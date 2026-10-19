@@ -660,6 +660,13 @@ async def test_vm_create_resumed_rollback_deletes_and_creates_nothing(
         "steps_succeeded": ["folder_lookup", "create"],
         "failed_step": "nic_attach",
         "rollback_reason": "nic attach failed",
+        "issues": [
+            {
+                "category": "connector",
+                "severity": "error",
+                "message": "vm.create failed at step 'nic_attach': nic attach failed",
+            }
+        ],
     }
 
 
@@ -4193,7 +4200,7 @@ async def test_deploy_from_library_resume_at_power_on_only_powers_on(
     gate: _GateRecorder,
 ) -> None:
     """An approved power-on only starts the VM; no deploy, no rename (#4217)."""
-    earlier = [_write._deploy_issue("rename", "warning", "rename failed")]
+    earlier = [_write.issue("rename", "warning", "rename failed")]
     conn = _RecordingConnector([{}])
     with _resuming(_DEPLOY_COMPOSITE, _POWER_ON_OP, _deployed_state("power_on", issues=earlier)):
         out = await vm_deploy_from_library_composite(
@@ -4221,7 +4228,7 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
     name) and reads no vApps. The delete reaches the seam with the same
     parameters and the same saved state, so the approved step matches.
     """
-    first_issues = [_write._deploy_issue("placement", "error", "OVF deploy call faulted")]
+    first_issues = [_write.issue("placement", "error", "OVF deploy call faulted")]
     state = {
         "deploy_name": _SAVED_DEPLOY_NAME,
         "failed": {
@@ -4244,7 +4251,7 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
     assert out["library_item_id"] == "li-ovf"
     assert out["issues"] == [
         *first_issues,
-        _write._deploy_issue("cleanup", "info", "removed VM vm-partial left by the failed deploy"),
+        _write.issue("cleanup", "info", "removed VM vm-partial left by the failed deploy"),
     ]
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("DELETE", "/api/vcenter/vm/vm-partial"),
@@ -4281,7 +4288,7 @@ async def test_deploy_from_library_resume_of_a_vapp_destroy_destroys_only_the_sa
         )
     assert out["status"] == "deploy_failed"
     assert out["issues"] == [
-        _write._deploy_issue(
+        _write.issue(
             "cleanup", "info", "removed vApp resgroup-v9 and its VMs left by the failed deploy"
         )
     ]

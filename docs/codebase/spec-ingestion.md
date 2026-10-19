@@ -51,8 +51,10 @@ The pipeline is broken into work items per Initiative #389:
   descriptors (`group_id IS NULL`) too (#3681) — the same connector scope
   `enable-reads` reaches group-agnostically — so a full `enable` never
   strands ungrouped write/typed ops at default-deny, and `connector review`
-  reports the ungrouped count (`ungrouped_op_count`, printed in the CLI
-  render) so an operator can see any the grouping pass left out.
+  reports the ungrouped count (`ungrouped_op_count`) and lists each
+  ungrouped op with its enabled state and safety level
+  (`ungrouped_ops`, the `[ungrouped]` section of the CLI render, #3870).
+  So `groups` plus `ungrouped_ops` is every op dispatch can serve.
 * **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline. T6
   (REST routes) lands the seven `/api/v1/connectors*` endpoints —
   `POST /ingest`, `GET /` (list), `GET /{id}/review`, `PATCH
@@ -502,8 +504,23 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
+
+Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
+delete usually removes something that cannot be brought back. Without the
+approval flag, a human operator seat ran it at once. Now it waits until a
+second person approves, on every seat. The parser does not use the
+`destructive` tier by itself: that tier also needs a blast-radius statement
+from a preview builder before the op can wait for approval, and a generic
+ingested delete has no builder, so a `destructive` default would make every
+ingested delete un-runnable. A connector floor raises an op to
+`destructive` when it ships the builder: the VMware floor does this for the
+vCenter tagging removals (see the floor table below and
+`connectors/vmware_rest/tagging_delete_preview.py`).
+`test_operations_ingest_delete_approval.py` checks that no `DELETE` in a
+shipped spec, or in the pinned vCenter and NSX specs, lands without
+approval, and that the pinned vCenter tagging removals land `destructive`.
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -575,6 +592,54 @@ listed methods.
 | `DELETE` `/vcenter/vm/{vm}` | Promoted: matches the governed VM-destroy posture. |
 | mutating `/vcenter/vm/{vm}/power` and `/power/**` | Promoted: matches the governed VM-power posture. |
 | VM reads and non-VMware connectors | Unchanged: no connector floor applies. |
+
+The same floor puts the vCenter **tagging removals** in the `destructive`
+tier with `requires_approval=True` (#3827), on the 8.0 and 9.0 catalogs and
+with or without the `/api` mount in the path:
+
+| Op | Why destructive | Preview lists |
+|---|---|---|
+| `DELETE` `/cis/tagging/category/{id}` | Removes every tag in the category and detaches them from every object. | The category, its tags, and the objects each tag is attached to. |
+| `DELETE` `/cis/tagging/tag/{id}` | Detaches the tag from every object. | The tag and its attached objects. |
+| `POST` `/cis/tagging/tag-association[/{id}]?action=detach*` (three actions) | Drops the association that governance (for example storage policy tags) relies on. | The tag and the objects named in the request; marked as reversible by attaching the tag again. |
+
+`destructive` means: every seat waits for a second person; a standing
+service-account grant can never satisfy the op (refused at grant creation
+and again at dispatch); and the caller must present a `preview_hash` from
+`preview_operation` so the park carries the blast radius above. The
+builders in `connectors/vmware_rest/tagging_delete_preview.py` are
+registered under every op_id spelling (`{categoryId}` / `{category_id}`,
+`{tagId}` / `{tag_id}`, with and without `/api`), because the vendor spec
+and an appliance-served spec spell the path parameter differently.
+A stored row can also spell a tag detach without the path parameter
+(`POST /api/cis/tagging/tag-association?action=detach`, the op_id the
+issue observed on a live connector); that spelling is registered too, and
+the builder takes the tag id from the request body.
+
+The builders follow three rules, because a detach request names tag ids
+in its body and the preview reads run before anyone approves:
+
+- Every id that enters a read path is escaped as one path segment, the
+  same way the dispatcher renders the write itself. A `..` traversal
+  segment, plain or percent-encoded, makes the builder raise, so the
+  removal is refused before it waits for approval and the refusal names
+  the reason.
+- Child lists are complete. The block carries `children_count`, the
+  exact number. Only the per-child detail reads (tag name, attached
+  objects) stop at 50 children; a child past that cap is listed by id
+  with `detail_omitted: true`.
+- A tag's attached-object list stops at 50 entries, next to the exact
+  `attached_object_count`; a cut list carries `attached_objects_omitted`.
+  When that list is the children of a tag delete, the block also carries
+  `children_omitted` and `children_full_list_op`, the read-only op that
+  lists every attached object.
+
+`test_connectors_vmware_rest_tagging_delete_dispatch.py` proves the
+dispatch contract: refusal without a bound preview, the park with the
+blast radius, a second operator's approval running the delete once, a
+service account's live grant never running a detach, the escaping and
+traversal refusal for body-supplied ids, and the complete lists above the
+detail cap.
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 (always `'ingested'`), `product`, `version`, `impl_id`, `embedding`,
@@ -658,7 +723,8 @@ sensor's id / name / tenant_id as `AffectedSensor` entries. The join
 follows the ingest's own tenant scope: a tenant-scoped ingest
 overwrote only that tenant's descriptor rows, so it filters
 `Sensor.tenant_id` to match — other tenants' sensors resolve their
-own or the built-in rows (tenant-wins, `operations/_lookup.py`) and
+own or the built-in rows (the tenant row is authoritative, see
+[Tenant connector row is authoritative](#tenant-connector-row-is-authoritative-3870)) and
 listing them would leak foreign sensor identities. Only a built-in /
 global ingest (`tenant_id IS NULL`) is deliberately unfiltered,
 since the built-in rows serve every tenant's Sensors. One structlog
@@ -822,6 +888,34 @@ product does not round-trip (the `_fixture` mechanism row parses to
 `fixture`). A malformed profile has already crashed the lifespan at
 `validate_shipped_artifacts()`; the stamp path re-parses with the same
 model, so it stays fail-closed as a second line of defence.
+
+### Tenant connector row is authoritative (#3870)
+
+A tenant-scoped ingest gives a tenant its own `endpoint_descriptor` rows
+for a connector triple `(product, version, impl_id)`. When such rows
+exist, they are the only rows that count for that tenant:
+
+- An op that is **enabled** on the tenant row runs from the tenant row.
+- An op that is **disabled** on the tenant row is refused (`unknown_op`).
+  It does not fall back to the built-in row, even when the built-in row
+  has it enabled.
+- An op that is **absent** from the tenant row is refused the same way.
+- A tenant with **no** descriptor row for the triple uses the built-in
+  rows (`tenant_id IS NULL`), as before.
+
+Ownership is decided by descriptor rows in any `is_enabled` state, so
+disabling every op on the tenant row leaves the tenant with nothing to
+run on that connector. To use the built-in row again, delete the tenant
+row (`connector delete` on the tenant scope).
+
+One predicate, `visible_scope_clause` in `operations/_lookup.py`, carries
+this rule. `lookup_descriptor` (dispatch, preview, sensors, gateway
+commands), `descriptor_exists_any_state`, `count_known_ops`,
+`list_operation_groups`, and `search_operations` (both the PostgreSQL SQL
+in `_search.py` and the SQLite fallback) all filter on it, so they always
+agree. The `GET /api/v1/connectors` listing still shows both rows; its
+`shadowed_by_tenant_scope` marker on the built-in row now means the
+built-in row is not used at all for that tenant.
 
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 
@@ -1699,7 +1793,10 @@ so they can never diverge on *which row* they act on. The resolver:
   path) does a single-pass existence check — no fallback, no
   ambiguity;
 - for the operator's own tenant, probes **both** the tenant scope and
-  the built-in scope with `scope_has_groups` and then:
+  the built-in scope with `scope_has_rows` (a group row **or** a
+  descriptor row counts, so a connector whose grouping pass produced no
+  groups is still found and reviewed with `groups=[]` and every op in
+  `ungrouped_ops`, #3870) and then:
   - both exist → raises `AmbiguousConnectorScopeError` (the route maps
     it to a 409 `connector_scope_ambiguous` enumerating the candidate
     rows — neither a silent pick nor a bare 404);
@@ -1718,15 +1815,17 @@ asymmetry. `bulk_enable_read_ops` and the `/review` payload render
 both run against the scope the shared resolver returns.
 
 The PATCH editing routes (`/groups`, `/operations`) and the
-connector-level `enable` / `disable` / `delete` transitions still
-keep their single-pass lookup against the operator's `tenant_id` via
-`_resolve_scope`: "do tenant_admins get to edit / transition
-built-ins?" is a policy choice distinct from the read/enable-reads
-visibility surface, and the route gate is `tenant_admin`-only —
-built-in writes already have an explicit MCP / CLI affordance
-(`ReviewService` accepts `tenant_id=None` under the `TENANT_ADMIN`
-role). They are free to adopt `_resolve_existing_scope` later if the
-same global-fallback / disambiguation is wanted there.
+connector-level `enable` / `disable` transitions resolve through
+`ReviewService._resolve_writable_scope` instead. It prefers the
+operator's own tenant row and falls back to the built-in row, which a
+`tenant_admin` without `platform_admin` may not write (403
+`BuiltinConnectorWriteForbiddenError`). It never raises the ambiguity
+error: with both rows present it acts on the tenant row. The group
+transitions and the group edit probe for group rows, because they have
+nothing to act on without them. The per-op edit (`edit_op`) probes with
+`scope_has_rows` (a group row **or** an operation row): an op that
+`enable_reads` enabled on a group-less connector must be disable-able
+again through the same tenant row (#3870).
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)
@@ -2032,6 +2131,37 @@ not recoverable server-side. The shipped repair path is
   assigned. There is deliberately **no** separate "repair" verb — the
   existing `meho connector ingest` / `POST /api/v1/connectors/ingest` /
   `meho_connector_ingest` surfaces are the repair path.
+
+### Review report for stored deletes (#3827)
+
+A corrected parser default or connector floor changes nothing for rows an
+earlier ingest already stored; they keep their old `safety_level` and
+`requires_approval` until the connector is ingested again (the
+"Applying corrected floors to existing rows" rule above). A spec guard test
+cannot show an operator which stored rows still run without approval. The
+review payload therefore carries a report:
+
+* `ConnectorReviewPayload.delete_ops_below_destructive` — one
+  `ConnectorReviewDeleteOp` per stored `source_kind='ingested'` row that is
+  delete-shaped (a `DELETE` verb, or a write the connector floor treats as
+  a removal, such as the vCenter tag detach actions) and sits below
+  `destructive`. Each row shows the stored `safety_level` /
+  `requires_approval` next to the posture a fresh ingest of the same
+  `(method, path)` would assign today — `default_safety_posture` (parser),
+  then `apply_safety_floor` (connector floor + catalog overlay) — plus
+  `needs_correction` and a plain-English `reason`.
+* `ConnectorReviewPayload.delete_ops_needing_correction_count` — how many
+  of those rows are weaker than the fresh-ingest posture.
+
+`operations/ingest/delete_review.py` builds the report from
+`load_ingested_writes_in_scope` (full descriptor universe, group or not).
+`meho connector review` prints the count line and a WARNING table of the
+rows that need correction; `--json` and the MCP `meho_connector_review`
+tool carry the full list. The fix is the same as for `needs_reingest`:
+ingest the connector again, or correct single rows with `edit-op`.
+`test_operations_ingest_review.py` seeds stored unsafe rows (the issue's
+`caution` category delete, a `caution` detach, a `dangerous` delete without
+approval) and checks the report and the count.
 
 The four supported component buckets are: `#/components/schemas/*`,
 `#/components/parameters/*` (vi-json.yaml's shared `moId`),

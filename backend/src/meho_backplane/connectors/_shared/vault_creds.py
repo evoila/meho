@@ -93,10 +93,12 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol, runtime_checkable
 
+import hvac.exceptions
+import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.vault import vault_client_for_operator
+from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
     CredentialsReadError,
     parse_credential_scheme,
@@ -111,10 +113,13 @@ __all__ = [
     "DEFAULT_KV_MOUNT",
     "BasicCredentialsTargetLike",
     "CredentialsReadError",
+    "SecretRefReadError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
     "load_basic_credentials",
+    "load_param_secret_data",
     "load_vault_secret_data",
+    "secret_ref_prefix",
     "strip_credential_value",
 ]
 
@@ -205,6 +210,47 @@ class VaultCredentialsReadError(CredentialsReadError):
     the base and still sees a GSM-backend failure, while everything that
     already catches this class keeps working unchanged.
     """
+
+
+def secret_ref_prefix(secret_ref: str) -> str:
+    """Cut *secret_ref* to its scheme and first path segment (#3864).
+
+    ``tenants/abc/kc-password`` becomes ``tenants/…`` and
+    ``gsm:proj/secret#pw`` becomes ``gsm:proj/…``. A ref with one segment
+    becomes ``…``. Errors and audit rows use this so they show where the
+    read went without the full path.
+    """
+    ref = secret_ref.strip()
+    scheme = parse_credential_scheme(ref)
+    head = f"{scheme}:" if scheme is not None else ""
+    rest = ref.partition(":")[2] if scheme is not None else ref
+    first, sep, _ = rest.partition("/")
+    return f"{head}{first}/…" if sep and first else f"{head}…"
+
+
+class SecretRefReadError(VaultCredentialsReadError):
+    """A secret named in the op params could not be read (#3864).
+
+    Raised by a handler that reads a secret ref from its own params, for
+    example the ``password_secret_ref`` of ``keycloak.user.create``. This is
+    not the target's own ``secret_ref``. The dispatcher maps it to the
+    ``vault_credentials_read_error`` result, so the caller and the audit row
+    see a clear error and never a success.
+
+    ``ref_prefix`` is the ref cut by :func:`secret_ref_prefix`.
+    ``cause_class`` is the class name of the store error (for example
+    ``Forbidden`` or ``InvalidPath``). The message carries only these two
+    and the param name, never the full path or a secret value.
+    """
+
+    def __init__(self, *, param: str, secret_ref: str, cause: BaseException) -> None:
+        self.param = param
+        self.ref_prefix = secret_ref_prefix(secret_ref)
+        self.cause_class = type(cause).__name__
+        super().__init__(
+            f"could not read {param} at {self.ref_prefix!r} from the credential "
+            f"store ({self.cause_class})"
+        )
 
 
 def _structural_unwrap(payload: object, *, target_name: str) -> dict[str, object]:
@@ -568,3 +614,37 @@ async def load_vault_secret_data(
         fields=sorted(secret_data.keys()),
     )
     return secret_data
+
+
+async def load_param_secret_data(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    param: str,
+    mount: str = DEFAULT_KV_MOUNT,
+) -> dict[str, object]:
+    """Read a secret whose ref came from the op param *param* (#3864).
+
+    Same read as :func:`load_vault_secret_data`; *target* carries the ref.
+    When Vault refuses, cannot serve, or cannot be reached for the read (an
+    hvac ``VaultError`` such as ``Forbidden`` or ``InvalidPath``, a Vault
+    login error, or a ``requests`` transport error such as
+    ``ConnectionError`` or ``Timeout`` raised by the read itself), this
+    raises :class:`SecretRefReadError` naming *param*. The dispatcher turns
+    that into a ``vault_credentials_read_error`` result, so the failure is
+    never reported as a problem with the target's own ``secret_ref``.
+
+    The transport errors matter: the login phase already maps them to
+    :class:`VaultClientError`, but the read phase does not, and their
+    message carries the request URL and so the full secret path.
+    """
+    try:
+        return await load_vault_secret_data(target, operator, mount=mount)
+    except (
+        hvac.exceptions.VaultError,
+        VaultClientError,
+        requests.exceptions.RequestException,
+    ) as exc:
+        raise SecretRefReadError(
+            param=param, secret_ref=target.secret_ref or "", cause=exc
+        ) from exc

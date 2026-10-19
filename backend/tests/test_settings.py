@@ -557,6 +557,55 @@ def test_agent_runs_disabled_tenants_rejects_non_uuid(raw: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #3997 — AGENT_MAX_OUTPUT_TOKENS output limit for the agent's model requests
+# ---------------------------------------------------------------------------
+
+
+def test_agent_max_output_tokens_defaults_to_4096_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``AGENT_MAX_OUTPUT_TOKENS`` keeps the old 4096 limit."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("AGENT_MAX_OUTPUT_TOKENS", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().agent_max_output_tokens == 4096
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("raw", ["1", "8192", "128000"])
+def test_agent_max_output_tokens_env_override_takes_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """A value inside [1, 128000] flows through ``get_settings()``."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("AGENT_MAX_OUTPUT_TOKENS", raw)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().agent_max_output_tokens == int(raw)
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "128001"])
+def test_agent_max_output_tokens_out_of_bounds_stops_start(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """A value outside [1, 128000] fails with an error that names the setting."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("AGENT_MAX_OUTPUT_TOKENS", raw)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValidationError, match="agent_max_output_tokens"):
+            get_settings()
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # #3852 — VAULT_OIDC_ROLE_BY_TENANT <uuid>=<role> CSV validation
 # ---------------------------------------------------------------------------
 

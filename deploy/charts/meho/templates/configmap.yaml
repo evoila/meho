@@ -223,6 +223,9 @@ data:
   {{- if $mcpResourceUri }}
   MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
   {{- end }}
+  # #3997 — most output tokens the agent asks the model for in one answer.
+  # Rendered always; it only matters when the agent runtime is in use.
+  AGENT_MAX_OUTPUT_TOKENS: {{ .Values.agent.maxOutputTokens | quote }}
   # G5.2-T1 (#623) — memory layer knobs. `userDefaultTtlDays` is consumed
   # by G5.2-T2 (#624) on `POST /api/v1/memory`; `expiryTickIntervalSeconds`
   # + `expiryEnabled` gate the in-process memory-expiry sweeper started

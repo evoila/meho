@@ -241,13 +241,14 @@ cli/
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated.
     │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
-    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review).
+    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin` (#3799) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector; omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
     │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
-    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent.
+    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin` flag as `review` (#3799).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
-    │   │   └── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
+    │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
+    │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
     │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
@@ -890,6 +891,11 @@ that header from one place, so every verb gets it without its own flag.
   test_audit_work_ref_control_plane.py` proves this round trip for
   `targets add`, `agent grant create`, `connector ingest` (sync and
   background job) and `connector edit-op`.
+- The header works the same way on MCP (`POST /mcp`, #4256). The audit
+  middleware writes no row of its own for `/mcp`, but it still reads the
+  header first. So the MCP row and the dispatch row of each tool call
+  carry it. A `work_ref` argument on `call_operation` still wins over the
+  header. `backend/tests/test_mcp_work_ref_header.py` proves this.
 - Some commands have their own local `--work-ref` (`operation call`,
   `scheduler create`, `runbook start`, `agent run`, and the filters on
   `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local

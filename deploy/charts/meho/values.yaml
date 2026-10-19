@@ -639,7 +639,8 @@ topology:
   # required. Range [0, 3650] (10 years upper bound).
   historyRetentionDays: 90
   # -- Cadence of the in-process history retention prune sweeper, in
-  # seconds. Default 604800 (7d / weekly) matches Initiative #365's
+  # seconds. Counted from the last recorded run, so a pod restart does not
+  # start it again. Default 604800 (7d / weekly) matches Initiative #365's
   # stated cadence ("a weekly background task prunes rows"). Range
   # [60, 604800]: below one minute the prune competes with normal
   # write load; the ceiling is the documented weekly cadence --
@@ -709,7 +710,8 @@ broadcastAnnouncement:
   # exchange for full historical retention. Range [0, 3650] (10y ceiling).
   retentionDays: 90
   # -- Cadence of the in-process announcement retention prune sweeper, in
-  # seconds. Default 604800 (7d / weekly). Range [60, 604800]: below one
+  # seconds. Counted from the last recorded run, so a pod restart does not
+  # start it again. Default 604800 (7d / weekly). Range [60, 604800]: below one
   # minute the prune competes with the announce write load; the ceiling
   # is the documented weekly cadence.
   pruneIntervalSeconds: 604800
@@ -931,6 +933,13 @@ agent:
   # matches the ESO target rendered by `eso.agent` when that path is
   # enabled, so operators who opt into both don't have to reconcile names.
   secretKey: api_key
+  # -- Most output tokens the agent asks the model for in one answer
+  # (`AGENT_MAX_OUTPUT_TOKENS`). Output tokens are the text the model writes
+  # back. Used by the Anthropic backend only. Range 1 to 128000. A higher
+  # value costs more, can make one answer take much longer, and above about
+  # 21000 the request is sent as a stream. The default 4096 keeps requests
+  # as they were before this setting existed.
+  maxOutputTokens: 4096
 
 # Keycloak Admin API credentials (G11.2 #803). The
 # `KeycloakAdminClient` (`meho_backplane.auth.keycloak_admin`) is what

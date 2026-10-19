@@ -109,6 +109,10 @@ class _BoundaryState:
     route: str | None = None
     projected_status: int | None = None
     context_selections: list[uuid.UUID] = field(default_factory=list)
+    #: Set when the boundary closes. A task started inside the request
+    #: (a hosted agent run) keeps a copy of the context, so it can still
+    #: see this state after the request ended.
+    closed: bool = False
 
 
 _current_boundary: ContextVar[_BoundaryState | None] = ContextVar(
@@ -170,10 +174,12 @@ def note_context_selected(correlation_id: uuid.UUID | None = None) -> uuid.UUID 
     Optional. The event only says context was picked; it is never a
     claim that the agent used or followed it. Returns the correlation
     id (a fresh opaque id when *correlation_id* is ``None``), or
-    ``None`` when no boundary is open or the per-request cap is hit.
+    ``None`` when no boundary is open, the boundary already closed (its
+    events are written, so this one would be lost), or the per-request
+    cap is hit.
     """
     state = _current_boundary.get()
-    if state is None or len(state.context_selections) >= MAX_CONTEXT_SELECTIONS:
+    if state is None or state.closed or len(state.context_selections) >= MAX_CONTEXT_SELECTIONS:
         return None
     selected = correlation_id or uuid.uuid4()
     state.context_selections.append(selected)
@@ -283,6 +289,7 @@ class RequestUsageBoundary:
 
     async def close(self, scope: Scope) -> None:
         """Close the boundary and write its events. Never raises ``Exception``."""
+        self._state.closed = True
         try:
             _current_boundary.reset(self._token)
         except ValueError:

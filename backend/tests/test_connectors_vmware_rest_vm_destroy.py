@@ -37,15 +37,19 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
-from meho_backplane.connectors.vmware_rest.composites import register_vmware_composite_operations
+from meho_backplane.connectors.vmware_rest.composites import (
+    _write,
+    register_vmware_composite_operations,
+)
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
@@ -629,6 +633,57 @@ async def test_vim_arm_pre_9_0_destroy_task(stub_embedding_service: AsyncMock) -
     )
     # The 9.0-only REST DELETE never fired on the vim arm.
     assert ("DELETE", "/vcenter/vm/vm-1") not in recorder.calls
+
+
+@pytest.mark.asyncio
+async def test_vim_arm_destroy_task_timeout_is_error(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Destroy_Task that does not finish in time is an error, not ok (#3813).
+
+    The VM may not be gone, so the approver's resume result and the audit row
+    must both say the destroy failed.
+    """
+    monkeypatch.setattr(_write, "_VM_DESTROY_TASK_TIMEOUT_SECONDS", 0.0)
+    recorder = _RecordingVmwareConnector(about_version="8.0.3")
+    _seed_vm_reads(recorder)
+    recorder.vmomi_responses[f"/VirtualMachine/{_VM}/Destroy_Task"] = _task_moref("task-78")
+    recorder.vmomi_responses["Task"] = _retrieve_result(
+        "Task", "task-78", "info", {"state": "running"}
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = {
+        "connector_id": _CONNECTOR_ID,
+        "op_id": _OP_ID,
+        "target": "test-vcenter",
+        "params": _PARAMS,
+    }
+    preview = await preview_operation(requester, args)
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    request_id = UUID(call["extras"]["approval_request_id"])
+
+    approver = _make_operator(sub="op-approver")
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+
+    assert resume.status == "error", resume.result
+    assert resume.extras["error_code"] == "timeout"
+    assert resume.result["task_id"] == "task-78"
+    assert any(i["severity"] == "error" for i in resume.result["issues"])
+
+    async with get_sessionmaker()() as s:
+        rows = (await s.execute(select(AuditLog).where(AuditLog.path == _OP_ID))).scalars().all()
+    statuses = [r.payload.get("result_status") for r in rows]
+    assert "error" in statuses, statuses
+    assert "ok" not in statuses, statuses
 
 
 # ---------------------------------------------------------------------------

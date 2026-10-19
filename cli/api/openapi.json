@@ -26613,6 +26613,60 @@
         "title": "ConnectorListResponse",
         "description": "Unified list envelope for ``GET /api/v1/connectors``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``None``; the field\nis present so a client reads it without a ``KeyError`` guard and so\nthe endpoint can grow keyset pagination later without a further\nbreaking change."
       },
+      "ConnectorReviewDeleteOp": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "safety_level": {
+            "type": "string",
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "title": "Is Enabled"
+          },
+          "expected_safety_level": {
+            "type": "string",
+            "title": "Expected Safety Level"
+          },
+          "expected_requires_approval": {
+            "type": "boolean",
+            "title": "Expected Requires Approval"
+          },
+          "needs_correction": {
+            "type": "boolean",
+            "title": "Needs Correction"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "method",
+          "safety_level",
+          "requires_approval",
+          "is_enabled",
+          "expected_safety_level",
+          "expected_requires_approval",
+          "needs_correction",
+          "reason"
+        ],
+        "title": "ConnectorReviewDeleteOp",
+        "description": "One stored ingested delete that sits below the ``destructive`` risk level (#3827).\n\nThe review report for stored deletes. Rows persisted by an earlier\ningest keep their old ``safety_level`` / ``requires_approval`` until the\nconnector is ingested again, so a guard test on the spec cannot show an\noperator which stored rows still run without approval. Each row carries\nwhat is stored next to what a fresh ingest of the same ``(method, path)``\nwould assign today (parser default, then the connector floor, then the\ncatalog overlay). ``needs_correction`` is ``True`` when the stored row is\nweaker than that; ``reason`` says why in plain words."
+      },
       "ConnectorReviewGroup": {
         "properties": {
           "group_key": {
@@ -26755,6 +26809,14 @@
             "title": "Ungrouped Op Count",
             "default": 0
           },
+          "ungrouped_ops": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewOp"
+            },
+            "type": "array",
+            "title": "Ungrouped Ops",
+            "default": []
+          },
           "kind": {
             "type": "string",
             "enum": [
@@ -26782,6 +26844,19 @@
           "needs_reingest_op_count": {
             "type": "integer",
             "title": "Needs Reingest Op Count",
+            "default": 0
+          },
+          "delete_ops_below_destructive": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewDeleteOp"
+            },
+            "type": "array",
+            "title": "Delete Ops Below Destructive",
+            "default": []
+          },
+          "delete_ops_needing_correction_count": {
+            "type": "integer",
+            "title": "Delete Ops Needing Correction Count",
             "default": 0
           }
         },

@@ -39,12 +39,13 @@ that comprise that surface:
 Tenant scoping
 ==============
 
-Every read query filters by ``tenant_id`` in the same shape the G0.6
+Every read query filters by ``tenant_id`` with the same predicate the G0.6
 dispatcher's :func:`~meho_backplane.operations._lookup.lookup_descriptor`
-does: built-in / global rows (``tenant_id IS NULL``) are visible to all
-operators; tenant-curated rows (``tenant_id == operator.tenant_id``) are
-visible only to that tenant's operators. The two row sets are unioned
-before ranking so search can hit both.
+uses (:func:`~meho_backplane.operations._lookup.visible_scope_clause`).
+When a tenant has its own row for a connector, only that row is visible to
+the tenant's operators; the built-in row for the same connector is not
+used (#3870). Otherwise the built-in rows (``tenant_id IS NULL``) are
+visible. Another tenant's rows are never visible.
 
 Hybrid retrieval over endpoint_descriptor
 =========================================
@@ -100,6 +101,7 @@ from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
     parse_connector_id,
+    visible_scope_clause,
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
@@ -577,8 +579,9 @@ def _build_operation_groups_query(
 ) -> Any:
     """Build the keyset-paginated :class:`OperationGroup` SELECT.
 
-    Filters: matching connector triple + tenant scope (NULL global OR
-    this tenant) + a *visibility* predicate; orders by ``group_key``
+    Filters: matching connector triple + tenant scope
+    (:func:`~meho_backplane.operations._lookup.visible_scope_clause`) + a
+    *visibility* predicate; orders by ``group_key``
     ASC; capped at ``limit``. ``cursor`` (when given) advances past
     the prior page's last ``group_key`` via strict ``>`` — keyset
     pagination with no offset and no overlap.
@@ -611,7 +614,13 @@ def _build_operation_groups_query(
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
             (OperationGroup.review_status == "enabled") | has_enabled_op,
-            (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == tenant_id),
+            visible_scope_clause(
+                OperationGroup,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
         )
         .order_by(OperationGroup.group_key)
         .limit(limit)
@@ -706,9 +715,10 @@ async def list_operation_groups(
     a non-zero ``enabled_op_count`` so groups-first discovery isn't blind
     to per-op enablement that ``search_operations`` + dispatch already
     honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and
-    holds zero enabled ops stays hidden. Tenant scoping: the union of
-    built-in (``tenant_id IS NULL``) and tenant-curated
-    (``tenant_id == operator.tenant_id``) rows.
+    holds zero enabled ops stays hidden. Tenant scoping:
+    :func:`~meho_backplane.operations._lookup.visible_scope_clause` — the
+    tenant's own rows when it has a row for the connector, the built-in
+    rows otherwise.
 
     Per-group enablement note: a service-layer
     :meth:`~meho_backplane.operations.ingest.service.ReviewService.enable_group`
@@ -816,8 +826,9 @@ async def search_operations(
     "group": str | None, "limit": int = 10}``.
 
     Returns ``{"hits": [...], "query_duration_ms": float}``. Tenant
-    boundary enforced: every candidate query filters on
-    ``(tenant_id IS NULL OR tenant_id == operator.tenant_id)``. The
+    boundary enforced: every candidate query filters on the same
+    :func:`~meho_backplane.operations._lookup.visible_scope_clause`
+    dispatch uses, so a hit is always an op ``call_operation`` can run. The
     ``group`` filter (when set) narrows by ``operation_group.group_key``
     within the same connector's natural key.
 

@@ -208,11 +208,38 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   success / warning envelopes therefore carry only `warning` / `info`
   issues (a power-on that fails after a successful deploy is a `warning`
   on the `deployed` envelope). The corollary is a **convention every
-  composite must follow to be covered**: a hard failure signalled only by
-  a bare `status` sentinel with no error-severity issue (`vm.create`'s
-  `rolled_back`, the `timeout` / `partial` / `aborted` writes) is *not*
-  auto-detected and still audits `ok` — those handlers must attach an
-  error-severity issue on their failure paths to be surfaced.
+  composite follows**: a hard failure (the change did not complete,
+  rolled back, timed out, or only partly applied) must attach an
+  error-severity issue, or it would still audit `ok`. Since #3813 the
+  write composites listed there do this, using the one shared builder
+  `connectors/vmware_rest/composite_issues.py::issue`: `vm.create`
+  `rolled_back`; the vim task `timeout` of `vm.destroy`, `vm.disk.grow`,
+  `vm.snapshot.revert`, `host.detach_from_vds`, the three
+  `network.portgroup.*` writes and `cluster.drs_rule.create`;
+  `vm.resize` / `host.disk_mark_flash` / `host.evacuate` `partial`;
+  `host.evacuate` `aborted`; `host.detach_from_vds` `incomplete`;
+  `vm.power` `error` / `tools_unavailable`; `vm.power.bulk` when any VM
+  failed (no `status` key, so `error_code` is `composite_error`);
+  `vm.guest.program.run` `timeout` / `exit_unknown`;
+  `storage_policy.delete` `delete_failed`; and `config_manager_unreadable`
+  for the three host config-manager composites. Their response schemas
+  document the `issues` field. Soft refusals and idempotency guards keep
+  no error issue and stay `ok`. The regression tests are
+  `tests/test_connectors_vmware_rest_composites_hard_failure_e2e.py`.
+  The error path runs the same JSONFlux reducer as the success path
+  (`dispatcher._reduce_and_audit_composite_error`, #4223). An envelope within the
+  inline budget comes back whole. A larger one (a failed `vm.power.bulk`
+  over many VMs, or a failed deploy with many or long issues) returns a
+  result handle plus the failure fields inline: `status` and `summary`
+  as they are, and a bounded view of `issues` (at most 5 entries, the
+  `error` entries first, every string value cut at 256 bytes of JSON text
+  and the list kept under 2 KB of JSON text, measured the way the
+  transport sends it, so non-ASCII text cannot grow it) with
+  `issues_total`. So the caller sees why the call failed without a
+  drill-in, and the inline result stays small. The full issues list is in
+  the stored result (the handle's rows when `issues` is the envelope's
+  only list, or the whole document otherwise). The audit row is
+  unchanged: `error`, with the error code and the full raw payload.
 
   **Preserving write governance on the direct path.** Because a direct
   session call bypasses the dispatcher, each mutating sub-call first
@@ -473,8 +500,17 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   - **`vmware.vm.info`** (`typed_ops_vm_info.py`, handler `vm_info`) —
     single-VM incident triage. Addressed by `vm` moid or `name`
     (`oneOf` in the schema; a `name` is resolved via
-    `GET /vcenter/vm?filter.names=`, and an unknown / ambiguous name
-    raises). One PropertyCollector read of the `VirtualMachine`'s
+    `GET /vcenter/vm?filter.names=`). An unknown name — the listing
+    answers `200 []` — raises `ConnectorResourceNotFoundError` with the
+    name as the resource id, so the dispatcher returns
+    `status="not_found"` with `extras.error_code="not_found"` and
+    `extras.resource_id=<name>` (#3653). Like every dispatcher result,
+    `POST /api/v1/operations/call` delivers this envelope on HTTP 200;
+    callers check `status`, not the HTTP code, to learn that the VM does
+    not exist. (The 404 from `status_code_for_result` is only the
+    synthetic code written to the audit row.) An ambiguous name still
+    raises a plain error. One PropertyCollector read of the
+    `VirtualMachine`'s
     `runtime.powerState`, `guest.ipAddress` / `guest.hostName` /
     `guest.toolsStatus` / `guest.toolsRunningStatus`,
     `guestHeartbeatStatus`, and `storage.perDatastoreUsage`. Unlike

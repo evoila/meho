@@ -189,9 +189,9 @@ meho connector edit-op vmware-rest-9.0 'DELETE:/vcenter/vm/{vm}' \
   --safety dangerous --requires-approval
 ```
 
-The parser defaults DELETE to ``safety_level='dangerous'`` but
-``requires_approval=false`` — operators flip the latter on any
-ops whose execution should block on the approval queue.
+The parser sets DELETE to ``safety_level='dangerous'`` with
+``requires_approval=true`` (#3827). Operators flip the latter on any
+other ops whose execution should block on the approval queue.
 
 ### Step 5 — enable the connector
 

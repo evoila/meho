@@ -1022,6 +1022,16 @@ class Settings(BaseModel):
         (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
+    agent_max_output_tokens:
+        Most output tokens the agent asks the model for in one answer
+        (``max_tokens`` on each request). Output tokens are the text the
+        model writes back. Used by the two Anthropic agent builders only;
+        the Bedrock and OpenAI-compatible backends keep their model's own
+        default. Default 4096, the value MEHO has always sent. Range
+        [1, 128000]; a value outside it stops the start. A higher value
+        costs more and can make one answer take much longer; above about
+        21,000 the request is sent as a stream. Set via
+        ``AGENT_MAX_OUTPUT_TOKENS``.
     bedrock_region:
         AWS region the Bedrock backend builder
         (:func:`meho_backplane.agent.models.bedrock_backend_builder`)
@@ -1739,6 +1749,11 @@ class Settings(BaseModel):
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
     agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    # #3997 -- output-token limit for each Anthropic agent request. Since
+    # pydantic-ai 2.52 an unset ``max_tokens`` means the model's maximum
+    # (128,000 for claude-sonnet-4-6), sent as a stream, so the builders
+    # always send this value. 4096 keeps requests as they were before.
+    agent_max_output_tokens: int = Field(default=4096, ge=1, le=128_000)
     # G11.5-T2 #1076 — AWS Bedrock backend configuration. The Bedrock
     # builder (``meho_backplane.agent.models.bedrock_backend_builder``)
     # uses pydantic_ai's :class:`BedrockConverseModel` + ``boto3`` via
@@ -2803,6 +2818,9 @@ def get_settings() -> Settings:
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
             "anthropic:claude-sonnet-4-6",
+        ),
+        agent_max_output_tokens=int(
+            os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "4096"),
         ),
         bedrock_region=os.environ.get("BEDROCK_REGION", "").strip(),
         bedrock_default_model=os.environ.get(

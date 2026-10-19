@@ -1271,6 +1271,67 @@ func TestPrintReviewTableRendersUngroupedCount(t *testing.T) {
 	}
 }
 
+// TestPrintReviewTableListsUngroupedOps — the review render lists each
+// ungrouped op with its enabled state and safety level (evoila/meho#3870),
+// so the review shows every op dispatch can serve, not only grouped ones.
+func TestPrintReviewTableListsUngroupedOps(t *testing.T) {
+	ungrouped := 2
+	summary := "Get repository contents"
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:      "acme-rest-3",
+		Product:          "acme",
+		Version:          "3",
+		ImplId:           "acme-rest",
+		UngroupedOpCount: &ungrouped,
+		UngroupedOps: &[]api.ConnectorReviewOp{
+			{OpId: "GET:/repos/contents", SafetyLevel: "safe", IsEnabled: true, Summary: &summary},
+			{OpId: "POST:/repos", SafetyLevel: "caution", IsEnabled: false},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"Ungrouped ops: 2 (1 enabled)", "[ungrouped]", "GET:/repos/contents", "Get repository contents", "POST:/repos", "caution"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing ungrouped token %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "(no groups;") {
+		t.Errorf("review render claimed no operations while listing ungrouped ops:\n%s", out)
+	}
+}
+
+// TestPrintReviewTableUngroupedCountWithoutList — an older server sends
+// `ungrouped_op_count` but no `ungrouped_ops`. The render must not print
+// "0 enabled" (which reads as "all disabled") or promise an [ungrouped]
+// section it cannot show; it reports the enabled count as unknown.
+func TestPrintReviewTableUngroupedCountWithoutList(t *testing.T) {
+	ungrouped := 3
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:      "acme-rest-3",
+		Product:          "acme",
+		Version:          "3",
+		ImplId:           "acme-rest",
+		UngroupedOpCount: &ungrouped,
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "core", Name: "Core", ReviewStatus: "staged", OpCount: 0},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"Ungrouped ops: 3", "enabled count unknown"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing token %q in:\n%s", want, out)
+		}
+	}
+	for _, reject := range []string{"0 enabled", "listed under [ungrouped] below", "[ungrouped]"} {
+		if strings.Contains(out, reject) {
+			t.Errorf("review render printed %q although the server sent no ungrouped list:\n%s", reject, out)
+		}
+	}
+}
+
 // TestPrintReviewTableOmitsUngroupedLineWhenZero — a connector whose ops are
 // all grouped (UngroupedOpCount nil or zero) prints no ungrouped line.
 func TestPrintReviewTableOmitsUngroupedLineWhenZero(t *testing.T) {
@@ -1284,6 +1345,85 @@ func TestPrintReviewTableOmitsUngroupedLineWhenZero(t *testing.T) {
 	printReviewTable(&buf, r)
 	if strings.Contains(buf.String(), "Ungrouped ops:") {
 		t.Errorf("review render printed an ungrouped line for a fully-grouped connector:\n%s", buf.String())
+	}
+}
+
+// TestPrintReviewTableRendersDeleteReview — the review render surfaces the
+// stored-delete report (#3827): the count line, the WARNING, and one row per
+// op that is weaker than a fresh ingest would make it. Rows that already
+// match the expected posture stay off the human render (they ride --json).
+func TestPrintReviewTableRendersDeleteReview(t *testing.T) {
+	needing := 1
+	r := &api.ConnectorReviewPayload{
+		ConnectorId: "vmware-rest-9.0",
+		Product:     "vmware",
+		Version:     "9.0",
+		ImplId:      "vmware-rest",
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "tagging", Name: "Tagging", ReviewStatus: "enabled", OpCount: 0},
+		},
+		DeleteOpsNeedingCorrectionCount: &needing,
+		DeleteOpsBelowDestructive: &[]api.ConnectorReviewDeleteOp{
+			{
+				OpId:                     "DELETE:/api/cis/tagging/category/{category_id}",
+				Method:                   "DELETE",
+				SafetyLevel:              "caution",
+				RequiresApproval:         false,
+				IsEnabled:                true,
+				ExpectedSafetyLevel:      "destructive",
+				ExpectedRequiresApproval: true,
+				NeedsCorrection:          true,
+				Reason:                   "stored at caution; a fresh ingest gives destructive.",
+			},
+			{
+				OpId:                     "DELETE:/vcenter/folder/{folder}",
+				Method:                   "DELETE",
+				SafetyLevel:              "dangerous",
+				RequiresApproval:         true,
+				IsEnabled:                true,
+				ExpectedSafetyLevel:      "dangerous",
+				ExpectedRequiresApproval: true,
+				NeedsCorrection:          false,
+				Reason:                   "waits for approval at dangerous.",
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{
+		"Deletes below destructive: 2 stored op(s), 1 need(s) correction.",
+		"WARNING: these stored ops are weaker",
+		"DELETE:/api/cis/tagging/category/{category_id}",
+		"destructive",
+		"connector edit-op",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing delete-review token %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "DELETE:/vcenter/folder/{folder}") {
+		t.Errorf("review render listed a row that needs no correction:\n%s", out)
+	}
+}
+
+// TestPrintReviewTableOmitsDeleteReviewWhenEmpty — a connector with no stored
+// deletes below destructive prints no delete-review section.
+func TestPrintReviewTableOmitsDeleteReviewWhenEmpty(t *testing.T) {
+	zero := 0
+	empty := []api.ConnectorReviewDeleteOp{}
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:                     "k8s-1.x",
+		DeleteOpsBelowDestructive:       &empty,
+		DeleteOpsNeedingCorrectionCount: &zero,
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "core", Name: "Core", ReviewStatus: "enabled", OpCount: 0},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	if strings.Contains(buf.String(), "Deletes below destructive") {
+		t.Errorf("review render printed a delete-review section for an empty report:\n%s", buf.String())
 	}
 }
 

@@ -120,6 +120,7 @@ __all__ = [
     "UnsupportedSpecError",
     "UpstreamNotSpecError",
     "classify_spec_origin",
+    "default_safety_posture",
     "detect_spec_format",
     "parse_openapi",
     "parse_openapi_with_provenance",
@@ -358,6 +359,9 @@ _VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", 
 # Anything outside this set + the ``dangerous`` set below falls into
 # the ``safe`` bucket.
 _CAUTION_VERBS = frozenset({"POST", "PUT", "PATCH"})
+# A ``DELETE`` lands ``dangerous`` and also requires approval (#3827): it
+# usually removes something that cannot be brought back, so it must wait for
+# a second person on every seat, not run at once for a human operator.
 _DANGEROUS_VERBS = frozenset({"DELETE"})
 
 # VIM-over-JSON represents managed-object methods as POST requests such as
@@ -1163,13 +1167,11 @@ def _build_proto(
         _assert_json_serializable(op_id=op_id, field="response_schema", schema=response_schema)
     _assert_parameter_schema_standalone(op_id=op_id, parameter_schema=parameter_schema)
 
-    safety_level = _safety_level_for(method)
-    requires_approval = _has_destructive_action_hint(
-        operation_id=_optional_string(operation.get("operationId")),
+    safety_level, requires_approval = default_safety_posture(
+        method,
         path=path,
+        operation_id=_optional_string(operation.get("operationId")),
     )
-    if requires_approval:
-        safety_level = _raise_safety_level(safety_level, "dangerous")
 
     return EndpointDescriptorProto(
         op_id=op_id,
@@ -1192,6 +1194,26 @@ def _optional_string(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     return value or None
+
+
+def default_safety_posture(
+    method: str, *, path: str, operation_id: str | None = None
+) -> tuple[SafetyLevel, bool]:
+    """Return the parser's ``(safety_level, requires_approval)`` for one operation.
+
+    The verb heuristic sets the level. A ``DELETE`` (#3827) or a destructive
+    action name (``Destroy``, ``Delete``, ``Remove``, ``Unregister``) turns
+    approval on and lifts the level to at least ``dangerous``. The review
+    report for stored deletes calls this with the row's method and path to
+    say what a fresh ingest would assign, before any connector floor.
+    """
+    safety_level = _safety_level_for(method)
+    requires_approval = method in _DANGEROUS_VERBS or _has_destructive_action_hint(
+        operation_id=operation_id, path=path
+    )
+    if requires_approval:
+        safety_level = _raise_safety_level(safety_level, "dangerous")
+    return safety_level, requires_approval
 
 
 def _safety_level_for(method: str) -> SafetyLevel:

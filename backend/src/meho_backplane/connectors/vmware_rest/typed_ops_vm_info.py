@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.vim_body import (
@@ -208,10 +209,15 @@ async def _resolve_vm_moid_by_name(
     400s the legacy ``filter.names`` prefixed form; the ``/rest`` mount
     (and ``vmware/vcsim``) requires the prefix.
 
-    Raises :exc:`RuntimeError` when the name resolves to zero VMs
-    (unknown) or more than one (ambiguous) -- the caller must then
-    re-issue with the specific ``vm`` moid. Mirrors the resolution
-    contract the composite listing enrichment uses.
+    Raises :exc:`ConnectorResourceNotFoundError` when the listing answers
+    with no VM of that name: the vCenter call succeeded and the VM does
+    not exist, so the dispatcher returns a ``not_found`` result instead
+    of a ``connector_error``. As with every dispatcher result, the REST
+    ``/api/v1/operations/call`` route delivers that envelope on HTTP 200;
+    callers read ``status`` to check whether a VM already exists. Raises
+    :exc:`RuntimeError` when the name matches more than one VM
+    (ambiguous) -- the caller must then re-issue with the specific ``vm``
+    moid.
     """
     list_path = await connector.mount_op_path(target, _LIST_VMS_PATH, operator)
     # Key the ``filter.names`` param off the mount flavor (#2298): the
@@ -233,7 +239,7 @@ async def _resolve_vm_moid_by_name(
         if isinstance(moid, str)
     ]
     if not moids:
-        raise RuntimeError(f"vmware.vm.info: no VM named {name!r}")
+        raise ConnectorResourceNotFoundError([name], f"vmware.vm.info: no VM named {name!r}")
     if len(moids) > 1:
         raise RuntimeError(
             f"vmware.vm.info: name {name!r} is ambiguous -- matches {len(moids)} VMs "
@@ -328,8 +334,8 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Name of the VM. Resolved to a moid via the VM listing; an "
-                "unknown or ambiguous name is a structured error. Supply "
-                "exactly one of 'vm' or 'name'."
+                "unknown name returns a not_found result and an ambiguous "
+                "name is an error. Supply exactly one of 'vm' or 'name'."
             ),
         },
     },
@@ -436,8 +442,8 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
         "the VirtualMachine managed object via PropertyCollector directly "
         "on the connector session, so it works with zero catalog ingest -- "
         "the plain vCenter REST VM detail reports configuration, not these "
-        "live guest signals. An unknown / ambiguous 'name' is a structured "
-        "error. safety_level=safe, read-only."
+        "live guest signals. An unknown 'name' returns a not_found result; an "
+        "ambiguous 'name' is an error. safety_level=safe, read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -454,7 +460,11 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
         ),
         "parameter_hints": {
             "vm": "VM moid (e.g. 'vm-42'); supply exactly one of vm / name.",
-            "name": "VM name; resolved to a moid, unknown/ambiguous is an error.",
+            "name": (
+                "VM name; resolved to a moid. An unknown name returns "
+                "status not_found, so this op can check whether a VM "
+                "exists. An ambiguous name is an error."
+            ),
         },
         "output_shape": (
             "{vm, name, power_state, guest_ip, guest_hostname, tools_status, "

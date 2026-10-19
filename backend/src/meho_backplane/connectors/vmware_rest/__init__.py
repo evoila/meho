@@ -44,6 +44,9 @@ from meho_backplane.connectors.vmware_rest import (  # noqa: F401
     ingest_corrections as _ingest_corrections,
 )
 from meho_backplane.connectors.vmware_rest import ingest_safety as _ingest_safety  # noqa: F401
+from meho_backplane.connectors.vmware_rest import (  # noqa: F401
+    tagging_delete_preview as _tagging_delete_preview,
+)
 from meho_backplane.connectors.vmware_rest.connector import (
     VmwareRest80Connector,
     VmwareRestConnector,

@@ -675,3 +675,146 @@ async def test_find_runbook_instruction_scans_every_text() -> None:
         == "disk-cleanup"
     )
     assert find_runbook_instruction("you are helpful", "list open incidents") is None
+
+
+# ---------------------------------------------------------------------------
+# #4232 — a wrong connector_id goes back to the model; the run goes on
+# ---------------------------------------------------------------------------
+
+
+def _scripted(calls: list[ToolCallPart], seen: list[Any]):
+    """Build a FunctionModel callback that sends *calls* one per turn, then answers.
+
+    Every tool-return part the model receives is appended to *seen*, so the
+    test can check what the model was told after each call.
+    """
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if part.part_kind == "tool-return"
+        ]
+        seen[:] = returns
+        if len(returns) < len(calls):
+            return ModelResponse(parts=[calls[len(returns)]])
+        return ModelResponse(parts=[TextPart("recovered")])
+
+    return fn
+
+
+@pytest.mark.parametrize(
+    ("toolset", "tool_name"),
+    [
+        (None, "list_operation_groups_tool"),
+        ({"meta_tools": ["list_operation_groups"]}, "list_operation_groups"),
+    ],
+    ids=["legacy-surface", "configured-surface"],
+)
+async def test_unknown_connector_id_reaches_model_and_run_recovers(
+    stub_embedding_service: AsyncMock,
+    toolset: dict[str, Any] | None,
+    tool_name: str,
+) -> None:
+    """A guessed connector id fails as a tool result; the right id then succeeds."""
+    await _seed_echo_op(stub_embedding_service)
+    seen: list[Any] = []
+    calls = [
+        ToolCallPart(tool_name, {"connector_id": "linux-1.x"}),
+        ToolCallPart(tool_name, {"connector_id": "vault-1.x"}),
+    ]
+    model = FunctionModel(_scripted(calls, seen))
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(
+        name="guesser", system_prompt="discover", request_limit=5, toolset=toolset
+    )
+
+    handle = runtime.start(definition, _make_operator(), "list groups")
+    result = await runtime.result(handle)
+
+    assert runtime.poll(handle) is AgentRunStatus.SUCCEEDED
+    assert result.output == "recovered"
+    wrong, right = seen
+    assert wrong.outcome == "failed"
+    assert "unknown connector_id 'linux-1.x'" in wrong.content
+    assert right.outcome == "success"
+    assert right.content["connector_id"] == "vault-1.x"
+
+
+async def test_unknown_connector_id_on_search_and_call_reaches_model(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``search_operations`` and ``call_operation`` also answer the model, not end the run."""
+    await _seed_echo_op(stub_embedding_service)
+    seen: list[Any] = []
+    calls = [
+        ToolCallPart("search_operations", {"connector_id": "linux-1.x", "query": "read"}),
+        ToolCallPart(
+            "call_operation",
+            {"connector_id": "linux-1.x", "op_id": "vault.kv.read", "params": {}},
+        ),
+        ToolCallPart(
+            "call_operation",
+            {"connector_id": "vault-1.x", "op_id": "vault.kv.read", "params": {}},
+        ),
+    ]
+    model = FunctionModel(_scripted(calls, seen))
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(
+        name="guesser",
+        system_prompt="discover",
+        request_limit=6,
+        toolset={"meta_tools": ["search_operations", "call_operation"]},
+    )
+
+    handle = runtime.start(definition, _make_operator(), "read a secret")
+    result = await runtime.result(handle)
+
+    assert runtime.poll(handle) is AgentRunStatus.SUCCEEDED
+    assert result.output == "recovered"
+    search_wrong, call_wrong, call_right = seen
+    assert search_wrong.outcome == "failed"
+    assert "unknown connector_id 'linux-1.x'" in search_wrong.content
+    # call_operation reports a bad connector inside its own result envelope.
+    assert call_wrong.content["status"] == "error"
+    assert call_right.content["status"] == "ok"
+
+
+async def test_wrong_connector_ids_do_not_use_the_tool_retry_budget(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Several wrong ids in a row still leave the run alive; only the turn budget bounds it."""
+    await _seed_echo_op(stub_embedding_service)
+    seen: list[Any] = []
+    calls = [
+        ToolCallPart("list_operation_groups_tool", {"connector_id": f"guess{i}-1.x"})
+        for i in range(3)
+    ]
+    model = FunctionModel(_scripted(calls, seen))
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(name="guesser", system_prompt="discover", request_limit=5)
+
+    handle = runtime.start(definition, _make_operator(), "list groups")
+    result = await runtime.result(handle)
+
+    assert result.output == "recovered"
+    assert [part.outcome for part in seen] == ["failed", "failed", "failed"]
+
+
+async def test_start_uses_the_caller_run_id_in_handle_and_errors() -> None:
+    """A run started with the caller's id names that id when it fails."""
+
+    def fail(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise RuntimeError("model broke")
+
+    runtime = PydanticAgentRun(model_factory=lambda: FunctionModel(fail))
+    definition = AgentDefinition(name="reader", system_prompt="read", request_limit=2)
+    caller_run_id = UUID("22222222-2222-2222-2222-222222222222")
+
+    handle = runtime.start(definition, _make_operator(), "go", run_id=caller_run_id)
+
+    assert handle.run_id == caller_run_id
+    with pytest.raises(AgentRunError, match=str(caller_run_id)):
+        await runtime.result(handle)

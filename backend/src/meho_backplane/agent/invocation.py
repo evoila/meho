@@ -833,7 +833,7 @@ class AgentInvoker:
         )
         try:
             try:
-                handle = self._runtime.start(definition, operator, inputs)
+                handle = self._runtime.start(definition, operator, inputs, run_id=run_id)
                 result = await self._runtime.result(handle)
             except AgentRunError as exc:
                 await self._finalize_run(run_id, output=None, error=str(exc))

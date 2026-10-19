@@ -115,6 +115,7 @@ from meho_backplane.agent.invoke import (
     current_agent_run_id_var,
     make_invoke_agent_tool,
 )
+from meho_backplane.agent.meta_tool import connector_errors_reach_model
 from meho_backplane.agent.models import (
     AgentTier,
     ModelResolver,
@@ -683,8 +684,15 @@ class AgentRun(Protocol):
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        run_id: UUID | None = None,
     ) -> AgentRunHandle:
-        """Begin a bounded run; return immediately with a live handle."""
+        """Begin a bounded run; return immediately with a live handle.
+
+        *run_id* is the id the caller already gave out (the durable
+        ``agent_run`` row id). The handle and every error then use it, so the
+        caller can match them. ``None`` makes a fresh id.
+        """
         ...
 
     def poll(self, handle: AgentRunHandle) -> AgentRunStatus:
@@ -833,7 +841,8 @@ def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
         Use this first to discover which group of operations is relevant
         before searching for a specific operation to call.
         """
-        return await list_operation_groups(ctx.deps, {"connector_id": connector_id})
+        with connector_errors_reach_model():
+            return await list_operation_groups(ctx.deps, {"connector_id": connector_id})
 
 
 def _coerce_output(value: Any) -> Any:
@@ -1213,8 +1222,15 @@ class PydanticAgentRun:
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        run_id: UUID | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
+
+        *run_id* is the caller's run id (the durable ``agent_run`` row id).
+        The handle, the logs, and a failure message all use it, so they match
+        what ``meho agent run`` and ``run-status`` show (#4232). ``None``
+        makes a fresh id for callers with no durable row.
 
         The loop runs as an :class:`asyncio.Task` on the current event
         loop, so :meth:`start` is non-blocking — callers either
@@ -1232,7 +1248,8 @@ class PydanticAgentRun:
                 "the sync invocation surface (T4) bridges at the edge",
             ) from exc
         receipts: list[HostedContextReceipt] = []
-        run_id = uuid4()
+        if run_id is None:
+            run_id = uuid4()
         agent = self._build_agent(definition, operator, run_id, receipts)
         task = asyncio.create_task(
             self._run_loop(agent, definition, operator, inputs, run_id, receipts),

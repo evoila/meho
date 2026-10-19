@@ -70,11 +70,15 @@ All public types are re-exported from `meho_backplane.agent`
 
 1. A caller constructs an `AgentDefinition` and a `PydanticAgentRun`
    (injecting a `ModelFactory`; the default builds a real Anthropic model).
-2. `start(definition, operator, inputs)` builds a framework `Agent` from the
-   definition, resolves its tools (`resolve_agent_tools` when the definition
-   carries a `toolset`, else the default two meta-tools), and launches the
-   bounded loop as an `asyncio.Task`. It returns immediately with an
-   `AgentRunHandle`.
+2. `start(definition, operator, inputs, run_id=None)` builds a framework
+   `Agent` from the definition, resolves its tools (`resolve_agent_tools`
+   when the definition carries a `toolset`, else the default two
+   meta-tools), and launches the bounded loop as an `asyncio.Task`. It
+   returns immediately with an `AgentRunHandle`. `AgentInvoker` passes the
+   durable `agent_run` row id as `run_id`, so the handle, the logs, and a
+   failure message (`agent run <id> failed: ...`) name the same id that
+   `meho agent run` and `run-status` show (#4232). Without `run_id` the seam
+   makes a fresh id.
 3. The loop runs: the model emits tool calls, each tool dispatches through
    `call_operation` / `list_operation_groups` under the injected operator,
    tool results return to the model, and the loop repeats until the model
@@ -85,6 +89,24 @@ All public types are re-exported from `meho_backplane.agent`
 The **turn budget** maps onto `UsageLimits(request_limit=...)`. When the
 loop would exceed it, the framework raises `UsageLimitExceeded`, which the
 seam converts to `AgentRunError("turn budget exhausted: ...")`.
+
+**Tool errors versus run failures (#4232).** A tool that raises a plain
+exception ends the whole run: pydantic-ai does not send it to the model. So
+model mistakes must be turned into something the model sees:
+
+- A wrong `connector_id` (unknown, or registered but not ingested) from
+  `list_operation_groups`, `search_operations`, or any other meta-tool
+  handler is turned into `pydantic_ai.ToolFailed` by
+  `connector_errors_reach_model` in `agent/meta_tool.py`. The model gets a
+  failed tool result with the same text the MCP surface returns, and can try
+  another id. `ToolFailed` does not use the tool's retry budget (default 1),
+  so a few wrong guesses do not end the run; the turn budget bounds them.
+- `call_operation` and `preview_operation` already report an unknown op,
+  bad params, or a bad connector inside their result envelope
+  (`status="error"`), so the model sees those too.
+- Gate refusals (role below the floor, connector outside the allow-list)
+  use `ModelRetry`.
+- Anything else is a real fault and fails the run.
 
 The **operator** travels as the framework dependency (`deps_type=Operator`);
 inside each tool the operator is read from `ctx.deps` and passed to the

@@ -131,7 +131,7 @@ from meho_backplane.agent.hosted_context import (
     READ_CONTEXT_RESOURCE,
     build_read_context_resource_tool,
 )
-from meho_backplane.agent.meta_tool import MetaToolSpec
+from meho_backplane.agent.meta_tool import MetaToolSpec, connector_errors_reach_model
 from meho_backplane.agent.tool_audit import ToolRefusedRetry
 from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
 from meho_backplane.agent.toolset_discovery import (
@@ -400,6 +400,10 @@ def _make_meta_tool(
     crash — when the requested connector is outside the spec's
     ``connectors`` list.
 
+    An unknown or not-yet-ingested ``connector_id`` from the handler goes
+    back to the model as a failed tool result (#4232), so the model can pick
+    another id and the run goes on.
+
     For ``meho_connector_list`` with a connector allow-list, the wrapper
     keeps only the rows whose ``connector_id`` is in the list (#4233), so
     the agent is not shown connectors it cannot call.
@@ -454,7 +458,8 @@ def _make_meta_tool(
                     f"an allowed connector or stop."
                 )
         call_arguments = dict(arguments)
-        result = await handler(ctx.deps, call_arguments)
+        with connector_errors_reach_model():
+            result = await handler(ctx.deps, call_arguments)
         if is_connector_list and allowed_connectors is not None:
             result = keep_allowed_connectors(result, allowed_connectors)
         if is_call_operation and result.get("status") == "awaiting_approval":

@@ -482,11 +482,12 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~0.4 MB argocd-3.3 + ~0.2 MB
+          # spec files (~0.4 MB argocd-3.3 + ~13 MB esxi-9.0 + ~0.2 MB
           # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
           # ~2 MB sddc-manager-9.0 + ~5 MB vcenter-8.0 + ~18 MB
           # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB
-          # vcf-installer-9.1 + ~5 MB vcf-operations-9.0), not the
+          # vcf-installer-9.1 + ~5 MB vcf-operations-9.0 + ~0.4 MB
+          # vks-9.0), not the
           # whole consumer repo. No
           # `ref:` pin — the shelf's default branch IS the
           # operator-curated pin (the directories are version-named),
@@ -495,6 +496,7 @@ jobs:
           # Keep the list sorted.
           sparse-checkout: |
             docs/argocd-3.3
+            docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
             docs/hetzner-robot-2026-04
@@ -510,6 +512,7 @@ jobs:
             docs/vcf-automation-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vks-9.0
           filter: blob:none
           # Read-only consumer; never pushes. Don't leave the token in
           # the shelf clone's local git config after checkout.
@@ -529,6 +532,7 @@ jobs:
           set -euo pipefail
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
+            spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
             spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
@@ -547,13 +551,14 @@ jobs:
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json; do
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -1542,6 +1547,7 @@ jobs:
           path: spec-shelf
           sparse-checkout: |
             docs/argocd-3.3
+            docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
             docs/hetzner-robot-2026-04
@@ -1557,6 +1563,7 @@ jobs:
             docs/vcf-automation-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vks-9.0
           filter: blob:none
           persist-credentials: false
 
@@ -1569,6 +1576,7 @@ jobs:
           set -euo pipefail
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
+            spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
             spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
@@ -1587,13 +1595,14 @@ jobs:
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json; do
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the

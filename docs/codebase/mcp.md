@@ -408,6 +408,34 @@ The full rules, bounds, and errors are in
 `tests/test_mcp_output_schema_conformance.py`, and
 `tests/test_result_reduction_properties.py`.
 
+### Wrong connector or op id (#4031)
+
+`call_operation` and `preview_operation` look up the op on the named
+connector first. When that lookup finds nothing, the error says why and
+what to do next:
+
+- **`unknown_op`** — the connector exists, but it has no enabled op with
+  this `op_id`. MEHO then looks for the same `op_id` on the other
+  connectors the caller can see. `extras.connectors_with_op` lists them
+  (sorted, at most 10), and the message names them, for example "This
+  operation exists on connector(s) vmware-rest-9.0". When the list is
+  empty, the message tells the caller to use `search_operations` on the
+  connector. `extras.known_op_count` still carries the connector's op
+  count. A common cause is the other version of the same product; op ids
+  can also be spelled differently between versions.
+- **`unknown_connector`** — the `connector_id` matches no connector the
+  caller can see: no operation rows and no registered connector class.
+  This is the same test `list_operation_groups` and `search_operations`
+  use. `extras.connector_id` echoes the id. Before #4031 this case was an
+  `unknown_op` with `known_op_count: 0`.
+
+The search for other connectors uses the same tenant rule as
+dispatch (`visible_scope_clause` in `operations/_lookup.py`), applied to
+each connector: a connector of another tenant is never named, and a
+built-in op hidden by the tenant's own connector row is not named
+either. The extra lookups run only on this error path
+(`operations/_op_miss.py`). Tests: `tests/test_operations_op_miss.py`.
+
 ## Agent-surface scoping (working vs. operator, #3154)
 
 `tools/list` is filtered by **four orthogonal gates**, all AND-composed

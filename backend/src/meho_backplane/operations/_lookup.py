@@ -23,6 +23,10 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   ``(product, version, impl_id)``. Returned in the ``unknown_op`` error
   payload so the operator has a "did you mean…" signal without the
   full enumeration the meta-tools (T8) provide.
+* :func:`find_connectors_with_op` -- the other connectors the caller can
+  see that have the same ``op_id`` enabled. Named in the ``unknown_op``
+  error so a caller who picked the wrong connector version learns where
+  the op lives (#4031).
 
 The split lets the dispatcher's :func:`dispatch` body keep step 2's
 descriptor resolution one helper call instead of three.
@@ -34,7 +38,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, select
+from sqlalchemy import ColumnElement, SQLColumnExpression, and_, select
 from sqlalchemy.orm import aliased
 
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -46,6 +50,7 @@ __all__ = [
     "connector_exists",
     "count_known_ops",
     "descriptor_exists_any_state",
+    "find_connectors_with_op",
     "lookup_descriptor",
     "parse_connector_id",
     "visible_scope_clause",
@@ -101,9 +106,9 @@ def visible_scope_clause(
     model: Any,
     *,
     tenant_id: UUID | None,
-    product: str,
-    version: str,
-    impl_id: str,
+    product: str | SQLColumnExpression[str],
+    version: str | SQLColumnExpression[str],
+    impl_id: str | SQLColumnExpression[str],
 ) -> ColumnElement[bool]:
     """Return the ``tenant_id`` predicate for the rows a tenant may use.
 
@@ -127,6 +132,11 @@ def visible_scope_clause(
 
     ``tenant_id=None`` is the operator-less chassis path: only built-in
     rows are visible.
+
+    *product* / *version* / *impl_id* are usually plain strings. They may
+    also be the columns of *model* itself; the ownership probe then
+    correlates per row, so one query can span many connectors and still
+    apply the same rule to each one (:func:`find_connectors_with_op`).
 
     The ownership probe runs over an alias of ``endpoint_descriptor`` so
     it never correlates with an outer query over the same table.
@@ -278,6 +288,67 @@ async def count_known_ops(
             )
         )
         return len(result.all())
+
+
+#: Cap on how many other connectors an ``unknown_op`` error names. A
+#: handful is enough to point the caller at the right one; the cap keeps
+#: the error small when an op id is shared by many connectors.
+_CONNECTORS_WITH_OP_CAP: int = 10
+
+
+async def find_connectors_with_op(
+    *,
+    tenant_id: UUID | None,
+    op_id: str,
+    exclude: tuple[str, str, str],
+) -> list[str]:
+    """Return the ids of other caller-visible connectors that have *op_id* enabled.
+
+    Runs only on the ``unknown_op`` error path (#4031). It finds the
+    connectors a caller probably meant, for example the other version of
+    the same product. *exclude* is the parsed *(product, version,
+    impl_id)* triple of the connector the caller named.
+
+    Tenant scope is :func:`visible_scope_clause`, applied per connector:
+    the tenant's own rows when it has a row for that connector, the
+    built-in rows otherwise. Another tenant's connector is never named.
+    ``tenant_id=None`` sees built-in rows only, the same as
+    :func:`count_known_ops`.
+
+    Each id is rendered as ``<impl_id>-<version>`` (``<product>`` for a
+    v1-style row with no version) and kept only when it parses back to
+    the same triple, so every named id can be passed to dispatch as is.
+    The list is sorted and capped at :data:`_CONNECTORS_WITH_OP_CAP`.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(
+                EndpointDescriptor.product,
+                EndpointDescriptor.version,
+                EndpointDescriptor.impl_id,
+            )
+            .where(
+                visible_scope_clause(
+                    EndpointDescriptor,
+                    tenant_id=tenant_id,
+                    product=EndpointDescriptor.product,
+                    version=EndpointDescriptor.version,
+                    impl_id=EndpointDescriptor.impl_id,
+                ),
+                EndpointDescriptor.op_id == op_id,
+                EndpointDescriptor.is_enabled.is_(True),
+            )
+            .distinct()
+        )
+        triples = {(row.product, row.version, row.impl_id) for row in result}
+    triples.discard(exclude)
+    connector_ids: set[str] = set()
+    for product, version, impl_id in triples:
+        connector_id = f"{impl_id}-{version}" if impl_id and version else product
+        if parse_connector_id(connector_id) == (product, version, impl_id):
+            connector_ids.add(connector_id)
+    return sorted(connector_ids)[:_CONNECTORS_WITH_OP_CAP]
 
 
 async def connector_exists(

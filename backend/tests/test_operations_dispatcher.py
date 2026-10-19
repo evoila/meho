@@ -637,15 +637,28 @@ def test_import_handler_caches_resolved_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_returns_unknown_op_when_descriptor_missing(
+    stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
     """No descriptor -> ``OperationResult.error`` starts with ``"unknown_op:"``."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
     operator = _make_operator()
     target = _FakeTarget(product="vault")
 
     result = await dispatch(
         operator=operator,
-        connector_id="vault",
+        connector_id="vault-1.x",
         op_id="vault.kv.read.notpresent",
         target=target,
         params={},

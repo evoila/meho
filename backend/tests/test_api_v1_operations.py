@@ -736,8 +736,10 @@ def test_post_call_refuses_undeliverable_receipt_before_dispatch(
     dispatch_mock.assert_not_awaited()
 
 
-def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient) -> None:
+@pytest.mark.asyncio
+async def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient) -> None:
     """The dispatcher's structured-error envelope rides on a 200 body."""
+    await _seed_descriptor(op_id="vault.kv.read")
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
@@ -838,6 +840,7 @@ async def test_post_call_accepts_bare_string_target(
                 updated_at=datetime.now(UTC),
             )
         )
+    await _seed_descriptor(op_id="vault.kv.read")
 
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:

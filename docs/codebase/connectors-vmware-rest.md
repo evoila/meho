@@ -2952,6 +2952,30 @@ genuinely small action. The read composites register no builder.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
+- **`event.tail` always sends a filter (#3706)** — vCenter 8.0.x answers a
+  `QueryEvents` call with no body with HTTP 500 (`InvalidArgument: Invalid
+  JSON syntax`). So `event_tail_composite` always sends
+  `{"filter": <EventFilterSpec>}`, with a `_typeName` tag on every data
+  object. The body is the same on 8.0.x and 9.0; only the
+  `/sdk/vim25/{release}` path differs (9.0's optional `eventViewSpec` is not
+  sent). Optional params map onto the filter: `begin_time` / `end_time`
+  (RFC 3339, checked by a schema pattern because the validator ignores
+  `format`) → `time`, `event_type_ids` → `eventTypeId`, `entity`
+  (`{moId, type, recursion?}`, recursion defaults to `all`) → `entity`, and
+  `max_count` (default 100, max 1000) → `maxCount`. The old client-side
+  `max_events` param is gone; the handler still cuts the list to
+  `max_count` in case a server ignores `maxCount`. `disableFullMessage` is
+  sent as `false`, because the spec says an unset flag drops
+  `fullFormattedMessage`. Each event comes back as a short row
+  `{createdTime, eventTypeId, fullFormattedMessage, entity}`; `eventTypeId`
+  is the `EventEx` / `ExtendedEvent` type id or else the event class name,
+  so it can be passed back as a filter value. `entity` is the object the
+  event is about: an `EventEx` `objectId` or an `ExtendedEvent`
+  `managedObject` wins, and only an event without one falls back to the
+  inherited `Event` context members (`vm`, `ds`, `host`, `net`, `dvs`,
+  `computeResource`, `datacenter`, most specific first). Rows keep the
+  order vCenter returned. `QueryEvents` has no ESXi SOAP builder, so this
+  composite does not run against a standalone ESXi host.
 - **`performance.summary` request bodies (#4038)** — both vi-json calls
   send `entity` as an annotated `ManagedObjectReference`
   (`vim_body.vim_moref`), never a bare moid string: vCenter 8.0.3 answers

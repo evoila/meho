@@ -79,6 +79,7 @@ nav:
       - Audit forensics: guides/audit-forensics.md
       - Flight recorder: guides/flight-recorder.md
       - Runbooks: guides/runbooks.md
+      - Hosted agents: guides/hosted-agents.md
       - Scheduler: guides/scheduler.md
       - Event ingestion: guides/event-ingestion.md
       - Satellite gateway: guides/satellite-gateway.md

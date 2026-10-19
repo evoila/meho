@@ -128,6 +128,15 @@ _DRILL_IN_WORKAROUND = (
     "params (see ``native_pagination`` below)."
 )
 
+#: Appended to every available drill-in rationale. The handle holds what the
+#: vendor returned for this one call. MEHO does not know whether that was all
+#: of the vendor's data (a paged API may have returned only the first page),
+#: so the prose never calls the handle complete (#3676).
+_SOURCE_COVERAGE_NOTE = (
+    " These are only the rows the vendor returned for this call; if the "
+    "vendor pages its results there may be more (see ``native_pagination``)."
+)
+
 #: Per-reason rationale for the ``available=False`` drill-in branch
 #: (#1629). Keyed by the machine-readable
 #: :data:`~meho_backplane.connectors.schemas.DrillInUnavailableReason`
@@ -136,13 +145,13 @@ _DRILL_IN_WORKAROUND = (
 #: causes at once and the operator could not tell which one fired.
 _DRILL_IN_UNAVAILABLE_RATIONALES: dict[DrillInUnavailableReason, str] = {
     "no_tenant_context": (
-        "The full result set was not spilled to the read-back store for "
+        "The rows this call returned were not spilled to the read-back store for "
         "this handle: the reduce ran without a usable tenant context "
         "(``tenant_id`` / ``operator_sub``), so the rows could not be "
         f"keyed to a tenant. {_DRILL_IN_WORKAROUND}"
     ),
     "result_store_unavailable": (
-        "The full result set was not spilled to the read-back store for "
+        "The rows this call returned were not spilled to the read-back store for "
         "this handle: the result store did not persist the rows (backend "
         f"unreachable, write rejected, or disabled). {_DRILL_IN_WORKAROUND}"
     ),
@@ -180,7 +189,7 @@ def _drill_in_available_rationale(
     )
     omitted_note = _omitted_fields_note(omitted_fields, omitted_fields_stored)
     return (
-        f"The full result set ({total_rows} rows) is retrievable over MCP "
+        f"The {total_rows} rows this call returned are retrievable over MCP "
         f"via the ``{_RESULT_QUERY_TOOL}`` tool or over REST via "
         f"``{_RESULT_QUERY_REST_ROUTE}``. Call either with "
         f"``handle_id={handle_id}`` plus ``offset`` / ``limit`` to page "
@@ -188,6 +197,7 @@ def _drill_in_available_rationale(
         f"``select`` / ``group_by`` / ``aggregate`` / ``order_by`` / "
         f"``limit``) to have the backplane return just the matching rows or "
         f"the per-group counts instead of the whole set.{tail_note}{omitted_note}"
+        f"{_SOURCE_COVERAGE_NOTE}"
     )
 
 
@@ -212,9 +222,9 @@ def _omitted_fields_note(omitted_fields: int, stored: bool) -> str:
 _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE: str = (
     "The underlying op did not register a ``pagination_hint`` in its "
     "metadata; native pagination params for this op are not documented "
-    "here. The connector author may register one via the typed-op "
-    "registration ``llm_instructions.pagination_hint`` slot to surface "
-    "specific param names + an example next call."
+    "here. The connector author (or, for an ingested op, an operator) may "
+    "add one in the op's ``llm_instructions.pagination_hint`` slot to "
+    "surface specific param names + an example next call."
 )
 
 #: Envelope keys vendor list ops wrap their collections under, in

@@ -334,3 +334,92 @@ async def test_list_plus_scalars_sweep_catches_an_unhinted_credential_op() -> No
     descriptor.llm_instructions = {}
 
     assert await _dropped_scalar_siblings([descriptor]) == {"vault.kv.list": ["mount"]}
+
+
+# ---------------------------------------------------------------------------
+# Static pagination hints and source coverage (#3676)
+# ---------------------------------------------------------------------------
+
+
+class _ValkeyDouble:
+    """Minimal async Valkey double so the real result store can spill."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+async def _reduce_issue_page(context_extra: dict[str, Any]) -> tuple[Any, _ValkeyDouble]:
+    """Reduce one 60-row page of GitHub issues through the real store."""
+    from meho_backplane.connectors.github.pagination_hints import GH_ISSUE_LIST_OP_ID
+    from meho_backplane.connectors.result_handle_store import ResultHandleStore
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    valkey = _ValkeyDouble()
+    store = ResultHandleStore(valkey)  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    page = [{"number": i, "title": f"issue {i}", "state": "open"} for i in range(60)]
+    context: dict[str, Any] = {
+        "op_id": GH_ISSUE_LIST_OP_ID,
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        **context_extra,
+    }
+    _summary, handle = await reducer.reduce(page, None, context)
+    assert handle is not None, "a 60-row page must reduce to a handle"
+    return handle, valkey
+
+
+@pytest.mark.asyncio
+async def test_github_issue_list_hint_surfaces_native_pagination() -> None:
+    """With the curated hint, the agent is told how to fetch the next page."""
+    from meho_backplane.connectors.github.pagination_hints import GH_ISSUE_LIST_PAGINATION_HINT
+
+    handle, _valkey = await _reduce_issue_page({"pagination_hint": GH_ISSUE_LIST_PAGINATION_HINT})
+
+    native = handle.fetch_more.native_pagination
+    assert native.available is True
+    assert native.params is not None
+    assert {"per_page", "page"} <= set(native.params)
+    assert native.example_next_call is not None
+    assert native.example_next_call["args"]["params"]["page"] == 2
+
+
+@pytest.mark.asyncio
+async def test_list_without_hint_reports_native_pagination_unavailable() -> None:
+    """Without a hint the envelope keeps the curated unavailable rationale."""
+    from meho_backplane.operations.jsonflux_reducer import (
+        _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE,
+    )
+
+    handle, _valkey = await _reduce_issue_page({})
+
+    native = handle.fetch_more.native_pagination
+    assert native.available is False
+    assert native.rationale == _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE
+
+
+@pytest.mark.asyncio
+async def test_reduced_page_is_never_labeled_source_complete() -> None:
+    """A hint says how to page; it does not make the stored page source-complete."""
+    import msgspec
+
+    from meho_backplane.connectors.github.pagination_hints import GH_ISSUE_LIST_PAGINATION_HINT
+    from meho_backplane.connectors.result_handle_store import _StoredPayload
+
+    handle, valkey = await _reduce_issue_page({"pagination_hint": GH_ISSUE_LIST_PAGINATION_HINT})
+
+    (raw,) = valkey.values.values()
+    stored = msgspec.json.decode(raw, type=_StoredPayload)
+    assert stored.storage_coverage == "complete"
+    assert stored.source_coverage == "unknown"
+    rationale = handle.fetch_more.drill_in.rationale
+    assert handle.fetch_more.drill_in.available is True
+    assert "full result set" not in rationale
+    assert "may be more" in rationale

@@ -39,11 +39,11 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 |---|---|---|---|---|
 | `-core-postgres-superuser` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.superuser` |
 | `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` | `corePostgres.enabled` | `postgres.credentialsSecret` |
-| `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.keycloak` |
+| `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.keycloak` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-keycloak-bootstrap` | `client_id`, `client_secret` | alnum 32 | `coreKeycloak.enabled` | `coreKeycloak.existingSecrets.bootstrap` |
-| `-core-keycloak-admin` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `keycloakAdmin.clientSecret.secretName` |
-| `-core-ui-auth` | `session_encryption_key`, `client_secret` | Fernet; alnum 32 | `coreKeycloak.enabled` | `uiConsole.secretName` |
-| `-core-check-runner` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `checkRunner.clientSecret.secretName` |
+| `-core-keycloak-admin` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `keycloakAdmin.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
+| `-core-ui-auth` | `session_encryption_key`, `client_secret` | Fernet; alnum 32 | `coreKeycloak.enabled` | `uiConsole.secretName` (not while `coreKeycloak.enabled` is on, see below) |
+| `-core-check-runner` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `checkRunner.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-approval-handoff` | `approval_handoff_encryption_key` | Fernet | any built-in part | `approvalHandoff.secretName` |
 | `-core-broadcast-auth` | `requirepass` | alnum 32 | any built-in part, with `broadcast.enabled` and `broadcast.auth.enabled` | `broadcast.auth.existingSecret` |
 | `-core-tls` | `tls.crt`, `tls.key`, `ca.crt` | type `kubernetes.io/tls`; a CA and a certificate for `ingress.host` | any built-in part, with the Ingress and TLS on | `ingress.tls.secretName` |
@@ -75,17 +75,31 @@ pair with their own certificate by setting `ingress.tls.secretName`.
 Put your Secret's name in the values key of the table. The Job then makes
 nothing for that row. It only reads your Secret and checks that it holds
 every key MEHO reads from it (for `uiConsole.secretName`, the keys named in
-`uiConsole.clientSecretKey` and `uiConsole.sessionEncryptionKey`). If a key
-is missing, or the Secret does not exist, the install stops with one
-sentence that names the Secret and the key, for example:
+`uiConsole.clientSecretKey` and `uiConsole.sessionEncryptionKey`; but see
+"With the built-in Keycloak" below). If a key is missing, or the Secret
+does not exist, the install stops with one sentence that names the Secret
+and the key, for example:
 
 ```text
-core_secrets_failed: Secret "my-ui" has no key "session_encryption_key"; add the key, or clear uiConsole.secretName so the install makes its own Secret.
+core_secrets_failed: Secret "my-handoff" has no key "approval_handoff_encryption_key"; add the key, or clear approvalHandoff.secretName so the install makes its own Secret.
 ```
 
 An empty values key, or one that holds the `<release>-core-…` name itself,
 lets the install make the Secret. `ingress.tls.secretName` is never checked,
 because cert-manager may create that Secret after the install.
+
+**With the built-in Keycloak.** The Keycloak subchart reads its Secrets by
+their `<release>-core-…` names only; it cannot read these parent values
+keys. While `coreKeycloak.enabled` is on,
+`corePostgres.existingSecrets.keycloak`,
+`keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
+`checkRunner.clientSecret.secretName` must stay empty or name the
+`<release>-core-…` Secret. A custom name there makes the Keycloak pod wait
+forever for a Secret that is never created. The render-time check for this
+lands with #4591. To use your own value for one of these Secrets, create it
+with the `<release>-core-…` name before the install: the Job keeps a Secret
+that exists. Only `coreKeycloak.existingSecrets.bootstrap` may name another
+Secret, because the Keycloak subchart reads that key too.
 
 ## Key types and files
 

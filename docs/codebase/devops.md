@@ -669,8 +669,8 @@ While the built-in Keycloak is on, leave
 `checkRunner.clientSecret.secretName` empty (or set them to the core name):
 the subchart cannot read these parent keys, so with another name the
 secrets Job would check that Secret, not make the core one, and the
-Keycloak pod would wait for it. The render-time guard for this belongs to
-the core wiring Task (#4047). The pod does not start until all five exist.
+Keycloak pod would wait for it forever. The render-time check for this
+lands with #4591. The pod does not start until all five exist.
 
 **What it renders.**
 
@@ -779,8 +779,8 @@ newer.
 
 - The backplane still fetches the discovery document from
   `KEYCLOAK_ISSUER_URL` (the public URL). Pointing it at the Service URL
-  needs the `KEYCLOAK_DISCOVERY_URL` setting, which comes with the core
-  wiring Task (#4047). The readiness probe code is green against the
+  needs the `KEYCLOAK_DISCOVERY_URL` setting, which comes with #4591. The
+  readiness probe code is green against the
   Service URL (checked on kind).
 - The admin console does not work through `kubectl port-forward`: its
   login page uses the public address, and `/auth/realms/master` is not

@@ -1156,6 +1156,13 @@ coreKeycloak:
   # official image at `https://<host>/auth`, with the MEHO realm loaded at
   # the first start. Needs `corePostgres.enabled: true`. Every other key is
   # described in `charts/keycloak/values.yaml`; set it here.
+  #
+  # While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`,
+  # `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
+  # `checkRunner.clientSecret.secretName` must stay empty or name the
+  # `<release>-core-…` Secret. A custom name there makes the Keycloak pod
+  # wait forever for a Secret that is never created. The render-time check
+  # for this lands with #4591.
   enabled: false
   # -- MEHO's public DNS name. Set the same value as `ingress.host`.
   hostname: ""

@@ -861,7 +861,7 @@
     "coreKeycloak": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner unless you name your own Secret (see docs/codebase/core-secrets.md), and the Keycloak subchart (`charts/keycloak/`) is deployed. Needs `corePostgres.enabled: true` (allOf below). This block names every key the subchart has; Helm checks their full shape against `charts/keycloak/values.schema.json` when `enabled` is true.",
+      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner, and the Keycloak subchart (`charts/keycloak/`) is deployed. Only the bootstrap Secret may have your own name (`existingSecrets.bootstrap`). While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`, `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and `checkRunner.clientSecret.secretName` must stay empty or name the `<release>-core-…` Secret; a custom name there makes the Keycloak pod wait forever for a Secret that is never created; the render-time check for this lands with #4591. See docs/codebase/core-secrets.md. Needs `corePostgres.enabled: true` (allOf below). This block names every key the subchart has; Helm checks their full shape against `charts/keycloak/values.schema.json` when `enabled` is true.",
       "properties": {
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },

@@ -6,9 +6,10 @@
 A person who starts a hosted agent run directly stays the subject of each
 call the run makes, and the run's agent is bound as the actor
 (:func:`~meho_backplane.auth.delegation.actor_delegation`). The gate works
-out the agent's verdict and the person's verdict and returns the stricter
-one. These tests drive :func:`~meho_backplane.operations._validate.policy_gate`
-directly with and without the actor bound.
+out the agent's verdict and the caller's verdict and returns the stricter
+one. The caller may be a person, a service account or another agent. These
+tests drive :func:`~meho_backplane.operations._validate.policy_gate` directly
+with and without the actor bound.
 """
 
 from __future__ import annotations
@@ -190,6 +191,39 @@ async def test_agent_caller_own_grants_still_apply_inside_a_direct_run() -> None
     assert verdict is PermissionVerdict.DENY
     assert reason is not None
     assert "acting for" not in reason
+
+
+async def test_agent_caller_deny_wins_when_the_hosted_agent_needs_approval() -> None:
+    """A denied agent-kind caller is refused, not parked, when the hosted agent needs approval."""
+    await _seed_grant("*", "deny", principal_sub="agent:caller")
+    await _seed_grant("*", "needs-approval")
+    with actor_delegation(_AGENT):
+        verdict, reason = await policy_gate(
+            operator=_agent_caller(), descriptor=_descriptor(), target=None
+        )
+    assert verdict is PermissionVerdict.DENY
+    assert reason is not None
+    assert "acting for" not in reason
+
+
+async def test_agent_needs_approval_skips_the_person_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A person or service caller cannot be denied, so its gate is not reached."""
+    await _seed_grant("*", "needs-approval")
+
+    async def _must_not_run(**_kwargs: Any) -> Any:
+        raise AssertionError("the person's verdict must not be worked out before approval")
+
+    monkeypatch.setattr(_validate, "_non_agent_verdict", _must_not_run)
+    with actor_delegation(_AGENT):
+        verdict, _reason = await policy_gate(
+            operator=_person(principal_kind=PrincipalKind.SERVICE),
+            descriptor=_descriptor(),
+            target=None,
+            connector_id="vault-1.x",
+        )
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL
 
 
 async def test_agent_denial_skips_the_person_verdict(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -397,8 +397,9 @@ and the person's own verdict, and the stricter one wins. So the agent's
 grants limit a direct run the same way they limit a scheduled one: an op the
 agent's grants deny is denied, even when the person could run it alone. The
 caller may also be another agent (an `agent`-kind token). Then the caller's
-own grants and the hosted agent's grants both apply, and the stricter wins. A
-call that must wait for approval follows the normal approval rules (the
+own grants and the hosted agent's grants both apply, and the stricter wins:
+a caller deny grant refuses the call even when the hosted agent would only
+wait for approval. A call that must wait for approval follows the normal approval rules (the
 person who asked cannot approve their own request, unless the deploy allows it). See
 `agent-permission-model.md`.
 

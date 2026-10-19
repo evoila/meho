@@ -561,10 +561,14 @@ async def _direct_run_verdict(
     agent safety defaults and the caller's role ceiling. The caller's own
     verdict uses the caller's principal kind (:func:`_caller_verdict`), so
     an agent-kind caller keeps its own grants. The stricter of the two
-    verdicts wins. The caller's verdict is worked out only when the hosted
-    agent may run the op (agent verdict auto-execute). The caller's verdict
-    can only make the result stricter, so this does not change the outcome.
-    It means a standing grant is recorded as used only when the call runs.
+    verdicts wins.
+
+    The caller's verdict is skipped when it cannot change the outcome. A
+    hosted-agent deny is already the strictest verdict. When the hosted
+    agent needs approval, only an agent-kind caller can still make it
+    stricter (a deny grant); a human or service caller never gets deny
+    (:func:`_non_agent_verdict`), and working out its verdict could record
+    a standing grant as used for a call that then waits for approval.
     """
     agent = operator.model_copy(
         update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
@@ -573,7 +577,12 @@ async def _direct_run_verdict(
         operator=agent, descriptor=descriptor, target=target
     )
     agent_result = (agent_verdict, f"agent {actor_sub} acting for {operator.sub}: {agent_reason}")
-    if agent_verdict is not PermissionVerdict.AUTO_EXECUTE:
+    if agent_verdict is PermissionVerdict.DENY:
+        return agent_result
+    if (
+        agent_verdict is PermissionVerdict.NEEDS_APPROVAL
+        and operator.principal_kind is not PrincipalKind.AGENT
+    ):
         return agent_result
     verdict, reason = await _caller_verdict(
         operator=operator, descriptor=descriptor, target=target, connector_id=connector_id

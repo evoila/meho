@@ -140,10 +140,13 @@ G11.2-T1):
   the hosted agent's (the resolver below, keyed on `agent:<name>`, with the
   caller's role ceiling) and the caller's own (the branch above that matches
   the caller's kind, so an `agent`-kind caller keeps its own grants). The
-  stricter one wins. The caller's verdict is worked out only when the hosted
-  agent may run the op (agent verdict `auto-execute`). An agent `deny` or
-  `needs-approval` returns at once, so a standing grant is recorded as used
-  only when the call runs. The rule in one line: a direct run may do only
+  stricter one wins. The caller's verdict is skipped when it cannot change
+  the outcome: a hosted-agent `deny` returns at once, and a hosted-agent
+  `needs-approval` returns at once for a person or service caller, because
+  the non-agent branch never returns `deny`. This also means a standing
+  grant is recorded as used only when the call runs. An `agent`-kind caller
+  is still checked in that case, so its own `deny` grant refuses the call
+  instead of parking it. The rule in one line: a direct run may do only
   what both the caller and the hosted agent may do. See `agent-runtime.md`
   "Whose identity a direct run uses".
 

@@ -19,14 +19,14 @@ import (
 // ExactOpResponse is the JSON envelope GET /api/v1/operations/search
 // returns when op_id is set (#3668): one call contract, no ranked hits.
 type ExactOpResponse struct {
-	Operation OperationContract `json:"operation"`
+	Operation Contract `json:"operation"`
 }
 
-// OperationContract mirrors the backend OperationContract model
+// Contract mirrors the backend OperationContract model
 // (backend/src/meho_backplane/operations/_contract.py). The parameter
 // schema and pagination hint stay raw JSON so --json prints them
 // exactly as the backend stored them.
-type OperationContract struct {
+type Contract struct {
 	ConnectorID      string            `json:"connector_id"`
 	OpID             string            `json:"op_id"`
 	Summary          *string           `json:"summary"`
@@ -95,7 +95,7 @@ func getExactOp(ctx context.Context, client operationsAPI, opts searchOptions) (
 	return &out, nil
 }
 
-func printContract(w io.Writer, c *OperationContract) {
+func printContract(w io.Writer, c *Contract) {
 	fmt.Fprintf(w, "%s  (connector %s)\n", c.OpID, c.ConnectorID)
 	if s := strDeref(c.Summary); s != "" {
 		fmt.Fprintf(w, "summary:  %s\n", s)

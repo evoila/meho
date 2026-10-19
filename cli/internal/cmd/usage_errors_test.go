@@ -27,11 +27,7 @@ func runCLI(t *testing.T, argv ...string) (stdout, stderr string, exit int) {
 	root.SetOut(&out)
 	root.SetErr(&errOut)
 	root.SetArgs(argv)
-	err := root.Execute()
-	switch {
-	case err == nil:
-		exit = 0
-	default:
+	if err := root.Execute(); err != nil {
 		exit = 1
 		var coder output.ExitCoder
 		if errors.As(err, &coder) {

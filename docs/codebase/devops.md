@@ -581,6 +581,10 @@ Design: the internal core design note, §2 (one database server) and §1
   egress rule to the built-in database (by pod, not CIDR) comes with #4050.
 - **Disk lifetime.** The PVC outlives `helm uninstall` (StatefulSet default).
   Delete the PVC and the generated Secrets together, or neither.
+- **After a restore.** A restored dump brings the role passwords of the
+  dump. Restart the pod after a restore: the sidecar then sets the
+  passwords from the Secrets again (it also does so on the next Secret
+  change, but not on its own clock).
 - **What wires it to the backplane.** Not this subchart: the
   `DATABASE_URL` default, the schema conditionals and the migration as an
   init container come with #4041 and #4047.

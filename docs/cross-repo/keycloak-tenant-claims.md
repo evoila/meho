@@ -51,357 +51,214 @@ specifies what the realm must produce.
 - The realm already issues access tokens to a client whose `aud` claim
   matches the backplane's `KEYCLOAK_AUDIENCE`. v0.1 deployments meet
   this prerequisite — the chassis-era login flow already works.
-- A generated UUID per tenant the deployment will host. v0.2 deploys
-  with a single tenant (`rdc-internal` for the dogfooding lab); the
-  UUID is recorded on the consumer side in `targets.yaml` for
-  per-target tenancy.
-- Keycloak version **22+**. The mapper type names this recipe
-  uses (`Hardcoded claim`, `Script Mapper`, and `User Attribute`
-  for `tenant_id` in Step 3; `Script Mapper` for Shape A and
-  `User Attribute` for Shape B in Step 4; and `User Realm Role`
-  referenced only as the discouraged shape in Step 4's two
-  callouts) are all **stock** OIDC protocol mappers and match the
-  Admin Console as shipped in Keycloak 22 through current (26.x at
-  time of writing); the 19.x and earlier consoles use slightly
-  different labels. Stock Keycloak ships **no** "Group Attribute"
-  mapper — see
-  [Step 3](#step-3--configure-the-tenant_id-protocol-mapper).
+- One UUID for the tenant. Mint it with `uuidgen` or
+  `python3 -c "import uuid; print(uuid.uuid4())"`, and write it down.
+  For now each site has one tenant.
+- Keycloak version **22+**. This recipe uses only **stock** OIDC
+  protocol mappers (no scripts). The Admin Console labels below match
+  Keycloak 22 through 26.x.
 
-## Recommended path: groups + realm roles
+## The recipe: five groups give the tenant and the role
 
-The recommended configuration sources `tenant_id` from the tenant
-**group's `tenant_id` attribute** (read by a Script Mapper — stock
-Keycloak has no mapper that copies a group attribute directly; see
-[Step 3](#step-3--configure-the-tenant_id-protocol-mapper)) and
-`tenant_role` from a **realm role**. This shape scales to tenants with
-many operators (one group membership + one role assignment per
-operator; the group attribute carries the UUID once). A single-tenant
-deploy can skip the group plumbing entirely and hardcode the UUID —
-also covered in Step 3.
+A person gets their tenant and their role from their Keycloak group.
+The full decision is in
+[`docs/decisions/login-role-groups.md`](../decisions/login-role-groups.md).
+In short:
 
-The alternative — both claims as user attributes — is covered as a
-[side note](#side-note-alternative-claim-sources) at the bottom; it is
-simpler when each user is in exactly one tenant and never moves, but
-does not scale.
+- The realm has five top-level groups. Each group carries `tenant_id`
+  and `tenant_role` as **group attributes** (key-value settings on the
+  group). `MEHO-Approvers` also carries `approver` = `true`.
+- Each human login client (`meho-cli`, `meho-mcp`) has three stock
+  **User Attribute** mappers. They copy `tenant_id`, `tenant_role` and
+  `approver` into the access token.
+- Each person is in **exactly one** of the five groups.
 
-### Step 1 — Create the tenant group
+| Group | `tenant_role` | `approver` |
+| --- | --- | --- |
+| `MEHO-Readers` | `read_only` | – |
+| `MEHO-Operators` | `operator` | – |
+| `MEHO-SA-Operators` | `operator` | – |
+| `MEHO-Admins` | `tenant_admin` | – |
+| `MEHO-Approvers` | `read_only` | `true` |
 
-Each MEHO tenant maps 1:1 to a Keycloak group. The group's
-`tenant_id` attribute carries the UUID the backplane scopes by.
+All five groups carry the same `tenant_id`.
 
-In the Admin Console (logged in as a realm admin):
+**Why a User Attribute mapper can read a group attribute.** The stock
+User Attribute mapper first looks at the person. When the person has no
+value of their own, it takes the value from the person's groups (and
+from a parent group when the group has none). This is
+`KeycloakModelUtils.resolveAttribute`, which `UserAttributeMapper`
+calls — see the
+[Keycloak 26.8.1 source](https://github.com/keycloak/keycloak/blob/26.8.1/server-spi-private/src/main/java/org/keycloak/models/utils/KeycloakModelUtils.java#L768-L797)
+and the
+[mapper that calls it](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/mappers/UserAttributeMapper.java#L96-L104).
+So you need no script and no fixed value. Earlier versions of this page
+said the opposite; that was wrong.
 
-1. Navigate to **Groups** → **Create group**.
-2. **Name:** the tenant slug (lowercase, hyphenated). Example:
-   `rdc-internal`.
-3. After the group is created, open **Attributes** on that group.
-4. Add an attribute:
-   - **Key:** `tenant_id`
-   - **Value:** a generated UUID (run `python3 -c "import uuid;
-     print(uuid.uuid4())"` or `uuidgen` to mint one). Record this
-     value — it goes into `targets.yaml` on the consumer side as the
-     per-tenant UUID for v0.2.next.
+### The fast way: `meho admin keycloak bootstrap-clients`
 
-The group attribute is the source of truth for `tenant_id`. Renaming
-the group is safe; **changing the `tenant_id` attribute value is a
-breaking change** (every audit row keyed on the old UUID becomes
-unreachable).
+The CLI does Steps 1 and 2 for you, and puts the first admin user in
+`MEHO-Admins`. It is safe to run twice:
 
-### Step 2 — Create the three realm roles
-
-The `tenant_role` enum has exactly three values matching the v0.2
-RBAC primitive:
-
-- `tenant_admin` — manages the tenant: targets, conventions, role
-  assignments. Can perform any state-changing operation.
-- `operator` — runs MCP operations against tenant infrastructure.
-  Read + write on the tenant's surface; cannot manage RBAC.
-- `read_only` — reads audit history, targets, conventions. No
-  state-changing operations.
-
-In the Admin Console:
-
-1. Navigate to **Realm roles** → **Create role**.
-2. Create three roles, named exactly:
-   - `meho-tenant-admin`
-   - `meho-operator`
-   - `meho-read-only`
-3. The `meho-` prefix scopes the roles to MEHO inside the realm and
-   keeps them visually distinct from other client / realm roles the
-   operator may already use.
-
-The role names on the realm side carry the `meho-` prefix; the claim
-value the backplane sees is the unprefixed snake_case enum
-(`tenant_admin` / `operator` / `read_only`). Shape A's Script Mapper
-translates the prefix away (and converts hyphens to underscores) —
-see [Step 4](#step-4--configure-the-tenant_role-protocol-mapper).
-Under Shape B the realm roles are RBAC bookkeeping only; the per-user
-`tenant_role` attribute carries the literal enum value directly.
-
-### Step 3 — Configure the `tenant_id` protocol mapper
-
-The access token needs the tenant's UUID as a `tenant_id` claim.
-**Stock Keycloak has no "Group Attribute" mapper** that copies a
-*group* attribute into a scalar claim: the OIDC package ships
-`GroupMembershipMapper` (emits group names / paths),
-`UserAttributeMapper` (emits a per-*user* attribute), and
-`HardcodedClaim` (emits a constant), and none of them reads a group
-attribute — the same gap the
-[`approver` recipe](#the-approver-approve-only-capability--group-based-recipe-3243)
-documents for a group-gated boolean (verified against the
-[26.x mapper javadocs](https://www.keycloak.org/docs-api/latest/javadocs/org/keycloak/protocol/oidc/mappers/package-summary.html)).
-Pick the stock shape that fits the deployment:
-
-- **One tenant per deploy** (the v0.2 default — see Prerequisites) → a
-  **Hardcoded claim** mapper carrying the tenant UUID. Simplest, stock,
-  no scripts, and the shape the reference deployment and the repo's
-  integration realm fixture actually use.
-- **Multiple tenants in one realm, scripts allowed** → **Shape A**, a
-  Script Mapper that reads the member's tenant-group `tenant_id`
-  attribute (from [Step 1](#step-1--create-the-tenant-group)).
-- **Multiple tenants, no scripts** → a per-user `tenant_id` attribute +
-  a **User Attribute** mapper (the
-  [side note](#side-note-alternative-claim-sources)).
-
-Where to add the mapper (any shape):
-
-- **Preferred:** add to the **Client scope** the backplane's client
-  uses (typically `meho-mcp` or whichever scope is bound to the
-  `KEYCLOAK_AUDIENCE` client). Mapper-on-scope means every client that
-  shares the scope inherits the mapper — clean for multi-client
-  deployments.
-- **Alternative:** add directly to the **Client** itself. Use this
-  when the realm has only one MEHO client and you prefer mapper
-  ownership tied to the client lifecycle.
-
-The claim-toggle settings are the same for every shape below:
-**Token Claim Name** `tenant_id` (what the backplane reads via
-`JWT_TENANT_CLAIM_NAME`, which defaults to `tenant_id`), **Claim JSON
-Type** `String`, **Add to ID token** off (the backplane validates the
-access token, not the ID token), **Add to access token** **on**
-(load-bearing — without this the mapper is a no-op for the backplane),
-and **Add to userinfo** on (makes the
-[verification snippet](#verification) below work without decoding the
-access token by hand).
-
-#### One tenant per deploy — a Hardcoded claim mapper
-
-In the Admin Console: **Client scopes** → `meho-mcp` (or your chosen
-scope) → **Mappers** tab → **Add mapper** → **By configuration** →
-**Hardcoded claim**. Set **Name** `tenant_id`, **Claim value** the
-tenant UUID minted in [Step 1](#step-1--create-the-tenant-group), and
-the shared claim toggles above.
-
-This is the shape the repo's integration realm fixture uses
-(`backend/tests/integration/_fixtures/meho-integration-realm.json` — an
-`oidc-hardcoded-claim-mapper` with `claim.name: tenant_id`). A Hardcoded
-claim is the same constant for **every** token minted on that client /
-scope, so it fits a single-tenant realm exactly; move to Shape A (or the
-per-user attribute) once a realm hosts more than one tenant.
-
-#### Shape A — a Script Mapper reading the group's `tenant_id` attribute
-
-If the realm has the **Script Mapper** feature enabled, a single mapper
-reads the member's tenant group's `tenant_id` attribute and emits it as
-the claim. Add it on the same scope / client: **Add mapper** → **By
-configuration** → **Script Mapper**, with **Name** `tenant_id`, the
-shared claim toggles above, and this body:
-
-```javascript
-// Script Mapper body — emits the tenant group's tenant_id attribute.
-// Each operator belongs to exactly one tenant group (Step 5); this reads
-// the first group carrying a tenant_id attribute and exports its value.
-// A member of no tenant group leaves exports undefined, so Keycloak omits
-// the claim and the backplane fails closed (401 missing_tenant_claim).
-var it = user.getGroupsStream().iterator();
-while (it.hasNext()) {
-  var tid = it.next().getFirstAttribute('tenant_id');
-  if (tid != null) { exports = tid; break; }
-}
+```bash
+KEYCLOAK_ADMIN_PASSWORD=... KEYCLOAK_ADMIN_USER_PASSWORD=... \
+meho admin keycloak bootstrap-clients \
+  --keycloak-base-url https://keycloak.example.org \
+  --realm <realm-name> \
+  --admin-username admin \
+  --mcp-resource-uri https://meho.example.org/mcp \
+  --tenant-id <tenant-uuid> \
+  --admin-user-username <first-admin>
 ```
 
-`user.getGroupsStream()` is the current `UserModel` API (Keycloak 19+,
-the same call the `approver` Shape A script uses) and
-`GroupModel.getFirstAttribute(...)` returns the group attribute's first
-value. Script Mapper requires the script-mappers feature
-(`--features=scripts` on `kc.sh start`, disabled by default since
-Keycloak 18) and a JS engine on the classpath (GraalJS ships with
-current distributions) — the same caveat as `tenant_role` Shape A.
+Then do Step 3 for everyone else. The steps below are the manual path,
+and they explain what the command does.
 
-#### Shape B — `tenant_id` as a per-user attribute (no scripts)
+### Step 1 — Create the five groups
 
-Realms that cannot enable scripts stamp `tenant_id` on each user and
-copy it with a built-in **User Attribute** mapper — see the
-[side note](#side-note-alternative-claim-sources), which gives the full
-mapper config (including the one extra **Aggregate attribute values:**
-off toggle that shape needs).
+For each of the five groups in the table above:
 
-### Step 4 — Configure the `tenant_role` protocol mapper
+1. **Groups** → **Create group** → **Name:** the group name, exactly
+   as written (for example `MEHO-Operators`). Create it at the top
+   level, not inside another group.
+2. Open the group → **Attributes** → add:
+   - `tenant_id` = your tenant UUID;
+   - `tenant_role` = the value from the table (`read_only`, `operator`
+     or `tenant_admin` — with an underscore, never a hyphen);
+   - on `MEHO-Approvers` only: `approver` = `true`.
+3. **Save.**
 
-The realm-role-to-claim mapping is more nuanced than the group
-attribute mapper because **Keycloak has no built-in mapper that
-emits a fixed scalar claim value gated by a single realm role.**
-The built-in **User Realm Role** mapper writes the user's filtered
-realm-role *names* (a string or JSON array) into the claim — not a
-per-mapper-configured constant. The backplane's `tenant_role` enum
-needs the constant value (`tenant_admin` / `operator` /
-`read_only`), not the role name. Two viable shapes meet the
-contract:
+The same with `kcadm.sh` (the Keycloak admin command line). Run it
+after `kcadm.sh config credentials`, with `REALM` and `TENANT_ID` set:
 
-#### Shape A (recommended) — one Script Mapper
+```bash
+kcadm.sh create groups -r "$REALM" -s name=MEHO-Readers \
+  -s "attributes.tenant_id=[\"$TENANT_ID\"]" -s 'attributes.tenant_role=["read_only"]'
+kcadm.sh create groups -r "$REALM" -s name=MEHO-Operators \
+  -s "attributes.tenant_id=[\"$TENANT_ID\"]" -s 'attributes.tenant_role=["operator"]'
+kcadm.sh create groups -r "$REALM" -s name=MEHO-SA-Operators \
+  -s "attributes.tenant_id=[\"$TENANT_ID\"]" -s 'attributes.tenant_role=["operator"]'
+kcadm.sh create groups -r "$REALM" -s name=MEHO-Admins \
+  -s "attributes.tenant_id=[\"$TENANT_ID\"]" -s 'attributes.tenant_role=["tenant_admin"]'
+kcadm.sh create groups -r "$REALM" -s name=MEHO-Approvers \
+  -s "attributes.tenant_id=[\"$TENANT_ID\"]" -s 'attributes.tenant_role=["read_only"]' \
+  -s 'attributes.approver=["true"]'
+```
 
-If the realm has the **Script Mapper** feature enabled, a single
-mapper picks the most-privileged role and emits the
-backplane-shaped enum value:
+The `tenant_id` on the groups is the source of truth for the tenant.
+Renaming a group is safe (but the next login then needs the new name).
+**Changing `tenant_id` is a breaking change:** every audit row keyed on
+the old UUID becomes unreachable.
 
-```javascript
-// Script Mapper body — token-mapper-script.js
-// Outputs the highest of the three meho-* roles the user holds, mapped
-// to the backplane's tenant_role enum (snake_case). The realm-side role
-// names use hyphens (meho-tenant-admin, meho-read-only) but the
-// backplane's TenantRole StrEnum is tenant_admin / operator / read_only
-// — see backend/src/meho_backplane/auth/operator.py. The replace() +
-// whitelist below bridges the two naming conventions and fail-closes
-// on anything unexpected (emits null, which Keycloak omits from the
-// claim, which the backplane rejects as 401 missing_tenant_claim).
-var roles = user.getRoleMappings();
-var ranked = ['meho-tenant-admin', 'meho-operator', 'meho-read-only'];
-var allowed = {tenant_admin: true, operator: true, read_only: true};
-for (var i = 0; i < ranked.length; i++) {
-  for (var j = 0; j < roles.size(); j++) {
-    if (roles.get(j).getName() == ranked[i]) {
-      // Strip the meho- prefix and convert hyphens to underscores so
-      // the value matches the TenantRole enum exactly.
-      var role = ranked[i].substring('meho-'.length).replace('-', '_');
-      exports = allowed[role] ? role : null;
-      break;
-    }
+### Step 2 — Add the three User Attribute mappers
+
+Add three mappers to **each** human login client (`meho-cli` and
+`meho-mcp`). In the Admin Console: **Clients** → the client →
+**Client scopes** → its **dedicated** scope → **Mappers** →
+**Add mapper** → **By configuration** → **User Attribute**.
+
+| Setting | `tenant_id` mapper | `tenant_role` mapper | `approver` mapper |
+| --- | --- | --- | --- |
+| Name | `tenant-id` | `tenant-role` | `approver` |
+| User Attribute | `tenant_id` | `tenant_role` | `approver` |
+| Token Claim Name | `tenant_id` | `tenant_role` | `approver` |
+| Claim JSON Type | `String` | `String` | `boolean` |
+| Add to ID token | off | off | off |
+| Add to access token | **on** | **on** | **on** |
+| Add to userinfo | on | on | on |
+| Multivalued | off | off | off |
+| Aggregate attribute values | off | off | off |
+
+**Add to access token** must be on: the backplane reads the access
+token. **Add to userinfo** on makes [Check 1](#verification) below
+work. Keep **Multivalued** and **Aggregate attribute values** off, so
+each claim is one value and not a list (a list is rejected).
+
+The same with `kcadm.sh` for one client (repeat for each client and
+each of the three mappers; change `name`, `user.attribute`,
+`claim.name` and `jsonType.label`):
+
+```bash
+CID=$(kcadm.sh get clients -r "$REALM" -q clientId=meho-cli \
+  --fields id --format csv --noquotes)
+kcadm.sh create "clients/$CID/protocol-mappers/models" -r "$REALM" -f - <<'JSON'
+{
+  "name": "tenant-role",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-usermodel-attribute-mapper",
+  "config": {
+    "user.attribute": "tenant_role",
+    "claim.name": "tenant_role",
+    "jsonType.label": "String",
+    "id.token.claim": "false",
+    "access.token.claim": "true",
+    "userinfo.token.claim": "true",
+    "introspection.token.claim": "true",
+    "multivalued": "false",
+    "aggregate.attrs": "false"
   }
-  if (typeof exports !== 'undefined') break;
 }
+JSON
 ```
 
-Configure with **Token Claim Name:** `tenant_role`, **Claim JSON
-Type:** `String`, **Add to access token:** on, **Add to userinfo:**
-on, **Add to ID token:** off.
+Put the mappers on the clients that **people** use. Do not put them on
+a client scope that service accounts or agent clients share: those get
+their own claims on their own confidential clients.
 
-A token minted by this mapper for an operator with `meho-operator`
-assigned carries `"tenant_role": "operator"`; for `meho-read-only`
-it carries `"tenant_role": "read_only"` (underscore, not hyphen —
-the backplane's enum is snake_case, the realm-role name is
-kebab-case, and the script is what bridges them).
+### Step 3 — Put each person in one group
 
-Script Mapper requires the script-mappers feature flag enabled
-(`--features=scripts` on the `kc.sh start` command line — disabled
-by default since Keycloak 18) and a JS engine on the classpath
-(GraalJS bundled with current Keycloak distributions). Realms that
-allow scripts land here: one mapper, declarative, easy to audit.
+For each person who should use MEHO: **Users** → the person →
+**Groups** → **Join group** → pick **one** of the five groups. Or with
+`kcadm.sh`:
 
-#### Shape B (no scripts) — `tenant_role` as a per-user attribute
+```bash
+USER_ID=$(kcadm.sh get users -r "$REALM" -q username=alice \
+  --fields id --format csv --noquotes)
+GROUP_ID=$(kcadm.sh get groups -r "$REALM" -q search=MEHO-Operators \
+  --fields id,name --format csv --noquotes | grep ',MEHO-Operators$' | cut -d, -f1)
+kcadm.sh update "users/$USER_ID/groups/$GROUP_ID" -r "$REALM" -n
+```
 
-For realms that cannot enable the scripts feature (most hardened
-production deployments), drop the realm-role-driven claim entirely
-and stamp `tenant_role` directly on each user as a custom attribute.
-A single built-in **User Attribute** protocol mapper then copies
-that attribute into the access token — no scripts, no role-to-claim
-indirection, no UI surfaces that don't exist.
+(Avoid the shell names `UID` and `GID`: they are read-only in bash and
+zsh.)
 
-The realm roles (`meho-tenant-admin` / `meho-operator` /
-`meho-read-only`) created in Step 2 are still useful as RBAC
-bookkeeping on the realm side (audit, group queries, future
-realm-side policies), but they do **not** drive the `tenant_role`
-claim under Shape B — the per-user attribute does.
+The rules:
 
-1. On each operator user, set the `tenant_role` attribute:
-   **Users** → select the user → **Attributes** tab → add
-   - **Key:** `tenant_role`
-   - **Value:** exactly one of `tenant_admin` / `operator` /
-     `read_only` (the literal enum value the backplane reads;
-     hyphens are wrong and will be rejected as
-     `401 unknown_tenant_role`).
+- **Exactly one group.** A person in two of the five groups gets one
+  of the two roles, and you cannot tell which one.
+- **No group, no access.** A person in none of the five groups gets no
+  `tenant_id`, and the backplane answers `401 missing_tenant_claim`.
+- **Leave the person's own `tenant_id` / `tenant_role` / `approver`
+  attributes empty.** A value on the person wins over the group.
+- **To change a role, move the person to another group.** The change
+  applies at the person's next login (or when their current token
+  expires).
 
-2. Add a single **User Attribute** mapper to the `meho-mcp` client
-   scope (the same scope the `tenant_id` mapper lives on, from
-   [Step 3](#step-3--configure-the-tenant_id-protocol-mapper)):
-   **Client scopes** → `meho-mcp` → **Mappers** tab → **Add mapper**
-   → **By configuration** → **User Attribute**.
+A company directory (Active Directory, LDAP) or a login system in front
+of Keycloak (Entra ID) can fill the groups for you: map the directory
+group to one of the five Keycloak groups. The recipes for that come
+with [#3959](https://github.com/evoila/meho/issues/3959).
 
-   Configure:
-   - **Name:** `tenant_role`
-   - **User Attribute:** `tenant_role` (the source — matches the
-     attribute key set in step 1)
-   - **Token Claim Name:** `tenant_role` (the target — what the
-     backplane reads)
-   - **Claim JSON Type:** `String`
-   - **Add to ID token:** off
-   - **Add to access token:** **on** (load-bearing)
-   - **Add to userinfo:** on
-   - **Aggregate attribute values:** off (each user has one role;
-     aggregation would emit a JSON array, which the backplane
-     rejects as `malformed_tenant_claim`)
-   - **Multivalued:** off (same reason)
+### Upgrading a realm that still has fixed values
 
-3. Save.
+Older realms often have **Hardcoded claim** mappers that put the same
+`tenant_id` and `tenant_role` into every token of the client. Remove
+them:
 
-The Script Mapper shape (Shape A) does the gating automatically
-from the user's role mappings; Shape B keeps role bookkeeping in
-realm roles but moves the claim source to a per-user attribute,
-trading "one mapper, role-driven" for "one mapper plus a per-user
-attribute edit on every role change". Both produce the same
-on-the-wire claim shape.
+- **Run `meho admin keycloak bootstrap-clients` again.** It turns the
+  fixed-value `tenant-id` and `tenant-role` mappers it made earlier
+  into User Attribute mappers, adds the `approver` mapper, creates the
+  five groups, and puts the first admin user in `MEHO-Admins`. It
+  prints `[updated] mapper tenant-id (replaced
+  oidc-hardcoded-claim-mapper with oidc-usermodel-attribute-mapper)`.
+  It does not delete old groups (for example `meho-admins`) or move
+  other people.
+- **Or by hand:** delete every Hardcoded claim mapper for `tenant_id`
+  or `tenant_role` on the client and on its client scopes, then do
+  Steps 1–3.
 
-> **Why not the built-in User Realm Role mapper?** Its `setClaim()`
-> reads `RoleResolveUtil.getResolvedRealmRoles(...)` and emits the
-> user's actual filtered role *names* (e.g.
-> `["meho-operator","meho-read-only"]` or
-> `"meho-operator"`) — there is no per-mapper "fixed value" field
-> on its config schema (verified against
-> [`UserRealmRoleMappingMapper.java`](https://github.com/keycloak/keycloak/blob/main/services/src/main/java/org/keycloak/protocol/oidc/mappers/UserRealmRoleMappingMapper.java)
-> on `main`, cross-checked against Keycloak 22.x and 26.x
-> javadocs; behaviour is unchanged on the relevant code path).
-> Tokens minted by that mapper carry e.g.
-> `tenant_role: "meho-operator"`, which the backplane rejects as
-> `401 unknown_tenant_role` (wrong prefix, not in the enum).
->
-> **Why not Hardcoded-Claim mappers in per-role client scopes?** A
-> per-user gate would require Keycloak to support per-user client-
-> scope assignment, which it does not — client scopes are bound at
-> the client level (Default + Optional), with no per-user
-> override surface in the Admin Console. Open feature requests
-> ([keycloak#37804](https://github.com/keycloak/keycloak/discussions/37804),
-> [keycloak#8486](https://github.com/keycloak/keycloak/issues/8486))
-> track this gap; until they land, the no-scripts path is the
-> per-user attribute approach above.
-
-### Step 5 — Assign users
-
-For each operator who should authenticate against MEHO:
-
-1. **Users** → select the user → **Groups** tab → **Join Group** →
-   pick the tenant group from [Step 1](#step-1--create-the-tenant-group).
-   Users must belong to **exactly one** tenant group; multiple
-   memberships make the Shape A script read a `tenant_id` from
-   whichever tenant group it encounters first.
-2. **(Shape A only.)** **Users** → select the user → **Role
-   mapping** tab → **Assign role** → filter by **Realm roles** →
-   pick exactly one of `meho-tenant-admin` / `meho-operator` /
-   `meho-read-only`. Holding more than one of the three
-   `meho-*` roles is supported — the script in Shape A picks the
-   most-privileged (admin > operator > read-only) — but
-   single-role assignment is the simpler invariant.
-3. **(Shape B only.)** **Users** → select the user → **Attributes**
-   tab → set the `tenant_role` attribute to exactly one of
-   `tenant_admin` / `operator` / `read_only` (matching the
-   [Step 4 Shape B](#shape-b-no-scripts--tenant_role-as-a-per-user-attribute)
-   recipe). Realm-role assignment is optional under Shape B; only
-   the attribute drives the claim.
-4. Save.
-
-Operators that are members of zero tenant groups, or that (under
-Shape A) hold none of the three `meho-*` roles, or that (under
-Shape B) have no `tenant_role` attribute set, will be rejected by
-the backplane with `401 missing_tenant_claim` on every
-authenticated request.
+Before you remove the fixed values, put every person in one of the
+five groups. Otherwise they lose access at their next login.
 
 ## Verification
 
@@ -440,10 +297,9 @@ adds):
 }
 ```
 
-If `tenant_id` or `tenant_role` is missing, the protocol mapper for
-that claim is misconfigured — most likely **Add to access token /
-userinfo** is off, or the user is not assigned to the
-group / role the mapper sources from.
+If `tenant_id` or `tenant_role` is missing, either the person is in
+none of the five groups, or the mapper for that claim is misconfigured
+(most likely **Add to access token / userinfo** is off).
 
 ### Check 2 — Decoded access token carries the claims
 
@@ -490,21 +346,16 @@ Failure modes:
   to `meho login` does not carry one of `tenant_id` / `tenant_role`.
   Re-check Check 1 against the same token.
 - **`401 malformed_tenant_claim`** — `tenant_id` is not a UUID
-  string, or `tenant_role` is not in the enum. Re-check the mapper's
-  **Claim JSON Type** (must be `String`, not `int` or array) and the
-  attribute / role values.
+  string. Re-check the `tenant_id` attribute on the group, and the
+  mapper's **Claim JSON Type** (must be `String`) and **Multivalued** /
+  **Aggregate attribute values** (both off).
 - **`401 unknown_tenant_role`** — `tenant_role` is a string but not
   one of `tenant_admin` / `operator` / `read_only`. Most common
-  cause: a built-in **User Realm Role** mapper is forwarding the
-  user's realm-role names verbatim (e.g. `meho-operator` or
-  `meho-read-only`) instead of the backplane's snake_case enum
-  values. Replace it with the recipe in
-  [Step 4](#step-4--configure-the-tenant_role-protocol-mapper) —
-  Shape A (Script Mapper, which strips the `meho-` prefix and
-  converts hyphens to underscores) or Shape B (User Attribute
-  mapper sourcing a per-user `tenant_role` attribute set to the
-  literal enum value) — both emit the constant snake_case enum the
-  backplane expects.
+  causes: a typo in the group's `tenant_role` attribute (for example
+  `read-only` with a hyphen), or a leftover **User Realm Role** mapper
+  that forwards realm-role names such as `meho-operator`. Fix the
+  attribute ([Step 1](#step-1--create-the-five-groups)) or delete the
+  role mapper.
 
 ## The `tenant` row is seeded just-in-time — no manual step
 
@@ -550,46 +401,14 @@ Practical consequences for an operator standing up a v0.2 deploy:
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `401 missing_tenant_claim` on every request | Mapper not on the access token | On the mapper screen, toggle **Add to access token** on |
-| `401 missing_tenant_claim` for one user only | User is not in a tenant group; or (Shape A) holds none of the three `meho-*` realm roles; or (Shape B) has no `tenant_role` user attribute | Assign the user (Step 5) |
-| `401 malformed_tenant_claim` | `tenant_id` **User Attribute** mapper (Shape B) has **Aggregate attribute values** on (emits a JSON array instead of a single string) | Toggle **Aggregate attribute values** off and re-issue the token |
-| `401 malformed_tenant_claim` (continued) | `tenant_id` mapper has **Claim JSON Type:** `int` or `JSON` instead of `String` | Set **Claim JSON Type** to `String`; UUIDs are strings, not ints |
-| `401 unknown_tenant_role` | The token's `tenant_role` is a string but not one of the three enum values — usually because the operator left a built-in **User Realm Role** mapper in place (it forwards realm-role names like `meho-operator`, not the constant enum values), or under Shape B set the user attribute to a hyphenated value (`read-only` instead of `read_only`) | Remove the User Realm Role mapper; use Shape A (Script Mapper, which converts `meho-read-only` → `read_only` automatically) or Shape B (User Attribute mapper sourcing the literal snake_case enum value the operator stamped on the user). Either way the on-the-wire value must be exactly `tenant_admin` / `operator` / `read_only` |
-| Two operators in the same tenant get different `tenant_id` values | One of them is in two tenant groups; the Shape A script reads whichever tenant group it encounters first | Each user belongs to exactly one tenant group |
-| `403 Forbidden` on a route that worked before | User now mints a `tenant_role` claim below what the route requires (e.g. demoted to `read_only`) | (Shape A) Re-assign the appropriate `meho-*` realm role on the user's **Role mapping** tab — the Script Mapper picks the highest assigned role on the next token mint. (Shape B) Update the user's `tenant_role` attribute on the **Users → Attributes** tab to one of `tenant_admin` / `operator` / `read_only` — realm-role changes do **not** drive the claim under Shape B. Either way, in-flight tokens keep the old claim until they expire (or the operator runs `meho login` again). |
+| `401 missing_tenant_claim` for one person only | The person is in none of the five groups | Put the person in one group ([Step 3](#step-3--put-each-person-in-one-group)) |
+| `401 malformed_tenant_claim` | The `tenant_id` mapper has **Aggregate attribute values** or **Multivalued** on (emits a JSON array instead of a single string), or **Claim JSON Type** `int` / `JSON` instead of `String` | Set both toggles off and the type to `String`, then log in again |
+| `401 unknown_tenant_role` | The group's `tenant_role` attribute is not exactly `tenant_admin` / `operator` / `read_only` (for example `read-only` with a hyphen), or a leftover **User Realm Role** mapper forwards realm-role names like `meho-operator` | Fix the group attribute ([Step 1](#step-1--create-the-five-groups)); delete the User Realm Role mapper |
+| A person gets the wrong role, or a different role from one login to the next | The person is in two of the five groups, or has their own `tenant_role` attribute (which wins over the group) | Keep the person in exactly one group; clear the person's own `tenant_id` / `tenant_role` / `approver` attributes |
+| Every person gets the same role, whatever their group | A **Hardcoded claim** mapper for `tenant_role` or `tenant_id` is still on the client or one of its client scopes | Delete it, or re-run `meho admin keycloak bootstrap-clients` ([upgrading](#upgrading-a-realm-that-still-has-fixed-values)) |
+| `403 Forbidden` on a route that worked before | The person's `tenant_role` is now below what the route requires (for example they moved to `MEHO-Readers`) | Move the person to the right group. Tokens already issued keep the old role until they expire (or the person runs `meho login` again). |
 | Claims appear on userinfo but not on the access token | Mapper has **Add to userinfo: on** but **Add to access token: off** | Toggle both on |
 | Mapper changes don't take effect for already-logged-in operators | Cached access tokens are still being sent until they expire | Wait for token expiry (or invoke `meho login` again to mint a fresh token) |
-
-## Side note: alternative claim sources
-
-The recipe above is the recommended shape (groups for `tenant_id`,
-realm roles for `tenant_role`). Step 4 already covers the two
-viable `tenant_role` mapper shapes (Shape A: Script Mapper; Shape
-B: User Attribute mapper). One smaller variation on the
-`tenant_id` half is worth recording for the single-tenant case:
-
-### `tenant_id` as a per-user attribute
-
-When each user is permanently in one tenant but the realm still hosts
-several tenants (so the single Hardcoded-claim shortcut in
-[Step 3](#step-3--configure-the-tenant_id-protocol-mapper) does not
-fit), stamp `tenant_id` directly on each user as an attribute and copy
-it with a built-in **User Attribute** mapper (the same mapper type as
-`tenant_role` Shape B). Configure it on the `meho-mcp` client scope:
-**User Attribute:** `tenant_id`, **Token Claim Name:** `tenant_id`,
-**Claim JSON Type:** `String`, **Add to access token:** on, **Aggregate
-attribute values:** off, **Multivalued:** off (each user has exactly one
-tenant; aggregation or multivalue would emit a JSON array, which the
-backplane rejects as `malformed_tenant_claim`).
-
-The tenant group's `tenant_id` attribute (Step 1) and Shape A's Script
-Mapper drop out; Step 2 (realm roles — optional under Shape B), Step 4,
-and Step 5 still apply.
-
-Tradeoff: avoids the Script Mapper feature but does not remove
-maintenance — every per-tenant UUID rotation still touches every user.
-The recommended (groups + Shape A script) shape is strictly better once
-a tenant has more than one operator; the single-tenant Hardcoded-claim
-shortcut is strictly simpler when a deploy has exactly one tenant.
 
 ## Side note — the `platform_admin` cross-tenant flag (#1638)
 
@@ -610,8 +429,8 @@ Recommended mapper shape: a **Hardcoded claim** mapper
 dedicated realm role (e.g. `meho-platform-admin`), so only users granted
 that role carry `"platform_admin": true`. Users without the role carry no
 claim and resolve to `False`. A per-user boolean attribute + User
-Attribute mapper is the script-free alternative (mirrors `tenant_role`
-Shape B). The backplane also accepts the string forms `"true"` /
+Attribute mapper is the script-free alternative (the same mapper type
+the `tenant_role` recipe uses). The backplane also accepts the string forms `"true"` /
 `"false"` for realms whose mapper emits the claim as a string.
 
 **Alternative source — a realm role, no mapper (`JWT_PLATFORM_ADMIN_ROLE_NAME`).**
@@ -672,141 +491,35 @@ code that reads a claim nothing mints.
   `require_role(operator)`, and the `sub`-keyed self-approval refusal
   (#1401) still applies (an approver cannot approve a request it parked).
 
-### Mapper design — a group-gated boolean needs a script (or a per-user attribute)
+### Recipe — put the person in `MEHO-Approvers`
 
-Stock Keycloak has **no built-in mapper that turns "member of group *X*"
-into a fixed boolean claim.** The **Group Membership** mapper emits the
-user's group *paths* (a string / JSON array), not a boolean; the
-**Hardcoded claim** mapper emits its constant for *every* token on the
-client, ungated; and there is **no** OIDC "Group Attribute" mapper in the
-stock distribution (the package ships `GroupMembershipMapper` and
-`UserAttributeMapper`, verified against the [26.x mapper
-javadocs](https://www.keycloak.org/docs-api/latest/javadocs/org/keycloak/protocol/oidc/mappers/package-summary.html)).
-Two shapes meet the contract, mirroring the `tenant_role` Shape A / Shape
-B split in [Step 4](#step-4--configure-the-tenant_role-protocol-mapper).
+The `approver` claim comes from the same group model as the tenant and
+the role ([the recipe](#the-recipe-five-groups-give-the-tenant-and-the-role)):
 
-Both shapes rely on the same coercion fact: an attribute / script value
-of the string `"true"` under **Claim JSON Type: boolean** is emitted as a
-JSON boolean `true` — Keycloak's `OIDCAttributeMapperHelper` converts it
-with `Boolean.valueOf(String)` (case-insensitive). Even if a realm leaves
-the type as `String`, the backplane accepts `"true"` / `"false"`, so the
-recipe is robust either way; **boolean** is the canonical choice.
-
-The commands below use `kcadm.sh` (the admin REST API path — scriptable,
-IaC-friendly, and stable across Console-label changes) as the **primary**
-path; the Admin Console equivalents follow as version-tolerant notes.
-Assume the operator has authenticated `kcadm.sh config credentials` and
-exported `REALM` and the backplane client's `clientId`
-(the one whose `aud` matches `KEYCLOAK_AUDIENCE`, typically `meho-mcp`).
-
-#### Shape A (recommended, group-driven) — a Script Mapper gated on the `approvers` group
-
-Create the group, then a Script Mapper on the backplane client that emits
-`approver: true` for members and nothing for everyone else.
+- The `MEHO-Approvers` group carries `approver` = `true`, plus
+  `tenant_id` and `tenant_role` = `read_only`
+  ([Step 1](#step-1--create-the-five-groups)).
+- The `approver` User Attribute mapper on each human login client
+  copies it into the token, with **Claim JSON Type** `boolean`
+  ([Step 2](#step-2--add-the-three-user-attribute-mappers)). Keycloak
+  turns the string `"true"` into the JSON boolean `true`.
+- To make a person an approver, put them in `MEHO-Approvers`
+  ([Step 3](#step-3--put-each-person-in-one-group)), and in no other
+  of the five groups.
 
 ```bash
-# 1. Create the approvers group.
-kcadm.sh create groups -r "$REALM" -s name=approvers
-
-# 2. Resolve the backplane client's internal id (protocol mappers are
-#    created under the client's UUID, not its clientId).
-CID=$(kcadm.sh get clients -r "$REALM" -q clientId="$CLIENT_ID" \
-  --fields id --format csv --noquotes)
-
-# 3. Create the Script Mapper. The script emits `true` for members of the
-#    approvers group and leaves `exports` undefined otherwise, so Keycloak
-#    omits the claim for non-members (which the backplane reads as false).
-cat > /tmp/approver-script-mapper.json <<'JSON'
-{
-  "name": "approver",
-  "protocol": "openid-connect",
-  "protocolMapper": "oidc-script-based-protocol-mapper",
-  "config": {
-    "script": "var it = user.getGroupsStream().iterator();\nwhile (it.hasNext()) {\n  if (it.next().getName() == 'approvers') { exports = true; break; }\n}\n",
-    "claim.name": "approver",
-    "jsonType.label": "boolean",
-    "access.token.claim": "true",
-    "id.token.claim": "false",
-    "userinfo.token.claim": "true"
-  }
-}
-JSON
-kcadm.sh create "clients/$CID/protocol-mappers/models" -r "$REALM" \
-  -f /tmp/approver-script-mapper.json
-
-# 4. Assign an approver into the group (repeat per approver). Avoid the
-#    shell-reserved names UID / GID (read-only in bash and zsh).
 USER_ID=$(kcadm.sh get users -r "$REALM" -q username=approver-bob \
   --fields id --format csv --noquotes)
-GROUP_ID=$(kcadm.sh get groups -r "$REALM" -q search=approvers \
-  --fields id --format csv --noquotes)
+GROUP_ID=$(kcadm.sh get groups -r "$REALM" -q search=MEHO-Approvers \
+  --fields id,name --format csv --noquotes | grep ',MEHO-Approvers$' | cut -d, -f1)
 kcadm.sh update "users/$USER_ID/groups/$GROUP_ID" -r "$REALM" -n
 ```
 
-Admin Console equivalent (version-tolerant — the mapper type and config
-keys are stable; only the Console labels drift across 22.x–26.x): **Clients**
-→ the backplane client → **Client scopes** → its **dedicated** scope →
-**Mappers** → **Add mapper** → **By configuration** → **Script Mapper**;
-set **Name** `approver`, paste the same script body, **Token Claim Name**
-`approver`, **Claim JSON Type** `boolean`, **Add to access token** on,
-**Add to ID token** off, **Add to userinfo** on. Assign users to the
-`approvers` group under **Users** → user → **Groups** → **Join Group**.
-
-Script Mapper requires the script-mappers feature (`--features=scripts` on
-`kc.sh start`, disabled by default since Keycloak 18) and a JS engine on
-the classpath (GraalJS ships with current distributions) — the same
-caveat as `tenant_role` Shape A. `user.getGroupsStream()` is the current
-`UserModel` API (Keycloak 19+); match on the top-level group name.
-
-#### Shape B (no scripts) — `approver` as a per-user attribute
-
-For realms that cannot enable the scripts feature, stamp `approver=true`
-directly on each approver user and copy it with a built-in **User
-Attribute** mapper. The `approvers` group from Shape A is still useful as
-RBAC bookkeeping on the realm side, but under Shape B the per-user
-attribute — not group membership — drives the claim (mirrors
-`tenant_role` Shape B).
-
-```bash
-# 1. Stamp the attribute on each approver user (USER_ID, not the
-#    shell-reserved UID which is read-only in bash and zsh).
-USER_ID=$(kcadm.sh get users -r "$REALM" -q username=approver-bob \
-  --fields id --format csv --noquotes)
-kcadm.sh update "users/$USER_ID" -r "$REALM" -s 'attributes.approver=["true"]'
-
-# 2. One User Attribute mapper on the backplane client.
-CID=$(kcadm.sh get clients -r "$REALM" -q clientId="$CLIENT_ID" \
-  --fields id --format csv --noquotes)
-cat > /tmp/approver-attr-mapper.json <<'JSON'
-{
-  "name": "approver",
-  "protocol": "openid-connect",
-  "protocolMapper": "oidc-usermodel-attribute-mapper",
-  "config": {
-    "user.attribute": "approver",
-    "claim.name": "approver",
-    "jsonType.label": "boolean",
-    "access.token.claim": "true",
-    "id.token.claim": "false",
-    "userinfo.token.claim": "true",
-    "aggregate.attrs": "false",
-    "multivalued": "false"
-  }
-}
-JSON
-kcadm.sh create "clients/$CID/protocol-mappers/models" -r "$REALM" \
-  -f /tmp/approver-attr-mapper.json
-```
-
-Admin Console equivalent: **Users** → user → **Attributes** → add
-`approver` = `true`; then **Clients** → backplane client → **Client
-scopes** → dedicated scope → **Mappers** → **Add mapper** → **By
-configuration** → **User Attribute** with **User Attribute** `approver`,
-**Token Claim Name** `approver`, **Claim JSON Type** `boolean`, **Add to
-access token** on, **Aggregate attribute values** off, **Multivalued**
-off. Both shapes put the same `"approver": true` on the wire; a user with
-neither the group (Shape A) nor the attribute (Shape B) carries no
-`approver` claim and is a non-approver.
+The other four groups carry no `approver` attribute, so their members
+get no `approver` claim and are not approvers. Operators and admins do
+not need it: `operator` and higher already pass the approvals gate.
+`meho admin keycloak bootstrap-clients` creates the group and the
+mapper.
 
 ### Verification
 
@@ -884,18 +597,16 @@ The complete human approver workflow needs **both** the claim provisioned
 
 Ordering: the console admission (#3282) already merged, so the only
 remaining gap this recipe closes is realm-side provisioning. Once a member
-of the `approvers` group (Shape A) or a user carrying `approver=true`
-(Shape B) mints a token, the REST decide path and the console are both
+of `MEHO-Approvers` logs in, the REST decide path and the console are both
 immediately usable by that approver.
 
 ### Rollback / removal
 
-- **Shape A:** remove the user from the `approvers` group
-  (`kcadm.sh delete "users/$USER_ID/groups/$GROUP_ID" -r "$REALM"`).
-- **Shape B:** clear the attribute
-  (`kcadm.sh update "users/$USER_ID" -r "$REALM" -s 'attributes.approver=[]'`).
+Remove the person from `MEHO-Approvers`
+(`kcadm.sh delete "users/$USER_ID/groups/$GROUP_ID" -r "$REALM"`), and,
+if they still need access, put them in another of the five groups.
 
-Either takes effect on the **next** token mint. An **already-minted**
+This takes effect on the **next** token mint. An **already-minted**
 access token keeps `approver: true` until it expires — the capability
 rides the token, not a per-request DB lookup, so removal is not
 retroactive. For immediate revocation, end the user's SSO sessions
@@ -913,15 +624,16 @@ minutes). Same in-flight-token caveat as the `tenant_role`
 | Backplane reads `tenant_id` from JWT | producer | tracked at [#222](https://github.com/evoila/meho/issues/222) (T2 / T3) |
 | `require_role(min_role)` enforces `tenant_role` | producer | tracked at [#222](https://github.com/evoila/meho/issues/222) (T4) |
 | Per-tenant audit-row isolation test | producer | tracked at [#222](https://github.com/evoila/meho/issues/222) (T6) |
-| Realm groups + roles + mappers configured on `evba.lab` | consumer | pending — applied by the dogfooding lab operator before deploying v0.2 |
+| Five role groups + User Attribute mappers | producer | `meho admin keycloak bootstrap-clients` creates them ([#4590](https://github.com/evoila/meho/issues/4590)); decision in [`../decisions/login-role-groups.md`](../decisions/login-role-groups.md) |
 | End-to-end `meho status` against v0.2 returns 200 | consumer | pending — the closing-comment artefact on the parent Initiative |
 | Backplane reads `approver` from JWT + `require_approvals_access` decouple | producer | landed — [#3270](https://github.com/evoila/meho/issues/3270) (`auth/jwt._extract_approver`, `auth/rbac.require_approvals_access`); console parity [#3282](https://github.com/evoila/meho/issues/3282) |
-| `approvers` group + `approver` mapper configured on the realm | consumer | pending — applied by the operator when the first dedicated approver is provisioned (this doc's [approver recipe](#the-approver-approve-only-capability--group-based-recipe-3243)) |
+| `MEHO-Approvers` group + `approver` mapper | producer | `meho admin keycloak bootstrap-clients` creates them ([#4590](https://github.com/evoila/meho/issues/4590)); a realm admin puts each approver in the group |
 
 ## References
 
 - Parent Initiative: [#222 — G0.1 Tenant model](https://github.com/evoila/meho/issues/222) — JWT `tenant_id` claim extraction, tenant table, audit_log scoping, role-enum RBAC primitive
 - Parent Goal: [#221 — G0 Foundational substrate](https://github.com/evoila/meho/issues/221)
+- Decision: [`../decisions/login-role-groups.md`](../decisions/login-role-groups.md) — the five login groups ([#4590](https://github.com/evoila/meho/issues/4590))
 - Sibling handshake: [`./targets-yaml.md`](./targets-yaml.md) — `targets.yaml` `rdc-meho` entry; the per-tenant UUID minted in Step 1 lands here in v0.2.next
 - Sibling handshake: [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md) — per-PR ephemeral smoke + `repository_dispatch`
 - Backend codebase walkthrough: [`../codebase/backend.md`](../codebase/backend.md) — `Settings`, `verify_jwt`, `Operator` model

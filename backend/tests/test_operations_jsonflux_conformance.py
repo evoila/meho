@@ -422,4 +422,4 @@ async def test_reduced_page_is_never_labeled_source_complete() -> None:
     rationale = handle.fetch_more.drill_in.rationale
     assert handle.fetch_more.drill_in.available is True
     assert "full result set" not in rationale
-    assert "may be more" in rationale
+    assert "may hold more rows" in rationale

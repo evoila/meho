@@ -132,10 +132,7 @@ _DRILL_IN_WORKAROUND = (
 #: vendor returned for this one call. MEHO does not know whether that was all
 #: of the vendor's data (a paged API may have returned only the first page),
 #: so the prose never calls the handle complete (#3676).
-_SOURCE_COVERAGE_NOTE = (
-    " These are only the rows the vendor returned for this call; if the "
-    "vendor pages its results there may be more (see ``native_pagination``)."
-)
+_SOURCE_COVERAGE_NOTE = " The vendor may hold more rows (see ``native_pagination``)."
 
 #: Per-reason rationale for the ``available=False`` drill-in branch
 #: (#1629). Keyed by the machine-readable

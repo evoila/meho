@@ -123,7 +123,9 @@ carries a `toolset` (passing the resolved `Tool` objects via the framework's
 `tools=` constructor argument). A definition with `toolset is None` falls
 back to `_register_default_meta_tools` — the original two hand-wired
 meta-tools (`call_operation` + `list_operation_groups`) — so a definition
-constructed without a toolset still runs.
+constructed without a toolset still runs. Stored definitions never hit this
+path: the `agent_definition.toolset` column is not nullable and defaults to
+`{}`, so every hosted run resolves through the toolset spec.
 
 ### Toolset spec shape
 
@@ -244,15 +246,39 @@ catalog tool's role floor against `ctx.deps` at call time, and checks the
 `connectors` allow-list for both `call_operation` and `preview_operation`.
 
 The empty spec `{}` resolves, in order: `list_operation_groups`,
-`search_operations`, `call_operation`, `meho_connector_list`, `list_targets`,
-`preview_operation`, `result_query`, `broadcast_announce`, `broadcast_recent`,
-`broadcast_watch`. A definition with `toolset is None` keeps the legacy two
-tools until it is migrated to a spec. Runbook, approval, and admin tools stay
+`search_operations`, `call_operation`, `meho_status`, `meho_connector_list`,
+`list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
+`broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
+keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
 out of the catalog on purpose; this is not full 25-tool parity with MCP.
 
 Hosted calls to these four tools do not write the per-call MCP audit row
 (`mcp/audit.py`); that row belongs to the MCP transport. `call_operation`
 still writes its dispatch audit row as before.
+
+### Backplane health and connector discovery (#4233)
+
+A hosted agent whose prompt names no `connector_id` must still find one. Two
+pieces make that work:
+
+- `meho_status` — the backplane health check. It uses the same payload builder
+  as the MCP tool and `GET /api/v1/health` (`build_health_response`), then
+  drops the fields that only describe an MCP session:
+  `mcp_session_id_capture`, `mcp_protocol_version`, `granted_scopes`, and
+  `surface_summary` (that one lists MCP tools, which a hosted run does not
+  have). It keeps `operator`, `vault`, `db`, `sensor_runner`, and `pairings`.
+  The hosted floor is `OPERATOR`, like the REST route, because the check reads
+  a credential through Vault. It takes no arguments. It is not built with
+  `_bridge`: the MCP module imports the agent package, so it is not registered
+  yet when the catalog is built, and the handler imports the health module
+  inside the function for the same reason.
+- `meho_connector_list` follows the spec's `connectors` allow-list. When the
+  list is set, `_make_meta_tool` keeps only the rows whose `connector_id` is
+  in it, so the agent is shown only connectors it may call. With no list, all
+  rows come back.
+
+Both are in the default `{}` surface. The usual flow is: `meho_connector_list`
+→ `list_operation_groups` / `search_operations` → `call_operation`.
 
 **Missing versus disabled.** `resolve_agent_toolset` reports two different
 outcomes, and `agent_toolset_resolved` logs both:
@@ -1252,6 +1278,11 @@ the architecture grounding it links back to.
   reads, `not_available` and `output_too_large` omissions) and the hosted
   context (tool-aware band, conventions through the preamble seam,
   over-budget omissions, system prompt kept first, legacy runs unchanged).
+- `backend/tests/test_agent_toolset_discovery.py` (#4233) — the connector
+  list follows the `connectors` allow-list; `meho_status` drops the
+  MCP-session fields, refuses arguments, and needs `OPERATOR`; an agent run
+  with no connector id in its prompt lists the connectors, picks
+  `linux-ssh-1.x`, and calls `linux.about`.
 - `backend/tests/integration/test_agent_run_anthropic.py` — opt-in
   real-Anthropic loop (skipped unless `ANTHROPIC_API_KEY` is set; marked
   `slow`). Proves the seam drives a live model that calls a real operation

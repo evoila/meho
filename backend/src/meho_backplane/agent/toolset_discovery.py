@@ -5,10 +5,13 @@
 
 A hosted run that only has ``call_operation`` and the discovery pair cannot
 find a connector, name a target, check a request before it runs, or read the
-rest of a large result. This module gives configured definitions four more
+rest of a large result. This module gives configured definitions five more
 tools, each one the MCP working-surface tool of the same name:
 
-* ``meho_connector_list`` — which connectors the tenant can use.
+* ``meho_status`` — whether MEHO itself is healthy (#4233).
+* ``meho_connector_list`` — which connectors the tenant can use. When the
+  definition has a ``connectors`` allow-list, the toolset keeps only those
+  rows (#4233).
 * ``list_targets`` — which managed targets the tenant has (a large page comes
   back as a JSONFlux result handle).
 * ``preview_operation`` — the request ``call_operation`` would send, without
@@ -37,6 +40,14 @@ A failed gate, and any ``McpInvalidParamsError`` / ``McpRateLimitedError`` the
 handler raises, reaches the model as :class:`~pydantic_ai.ModelRetry` (tool
 feedback it can act on) instead of aborting the run.
 
+``meho_status`` (#4233) builds the same health payload as the MCP tool and
+``GET /api/v1/health``, then drops the fields that only describe an MCP
+session (protocol version, session id capture, OAuth scopes, and the list of
+MCP tools). A hosted run has none of these, and the MCP tool list would tell
+the model it has tools it does not have. Its hosted role floor is
+``OPERATOR``, the same as ``GET /api/v1/health``, because the check reads a
+credential through Vault.
+
 Retrieval tools (#3759)
 =======================
 
@@ -59,7 +70,7 @@ import jsonschema
 from pydantic_ai import ModelRetry
 
 from meho_backplane.agent.meta_tool import MetaToolSpec, _MetaToolHandler
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import (
     ToolDefinition,
     ToolSurface,
@@ -80,14 +91,17 @@ from meho_backplane.mcp.tools import result_query as _result_query_tools  # noqa
 from meho_backplane.mcp.tools import topology as _topology_tools  # noqa: F401
 
 __all__ = [
+    "CONNECTOR_LIST",
     "DISCOVERY_META_TOOL_NAMES",
     "RETRIEVAL_META_TOOL_NAMES",
     "build_discovery_meta_tools",
     "build_retrieval_meta_tools",
+    "keep_allowed_connectors",
 ]
 
 
-_CONNECTOR_LIST = "meho_connector_list"
+_MEHO_STATUS = "meho_status"
+CONNECTOR_LIST = "meho_connector_list"
 _LIST_TARGETS = "list_targets"
 _PREVIEW_OPERATION = "preview_operation"
 _RESULT_QUERY = "result_query"
@@ -96,7 +110,8 @@ _RESULT_QUERY = "result_query"
 #: agent name is the MCP name, so an allow-list reads the same on both
 #: surfaces.
 DISCOVERY_META_TOOL_NAMES: tuple[str, ...] = (
-    _CONNECTOR_LIST,
+    _MEHO_STATUS,
+    CONNECTOR_LIST,
     _LIST_TARGETS,
     _PREVIEW_OPERATION,
     _RESULT_QUERY,
@@ -120,6 +135,23 @@ _HOSTED_READ_NOTE = (
     " In this hosted run there is no `resources/read`: read a hit's `locator` "
     "or `uri` with `read_context_resource` when you have that tool, otherwise "
     "work from the snippet or passages returned here."
+)
+
+#: Hosted description for ``meho_status``. The MCP text talks about OAuth
+#: scopes and the MCP tool list, which the hosted result leaves out.
+_STATUS_DESCRIPTION = (
+    "Check whether MEHO itself is healthy. Returns who you run as (tenant and "
+    "role), whether MEHO can reach its credential store (`vault`), whether the "
+    "database is migrated (`db`), the sensor runner state, and add-on "
+    "pairings. Call this when the task asks about MEHO's own status, or when "
+    "calls fail and you need to know if MEHO is the cause. No arguments. "
+    "Read-only."
+)
+
+#: ``meho_status`` fields that only describe an MCP session. A hosted run is
+#: not an MCP session, so the hosted tool leaves them out.
+_MCP_SESSION_STATUS_FIELDS: frozenset[str] = frozenset(
+    {"mcp_session_id_capture", "mcp_protocol_version", "granted_scopes", "surface_summary"}
 )
 
 #: Hosted description for ``meho_connector_list``. The MCP text points at
@@ -187,6 +219,37 @@ def _governed_handler(definition: ToolDefinition, handler: _MetaToolHandler) -> 
     return _wrapped
 
 
+def keep_allowed_connectors(
+    result: dict[str, Any],
+    allowed_connectors: frozenset[str],
+) -> dict[str, Any]:
+    """Return a ``meho_connector_list`` *result* with only the allowed rows.
+
+    The toolset calls this when the spec has a ``connectors`` allow-list, so
+    the agent is shown only the connectors it may call (#4233).
+    """
+    rows = result.get("connectors", [])
+    return {
+        **result,
+        "connectors": [r for r in rows if r.get("connector_id") in allowed_connectors],
+    }
+
+
+async def _hosted_status(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``meho_status`` health payload without the MCP-session fields.
+
+    Same payload builder as the MCP tool and ``GET /api/v1/health``.
+    """
+    # Imported here: the health module imports the agent package, so a
+    # module-level import would be circular.
+    from meho_backplane.api.v1.health import build_health_response
+
+    if arguments:
+        raise ModelRetry(f"{_MEHO_STATUS} takes no arguments.")
+    health = (await build_health_response(operator)).model_dump(mode="json")
+    return {k: v for k, v in health.items() if k not in _MCP_SESSION_STATUS_FIELDS}
+
+
 def _bridge(name: str, *, description: str | None = None) -> MetaToolSpec:
     """Build one :class:`MetaToolSpec` from the registered MCP tool *name*.
 
@@ -206,9 +269,21 @@ def _bridge(name: str, *, description: str | None = None) -> MetaToolSpec:
 
 
 def build_discovery_meta_tools() -> tuple[MetaToolSpec, ...]:
-    """Build the four governed discovery and result-handle meta-tools."""
+    """Build the five governed status, discovery, and result-handle meta-tools."""
+    # Built here, not with _bridge: the MCP module for this tool imports the
+    # agent package, so it is not registered yet when this catalog is built.
+    # The hosted floor is OPERATOR, like GET /api/v1/health, because the
+    # check reads a credential through Vault. The MCP floor is lower.
+    status = MetaToolSpec(
+        name=_MEHO_STATUS,
+        handler=_hosted_status,
+        description=_STATUS_DESCRIPTION,
+        parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        required_role=TenantRole.OPERATOR,
+    )
     return (
-        _bridge(_CONNECTOR_LIST, description=_CONNECTOR_LIST_DESCRIPTION),
+        status,
+        _bridge(CONNECTOR_LIST, description=_CONNECTOR_LIST_DESCRIPTION),
         _bridge(_LIST_TARGETS),
         _bridge(_PREVIEW_OPERATION),
         _bridge(_RESULT_QUERY),

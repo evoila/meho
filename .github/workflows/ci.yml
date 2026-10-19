@@ -825,7 +825,20 @@ jobs:
           # count in the matrix + TOTAL) rather than bumping only this budget.
           budget_s=660
           start=$(date +%s)
-          uv run pytest -n 3 --dist loadscope --maxfail=1 "${SHARD_FILES[@]}"
+          # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
+          # in each xdist worker, so a test that stops making progress fails
+          # on its own after 180 s with its name and a stack dump of every
+          # thread, instead of sitting silent (one dot per test, no names)
+          # until the 20-min job cap. The shard then still lands inside the
+          # 660 s budget below. Mirrors the python-coverage job's guard;
+          # --timeout-method=signal (NOT thread) is load-bearing under xdist:
+          # thread calls os._exit(), which xdist reads as a worker crash and
+          # whose stack dump it swallows. 180 s is ~3x the slowest honest
+          # unit tests (the Alembic upgrade/downgrade round-trips, ~55 s on
+          # a loaded 3-worker box); raise it only with a --durations
+          # measurement showing a legitimate test near it.
+          uv run pytest -n 3 --dist loadscope --maxfail=1 \
+            --timeout=180 --timeout-method=signal "${SHARD_FILES[@]}"
           dur=$(( $(date +%s) - start ))
           echo "::notice title=Unit pytest wall (shard ${SHARD}/${TOTAL})::${dur}s (budget ${budget_s}s per shard; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then

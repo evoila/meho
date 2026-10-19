@@ -67,8 +67,11 @@ __all__ = [
     "load_groups",
     "load_op",
     "load_ops_in_groups",
+    "load_ops_outside_groups",
     "operator_disabled_op_ids",
     "scope_has_groups",
+    "scope_has_rows",
+    "select_groups",
     "ungrouped_op_ids",
     "validate_edit_op_args",
     "write_audit_row",
@@ -163,14 +166,16 @@ class ConnectorScope:
 # ---------------------------------------------------------------------------
 
 
-async def load_groups(
+async def select_groups(
     session: AsyncSession,
     scope: ConnectorScope,
-    connector_id: str,
 ) -> list[OperationGroup]:
     """Return every :class:`OperationGroup` row in *scope* sorted by ``group_key``.
 
-    Empty result → :class:`ConnectorNotFoundError`. The "is_None"
+    Returns ``[]`` when the scope has no group rows: the review render
+    uses this so a connector whose grouping pass produced no buckets
+    still lists its ops as ``ungrouped_ops`` (#3870). Callers that need
+    "no groups" to be an error use :func:`load_groups`. The "is_None"
     guard matches the SQL semantics SQLAlchemy emits
     (``tenant_id IS NULL`` vs ``tenant_id = :tid``). The deterministic
     sort makes review payloads round-trippable across calls and
@@ -187,7 +192,21 @@ async def load_groups(
         stmt = stmt.where(OperationGroup.tenant_id == scope.tenant_id)
     stmt = stmt.order_by(OperationGroup.group_key)
     result = await session.execute(stmt)
-    groups = list(result.scalars().all())
+    return list(result.scalars().all())
+
+
+async def load_groups(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    connector_id: str,
+) -> list[OperationGroup]:
+    """Return every :class:`OperationGroup` row in *scope*, or raise when there are none.
+
+    :func:`select_groups` plus the empty-result guard: an empty result
+    → :class:`ConnectorNotFoundError`. The group transition paths use
+    this because they have nothing to act on without group rows.
+    """
+    groups = await select_groups(session, scope)
     if not groups:
         raise ConnectorNotFoundError(
             connector_id=connector_id,
@@ -228,6 +247,41 @@ async def scope_has_groups(
         stmt = stmt.where(OperationGroup.tenant_id.is_(None))
     else:
         stmt = stmt.where(OperationGroup.tenant_id == scope.tenant_id)
+    stmt = stmt.limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
+
+
+async def scope_has_rows(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> bool:
+    """Return whether *scope* holds any group row **or** any descriptor row.
+
+    The existence probe behind the shared read / enable-reads resolver
+    (:meth:`~meho_backplane.operations.ingest.service.ReviewService._resolve_existing_scope`).
+    A connector whose grouping pass failed has descriptor rows but no
+    group rows, and dispatch still serves its enabled ops, so the review
+    must find it (#3870). :func:`scope_has_groups` alone would miss it.
+    The group probe runs first because it is the common case; the
+    descriptor probe is the same ``SELECT 1 ... LIMIT 1`` shape over
+    ``endpoint_descriptor`` with the same scope predicate.
+    """
+    if await scope_has_groups(session, scope):
+        return True
+    stmt = (
+        select(literal(1))
+        .select_from(EndpointDescriptor)
+        .where(
+            EndpointDescriptor.product == scope.product,
+            EndpointDescriptor.version == scope.version,
+            EndpointDescriptor.impl_id == scope.impl_id,
+        )
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
     stmt = stmt.limit(1)
     result = await session.execute(stmt)
     return result.scalar_one_or_none() is not None
@@ -322,6 +376,39 @@ async def load_ops_in_groups(
     return list(result.scalars().all())
 
 
+async def load_ops_outside_groups(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    group_ids: list[UUID],
+) -> list[EndpointDescriptor]:
+    """Return *scope*'s descriptors that are not in any of *group_ids*.
+
+    The complement of :func:`load_ops_in_groups` over the same scope:
+    ops with ``group_id IS NULL`` plus any op whose group is not in
+    *group_ids*. The review payload lists these as ``ungrouped_ops`` so
+    the review shows every op dispatch can serve (#3870). Same
+    universe as :func:`count_ops_in_scope` minus the grouped ops, so
+    the list length equals the payload's ``ungrouped_op_count``. Sorted
+    by ``op_id``.
+    """
+    stmt = select(EndpointDescriptor).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+    )
+    if group_ids:
+        stmt = stmt.where(
+            EndpointDescriptor.group_id.is_(None) | EndpointDescriptor.group_id.notin_(group_ids)
+        )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    stmt = stmt.order_by(EndpointDescriptor.op_id)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def count_ops_in_scope(session: AsyncSession, scope: ConnectorScope) -> int:
     """Count **every** :class:`EndpointDescriptor` row for *scope*, group or not.
 
@@ -369,6 +456,36 @@ async def count_needs_reingest_in_scope(session: AsyncSession, scope: ConnectorS
     else:
         stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
     return int(await session.scalar(stmt) or 0)
+
+
+async def load_ingested_writes_in_scope(
+    session: AsyncSession, scope: ConnectorScope
+) -> list[EndpointDescriptor]:
+    """Return *scope*'s ingested write rows that sit below ``destructive`` (#3827).
+
+    The input of the review report for stored deletes. Same full-universe
+    predicate as :func:`count_ops_in_scope` (group or not), narrowed to
+    ``source_kind='ingested'`` rows with a mutating verb and a
+    ``safety_level`` other than ``destructive``. Reads are never
+    delete-shaped and a ``destructive`` row is already at the top level,
+    so neither can appear on the report. Sorted by ``op_id`` so the report
+    is stable across calls.
+    """
+    stmt = select(EndpointDescriptor).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+        EndpointDescriptor.source_kind == "ingested",
+        EndpointDescriptor.method.in_(("POST", "PUT", "PATCH", "DELETE")),
+        EndpointDescriptor.safety_level != "destructive",
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    stmt = stmt.order_by(EndpointDescriptor.op_id)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
 
 
 # ---------------------------------------------------------------------------

@@ -123,7 +123,9 @@ carries a `toolset` (passing the resolved `Tool` objects via the framework's
 `tools=` constructor argument). A definition with `toolset is None` falls
 back to `_register_default_meta_tools` — the original two hand-wired
 meta-tools (`call_operation` + `list_operation_groups`) — so a definition
-constructed without a toolset still runs.
+constructed without a toolset still runs. Stored definitions never hit this
+path: the `agent_definition.toolset` column is not nullable and defaults to
+`{}`, so every hosted run resolves through the toolset spec.
 
 ### Toolset spec shape
 
@@ -244,16 +246,40 @@ catalog tool's role floor against `ctx.deps` at call time, and checks the
 `connectors` allow-list for both `call_operation` and `preview_operation`.
 
 The empty spec `{}` resolves, in order: `list_operation_groups`,
-`search_operations`, `call_operation`, `meho_connector_list`, `list_targets`,
-`preview_operation`, `result_query`, `broadcast_announce`, `broadcast_recent`,
-`broadcast_watch`. A definition with `toolset is None` keeps the legacy two
-tools until it is migrated to a spec. Runbook, approval, and admin tools stay
+`search_operations`, `call_operation`, `meho_status`, `meho_connector_list`,
+`list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
+`broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
+keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
 out of the catalog on purpose; this is not full 25-tool parity with MCP.
 
 Hosted calls to these four tools do not write the per-call MCP audit row
 (`mcp/audit.py`); that row belongs to the MCP transport. They write the
 agent tool call row instead (see [Audit of agent tool calls](#audit-of-agent-tool-calls-4234)).
 `call_operation` still writes its dispatch audit row as before.
+
+### Backplane health and connector discovery (#4233)
+
+A hosted agent whose prompt names no `connector_id` must still find one. Two
+pieces make that work:
+
+- `meho_status` — the backplane health check. It uses the same payload builder
+  as the MCP tool and `GET /api/v1/health` (`build_health_response`), then
+  drops the fields that only describe an MCP session:
+  `mcp_session_id_capture`, `mcp_protocol_version`, `granted_scopes`, and
+  `surface_summary` (that one lists MCP tools, which a hosted run does not
+  have). It keeps `operator`, `vault`, `db`, `sensor_runner`, and `pairings`.
+  The hosted floor is `OPERATOR`, like the REST route, because the check reads
+  a credential through Vault. It takes no arguments. It is not built with
+  `_bridge`: the MCP module imports the agent package, so it is not registered
+  yet when the catalog is built, and the handler imports the health module
+  inside the function for the same reason.
+- `meho_connector_list` follows the spec's `connectors` allow-list. When the
+  list is set, `_make_meta_tool` keeps only the rows whose `connector_id` is
+  in it, so the agent is shown only connectors it may call. With no list, all
+  rows come back.
+
+Both are in the default `{}` surface. The usual flow is: `meho_connector_list`
+→ `list_operation_groups` / `search_operations` → `call_operation`.
 
 **Missing versus disabled.** `resolve_agent_toolset` reports two different
 outcomes, and `agent_toolset_resolved` logs both:
@@ -334,9 +360,52 @@ count), and logged as `agent_hosted_context_over_budget`. With
 `read_context_resource` the band also names the URI to read one.
 
 Memory, knowledge base, and topology are on demand only; nothing loads them
-into the prompt. Delivery receipts for the hosted context are separate work
-(#3763). Like the #3737 tools, hosted reads do not write the per-call MCP
-audit row; they write the agent tool call row.
+into the prompt. Like the #3737 tools, hosted reads do not write the per-call
+MCP audit row; they write the agent tool call row.
+
+**Delivery receipt (#3763).** Each hosted context build also returns a
+`HostedContextReceipt` (`HostedContext.receipt`). It says what MEHO
+*supplied*, not what the model did with it:
+
+| Field | Meaning |
+|---|---|
+| `conventions_revision` | `PreambleAssembly.conventions_revision`: a 16-character digest of the tenant's operational conventions (`id`, `updated_at`, pack order). |
+| `capabilities` | Registered tool name → version. The version is 12 hex characters of SHA-256 over the name, description, and input schema the model saw (`toolset.capability_versions`). |
+| `context_chars`, `context_tokens_estimate` | Size of the hosted context prompt part. |
+| `conventions_delivered`, `conventions_tokens_estimate` | How many conventions were packed, and the size of their band. |
+| `omissions` | Ids only: conventions over the budget (`over_budget`), requested tools the role may not use (`kind="capability"`, `role_below_floor`), and requested tools this runtime does not ship (`unsupported`). Tools the spec did not ask for are not listed. |
+| `correlation_id` | The id of the matching `context_selected` request usage event, or `None` when no event was recorded. |
+
+The model is `extra="forbid"`: it has no field for convention or retrieved
+text, prompts, or any claim that the model followed the context. Every id in
+it belongs to the run's own tenant.
+
+Where it goes:
+
+- **Run trace.** `PydanticAgentRun._build_agent` logs it as
+  `agent_hosted_context_delivered` every time the hosted context is built,
+  child runs included. The line carries the agent name, operator, tenant,
+  and `run_id`. The `run_id` is the durable `agent_run` id bound for the
+  run by the invocation layer; a recorded child run logs its own id. A run
+  with no bound id (the runtime used on its own) logs the id of its
+  `AgentRunHandle`. So two runs of the same agent stay apart in the log
+  even when usage collection is off and the receipt has no
+  `correlation_id`. A run started with `start()` also returns the receipt
+  on `AgentRunResult.context_receipt`. A legacy run (`toolset is None`)
+  has no hosted context, so no log line and `context_receipt=None`.
+- **Request usage sink (#3734).** `assemble_hosted_context` calls
+  `note_context_selected()`. When usage collection is on and the run started
+  inside an open request, that request stores one `context_selected` event
+  with the receipt's `correlation_id`. The usage schema only holds ids, so
+  the sizes and revision stay in the trace; the correlation id joins the
+  two. Scheduled runs and runs that outlive their request get
+  `correlation_id=None`.
+- **Never `audit_log`.** A receipt is telemetry, not an accountable action.
+
+Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
+`None`, granted-versus-denied capability, budget-overflow, usage-link, and
+run-id (two concurrent runs, a bound durable id, a parent and its child)
+cases.
 
 ### Audit of agent tool calls (#4234)
 
@@ -537,6 +606,46 @@ bounds how long a sync run holds the HTTP connection. `run` awaits
 `asyncio.wait_for(asyncio.shield(task), timeout)` — the shield means the
 timeout abandons the *wait*, not the run, so a long run degrades to a
 pollable async run rather than being cancelled.
+
+### Output limit per answer (`AGENT_MAX_OUTPUT_TOKENS`)
+
+Each model request carries `max_tokens`: the most output tokens the
+model may write back in one answer. The setting
+`agent_max_output_tokens` (env `AGENT_MAX_OUTPUT_TOKENS`, Helm
+`agent.maxOutputTokens`) sets it.
+
+- Default 4096. This is the value MEHO has always sent, so an install
+  that does not set it sees no change.
+- Allowed range 1 to 128000. A value outside the range stops the
+  backplane at start with an error that names
+  `agent_max_output_tokens`. The chart schema checks the same range at
+  `helm template` time.
+- Both Anthropic builders read it: `anthropic_backend_builder`
+  (`agent/models.py`, used through the tier resolver) and
+  `default_model_factory` (`agent/run.py`). They send it as
+  `AnthropicModelSettings(max_tokens=...)`.
+- The Bedrock and OpenAI-compatible backends do **not** use it. They
+  send no output limit, so the model's own default applies, as before.
+  Applying the setting there would change their requests on upgrade,
+  and this setting must not change anything by default.
+
+Why the builders always send a value: since pydantic-ai 2.52, an unset
+`max_tokens` means the model's maximum (128,000 for
+`claude-sonnet-4-6`), and pydantic-ai then sends the request as a
+stream.
+
+What a higher value costs:
+
+- **Money.** A longer answer uses more output tokens, and output
+  tokens are the most expensive part of a request.
+- **Time.** One answer can take much longer. A sync run still converts
+  to async at `AGENT_SYNC_TIMEOUT_SECONDS`, but the loop holds the
+  model call for the whole answer.
+- **Streaming.** The `anthropic` SDK refuses a non-streamed request it
+  expects to take more than 10 minutes. With the SDK's default timeout
+  that is any `max_tokens` above about 21,333. pydantic-ai then sends
+  the request as a stream instead. The agent still gets the same
+  result, but the request on the wire is different.
 
 ## Composition — agent invokes agent (T5 #812)
 
@@ -1176,11 +1285,20 @@ the architecture grounding it links back to.
   but routes through a PrivateLink-flagged sibling registration
   cleanly; a tenant policy can split tiers across Anthropic + Bedrock
   by layering both default registrations.
+- Output limit (#3997) — `test_agent_run.py` and
+  `test_agent_model_resolver.py` each send one real request through the
+  `anthropic` SDK with only the HTTP transport replaced
+  (`tests/_anthropic_request_capture.py`). They check that both
+  Anthropic builders send `max_tokens == 4096` by default, not
+  streamed, and that `AGENT_MAX_OUTPUT_TOKENS=8192` reaches the
+  request. `test_settings.py` checks the default, an override, and that
+  a value outside [1, 128000] stops the start.
 - `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
   tests for the OpenAI-compat builder, per-vendor profile dispatch
   (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,
   the settings-driven default builder's host-hint heuristic, and
-  fail-closed posture without `OPENAI_API_KEY`.
+  fail-closed posture without `OPENAI_API_KEY`. One test sends a real
+  openai SDK request and checks its URL, `Authorization` header and body.
 - `backend/tests/test_agent_vcf_paif_backend.py` (G11.5-T4) — unit tests
   for the VCF PAIF builder and the bundled OIDC token provider: the
   vLLM-equivalent profile flips strict-tool-def off; the `client_credentials`
@@ -1190,7 +1308,19 @@ the architecture grounding it links back to.
   the air-gapped tenant resolves all three tiers to PAIF with **zero**
   SaaS-host traffic; a mis-flagged `is_saas_egress=True` PAIF registration
   still fails closed for an air-gapped tenant; the settings-driven default
-  fails closed naming every missing setting.
+  fails closed naming every missing setting. The zero-traffic check uses
+  two guards: `respx` for plain `httpx` (the token fetch) and
+  `no_httpx2_egress` for `httpx2` (the openai SDK). A self-test proves the
+  `httpx2` guard catches an SDK request. Other tests send one real SDK
+  request (base URL plus IdP token) and check that the SDK client trusts
+  the CA file named by `SSL_CERT_FILE`.
+- `backend/tests/_httpx2_capture.py` — shared test helpers. The `anthropic`
+  1.x and `openai` 3.x SDKs send with `httpx2`, which `respx` cannot see.
+  The helpers patch `httpx2.AsyncHTTPTransport` to capture the request the
+  real SDK built, or to fail a test that sends one. They also read the SSL
+  context an SDK client uses. `test_operations_ingest_anthropic_client.py`
+  uses them to check that the spec-ingest client really sends our
+  `max_tokens`, uses the 120-second timeout, and retries exactly once.
 - `backend/tests/test_agent_toolset.py` — unit tests for the resolver /
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input
@@ -1204,6 +1334,11 @@ the architecture grounding it links back to.
   reads, `not_available` and `output_too_large` omissions) and the hosted
   context (tool-aware band, conventions through the preamble seam,
   over-budget omissions, system prompt kept first, legacy runs unchanged).
+- `backend/tests/test_agent_toolset_discovery.py` (#4233) — the connector
+  list follows the `connectors` allow-list; `meho_status` drops the
+  MCP-session fields, refuses arguments, and needs `OPERATOR`; an agent run
+  with no connector id in its prompt lists the connectors, picks
+  `linux-ssh-1.x`, and calls `linux.about`.
 - `backend/tests/integration/test_agent_run_anthropic.py` — opt-in
   real-Anthropic loop (skipped unless `ANTHROPIC_API_KEY` is set; marked
   `slow`). Proves the seam drives a live model that calls a real operation

@@ -150,10 +150,16 @@ cutover. Migration `0113` adds the `session_id` index it uses.
 
 `note_context_selected(correlation_id=None)` adds one `context_selected`
 event to the current request, linked by an opaque correlation id (a new
-one is made when none is given). It is optional: nothing calls it yet; the
-evaluation work uses it later. The event only says context was picked for
-this request. It never says the agent used or followed it, and the schema
+one is made when none is given). It is optional. The hosted agent context
+assembler calls it once per configured run and puts the id on the run's
+delivery receipt (#3763, see `agent-runtime.md`). The event only says
+context was picked for this request. It never says the agent used or followed it, and the schema
 has no field that could say so. At most 16 are kept per request.
+
+A task started inside a request (a hosted agent run) keeps a copy of the
+request's context. Once the request has closed and written its events,
+`note_context_selected` returns `None` in that task, so a receipt does
+not name a selection the request can no longer write.
 
 ## Reading
 

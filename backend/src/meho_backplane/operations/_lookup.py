@@ -10,8 +10,12 @@ form ``"<impl_id>-<version>"`` and resolves it into the
 
 * :func:`parse_connector_id` -- the parser. See its docstring for the
   encoding contract and the v1-style backward-compatible fallback.
-* :func:`lookup_descriptor` -- tenant-scoped-then-global descriptor
-  lookup. Returns ``None`` if no enabled descriptor matches.
+* :func:`lookup_descriptor` -- descriptor lookup in the caller's
+  *visible scope* (see :func:`visible_scope_clause`). Returns ``None``
+  if no enabled descriptor matches.
+* :func:`visible_scope_clause` -- the one tenant-scope predicate that
+  dispatch, preview, ``list_operation_groups`` and ``search_operations``
+  share, so they always agree on which rows a tenant can use.
 * :func:`descriptor_exists_any_state` -- ``is_enabled``-agnostic
   presence probe. Used only to classify a non-dispatchable sub-op as
   *present-but-disabled* versus *truly absent*; never used to dispatch.
@@ -27,9 +31,11 @@ descriptor resolution one helper call instead of three.
 from __future__ import annotations
 
 import re
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, and_, select
+from sqlalchemy.orm import aliased
 
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
@@ -42,6 +48,7 @@ __all__ = [
     "descriptor_exists_any_state",
     "lookup_descriptor",
     "parse_connector_id",
+    "visible_scope_clause",
 ]
 
 
@@ -90,6 +97,58 @@ def parse_connector_id(connector_id: str) -> tuple[str, str, str]:
     return product, version, head
 
 
+def visible_scope_clause(
+    model: Any,
+    *,
+    tenant_id: UUID | None,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> ColumnElement[bool]:
+    """Return the ``tenant_id`` predicate for the rows a tenant may use.
+
+    *model* is :class:`EndpointDescriptor` or :class:`OperationGroup`
+    (any mapped class with a ``tenant_id`` column) and the predicate
+    applies to that class's rows for *(product, version, impl_id)*.
+
+    The tenant's own connector row is authoritative (#3870). When the
+    tenant has **any** ``endpoint_descriptor`` row for the connector
+    triple, in any ``is_enabled`` state, only the tenant's rows are
+    visible. The built-in rows (``tenant_id IS NULL``) for that triple
+    are not used at all. An op that is disabled or absent on the
+    tenant's row is therefore not usable, even if the built-in row has
+    it enabled. When the tenant has no row for the triple, the built-in
+    rows are visible as before.
+
+    So at most one of the two buckets is visible for a given triple.
+    Dispatch, preview, ``list_operation_groups`` and
+    ``search_operations`` all filter on this one predicate, so they
+    cannot disagree.
+
+    ``tenant_id=None`` is the operator-less chassis path: only built-in
+    rows are visible.
+
+    The ownership probe runs over an alias of ``endpoint_descriptor`` so
+    it never correlates with an outer query over the same table.
+    """
+    if tenant_id is None:
+        return model.tenant_id.is_(None)  # type: ignore[no-any-return]
+    owned = aliased(EndpointDescriptor)
+    tenant_owns_connector = (
+        select(owned.id)
+        .where(
+            owned.tenant_id == tenant_id,
+            owned.product == product,
+            owned.version == version,
+            owned.impl_id == impl_id,
+        )
+        .exists()
+    )
+    return (model.tenant_id == tenant_id) | and_(  # type: ignore[no-any-return]
+        model.tenant_id.is_(None), ~tenant_owns_connector
+    )
+
+
 async def lookup_descriptor(
     *,
     tenant_id: UUID,
@@ -100,35 +159,23 @@ async def lookup_descriptor(
 ) -> EndpointDescriptor | None:
     """Look up an :class:`EndpointDescriptor` for *(product, version, impl_id, op_id)*.
 
-    Tenant scoping: tenant-scoped composites (``tenant_id == <operator
-    tenant>``) win when present; built-in / global rows (``tenant_id IS
-    NULL``) are the fallback. Two SELECTs rather than a single ``ORDER
-    BY tenant_id NULLS LAST`` -- the partial unique indexes (migration
-    ``0005``) only catch duplicates within each bucket, so the
-    application-layer ordering preserves the "tenant-scoped wins over
-    built-in" semantics regardless of which direction PG decides NULLS
-    sort in.
+    Tenant scoping is :func:`visible_scope_clause`: when the tenant has
+    its own row for the connector, only that row counts and a disabled
+    or absent op there resolves to ``None``. There is no fallback to the
+    built-in row (#3870). Otherwise the built-in row is used. Because
+    only one bucket is ever visible, one SELECT finds at most one row.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        # Tenant-scoped first.
         result = await session.execute(
             select(EndpointDescriptor).where(
-                EndpointDescriptor.tenant_id == tenant_id,
-                EndpointDescriptor.product == product,
-                EndpointDescriptor.version == version,
-                EndpointDescriptor.impl_id == impl_id,
-                EndpointDescriptor.op_id == op_id,
-                EndpointDescriptor.is_enabled.is_(True),
-            )
-        )
-        tenant_row = result.scalar_one_or_none()
-        if tenant_row is not None:
-            return tenant_row
-        # Built-in / global fallback.
-        result = await session.execute(
-            select(EndpointDescriptor).where(
-                EndpointDescriptor.tenant_id.is_(None),
+                visible_scope_clause(
+                    EndpointDescriptor,
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                ),
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
@@ -157,21 +204,25 @@ async def descriptor_exists_any_state(
     apart from *truly absent* (no row at all) for callers that need to
     distinguish the two remediation paths (re-enable vs ingest).
 
-    Scoping mirrors :func:`lookup_descriptor`'s tenant-then-global
-    visibility: a row counts when it is this tenant's
-    (``tenant_id == tenant_id``) **or** built-in / global
-    (``tenant_id IS NULL``). A single ``LIMIT 1`` existence probe over
-    that union -- the caller has already established (via
-    :func:`lookup_descriptor` returning ``None``) that no *enabled* row
-    matches, so the only open question is presence in any state.
+    Scoping is the same :func:`visible_scope_clause` that
+    :func:`lookup_descriptor` uses: the tenant's own rows when it has a
+    row for the connector, the built-in rows otherwise. A single
+    ``LIMIT 1`` existence probe -- the caller has already established
+    (via :func:`lookup_descriptor` returning ``None``) that no *enabled*
+    row matches, so the only open question is presence in any state.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
             select(EndpointDescriptor.id)
             .where(
-                (EndpointDescriptor.tenant_id == tenant_id)
-                | (EndpointDescriptor.tenant_id.is_(None)),
+                visible_scope_clause(
+                    EndpointDescriptor,
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                ),
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
@@ -196,26 +247,30 @@ async def count_known_ops(
     actual enumeration belongs to the ``list_operation_groups`` /
     ``search_operations`` meta-tools shipped in T8 #399).
 
-    The count is scoped to what the calling operator can see: built-in /
-    global rows (``tenant_id IS NULL``) plus this tenant's own rows
-    (``tenant_id == tenant_id``). This mirrors the tenant boundary
-    :func:`connector_exists` and the data-returning meta-tools enforce.
-    Without it the count is a cross-tenant oracle — a connector private
-    to tenant B would leak its enabled-op count into a tenant-A caller's
+    The count is scoped to what the calling operator can dispatch: the
+    same :func:`visible_scope_clause` :func:`lookup_descriptor` uses (the
+    tenant's own rows when it has a row for the connector, the built-in
+    rows otherwise). It never counts another tenant's rows. Without that
+    the count is a cross-tenant oracle — a connector private to tenant B
+    would leak its enabled-op count into a tenant-A caller's
     ``unknown_op`` error payload.
 
     ``tenant_id=None`` is the operator-less chassis / CLI dispatch path
     (the typed-connector ``execute`` shims, which resolve descriptors
-    against global rows only): the ``tenant_id == None`` clause compiles
-    to ``IS NULL``, so the predicate collapses to global rows — matching
-    those callers' own ``tenant_id IS NULL`` descriptor query.
+    against global rows only): the predicate collapses to global rows —
+    matching those callers' own ``tenant_id IS NULL`` descriptor query.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
             select(EndpointDescriptor.id).where(
-                (EndpointDescriptor.tenant_id.is_(None))
-                | (EndpointDescriptor.tenant_id == tenant_id),
+                visible_scope_clause(
+                    EndpointDescriptor,
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                ),
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,

@@ -27,6 +27,7 @@ Coverage, by acceptance criterion:
 
 from __future__ import annotations
 
+import contextvars
 import importlib.util
 import uuid
 from collections.abc import Iterator
@@ -276,6 +277,17 @@ async def test_context_selections_are_capped() -> None:
     assert all(item is not None for item in picked[:MAX_CONTEXT_SELECTIONS])
     assert picked[MAX_CONTEXT_SELECTIONS:] == [None, None]
     await boundary.close({"type": "http", "path": "/x"})
+
+
+@pytest.mark.usefixtures("usage_on")
+async def test_closed_boundary_takes_no_more_selections() -> None:
+    """A task that outlives its request (a hosted run) cannot note a lost selection."""
+    boundary = open_request_usage()
+    assert boundary is not None
+    task_context = contextvars.copy_context()
+    assert task_context.run(note_context_selected) is not None
+    await boundary.close({"type": "http", "path": "/x"})
+    assert task_context.run(note_context_selected) is None
 
 
 @pytest.mark.usefixtures("usage_on")

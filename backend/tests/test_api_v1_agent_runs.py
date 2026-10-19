@@ -215,26 +215,56 @@ async def test_async_run_returns_handle_then_poll(monkeypatch: pytest.MonkeyPatc
     assert body["agent_definition_id"] is not None
 
 
+@respx.mock
 @pytest.mark.asyncio
-async def test_sync_run_converts_to_async_on_timeout(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A sync run past the server-side timeout returns a 202 handle."""
+async def test_sync_run_converts_to_async_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sync run past the server-side timeout returns a 202 handle.
+
+    Driven over an httpx ``ASGITransport`` like
+    :func:`test_async_run_returns_handle_then_poll`, and for the same reason:
+    the converted run keeps going in the background after the 202. The sync
+    :class:`TestClient` closes its per-request event loop the moment the
+    POST returns, which cancels that run in the middle of a database call
+    (since #4221 a configured run reads the tenant conventions before its
+    first model turn). The cancelled aiosqlite worker thread then dies when
+    it reports back to the closed loop, and the next test that garbage-
+    collects that connection waits forever for a close that nobody runs
+    (#4270). Polling the run to its terminal state keeps the loop open
+    until nothing is left running.
+    """
+    install_fake_vault(monkeypatch)
     await _seed_definition()
     _install_invoker("eventually")
     monkeypatch.setenv("AGENT_SYNC_TIMEOUT_SECONDS", "0.0000001")
     get_settings.cache_clear()
     key = make_rsa_keypair("kid-timeout")
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        resp = client.post(
+    mock_discovery_and_jwks(respx.mock, public_jwks(key))
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="https://testserver",
+    ) as ac:
+        resp = await ac.post(
             "/api/v1/agents/triage/run",
             json={"input": "go"},
-            headers={"Authorization": f"Bearer {_token(key)}"},
+            headers=headers,
         )
-    assert resp.status_code == 202, resp.text
-    assert resp.json()["converted_to_async"] is True
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        assert body["converted_to_async"] is True
+        handle = body["run_id"]
+
+        status = ""
+        for _ in range(100):
+            poll = await ac.get(f"/api/v1/agents/runs/{handle}", headers=headers)
+            assert poll.status_code == 200, poll.text
+            status = poll.json()["status"]
+            if status == "succeeded":
+                break
+            await asyncio.sleep(0.02)
+
+    assert status == "succeeded"
 
 
 @pytest.mark.asyncio

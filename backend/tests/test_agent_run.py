@@ -441,7 +441,7 @@ async def test_default_model_factory_pins_old_max_tokens(
 
     Since pydantic-ai 2.52, an unset ``max_tokens`` becomes the model's
     maximum (128,000 for claude-sonnet-4-6) and the request is streamed.
-    The factory pins the old 4096, so the request stays as before.
+    The ``AGENT_MAX_OUTPUT_TOKENS`` default of 4096 keeps the request as before.
     """
     from meho_backplane.agent.run import default_model_factory
     from meho_backplane.settings import get_settings
@@ -450,6 +450,7 @@ async def test_default_model_factory_pins_old_max_tokens(
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-max-tokens-test")
     monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_MAX_OUTPUT_TOKENS", raising=False)
     point_anthropic_sdk_at_nowhere(monkeypatch)
     get_settings.cache_clear()
     try:
@@ -460,6 +461,30 @@ async def test_default_model_factory_pins_old_max_tokens(
 
     assert body["model"] == "claude-sonnet-4-6"
     assert body["max_tokens"] == 4096
+    assert body.get("stream") is not True
+
+
+async def test_default_model_factory_sends_configured_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed ``AGENT_MAX_OUTPUT_TOKENS`` reaches the real request."""
+    from meho_backplane.agent.run import default_model_factory
+    from meho_backplane.settings import get_settings
+
+    from ._anthropic_request_capture import capture_first_request, point_anthropic_sdk_at_nowhere
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-max-tokens-test")
+    monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
+    monkeypatch.setenv("AGENT_MAX_OUTPUT_TOKENS", "8192")
+    point_anthropic_sdk_at_nowhere(monkeypatch)
+    get_settings.cache_clear()
+    try:
+        model = default_model_factory()
+        body = await capture_first_request(model, monkeypatch)
+    finally:
+        get_settings.cache_clear()
+
+    assert body["max_tokens"] == 8192
     assert body.get("stream") is not True
 
 

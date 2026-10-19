@@ -151,7 +151,8 @@ _RESPONSE_START: Final[str] = "http.response.start"
 _RESPONSE_BODY: Final[str] = "http.response.body"
 
 #: Lower-cased request-header name carrying the external change-ticket
-#: reference for a REST/dispatch call (work_ref I1-T2 #1657). Read off
+#: reference for a REST, dispatch or MCP call (work_ref I1-T2 #1657;
+#: MCP since #4256). Read off
 #: the raw ASGI scope (the audit middleware is pure-ASGI and runs before
 #: FastAPI route resolution, so there is no ``Request`` object to declare
 #: a ``Header(...)`` param on -- same posture as ``X-Request-Id`` in
@@ -850,18 +851,6 @@ class AuditMiddleware:
 
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Audit one HTTP request: bind the work-ref, run the inner app, write the row."""
-        # G0.5-T5 (#250): MCP requests are audited at per-operation
-        # granularity by the MCP handlers themselves, not at the
-        # JSON-RPC-envelope layer. Skip the chassis audit path entirely
-        # for ``/mcp`` so we don't double-attribute (or, worse,
-        # under-attribute when the chassis row hides a multi-op POST).
-        scope_path = scope.get("path", "")
-        if isinstance(scope_path, str) and scope_path.startswith(
-            _AUDIT_SKIP_PATH_PREFIXES,
-        ):
-            await self.app(scope, receive, send)
-            return
-
         start = time.monotonic()
 
         # work_ref I1-T2 (#1657), widened by #3804: bind the inbound
@@ -877,11 +866,26 @@ class AuditMiddleware:
         # the middleware is a single instance serving concurrent requests
         # on one event loop, so a leaked binding would mis-stamp the NEXT
         # request's rows. ``None`` header -> no bind -> NULL, unchanged.
+        # The bind runs BEFORE the ``/mcp`` skip below (#4256), so the MCP
+        # audit rows and the dispatch rows written inside each tool call
+        # carry the header too. A ``work_ref`` tool argument still wins:
+        # ``call_operation`` binds it over this value for its dispatch.
         work_ref_token = None
         work_ref_header = _extract_work_ref(scope)
         if work_ref_header is not None:
             work_ref_token = work_ref_var.set(work_ref_header)
         try:
+            # G0.5-T5 (#250): MCP requests are audited at per-operation
+            # granularity by the MCP handlers themselves, not at the
+            # JSON-RPC-envelope layer. Skip the chassis audit row for
+            # ``/mcp`` so we don't double-attribute (or, worse,
+            # under-attribute when the chassis row hides a multi-op POST).
+            scope_path = scope.get("path", "")
+            if isinstance(scope_path, str) and scope_path.startswith(
+                _AUDIT_SKIP_PATH_PREFIXES,
+            ):
+                await self.app(scope, receive, send)
+                return
             await self._run_and_finalize(scope, receive, send, start)
         finally:
             if work_ref_token is not None:

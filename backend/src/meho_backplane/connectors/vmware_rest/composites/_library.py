@@ -57,6 +57,7 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_FIND_LIBRARY,
     _OP_FIND_LIBRARY_ITEM,
@@ -121,11 +122,6 @@ _OP_GET_LIBRARY_ITEM = "GET:/content/library/item/{libraryItemId}"
 _ITEMS_HARD_CAP: Final[int] = 500
 
 
-def _issue(category: str, severity: str, message: str) -> dict[str, Any]:
-    """Build one structured issue entry for a failure envelope."""
-    return {"category": category, "severity": severity, "message": message}
-
-
 async def _resolve_datastore_id(
     connector: VmwareRestConnector,
     target: Any,
@@ -152,7 +148,7 @@ async def _resolve_datastore_id(
         return None, {
             "status": "datastore_not_found",
             "library_id": None,
-            "issues": [_issue("input", "error", f"datastore {name!r} matched no datastore")],
+            "issues": [issue("input", "error", f"datastore {name!r} matched no datastore")],
         }
     if len(ids) > 1:
         return None, {
@@ -160,7 +156,7 @@ async def _resolve_datastore_id(
             "library_id": None,
             "candidates": ids,
             "issues": [
-                _issue("input", "error", f"datastore {name!r} matched {len(ids)} datastores")
+                issue("input", "error", f"datastore {name!r} matched {len(ids)} datastores")
             ],
         }
     return ids[0], None
@@ -191,7 +187,7 @@ async def _resolve_library_id(
             "status": "invalid_reference",
             "library_id": None,
             "issues": [
-                _issue("input", "error", "supply library_id (id) or library_name to identify")
+                issue("input", "error", "supply library_id (id) or library_name to identify")
             ],
         }
 
@@ -202,7 +198,7 @@ async def _resolve_library_id(
         return None, {
             "status": "library_not_found",
             "library_id": None,
-            "issues": [_issue("input", "error", f"library {library_name!r} matched no library")],
+            "issues": [issue("input", "error", f"library {library_name!r} matched no library")],
         }
     if len(library_ids) > 1:
         return None, {
@@ -210,7 +206,7 @@ async def _resolve_library_id(
             "library_id": None,
             "candidates": library_ids,
             "issues": [
-                _issue(
+                issue(
                     "input",
                     "error",
                     f"library {library_name!r} matched {len(library_ids)} libraries",
@@ -312,7 +308,7 @@ async def content_library_subscribed_create_composite(
         return {
             "status": "create_error",
             "library_id": None,
-            "issues": [_issue("connector", "error", f"subscribed-library create failed: {exc}")],
+            "issues": [issue("connector", "error", f"subscribed-library create failed: {exc}")],
         }
     if gate is not None:
         return gate
@@ -323,7 +319,7 @@ async def content_library_subscribed_create_composite(
             "status": "create_error",
             "library_id": None,
             "issues": [
-                _issue(
+                issue(
                     "connector",
                     "error",
                     f"create returned no library id (got {type(library_id).__name__})",
@@ -390,7 +386,7 @@ async def content_library_subscribed_sync_composite(
         return {
             "status": "sync_error",
             "library_id": library_id,
-            "issues": [_issue("connector", "error", f"subscribed-library sync failed: {exc}")],
+            "issues": [issue("connector", "error", f"subscribed-library sync failed: {exc}")],
         }
     if gate is not None:
         return gate
@@ -443,7 +439,7 @@ async def content_library_subscribed_status_composite(
             "status": "read_error",
             "library_id": library_id,
             "issues": [
-                _issue(
+                issue(
                     "connector",
                     "error",
                     f"library read returned {type(model).__name__}, expected object",

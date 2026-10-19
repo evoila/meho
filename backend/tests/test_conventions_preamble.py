@@ -55,6 +55,7 @@ from unittest.mock import patch
 
 import pytest
 
+from meho_backplane.conventions.index import index_revision
 from meho_backplane.conventions.preamble import (
     BLOCK_END,
     BLOCK_START,
@@ -62,6 +63,7 @@ from meho_backplane.conventions.preamble import (
     BROADCAST_DISCIPLINE_BAND,
     GUARD_PREFIX,
     assemble_preamble,
+    assemble_preamble_detailed,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantConvention
@@ -796,3 +798,34 @@ async def test_conventions_only_skips_runbook_priming() -> None:
     ):
         result = await assemble_preamble(tenant, _PRIMING_OPERATOR, conventions_only=True)
     assert result.text == ""
+
+
+# ---------------------------------------------------------------------------
+# #3763 -- conventions revision for hosted delivery receipts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_conventions_revision_tracks_the_operational_set() -> None:
+    """The revision is stable for one set and changes when an operational row changes."""
+    tenant = uuid.uuid4()
+    empty = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR, conventions_only=True)
+    assert empty.conventions_revision == index_revision([])
+
+    await _insert_convention(tenant_id=tenant, slug="be-brief", title="Brief", body="One line.")
+    first = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR, conventions_only=True)
+    again = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR)
+    assert first.conventions_revision == again.conventions_revision != empty.conventions_revision
+    assert len(first.conventions_revision) == 16
+
+    await _insert_convention(
+        tenant_id=tenant, slug="ref", title="Ref", body="Reference.", kind="reference"
+    )
+    with_reference = await assemble_preamble_detailed(
+        tenant, _NO_RUNS_OPERATOR, conventions_only=True
+    )
+    assert with_reference.conventions_revision == first.conventions_revision
+
+    await _insert_convention(tenant_id=tenant, slug="second", title="Second", body="Two.")
+    changed = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR, conventions_only=True)
+    assert changed.conventions_revision != first.conventions_revision

@@ -3,8 +3,8 @@
 
 """Capture the Messages API request an Anthropic agent model sends.
 
-Used by the tests that pin the agent output-token cap
-(``_AGENT_MAX_OUTPUT_TOKENS``) on both Anthropic builders. The request
+Used by the tests that check the agent output-token limit
+(the ``AGENT_MAX_OUTPUT_TOKENS`` setting) on both Anthropic builders. The request
 goes through the real ``anthropic`` SDK. Only the HTTP transport is
 replaced, so the tests see the exact JSON body the SDK would send.
 

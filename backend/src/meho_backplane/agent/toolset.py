@@ -62,11 +62,12 @@ can grow without a migration — the T2 design constraint):
   registers no tools.
 * ``connectors`` — an optional allow-list of ``connector_id`` values the
   agent may reach through ``call_operation`` (and inspect through
-  ``preview_operation``). Omitted / ``null`` means "no
-  connector-level restriction beyond what dispatch already enforces"
-  (the tenant boundary + per-op RBAC still apply). An empty list forbids
-  every connector — ``call_operation`` is registered but every dispatch
-  is rejected before it reaches the dispatcher.
+  ``preview_operation``). ``meho_connector_list`` shows only these
+  connectors, so the agent finds the ones it may use (#4233). Omitted /
+  ``null`` means "no connector-level restriction beyond what dispatch
+  already enforces" (the tenant boundary + per-op RBAC still apply). An
+  empty list forbids every connector — ``call_operation`` is registered
+  but every dispatch is rejected before it reaches the dispatcher.
 
 Unknown keys in the spec are ignored (forward-compat): a future spec field
 must not break an older runtime.
@@ -75,13 +76,16 @@ Configured versus legacy surface
 ================================
 
 A definition with a toolset spec (even ``{}``) resolves through this module:
-the connector-execution tools, the four governed discovery and result-handle
-tools (``meho_connector_list``, ``list_targets``, ``preview_operation``,
-``result_query``; #3737), and the broadcast tools, each subject to the
-intersection above. A definition with **no** spec (``toolset is None``) keeps
-the legacy two-tool fallback in :mod:`meho_backplane.agent.run` until its
-definition is migrated to a spec. Runbook, approval, and admin tools are not
-in the catalog on purpose.
+the connector-execution tools, the governed status, discovery and
+result-handle tools (``meho_status`` from #4233; ``meho_connector_list``,
+``list_targets``, ``preview_operation``, ``result_query`` from #3737), and
+the broadcast tools, each subject to the intersection above. A definition
+with **no** spec (``toolset is None``) keeps the legacy two-tool fallback in
+:mod:`meho_backplane.agent.run` until its definition is migrated to a spec.
+Stored definitions always have a spec (the database column defaults to
+``{}``), so every hosted run takes the configured path; ``toolset is None``
+only happens for definitions built in code. Runbook, approval, and admin
+tools are not in the catalog on purpose.
 
 Missing versus disabled tools (#3737)
 =====================================
@@ -113,6 +117,9 @@ so existing definitions keep their surface; such a tool is reported
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -128,9 +135,11 @@ from meho_backplane.agent.meta_tool import MetaToolSpec
 from meho_backplane.agent.tool_audit import ToolRefusedRetry
 from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
 from meho_backplane.agent.toolset_discovery import (
+    CONNECTOR_LIST,
     RETRIEVAL_META_TOOL_NAMES,
     build_discovery_meta_tools,
     build_retrieval_meta_tools,
+    keep_allowed_connectors,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import role_at_least
@@ -148,6 +157,7 @@ __all__ = [
     "DisabledReason",
     "MetaToolSpec",
     "ToolsetResolution",
+    "capability_versions",
     "resolve_agent_tools",
     "resolve_agent_toolset",
     "toolset_admits_runbook_execution",
@@ -390,6 +400,10 @@ def _make_meta_tool(
     crash — when the requested connector is outside the spec's
     ``connectors`` list.
 
+    For ``meho_connector_list`` with a connector allow-list, the wrapper
+    keeps only the rows whose ``connector_id`` is in the list (#4233), so
+    the agent is not shown connectors it cannot call.
+
     For ``call_operation`` specifically the wrapper also threads the G11.1-T9
     (#1117) approval-resume substrate: when the dispatch returns
     ``status="awaiting_approval"``, the wrapper blocks on
@@ -407,6 +421,7 @@ def _make_meta_tool(
     handler = meta.handler
     is_call_operation = meta.name == "call_operation"
     is_connector_scoped = meta.name in _CONNECTOR_SCOPED_TOOLS
+    is_connector_list = meta.name == CONNECTOR_LIST
 
     async def _tool(ctx: RunContext[Operator], **arguments: Any) -> dict[str, Any]:
         if not role_at_least(ctx.deps.tenant_role, meta.required_role):
@@ -440,6 +455,8 @@ def _make_meta_tool(
                 )
         call_arguments = dict(arguments)
         result = await handler(ctx.deps, call_arguments)
+        if is_connector_list and allowed_connectors is not None:
+            result = keep_allowed_connectors(result, allowed_connectors)
         if is_call_operation and result.get("status") == "awaiting_approval":
             settings = get_settings()
             return await resume_or_surface_awaiting_approval(
@@ -579,3 +596,24 @@ def resolve_agent_tools(
     missing / disabled report call :func:`resolve_agent_toolset`.
     """
     return resolve_agent_toolset(toolset, operator).tools
+
+
+def capability_versions(tools: Iterable[Tool[Operator]]) -> dict[str, str]:
+    """Return ``{tool name: version}`` for *tools* (#3763).
+
+    The version is the first 12 hex characters of a SHA-256 over the
+    name, description, and input schema the model is shown. It changes
+    when any of them changes, so a delivery receipt can say which shape
+    of each tool a run had without copying the text.
+    """
+    versions: dict[str, str] = {}
+    for tool in tools:
+        definition = tool.tool_def
+        shown = {
+            "name": definition.name,
+            "description": definition.description,
+            "parameters": definition.parameters_json_schema,
+        }
+        encoded = json.dumps(shown, sort_keys=True, separators=(",", ":")).encode()
+        versions[definition.name] = hashlib.sha256(encoded).hexdigest()[:12]
+    return versions

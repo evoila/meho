@@ -13,16 +13,23 @@ Covers the two pieces ``build_anthropic_ingest_llm_client`` adds:
 
 No network: the factory tests construct a real (but unused)
 ``AsyncAnthropic`` with a fake key, and the adapter tests mock the SDK
-client so ``messages.create`` never leaves the process.
+client so ``messages.create`` never leaves the process. The real-SDK
+tests point the SDK at a ``.invalid`` host and replace only its
+``httpx2`` transport, so they read the request the SDK really built.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anthropic
+import httpx2
 import pytest
+import truststore
 from anthropic.types import TextBlock
 
 from meho_backplane.operations.ingest import (
@@ -31,6 +38,14 @@ from meho_backplane.operations.ingest import (
 )
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
 from meho_backplane.settings import get_settings
+
+from ._anthropic_request_capture import _TEXT_REPLY, point_anthropic_sdk_at_nowhere
+from ._httpx2_capture import (
+    ca_common_names,
+    capture_httpx2_requests,
+    client_ssl_context,
+    write_test_ca,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -268,6 +283,104 @@ async def test_generate_structured_json_passes_output_config_when_schema_given()
         messages=[{"role": "user", "content": "u"}],
         output_config={"format": schema},
     )
+
+
+# ---------------------------------------------------------------------------
+# Real SDK requests: the pinned values reach the wire
+# ---------------------------------------------------------------------------
+
+
+def _build_real_client(monkeypatch: pytest.MonkeyPatch) -> AnthropicMessagesLlmClient:
+    """Build the production client with a real ``AsyncAnthropic`` on a ``.invalid`` host."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-ingest-test")
+    point_anthropic_sdk_at_nowhere(monkeypatch)
+    get_settings.cache_clear()
+    client = build_anthropic_ingest_llm_client()
+    assert isinstance(client, AnthropicMessagesLlmClient)
+    return client
+
+
+async def test_real_sdk_request_carries_max_tokens_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The request the SDK really sends has our ``max_tokens`` and 120-second timeout.
+
+    The other tests here mock the SDK, so they only show what we pass to
+    it. This one replaces only the ``httpx2`` transport and reads the
+    request the SDK built.
+    """
+    from meho_backplane.operations.ingest.anthropic_client import _INGEST_LLM_TIMEOUT_SECONDS
+
+    sent = capture_httpx2_requests(
+        monkeypatch, lambda _request: httpx2.Response(200, json=_TEXT_REPLY)
+    )
+    client = _build_real_client(monkeypatch)
+
+    text = await client.generate_json(
+        system_prompt="sys", user_prompt="usr", max_output_tokens=2048
+    )
+
+    assert text == "ok"
+    assert len(sent) == 1
+    request = sent[0]
+    assert str(request.url) == "http://anthropic.invalid/v1/messages"
+    body = json.loads(request.content)
+    assert body["max_tokens"] == 2048
+    assert body["model"] == "claude-sonnet-4-6"
+    assert "stream" not in body
+    # httpx2 carries the timeout each request uses in its extensions.
+    assert request.extensions["timeout"] == {
+        "connect": _INGEST_LLM_TIMEOUT_SECONDS,
+        "read": _INGEST_LLM_TIMEOUT_SECONDS,
+        "write": _INGEST_LLM_TIMEOUT_SECONDS,
+        "pool": _INGEST_LLM_TIMEOUT_SECONDS,
+    }
+
+
+async def test_real_sdk_retries_a_failed_request_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server error is retried once, then fails: two requests in total.
+
+    ``retry-after-ms`` keeps the SDK's wait before the retry at 1 ms, so
+    the test stays fast.
+    """
+    from meho_backplane.operations.ingest.anthropic_client import _INGEST_LLM_MAX_RETRIES
+
+    sent = capture_httpx2_requests(
+        monkeypatch,
+        lambda _request: httpx2.Response(
+            500,
+            headers={"retry-after-ms": "1"},
+            json={"type": "error", "error": {"type": "api_error", "message": "boom"}},
+        ),
+    )
+    client = _build_real_client(monkeypatch)
+
+    with pytest.raises(anthropic.InternalServerError):
+        await client.generate_json(system_prompt="sys", user_prompt="usr", max_output_tokens=16)
+
+    assert len(sent) == 1 + _INGEST_LLM_MAX_RETRIES == 2
+
+
+def test_real_sdk_client_trusts_ssl_cert_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With ``SSL_CERT_FILE`` set, the SDK client trusts that CA file.
+
+    ``httpx2`` reads the variable when the SDK builds its client. Without
+    it, the client uses the system store (a ``truststore`` context).
+    """
+    ca_file = write_test_ca(tmp_path, common_name="MEHO ingest test CA")
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    sdk_client = _build_real_client(monkeypatch)._client
+    assert isinstance(client_ssl_context(sdk_client._client), truststore.SSLContext)
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+    sdk_client = _build_real_client(monkeypatch)._client
+    assert "MEHO ingest test CA" in ca_common_names(client_ssl_context(sdk_client._client))
 
 
 # ---------------------------------------------------------------------------

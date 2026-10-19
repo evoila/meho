@@ -161,19 +161,32 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 			*r.NeedsReingestOpCount,
 		)
 	}
-	// #3681: ungrouped descriptors (group_id IS NULL) never land in any
-	// group's op list below — the grouping pass left them out — so the
-	// per-group render alone hides them. Surface the count here so an
-	// operator can see the gap. A full `connector enable` covers them
-	// (the cascade now reaches ungrouped rows too), as does
-	// `connector enable-reads` for read-class ops; `--json` carries the
-	// reconciling `ungrouped_op_count` for tooling.
+	// #3681 / #3870: ungrouped descriptors (group_id IS NULL) never land
+	// in any group's op list below, yet dispatch serves the enabled ones.
+	// List them after the groups (with their enabled state and safety
+	// level) so the review shows the whole op set; this line points the
+	// operator at that section.
+	hasUngrouped := r.UngroupedOps != nil && len(*r.UngroupedOps) > 0
 	if r.UngroupedOpCount != nil && *r.UngroupedOpCount > 0 {
-		fmt.Fprintf(w, "\nUngrouped ops: %d — not shown in any group above; `connector enable` covers them (per-op `connector edit-op` can still override individual ones). Use --json for the full descriptor universe.\n",
-			*r.UngroupedOpCount,
-		)
+		if r.UngroupedOps == nil {
+			// A server from before the list shipped sends the count
+			// alone. Say the enabled count is unknown rather than print
+			// "0 enabled", which would read as "all disabled".
+			fmt.Fprintf(w, "\nUngrouped ops: %d (enabled count unknown — the server did not send the list) — not in any group. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
+				*r.UngroupedOpCount,
+			)
+		} else {
+			fmt.Fprintf(w, "\nUngrouped ops: %d (%d enabled) — not in any group; listed under [ungrouped] below. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
+				*r.UngroupedOpCount, enabledOpCount(*r.UngroupedOps),
+			)
+		}
 	}
-	if len(r.Groups) == 0 {
+	// #3827: stored ingested deletes below the destructive risk level. A
+	// row an earlier ingest left weaker than a fresh ingest would make it
+	// needs a re-ingest or a per-op `connector edit-op`; the full list
+	// (including rows that need no change) rides the --json render.
+	printDeleteReview(w, r)
+	if len(r.Groups) == 0 && !hasUngrouped {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return
 	}
@@ -184,25 +197,82 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 		if g.WhenToUse != "" {
 			fmt.Fprintf(w, "  when_to_use: %s\n", g.WhenToUse)
 		}
-		if len(g.Ops) == 0 {
+		printReviewOps(w, g.Ops)
+	}
+	if hasUngrouped {
+		fmt.Fprintf(w, "\n[ungrouped] — %d op(s)\n", len(*r.UngroupedOps))
+		printReviewOps(w, *r.UngroupedOps)
+	}
+}
+
+// printReviewOps renders a compact one-line-per-op table. Operators with
+// a 3000-op vcenter connector cannot scroll through a verbose render;
+// --json carries the full descriptions for the "ok now show me
+// everything" path.
+func printReviewOps(w io.Writer, ops []api.ConnectorReviewOp) {
+	if len(ops) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
+		"op_id", "safety", "req", "en", "summary",
+	)
+	for _, op := range ops {
+		fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
+			truncate(op.OpId, 42),
+			op.SafetyLevel,
+			boolFlag(op.RequiresApproval),
+			boolFlag(op.IsEnabled),
+			truncate(strDeref(op.Summary), 70),
+		)
+	}
+}
+
+// enabledOpCount counts the enabled ops in an op list.
+func enabledOpCount(ops []api.ConnectorReviewOp) int {
+	n := 0
+	for _, op := range ops {
+		if op.IsEnabled {
+			n++
+		}
+	}
+	return n
+}
+
+// printDeleteReview renders the review report for stored ingested deletes
+// below the destructive risk level (#3827). It prints a count line whenever
+// the report has rows, and a WARNING table of the rows that are weaker than
+// a fresh ingest would make them (stored posture next to the expected one).
+func printDeleteReview(w io.Writer, r *api.ConnectorReviewPayload) {
+	if r.DeleteOpsBelowDestructive == nil || len(*r.DeleteOpsBelowDestructive) == 0 {
+		return
+	}
+	rows := *r.DeleteOpsBelowDestructive
+	needing := 0
+	if r.DeleteOpsNeedingCorrectionCount != nil {
+		needing = *r.DeleteOpsNeedingCorrectionCount
+	}
+	fmt.Fprintf(w, "\nDeletes below destructive: %d stored op(s), %d need(s) correction.\n",
+		len(rows), needing,
+	)
+	if needing == 0 {
+		fmt.Fprintln(w, "  All of them wait for approval. Use --json for the full list.")
+		return
+	}
+	fmt.Fprintln(w, "WARNING: these stored ops are weaker than a fresh ingest would make them. Ingest the connector again, or fix each one with `connector edit-op <connector_id> <op_id> --safety <expected> --requires-approval`.")
+	fmt.Fprintf(w, "  %-60s %-9s %3s  %-11s %3s\n",
+		"op_id", "stored", "req", "expected", "req",
+	)
+	for _, op := range rows {
+		if !op.NeedsCorrection {
 			continue
 		}
-		// Compact one-line-per-op render. Operators with a 3000-op
-		// vcenter connector cannot scroll through a verbose render;
-		// --json carries the full descriptions for the "ok now show
-		// me everything" path.
-		fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-			"op_id", "safety", "req", "en", "summary",
+		fmt.Fprintf(w, "  %-60s %-9s %3s  %-11s %3s\n",
+			truncate(op.OpId, 60),
+			op.SafetyLevel,
+			boolFlag(op.RequiresApproval),
+			op.ExpectedSafetyLevel,
+			boolFlag(op.ExpectedRequiresApproval),
 		)
-		for _, op := range g.Ops {
-			fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-				truncate(op.OpId, 42),
-				op.SafetyLevel,
-				boolFlag(op.RequiresApproval),
-				boolFlag(op.IsEnabled),
-				truncate(strDeref(op.Summary), 70),
-			)
-		}
 	}
 }
 

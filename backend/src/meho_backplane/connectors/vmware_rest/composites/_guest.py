@@ -75,6 +75,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
@@ -1175,13 +1176,33 @@ async def _poll_for_exit(
             # info aged out of the ~5-minute window (or Tools restarted).
             return _exit_unknown()
         if time.monotonic() >= deadline:
-            return {"status": "timeout", "exit_code": None} if seen_running else _exit_unknown()
+            if not seen_running:
+                return _exit_unknown()
+            return {
+                "status": "timeout",
+                "exit_code": None,
+                "issues": [
+                    issue(
+                        "connector",
+                        "error",
+                        f"process {pid} was still running after {timeout_seconds}s",
+                    )
+                ],
+            }
         await asyncio.sleep(_RUN_POLL_INTERVAL_SECONDS)
 
 
 def _exit_unknown() -> dict[str, Any]:
     """Completion fields for a process whose exit code could not be determined."""
-    return {"status": "exit_unknown", "exit_code": None, "start_time": None, "end_time": None}
+    return {
+        "status": "exit_unknown",
+        "exit_code": None,
+        "start_time": None,
+        "end_time": None,
+        "issues": [
+            issue("connector", "error", "the process exit code could not be read from the guest")
+        ],
+    }
 
 
 def _process_info_for_pid(payload: Any, pid: int) -> dict[str, Any] | None:

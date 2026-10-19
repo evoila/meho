@@ -601,6 +601,12 @@
           "type": "string",
           "minLength": 1,
           "description": "Key within `secretName` whose value is the API key. Defaults to `api_key`, matching the ESO target."
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000,
+          "description": "Most output tokens the agent asks the model for in one answer. Rendered as `AGENT_MAX_OUTPUT_TOKENS`. Used by the Anthropic backend only. Range [1, 128000], the same bounds the backplane checks at start. Default 4096."
         }
       }
     },

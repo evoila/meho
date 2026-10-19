@@ -15,7 +15,14 @@ via :mod:`respx`. Acceptance criteria from #1078 map onto the tests as:
   :class:`EgressViolationError`. The PAIF backend is registered with
   the OIDC token endpoint stubbed; the full chain (policy → resolver
   → backend → token acquisition) runs end-to-end with **zero** SaaS
-  egress (respx asserts the only POST is to the in-cluster IdP).
+  egress. ``respx`` guards plain ``httpx`` (the token fetch) and
+  ``no_httpx2_egress`` guards ``httpx2`` (the openai SDK).
+* ``test_zero_egress_guard_sees_openai_sdk_requests`` — self-test: the
+  ``httpx2`` guard catches a request from the PAIF model's SDK client.
+* ``test_paif_request_goes_to_base_url_with_provider_token`` — one real
+  SDK request goes to the PAIF base URL with the IdP token.
+* ``test_paif_client_trusts_ssl_cert_file`` — with ``SSL_CERT_FILE`` set,
+  the SDK client trusts that CA file.
 * ``test_paif_token_acquired_via_client_credentials_and_cached`` —
   AC #2 (first half): the bundled OIDC provider POSTs the
   ``client_credentials`` grant and caches the access token; a second
@@ -39,13 +46,19 @@ via :mod:`respx`. Acceptance criteria from #1078 map onto the tests as:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from pathlib import Path
 from typing import cast
 from uuid import UUID
 
 import httpx
+import httpx2
+import openai
 import pytest
 import respx
+import truststore
+from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 
@@ -68,12 +81,23 @@ from meho_backplane.agent import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
 
+from ._httpx2_capture import (
+    OPENAI_TEXT_REPLY,
+    ca_common_names,
+    capture_httpx2_requests,
+    client_ssl_context,
+    no_httpx2_egress,
+    write_test_ca,
+)
+
 _TENANT_AIRGAP = UUID("33333333-3333-3333-3333-333333333333")
 _TENANT_SAAS = UUID("44444444-4444-4444-4444-444444444444")
 
 _TOKEN_URL = "https://kc.airgap.local/realms/meho/protocol/openid-connect/token"
 _PAIF_HOST = "https://pais.airgap.local"
 _PAIF_BASE_URL = f"{_PAIF_HOST}{VCF_PAIF_OPENAI_COMPAT_BASE_PATH}"
+#: PAIF base URL for the request-level tests. ``.invalid`` never resolves.
+_PAIF_TEST_BASE_URL = f"https://paif.invalid{VCF_PAIF_OPENAI_COMPAT_BASE_PATH}"
 
 
 @pytest.fixture(autouse=True)
@@ -423,11 +447,11 @@ async def test_resolver_routes_air_gapped_tenant_to_paif() -> None:
     )
     operator = _make_operator(tenant_id=_TENANT_AIRGAP)
 
-    # respx with no registered routes refuses any HTTP traffic. If the
-    # resolver or builder secretly reached out to a SaaS host or to the
-    # IdP, the call would surface as a respx assertion failure with the
-    # actual URL — that's the zero-egress contract.
-    with respx.mock(assert_all_called=False) as mock:
+    # Two guards, one per HTTP library. ``respx`` sees plain ``httpx``:
+    # MEHO's own token fetch uses it. ``no_httpx2_egress`` sees ``httpx2``:
+    # the openai SDK sends with it, and ``respx`` cannot see that. If
+    # building the model sent any request, one of the two would catch it.
+    with respx.mock(assert_all_called=False) as mock, no_httpx2_egress():
         # We *do* anticipate that *if* the loop ran, only this URL would
         # be touched (proves the on-prem hosts are wired correctly).
         # We don't actually fire a chat completion in this unit test —
@@ -444,6 +468,90 @@ async def test_resolver_routes_air_gapped_tenant_to_paif() -> None:
         # about ``api_key=Callable[...]``. If a regression made the
         # provider fetch eagerly, this assertion would catch it.
         assert mock.calls.call_count == 0
+
+
+def _paif_model(base_url: str = _PAIF_TEST_BASE_URL) -> OpenAIChatModel:
+    """Build a PAIF model whose token comes from the stubbed OIDC endpoint."""
+    provider = vcf_paif_bearer_provider(
+        token_url=_TOKEN_URL,
+        client_id="meho-paif",
+        client_secret="paif-secret",
+    )
+    model = vcf_paif_backend_builder(
+        model_id="meta-llama/Llama-3.1-8B-Instruct",
+        base_url=base_url,
+        bearer_token_provider=provider,
+    )()
+    assert isinstance(model, OpenAIChatModel)
+    return model
+
+
+async def test_zero_egress_guard_sees_openai_sdk_requests() -> None:
+    """The ``httpx2`` guard catches a request from the PAIF model's own SDK client.
+
+    Self-test for the guard used in
+    ``test_resolver_routes_air_gapped_tenant_to_paif``. If the SDK ever
+    moves to another HTTP library, this test fails, so the zero-egress
+    test cannot go blind again without anyone noticing.
+    """
+    model = _paif_model()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(_TOKEN_URL).respond(json={"access_token": "fake-bearer", "expires_in": 300})
+        with (
+            pytest.raises(AssertionError, match="zero-egress guard") as caught,
+            no_httpx2_egress(),
+            pytest.raises(openai.APIConnectionError),
+        ):
+            await model.client.with_options(max_retries=0).chat.completions.create(
+                model="meta-llama/Llama-3.1-8B-Instruct",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+    assert "paif.invalid" in str(caught.value)
+
+
+async def test_paif_request_goes_to_base_url_with_provider_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One real SDK request goes to the PAIF base URL with the IdP token.
+
+    The token fetch (plain ``httpx``) is stubbed with ``respx``. The chat
+    request (``httpx2``) is captured at the transport, after the openai
+    SDK built it.
+    """
+    base_url = _PAIF_TEST_BASE_URL
+    sent = capture_httpx2_requests(
+        monkeypatch, lambda _request: httpx2.Response(200, json=OPENAI_TEXT_REPLY)
+    )
+    model = _paif_model(base_url)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(_TOKEN_URL).respond(json={"access_token": "fake-bearer", "expires_in": 300})
+        result = await Agent(model).run("hi")
+
+    assert result.output == "ok"
+    assert len(sent) == 1
+    request = sent[0]
+    assert str(request.url) == f"{base_url}chat/completions"
+    assert request.headers["Authorization"] == "Bearer fake-bearer"
+    assert json.loads(request.content)["model"] == "meta-llama/Llama-3.1-8B-Instruct"
+
+
+def test_paif_client_trusts_ssl_cert_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With ``SSL_CERT_FILE`` set, the PAIF SDK client trusts that CA file.
+
+    Internal CAs (the usual case for an on-prem PAIF endpoint) depend on
+    this. ``httpx2`` reads the variable when the SDK builds its client.
+    Without it, the client uses the system store (a ``truststore`` context).
+    """
+    ca_file = write_test_ca(tmp_path, common_name="MEHO PAIF test CA")
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    assert isinstance(client_ssl_context(_paif_model().client._client), truststore.SSLContext)
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+    ssl_context = client_ssl_context(_paif_model().client._client)
+    assert "MEHO PAIF test CA" in ca_common_names(ssl_context)
 
 
 def test_resolver_refuses_paif_backend_flagged_saas_for_no_egress_tenant() -> None:

@@ -1115,7 +1115,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on the light pool (#3251). |
-| `python-unit-shard` (`Python unit shard N/3`) | `backend/` unit + acceptance subtree, split 3 ways | `pytest -n 3 --dist loadscope --maxfail=1` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
+| `python-unit-shard` (`Python unit shard N/3`) | `backend/` unit + acceptance subtree, split 3 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
@@ -1165,7 +1165,14 @@ shape (deterministic file-stride matrix + fan-in):
   suite is shard-safe — proven live by the `python-coverage` sweep, which
   runs the identical split over a superset of these files. `fail-fast:
   false` so one red shard does not cancel the others; each shard keeps
-  `--maxfail=1` for fast per-shard feedback. The `tests/integration` /
+  `--maxfail=1` for fast per-shard feedback. Each shard also arms a
+  per-test hang guard, `--timeout=180 --timeout-method=signal` (#4270):
+  a test that stops making progress fails on its own after 180 s with
+  its name and a stack dump of every thread, instead of sitting silent
+  until the 20-minute job cap (the shards print one dot per test, so a
+  hang left no test name in the log). `signal`, not `thread`, because
+  the thread method calls `os._exit()`, which xdist reads as a worker
+  crash. The `tests/integration` /
   `tests/migrations` exclusions and the `MEHO_SKIP_SPEC_INGEST_TESTS` G0.7
   canary opt-out (#2980) are preserved on **every** shard. Every shard also
   installs Helm v3.16.4 (the same pinned `azure/setup-helm` step as

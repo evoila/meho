@@ -46,6 +46,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "AUDIT_METHOD",
+    "OP_CROSS_TENANT_INGEST",
     "OP_DELETE_CONNECTOR",
     "OP_DISABLE_CONNECTOR",
     "OP_EDIT_GROUP",
@@ -98,6 +99,10 @@ OP_LLM_GROUPING: Final[str] = "meho_connector_llm_grouping"
 #: ``is_enabled=False`` / ``review_status='staged'`` behind the review gate.
 #: The audit row makes the dispatchability change durable and attributable.
 OP_PROFILE_STAMP: Final[str] = "meho_connector_profile_stamp"
+#: Audit op-id for a ``platform_admin`` ingest into another tenant (#3800).
+#: The row is attributed to the acting operator; the payload names the
+#: target tenant.
+OP_CROSS_TENANT_INGEST: Final[str] = "meho_connector_ingest_cross_tenant"
 
 #: HTTP methods that classify an ingested op as *read-class*. The
 #: bulk read-class enable path (G0.25-T7 #1749) flips ``is_enabled``

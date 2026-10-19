@@ -104,7 +104,7 @@ meho operation search k8s-1.x "pods that are not running" --group workload
 Each hit carries the fields that matter before you call anything:
 
 - **`op_id`** — the handle you pass to call, e.g. `k8s.pod.list`.
-- **`safety_level`** — `safe`, `caution`, or `dangerous`.
+- **`safety_level`** — `safe`, `caution`, `dangerous`, or `destructive`.
 - **`requires_approval`** — whether a call parks for a second pair of
   eyes instead of executing.
 

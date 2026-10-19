@@ -44,7 +44,10 @@ One sentence per level:
 - **`dangerous`:** an agent login is refused unless a grant allows it, and
   then it still waits for approval; a person runs it at once.
 - **`destructive`:** an agent login is always refused, and a person always
-  waits for approval.
+  waits for approval. A destructive call must first get a `preview_hash`
+  from `preview_operation` and pass it to `call_operation`; without a
+  matching hash, MEHO refuses the call and stores no approval request
+  (#3197).
 
 An op marked `requires_approval` also waits for approval, for every kind of
 login. There are two exceptions. A refusal for an agent login stays a
@@ -230,8 +233,21 @@ elif verdict != AUTO_EXECUTE:
 # else AUTO_EXECUTE: continue to connector resolution
 ```
 
-Only a `deny` verdict refuses the call. A `needs-approval` verdict really
-waits: the stored request runs after someone approves it (G11.2-T4, #817).
+A `deny` verdict refuses the call. A `needs-approval` verdict usually
+stores an approval request and waits: the stored request runs after someone
+approves it (#817). In a few cases `_handle_needs_approval` refuses the call
+instead and stores nothing:
+
+- a `destructive` op without a matching `preview_hash` from
+  `preview_operation`, or without a blast-radius statement
+  (`_destructive_binding_refusal`, #3197);
+- a write that the permission check before storing says will be denied
+  (`_preflight_denied_refusal`, `write_capability_denied`, #3542);
+- an `idempotency_key` that a different call already uses
+  (`idempotency_key_conflict`, #3486);
+- an unexpected error while storing the request (the call is refused, not
+  left half-stored).
+
 See [approvals.md](approvals.md) for the queue, the approve and reject
 verbs, and the resume path.
 

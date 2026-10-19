@@ -16,9 +16,9 @@ Coverage matrix (Task #450 acceptance criteria):
   the UPDATE branch; properties + ``last_seen`` are refreshed.
 * **Transactional** — a mid-reconcile failure rolls the whole
   transaction back; the graph is byte-identical to before.
-* **Audit + broadcast** — one ``audit_log`` row per refresh with the
-  canonical ``topology.refresh`` op_id + counts; one broadcast event
-  published (mocked at :func:`publish_event`).
+* **Audit** — one ``audit_log`` row per refresh with the canonical
+  ``topology.refresh`` op_id + counts. A refresh publishes no Broadcast
+  event (#3758).
 * **Tenant boundary** — a refresh writes only ``(tenant_id=A)`` rows;
   a same-named target in tenant B is untouched.
 
@@ -54,8 +54,6 @@ from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode, Target, Ten
 from meho_backplane.operations._handler_resolve import reset_connector_instance_cache
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
-
-_PUBLISH = "meho_backplane.topology.refresh.publish_event"
 
 
 @pytest.fixture(autouse=True)
@@ -200,8 +198,7 @@ async def test_first_refresh_inserts_nodes_and_edges() -> None:
     tenant_id, target = await _seed_tenant_and_target()
     _FakeConnector.hints = _hints_3n2e()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, _operator(tenant_id))
+    result = await refresh_target_topology(target, _operator(tenant_id))
 
     assert isinstance(result, RefreshResult)
     assert result.added_nodes == 3
@@ -240,9 +237,8 @@ async def test_second_refresh_same_hints_is_unchanged() -> None:
     _FakeConnector.hints = _hints_3n2e()
     op = _operator(tenant_id)
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        await refresh_target_topology(target, op)
-        result = await refresh_target_topology(target, op)
+    await refresh_target_topology(target, op)
+    result = await refresh_target_topology(target, op)
 
     assert result.added_nodes == 0
     assert result.added_edges == 0
@@ -313,8 +309,7 @@ async def test_no_populator_refresh_carries_explicit_signal() -> None:
         await session.commit()
         await session.refresh(nopop_target)
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(nopop_target, _operator(tenant_id))
+    result = await refresh_target_topology(nopop_target, _operator(tenant_id))
 
     assert result.added_nodes == 0
     assert result.added_edges == 0
@@ -334,8 +329,7 @@ async def test_populated_refresh_omits_signal_even_with_gaps_registered() -> Non
     tenant_id, target = await _seed_tenant_and_target()
     _FakeConnector.hints = _hints_3n2e()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, _operator(tenant_id))
+    result = await refresh_target_topology(target, _operator(tenant_id))
 
     assert result.added_nodes == 3
     assert result.no_populator_for_product is None
@@ -354,26 +348,25 @@ async def test_dropped_node_is_soft_deleted() -> None:
     _FakeConnector.hints = _hints_3n2e()
     op = _operator(tenant_id)
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        await refresh_target_topology(target, op)
-        # Drop vm-b (and its edge) from discovery.
-        _FakeConnector.hints = TopologyHints(
-            discovered_at=datetime.now(UTC),
-            nodes=(
-                NodeHint(kind="vm", name="vm-a", properties={"power": "on"}),
-                NodeHint(kind="datastore", name="ds-1"),
+    await refresh_target_topology(target, op)
+    # Drop vm-b (and its edge) from discovery.
+    _FakeConnector.hints = TopologyHints(
+        discovered_at=datetime.now(UTC),
+        nodes=(
+            NodeHint(kind="vm", name="vm-a", properties={"power": "on"}),
+            NodeHint(kind="datastore", name="ds-1"),
+        ),
+        edges=(
+            EdgeHint(
+                from_kind="vm",
+                from_name="vm-a",
+                to_kind="datastore",
+                to_name="ds-1",
+                kind="mounts",
             ),
-            edges=(
-                EdgeHint(
-                    from_kind="vm",
-                    from_name="vm-a",
-                    to_kind="datastore",
-                    to_name="ds-1",
-                    kind="mounts",
-                ),
-            ),
-        )
-        result = await refresh_target_topology(target, op)
+        ),
+    )
+    result = await refresh_target_topology(target, op)
 
     assert result.removed_nodes == 1
     assert result.removed_edges == 1
@@ -405,18 +398,17 @@ async def test_changed_properties_take_update_path() -> None:
     _FakeConnector.hints = _hints_3n2e()
     op = _operator(tenant_id)
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        await refresh_target_topology(target, op)
-        _FakeConnector.hints = TopologyHints(
-            discovered_at=datetime.now(UTC),
-            nodes=(
-                NodeHint(kind="vm", name="vm-a", properties={"power": "off"}),
-                NodeHint(kind="vm", name="vm-b"),
-                NodeHint(kind="datastore", name="ds-1"),
-            ),
-            edges=_hints_3n2e().edges,
-        )
-        result = await refresh_target_topology(target, op)
+    await refresh_target_topology(target, op)
+    _FakeConnector.hints = TopologyHints(
+        discovered_at=datetime.now(UTC),
+        nodes=(
+            NodeHint(kind="vm", name="vm-a", properties={"power": "off"}),
+            NodeHint(kind="vm", name="vm-b"),
+            NodeHint(kind="datastore", name="ds-1"),
+        ),
+        edges=_hints_3n2e().edges,
+    )
+    result = await refresh_target_topology(target, op)
 
     assert result.updated_nodes == 1
     assert result.added_nodes == 0
@@ -451,7 +443,6 @@ async def test_mid_reconcile_failure_rolls_back() -> None:
     # Fail the audit write (last step inside the transaction) so the
     # already-staged node/edge inserts must roll back.
     with (
-        patch(_PUBLISH, new=AsyncMock()),
         patch(
             "meho_backplane.topology.refresh._write_audit",
             new=AsyncMock(side_effect=RuntimeError("boom")),
@@ -477,19 +468,17 @@ async def test_mid_reconcile_failure_rolls_back() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Audit + broadcast
+# Audit
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_refresh_emits_audit_row_and_broadcast() -> None:
+async def test_refresh_emits_audit_row() -> None:
     _register_fake()
     tenant_id, target = await _seed_tenant_and_target()
     _FakeConnector.hints = _hints_3n2e()
 
-    publish_mock = AsyncMock()
-    with patch(_PUBLISH, new=publish_mock):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -505,37 +494,9 @@ async def test_refresh_emits_audit_row_and_broadcast() -> None:
     assert row.payload["op_id"] == "topology.refresh"
     assert row.payload["op_class"] == "read"
     assert row.payload["added_nodes"] == 3
-
-    publish_mock.assert_awaited_once()
-    event = publish_mock.await_args.args[0]
-    assert event.op_id == "topology.refresh"
-    assert event.op_class == "read"
-    assert event.tenant_id == tenant_id
-    assert event.payload["added_nodes"] == 3
     # No per-resource leak — only counts + metadata.
-    assert "nodes" not in event.payload
-    assert "name" not in event.payload
-
-
-@pytest.mark.asyncio
-async def test_broadcast_failure_does_not_fail_refresh() -> None:
-    _register_fake()
-    tenant_id, target = await _seed_tenant_and_target()
-    _FakeConnector.hints = _hints_3n2e()
-
-    with patch(_PUBLISH, new=AsyncMock(side_effect=RuntimeError("redis down"))):
-        result = await refresh_target_topology(target, _operator(tenant_id))
-
-    # Refresh still succeeded; audit row committed.
-    assert result.added_nodes == 3
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        rows = (
-            (await session.execute(select(AuditLog).where(AuditLog.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
-    assert len(rows) == 1
+    assert "nodes" not in row.payload
+    assert "name" not in row.payload
 
 
 # ---------------------------------------------------------------------------
@@ -550,8 +511,7 @@ async def test_refresh_is_tenant_scoped() -> None:
     tenant_b, _target_b = await _seed_tenant_and_target("tenant-b")
     _FakeConnector.hints = _hints_3n2e()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        await refresh_target_topology(target_a, _operator(tenant_a))
+    await refresh_target_topology(target_a, _operator(tenant_a))
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -617,8 +577,7 @@ async def test_refresh_adopts_pre_existing_target_null_node_without_collision() 
 
     _FakeConnector.hints = _hints_3n2e()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, op)
+    result = await refresh_target_topology(target, op)
 
     # vm-a is adopted (updated, not added); vm-b + ds-1 are genuinely new.
     assert result.added_nodes == 2
@@ -672,17 +631,16 @@ async def test_refresh_does_not_soft_delete_other_targets_nodes() -> None:
         await session.commit()
         await session.refresh(target_b)
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        # Target A discovers the 3n/2e snapshot.
-        _FakeConnector.hints = _hints_3n2e()
-        await refresh_target_topology(target_a, op)
-        # Target B discovers a disjoint single node.
-        _FakeConnector.hints = TopologyHints(
-            discovered_at=datetime.now(UTC),
-            nodes=(NodeHint(kind="vm", name="vm-z"),),
-            edges=(),
-        )
-        result_b = await refresh_target_topology(target_b, op)
+    # Target A discovers the 3n/2e snapshot.
+    _FakeConnector.hints = _hints_3n2e()
+    await refresh_target_topology(target_a, op)
+    # Target B discovers a disjoint single node.
+    _FakeConnector.hints = TopologyHints(
+        discovered_at=datetime.now(UTC),
+        nodes=(NodeHint(kind="vm", name="vm-z"),),
+        edges=(),
+    )
+    result_b = await refresh_target_topology(target_b, op)
 
     # B added its own node and removed nothing — A's nodes are off-limits.
     assert result_b.added_nodes == 1
@@ -795,8 +753,7 @@ async def test_refresh_forwards_operator_to_k8s_style_discover_topology() -> Non
     op = _operator(tenant_id)
     _OperatorAwareConnector.captured_operators = []
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, op)
+    result = await refresh_target_topology(target, op)
 
     assert _OperatorAwareConnector.captured_operators == [op], (
         "refresh service must forward the operator to a populator whose "
@@ -832,9 +789,8 @@ async def test_refresh_with_k8s_style_populator_is_idempotent_on_recall() -> Non
 
     op = _operator(tenant_id)
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        first = await refresh_target_topology(target, op)
-        second = await refresh_target_topology(target, op)
+    first = await refresh_target_topology(target, op)
+    second = await refresh_target_topology(target, op)
 
     assert first.added_nodes >= 2  # ≥2 per the issue body's acceptance criterion.
     assert second.added_nodes == 0
@@ -941,8 +897,7 @@ async def test_refresh_does_not_clobber_or_adopt_curated_node() -> None:
     await _seed_curated_node(tenant_id, kind="vm", name="vm-a", last_seen=seeded_at)
 
     _FakeConnector.hints = _hints_3n2e()
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, op)
+    result = await refresh_target_topology(target, op)
 
     # vm-a is curated (heartbeat, not counted); vm-b + ds-1 are new.
     assert result.added_nodes == 2
@@ -976,27 +931,26 @@ async def test_refresh_never_soft_deletes_curated_node() -> None:
     op = _operator(tenant_id)
     await _seed_curated_node(tenant_id, kind="vm", name="vm-a", last_seen=datetime.now(UTC))
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        _FakeConnector.hints = _hints_3n2e()
-        await refresh_target_topology(target, op)
-        # vm-a (and its edge) gone from discovery.
-        _FakeConnector.hints = TopologyHints(
-            discovered_at=datetime.now(UTC),
-            nodes=(
-                NodeHint(kind="vm", name="vm-b"),
-                NodeHint(kind="datastore", name="ds-1"),
+    _FakeConnector.hints = _hints_3n2e()
+    await refresh_target_topology(target, op)
+    # vm-a (and its edge) gone from discovery.
+    _FakeConnector.hints = TopologyHints(
+        discovered_at=datetime.now(UTC),
+        nodes=(
+            NodeHint(kind="vm", name="vm-b"),
+            NodeHint(kind="datastore", name="ds-1"),
+        ),
+        edges=(
+            EdgeHint(
+                from_kind="vm",
+                from_name="vm-b",
+                to_kind="datastore",
+                to_name="ds-1",
+                kind="mounts",
             ),
-            edges=(
-                EdgeHint(
-                    from_kind="vm",
-                    from_name="vm-b",
-                    to_kind="datastore",
-                    to_name="ds-1",
-                    kind="mounts",
-                ),
-            ),
-        )
-        result = await refresh_target_topology(target, op)
+        ),
+    )
+    result = await refresh_target_topology(target, op)
 
     assert result.removed_nodes == 0, "curated node absence is not a removal"
     vm_a = await _load_node(tenant_id, "vm-a")
@@ -1030,8 +984,7 @@ async def test_promoted_curated_node_with_target_id_survives_owner_refresh() -> 
         nodes=(NodeHint(kind="vm", name="vm-z"),),
         edges=(),
     )
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, op)
+    result = await refresh_target_topology(target, op)
 
     assert result.removed_nodes == 0
     promoted = await _load_node(tenant_id, "promoted-vm")
@@ -1055,8 +1008,7 @@ async def test_resurrected_curated_node_counts_as_updated() -> None:
     await _seed_curated_node(tenant_id, kind="vm", name="vm-a", last_seen=None)
 
     _FakeConnector.hints = _hints_3n2e()
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, op)
+    result = await refresh_target_topology(target, op)
 
     assert result.updated_nodes == 1
     assert result.removed_nodes == 0
@@ -1098,8 +1050,7 @@ async def test_auto_node_reconcile_unchanged_by_source_column() -> None:
         await session.commit()
 
     _FakeConnector.hints = _hints_3n2e()
-    with patch(_PUBLISH, new=AsyncMock()):
-        result = await refresh_target_topology(target, op)
+    result = await refresh_target_topology(target, op)
 
     assert result.updated_nodes == 1
     vm_a = await _load_node(tenant_id, "vm-a")
@@ -1143,8 +1094,7 @@ async def test_expand_step_refresh_writes_no_source_scope() -> None:
         await session.commit()
 
     _FakeConnector.hints = _hints_3n2e()
-    with patch(_PUBLISH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
 
     vm_a = await _load_node(tenant_id, "vm-a")
     assert vm_a.target_id == target.id

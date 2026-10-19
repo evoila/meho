@@ -38,7 +38,6 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-import meho_backplane.broadcast.publisher as _publisher
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -112,14 +111,6 @@ def _reset_module_state() -> Iterator[None]:
     clear_registry()
     _PREVIEW_BUILDERS.clear()
     _PREVIEW_BUILDERS.update(builders_snapshot)
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_publisher, "publish_event", _noop)
 
 
 @pytest.fixture

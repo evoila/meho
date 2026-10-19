@@ -101,8 +101,8 @@ async def test_reference_soak_run_human_cycle(monkeypatch: pytest.MonkeyPatch) -
       **stage 4** (the governance invariant) which is the part that
       must hold against the live substrate and is connector-agnostic.
     * The captured ``approval.request`` + ``approval.decision`` audit
-      rows are fed into :func:`assert_approval_completeness`. Broadcast
-      no longer carries automatic events, so the event list is empty.
+      rows are fed into :func:`assert_approval_completeness`. A dispatch
+      publishes no Broadcast event (#3758), so the rows are the record.
     * :func:`scorecard_cell` then derives the supported cell: stages
       clean + no live soak yet → 🟡 SHADOW (the op is ready to enter
       stage 5, not yet ✅).
@@ -231,7 +231,6 @@ async def test_reference_soak_run_human_cycle(monkeypatch: pytest.MonkeyPatch) -
     stage4 = assert_approval_completeness(
         _OP_ID,
         audit_rows=audit_rows,
-        broadcast_events=[],
         # The resume only returned after approve_request committed the
         # decision row (we awaited the commit above before re-dispatching).
         returned_after_decision=True,

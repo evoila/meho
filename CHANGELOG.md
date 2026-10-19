@@ -103,10 +103,13 @@ connector-related release-notes line.
   and the chart's ports were fixed. Now each item of `extraEgress` is a
   normal Kubernetes egress rule that the chart adds as written. Every
   rule must have a `to` list; the chart refuses a rule without one,
-  because Kubernetes reads a missing `to` as "every destination".
-  Without the new key the chart renders exactly as before. The install
-  guide explains what to list. A chart test covers the Traefik case and
-  the refused rules.
+  because Kubernetes reads a missing `to` as "every destination". This
+  check holds even when Helm's schema check is skipped. The chart also
+  refuses keys Kubernetes does not know, so a typo such as `port:` for
+  `ports:` cannot remove a port limit. Without the new key the chart
+  renders exactly as before. The install guide explains what to list and
+  says to open only what MEHO needs. A chart test covers the Traefik
+  case and the refused rules.
 
 ## [0.35.22] - 2026-10-13
 

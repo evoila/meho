@@ -1248,11 +1248,37 @@
           "items": {
             "type": "object",
             "required": ["to"],
+            "additionalProperties": false,
             "properties": {
-              "to": { "type": "array", "minItems": 1, "items": { "type": "object" } }
+              "to": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": false,
+                  "properties": {
+                    "ipBlock": { "type": "object" },
+                    "namespaceSelector": { "type": "object" },
+                    "podSelector": { "type": "object" }
+                  }
+                }
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "port": { "type": ["integer", "string"] },
+                    "endPort": { "type": "integer" },
+                    "protocol": { "type": "string" }
+                  }
+                }
+              }
             }
           },
-          "description": "Extra Kubernetes NetworkPolicyEgressRule objects appended verbatim to the backplane NetworkPolicy (#3516): the networks of the systems MEHO manages, the AI service, and Vault / Keycloak behind an in-cluster ingress (name the ingress Pods and their targetPort — the rule is checked after the Service redirect). Each rule must carry a non-empty `to` list, because Kubernetes reads a missing or empty `to` as every destination. Other fields (`ports`) pass through; the API server validates the rest. Default empty — nothing is added."
+          "description": "Extra outgoing rules for the backplane NetworkPolicy, each a Kubernetes egress rule added exactly as written (#3516): the networks of the systems MEHO manages, the AI service, and Vault / Keycloak behind an in-cluster ingress (name the ingress Pods and their targetPort — the rule is checked after the Service redirect). Each rule must have a non-empty `to` list, because Kubernetes reads a missing or empty `to` as every destination. Only the keys Kubernetes knows are accepted (`to`, `ports`; in `to`: `ipBlock`, `namespaceSelector`, `podSelector`; in `ports`: `port`, `endPort`, `protocol`), so a typo such as `port:` for `ports:` is refused instead of silently dropping the port limit. Default empty — nothing is added."
         }
       },
       "allOf": [

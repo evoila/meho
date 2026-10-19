@@ -249,13 +249,17 @@ egress rules to:
   is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
 - Operator rules — every item of `networkPolicy.extraEgress` (default
-  `[]`), appended verbatim after the rules above (#3516)
+  `[]`), added after the rules above, exactly as written (#3516)
 
 Without `extraEgress` the backplane cannot reach the systems it manages
 or the AI service, yet `/ready` stays green, because readiness only checks
-MEHO's own dependencies. The schema requires a non-empty `to` list on each
-item: Kubernetes reads a missing or empty `to` as every destination, so a
-stray `- {}` would silently undo the default-deny egress. Kubernetes leaves
+MEHO's own dependencies. Each item must have a non-empty `to` list:
+Kubernetes reads a missing or empty `to` as every destination, so a stray
+`- {}` would silently undo the default-deny egress. The schema checks this,
+and the template checks it again with `fail`, because Helm, Flux and Argo
+CD can all skip the schema (`--skip-schema-validation`). The schema also
+accepts only the keys Kubernetes knows in a rule, a `to` item and a `ports`
+item, so a typo cannot quietly drop a port limit. Kubernetes leaves
 it undefined whether a rule is checked before or after a Service redirect;
 Calico / Canal with kube-proxy check it after. So when Vault or Keycloak
 sit behind an in-cluster ingress, traffic arrives at the ingress Pod's own

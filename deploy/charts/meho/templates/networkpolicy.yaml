@@ -116,7 +116,13 @@ spec:
         - port: 53
           protocol: UDP
     {{- with .Values.networkPolicy.extraEgress }}
-    # Operator-supplied egress rules, rendered verbatim (#3516): the
+    {{- range $i, $rule := . }}
+    {{- /* Also guarded by the schema; this check holds under --skip-schema-validation. */}}
+    {{- if not $rule.to }}
+    {{- fail (printf "networkPolicy.extraEgress[%d] has no 'to' list. Kubernetes reads a rule without 'to' as 'allow every destination'. Add a 'to' list with the networks MEHO must reach." $i) }}
+    {{- end }}
+    {{- end }}
+    # Operator egress rules, added exactly as written (#3516): the
     # systems MEHO manages, the AI service, and anything the fixed rules
     # above cannot express (Vault / Keycloak behind an ingress, whose
     # traffic is redirected to the ingress Pod port before the rule is

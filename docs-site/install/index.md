@@ -248,15 +248,28 @@ Everything else is blocked: vCenter, NSX, ESXi, SSH and WinRM hosts, and
 the AI service. MEHO still reports ready, because its readiness check only
 tests its own parts. So list those networks in `networkPolicy.extraEgress`.
 Each item is a normal Kubernetes egress rule, and the chart adds it as
-written:
+written.
+
+Open only the networks and ports MEHO needs. Each rule you add lets MEHO
+send traffic there.
 
 ```yaml
 networkPolicy:
   extraEgress:
-    # The systems MEHO manages, on every port.
+    # The systems MEHO manages. Replace the range with yours, and list
+    # only the ports your connectors use.
     - to:
         - ipBlock:
-            cidr: 10.5.0.0/16
+            cidr: 192.0.2.0/24
+      ports:
+        - port: 443     # vCenter, NSX
+          protocol: TCP
+        - port: 22      # SSH
+          protocol: TCP
+        - port: 5985    # WinRM (HTTP)
+          protocol: TCP
+        - port: 5986    # WinRM (HTTPS)
+          protocol: TCP
     # The AI service and other public APIs, on 443 only.
     - to:
         - ipBlock:
@@ -267,8 +280,16 @@ networkPolicy:
           protocol: TCP
 ```
 
+!!! warning "The second rule is wide"
+
+    This rule lets MEHO reach every public address on port 443. When you
+    can, use your AI provider's address range or your outgoing proxy
+    instead.
+
 Every rule needs a `to` list. The chart refuses a rule without one,
-because Kubernetes reads a rule with no `to` as "every destination".
+because Kubernetes reads a rule with no `to` as "every destination". The
+chart also refuses keys it does not know, so a typo such as `port:` for
+`ports:` cannot remove the port limit.
 
 **Vault or Keycloak behind your ingress.** Kubernetes does not define
 whether a network rule is checked before or after the cluster redirects a
@@ -292,6 +313,9 @@ networkPolicy:
         - port: 8443
           protocol: TCP
 ```
+
+Check the `targetPort` of your ingress Service. For ingress-nginx it is
+usually 443.
 
 The same applies to any rule: name the real Pod or address and its port,
 not the load balancer address.

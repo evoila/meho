@@ -10,7 +10,12 @@ guard, resume-target fix, write-op secret redaction) + #1503 (G0.20-T3
 
 ## Overview
 
-The approval substrate parks `requires_approval` / `caution` / `dangerous`
+Which calls wait for approval depends on the op's safety level and on who
+calls it (an agent, a person, or a service account). The table in
+[agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance)
+shows each case.
+
+The approval substrate parks `requires_approval` / `caution` / `dangerous` / `destructive`
 dispatches durably and lets an operator approve or reject them
 across **REST, MCP, and CLI** transports. Two layers, one source of
 truth:
@@ -874,6 +879,47 @@ for the paired add-on that requested the approval
 (`AddonStepEventService.record_if_owned_committed`). That answers "was it
 approved?"; the `/result` surface answers "what did the approved re-dispatch
 produce?" — complementary, not a duplicate.
+
+## The audit row of an approved run (#3864)
+
+When a person approves a request, MEHO runs the operation. The run writes its
+own audit row, separate from the `approval.decision` row. The decision row
+only says "approved". The run row says whether the change landed.
+
+What the run row holds:
+
+- `method='DISPATCH'`, `path` and `payload.op_id` set to the real op (for
+  example `keycloak.user.create`).
+- `payload.result_status` is `ok` or `error`. A failed run also has
+  `payload.error` with the `error_code` and the safe details (#2680).
+- `payload.approval_request_id` names the request it ran for.
+- `parent_audit_id` points at the request's `approval.request` row, next to
+  the decision row (#2086). The agent-run resume uses the same shape.
+- `operator_sub` is the approver, who ran it.
+
+The approve response (`dispatch_status`, `dispatch_error`) and the stored
+`resume_result` carry the same outcome. `resume_result.audit_id` is the id of
+the run row, for a failed run too.
+
+Before #3864 the REST `/approve` and `/decide` routes left their own log
+labels (`audit_op_id="approval.decide"` and siblings) in place during the run.
+The dispatcher copies every `audit_*` label into the run row, so the run row
+was labelled `approval.decide`. A search for the real op found the request
+and the decision, but no run. `_dispatch_resume_with_bound_context` now clears
+those labels for the run (`_run_audit_context`) and puts them back after. The
+route's own row keeps `approval.decide`.
+
+Two failures that must never read as success, both covered by
+`tests/test_approval_failed_run_record.py`:
+
+- **The password ref cannot be read.** `keycloak.user.create` and
+  `keycloak.user.reset_password` read the password from `password_secret_ref`.
+  When Vault refuses, cannot find, or cannot be reached for it (a connection
+  failure or timeout during the read), the run fails with
+  `vault_credentials_read_error`. The error shows only the ref prefix (for
+  example `tenants/…`) and the error class. No user is created.
+- **The Keycloak account may not write.** A 403 from Keycloak fails the run
+  with `connector_http_403`.
 
 ## Retry-safe approval requests, binding identity, and run phase (#3486)
 

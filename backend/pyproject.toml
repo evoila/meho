@@ -355,7 +355,8 @@ module = ["hvac.*"]
 ignore_missing_imports = true
 
 # ``requests`` is hvac's transport dependency. We only catch its
-# exception types in :mod:`meho_backplane.auth.vault` to map them
+# exception types in :mod:`meho_backplane.auth.vault` and
+# :mod:`meho_backplane.connectors._shared.vault_creds` to map them
 # through to backplane-side errors; we don't depend on its public API
 # directly. ``types-requests`` would pull a separate stub package into
 # the runtime image; whitelisting the module keeps the dev image lean

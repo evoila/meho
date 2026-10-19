@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _CONNECTOR_ID,
     _WRITE_REQUIRES_APPROVAL,
@@ -91,19 +92,6 @@ _OP_PBM_DELETE = "POST:/pbm/ProfileManager/PbmDelete"
 _TAG_CATEGORY_CARDINALITY = "MULTIPLE"
 #: The vim managed-object type a datastore tag-association DynamicID names.
 _DATASTORE_OBJECT_TYPE = "Datastore"
-
-
-def _issue(category: str, severity: str, message: str) -> dict[str, Any]:
-    """Build one structured ``issues[]`` entry (#3812 convention).
-
-    ``severity == "error"`` is the author-controlled marker that routes the
-    envelope through the dispatcher's error-audit path (#3809 /
-    :func:`~meho_backplane.operations.dispatcher._composite_terminal_error_code`)
-    instead of recording a failed mutation as ``ok``; ``warning`` / ``info``
-    stay on the success path (an adopted sub-step is a ``warning``, not a
-    failure).
-    """
-    return {"category": category, "severity": severity, "message": message}
 
 
 async def _gate_pbm_sub_op(
@@ -497,7 +485,7 @@ async def _create_pbm_policy(
             adopted=adopted,
             issues=[
                 *issues,
-                _issue(
+                issue(
                     "connector",
                     "error",
                     f"PbmCreate returned no policy id for {policy_name!r}",
@@ -580,7 +568,7 @@ async def _mint_or_adopt_pbm_policy(
                 adopted=adopted,
                 issues=[
                     *issues,
-                    _issue(
+                    issue(
                         "state",
                         "warning",
                         f"adopted existing storage policy {policy_name!r} "
@@ -599,7 +587,7 @@ async def _mint_or_adopt_pbm_policy(
             adopted=adopted,
             issues=[
                 *issues,
-                _issue(
+                issue(
                     "state",
                     "error",
                     f"storage policy {policy_name!r} already exists ({existing_id}) "
@@ -671,7 +659,7 @@ async def storage_policy_create_composite(
             tag_name=tag_name,
             resolved=resolved,
             issues=[
-                _issue(
+                issue(
                     "input",
                     "error",
                     f"datastore {missing!r} resolved to zero or several datastores",
@@ -702,7 +690,7 @@ async def storage_policy_create_composite(
             category_id=category_id,
             adopted=adopted,
             issues=[
-                _issue(
+                issue(
                     "state",
                     "error",
                     f"tag category {category_name!r} exists but cannot be adopted: {conflict}",
@@ -718,7 +706,7 @@ async def storage_policy_create_composite(
     adopted["category"] = cat_adopted
     if cat_adopted:
         issues.append(
-            _issue(
+            issue(
                 "state",
                 "warning",
                 f"adopted existing tag category {category_name!r} ({category_id})",
@@ -738,7 +726,7 @@ async def storage_policy_create_composite(
     adopted["tag"] = tag_adopted
     if tag_adopted:
         issues.append(
-            _issue(
+            issue(
                 "state",
                 "warning",
                 f"adopted existing tag {tag_name!r} ({tag_id}) in category {category_name!r}",
@@ -815,6 +803,13 @@ async def storage_policy_delete_composite(
             "status": "delete_failed",
             "policy_id": policy_id,
             "fault": fault_type,
+            "issues": [
+                issue(
+                    "connector",
+                    "error",
+                    f"PbmDelete refused to remove policy {policy_id!r}: {fault_type or 'fault'}",
+                )
+            ],
             "guidance": (
                 f"PbmDelete refused to remove policy {policy_id!r}"
                 + (f" ({policy_name!r})" if policy_name else "")

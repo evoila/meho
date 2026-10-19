@@ -26,6 +26,7 @@ import contextlib
 import time
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
     fault_message,
@@ -84,11 +85,6 @@ LEASE_STATE_ERROR = "error"
 # them), mirroring the ``poll_vim_task`` 600s / 2s convention.
 _LEASE_READY_TIMEOUT_SECONDS = 600.0
 _LEASE_READY_POLL_INTERVAL = 2.0
-
-
-def issue(category: str, severity: str, message: str) -> dict[str, Any]:
-    """Build one ``{category, severity, message}`` issue projection."""
-    return {"category": category, "severity": severity, "message": message}
 
 
 def fault_text(fault: Any) -> str:

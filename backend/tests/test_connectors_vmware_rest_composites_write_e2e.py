@@ -434,7 +434,12 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
     """
     empty: dict[str, Any] = {"value": []}
     per_composite: dict[str, dict[str, Any]] = {
-        "vmware.composite.vm.create": {"/vcenter/folder": empty},
+        # vm.create: the folder resolves and the create returns the new VM id.
+        # An empty folder listing would roll back, which is an error (#3813).
+        "vmware.composite.vm.create": {
+            "/vcenter/folder": {"value": [{"folder": "group-v1"}]},
+            "/vcenter/vm": {"value": "vm-benign"},
+        },
         "vmware.composite.vm.clone": {
             "/vcenter/vm-template/library-items/lib-1?action=deploy": {"value": "vm-benign"},
         },
@@ -681,7 +686,9 @@ async def test_vm_create_rollback_on_nic_failure(
         },
     )
 
-    assert result.status == "ok", result.error
+    # #3813: a rolled-back create is a failed call, not ok.
+    assert result.status == "error", result.result
+    assert result.extras["error_code"] == "rolled_back"
     assert result.result["status"] == "rolled_back"
     assert result.result["failed_step"] == "nic_attach"
     assert result.result["vm_id"] is None
@@ -2412,7 +2419,9 @@ async def test_vm_create_rollback_park_approve_resume_deletes_and_creates_nothin
         target=_FakeVmwareTarget(target_id=target_id),
         params=params,
     )
-    assert result.status == "ok", result.error
+    # #3813: a rolled-back create is a failed call, not ok.
+    assert result.status == "error", result.result
+    assert result.extras["error_code"] == "rolled_back"
     assert result.result["status"] == "rolled_back"
     first_calls = list(recorder.calls)
     assert first_calls == [
@@ -2429,7 +2438,8 @@ async def test_vm_create_rollback_park_approve_resume_deletes_and_creates_nothin
 
     resume = await _resume(pending.id, await _approve_as(pending.id, "ops-reviewer"))
 
-    assert resume.status == "ok", resume.error
+    assert resume.status == "error", resume.result
+    assert resume.extras["error_code"] == "rolled_back"
     assert resume.result == result.result
     assert recorder.calls == [*first_calls, ("DELETE", "/vcenter/vm/vm-rb-1")]
     assert await _approval_row_count() == 1

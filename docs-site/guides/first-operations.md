@@ -104,7 +104,7 @@ meho operation search k8s-1.x "pods that are not running" --group workload
 Each hit carries the fields that matter before you call anything:
 
 - **`op_id`** — the handle you pass to call, e.g. `k8s.pod.list`.
-- **`safety_level`** — `safe`, `caution`, or `dangerous`.
+- **`safety_level`** — `safe`, `caution`, `dangerous`, or `destructive`.
 - **`requires_approval`** — whether a call parks for a second pair of
   eyes instead of executing.
 
@@ -293,6 +293,12 @@ By default you cannot approve your own request (the four-eyes rule),
 and parked requests expire on a TTL. The full story — including the
 audited single-operator break-glass — is the
 [approvals & break-glass guide](approvals-and-break-glass.md).
+
+`safety_level` works differently: what happens depends on who calls. For
+example, an agent's `caution` call waits for approval, but a person's
+`caution` call runs at once. The table in the
+[agent permission model](https://github.com/evoila/meho/blob/main/docs/codebase/agent-permission-model.md#safety-levels-at-a-glance)
+shows each safety level for agents, people and service accounts.
 
 Before approving *any* fan-out write: open the approval payload and
 verify the resolved object list first. An unconstrained filter is how

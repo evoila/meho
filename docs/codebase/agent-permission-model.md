@@ -12,12 +12,54 @@ The verdict is the intersection of three independent gates:
 effective = user-role-allows ∩ agent-permission ∩ op-requirement
 ```
 
-Human operators and service accounts keep the v0.2 contract (default-allow
-except `requires_approval`); see [Principal-kind branch](#principal-kind-branch).
+People and service accounts do not use this resolver. They follow a
+simpler rule, set by the op's `safety_level` and `requires_approval`; see
+[Principal-kind branch](#principal-kind-branch).
 
 The full resolution lives in `meho_backplane/auth/permissions.py`; the gate is
 called from `meho_backplane/operations/_validate.py`; the dispatcher branches
 on the result in `meho_backplane/operations/dispatcher.py`.
+
+## Safety levels at a glance
+
+This is what happens today when no grant matches. In this table:
+
+- **Agent login** is a token for an agent identity (`principal_kind=agent`).
+- **Person** is a person's login (`principal_kind=user`).
+- **Service account** is fixed automation that logs in with a client secret
+  (`principal_kind=service`).
+
+| Safety level | Agent login, no grant | Person | Service account |
+|---|---|---|---|
+| `safe` | runs at once | runs at once | runs at once |
+| `caution` | waits for approval | runs at once | a change waits for approval unless a standing grant covers it; a read runs at once |
+| `dangerous` | refused (a grant can change this to "waits for approval") | runs at once | waits for approval unless a standing grant covers it |
+| `destructive` | always refused | waits for approval | always waits for approval |
+
+One sentence per level:
+
+- **`safe`:** an agent login runs it at once, and so does a person.
+- **`caution`:** an agent login waits until a person approves it (it is
+  not refused), and a person runs it at once.
+- **`dangerous`:** an agent login is refused unless a grant allows it, and
+  then it still waits for approval; a person runs it at once.
+- **`destructive`:** an agent login is always refused, and a person always
+  waits for approval. A destructive call must first get a `preview_hash`
+  from `preview_operation` and pass it to `call_operation`; without a
+  matching hash, MEHO refuses the call and stores no approval request
+  (#3197).
+
+An op marked `requires_approval` also waits for approval, for every kind of
+login. There are two exceptions. A refusal for an agent login stays a
+refusal. A service account's standing grant can still let the op run, but
+never a `destructive` one.
+
+"Waits for approval" means MEHO stores an approval request and returns
+`awaiting_approval`. The op runs only after someone approves it. See
+[approvals.md](approvals.md).
+
+An agent with the `read_only` role never runs anything at once: its best
+result is "waits for approval" (see step 5 below).
 
 ## Key types
 
@@ -64,10 +106,23 @@ One row = one permission grant for a principal.
 `policy_gate` (`_validate.py`) branches on `operator.principal_kind` (from
 G11.2-T1):
 
-- **`user` / `service`** — `requires_approval=True` → `needs-approval` (routed
-  to the approval queue, **not** hard-denied, since G11.7-T1 #1401 — ops-team
-  operators authenticate as `user` principals, so the old hard-deny returned
-  `denied` to the very people meant to run the op); otherwise `auto-execute`.
+- **Every kind that is not `agent`** (`user`, `service`, `runner`) —
+  `_non_agent_verdict` (`_validate.py`). It never returns `deny`. It returns
+  `needs-approval` in these cases, in this order:
+  1. `safety_level=destructive` — for every person and every service
+     account, even when `requires_approval` is false (#3198). No standing
+     grant can clear it.
+  2. `requires_approval=True` — the op goes to the approval queue, not a
+     hard deny (G11.7-T1 #1401).
+  3. Service accounts only (`_service_safety_gate_reason`, #3152): a
+     `dangerous` op, and a `caution` op that changes something. A
+     `caution` read (`GET` / `HEAD`) runs at once. A typed `caution` op
+     has no HTTP method, so it always counts as a change.
+
+  A service account with a live standing grant that covers the op runs it
+  at once; MEHO records the grant use on the approvals audit ledger (#3151,
+  see [service-principal-grants.md](service-principal-grants.md)). Everything
+  else returns `auto-execute`.
   **The per-agent resolver is never consulted for a non-agent token: no
   `agent_permission` row is loaded on this branch, so a grant has zero effect
   on a `user`/`service`-kind dispatch.** This is deliberate (G11.2-T3) — an op a
@@ -142,13 +197,18 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    | `dangerous` | `needs-approval` | `auto-execute` row → `needs-approval`; a dangerous op is grantable up to human approval, never auto-executed. The *default* (no grant) stays `deny`. |
    | `destructive` | `deny` | `auto-execute` / `needs-approval` row → `deny`; the tier is **non-grantable for agents** — no `AgentPermission` grant lifts an agent principal off `deny` (#3183). |
 
-   For `caution` / `dangerous` this is the "deny **unless granted**" rule
-   (#820): the no-grant default is `deny`, but an explicit grant *is*
-   honoured up to the `needs-approval` ceiling. The `destructive` tier
-   (#3183) is the exception — its ceiling is `deny`, so it is denied for
-   agent principals regardless of any grant. Governed execution of a
-   destructive op is a human decision on the non-agent approval path
-   (#3197 / #3198), never an agent verdict.
+   So no grant can make a `caution` or `dangerous` op run at once for an
+   agent. The best a grant can give is "waits for approval".
+
+   - `caution`: the default with no grant is already `needs-approval`. The
+     op waits for approval; it is **not** refused. A grant cannot loosen
+     this. A `deny` grant can tighten it to a refusal.
+   - `dangerous`: the default with no grant is `deny`. A grant with
+     `auto-execute` or `needs-approval` lifts it to `needs-approval`. This
+     is the "deny **unless granted**" rule (#820).
+   - `destructive` (#3183): the default and the ceiling are both `deny`, so
+     an agent is refused whatever grant exists. Running a destructive op is
+     a human decision on the non-agent approval path (#3197 / #3198).
 
 5. **Apply role ceiling.** `READ_ONLY` principals are capped at `needs-approval`;
    `OPERATOR` and `TENANT_ADMIN` are uncapped.
@@ -165,11 +225,31 @@ verdict, gate_reason = await policy_gate(operator=..., descriptor=..., target=..
 if verdict == DENY:
     → audit row (status="denied") + result_denied(reason)        # 403
 elif verdict == NEEDS_APPROVAL:
-    → audit row (status="pending") + result_pending(reason)      # 202
+    → _handle_needs_approval(...)                                # 202
+      stores an ApprovalRequest row + its "request" audit row,
+      returns result_awaiting_approval (status="awaiting_approval")
 elif verdict != AUTO_EXECUTE:
     → audit row (status="denied") + result_denied(...)           # defensive fail-closed
 # else AUTO_EXECUTE: continue to connector resolution
 ```
+
+A `deny` verdict refuses the call. A `needs-approval` verdict usually
+stores an approval request and waits: the stored request runs after someone
+approves it (#817). In a few cases `_handle_needs_approval` refuses the call
+instead and stores nothing:
+
+- a `destructive` op without a matching `preview_hash` from
+  `preview_operation`, or without a blast-radius statement
+  (`_destructive_binding_refusal`, #3197);
+- a write that the permission check before storing says will be denied
+  (`_preflight_denied_refusal`, `write_capability_denied`, #3542);
+- an `idempotency_key` that a different call already uses
+  (`idempotency_key_conflict`, #3486);
+- an unexpected error while storing the request (the call is refused, not
+  left half-stored).
+
+See [approvals.md](approvals.md) for the queue, the approve and reject
+verbs, and the resume path.
 
 `policy_gate` (`_validate.py`) opens its own DB session (same
 `get_sessionmaker()` pattern as `audit_and_broadcast_safe`) and calls
@@ -177,27 +257,27 @@ elif verdict != AUTO_EXECUTE:
 
 ### Audit-query agreement
 
-A `needs-approval` dispatch persists `result_status="pending"` (synthetic HTTP
-`202`) on both the audit row and the broadcast event. The audit-query read path
+A `needs-approval` dispatch writes its "request" audit row with the
+synthetic status code `202` (`approval_queue.py`). The audit-query read path
 (`audit_query/query.py`) derives `pending` from `status_code == 202` and offers
-a `result_status="pending"` filter, so the audit API and the broadcast feed
-agree on the same `audit_id` rather than collapsing the 202 (a 2xx) to `ok`.
+a `result_status="pending"` filter, so a waiting call is not counted as `ok`.
 
 ## Dependencies
 
 - `meho_backplane/auth/operator.py` — `Operator`, `TenantRole`, `PrincipalKind`
 - `meho_backplane/db/engine.py` — `get_sessionmaker`
 - `meho_backplane/db/models.py` — `AgentPermission`, `PermissionVerdict`
-- `meho_backplane/operations/_errors.py` — `result_denied`, `result_pending`,
-  `status_code_for_result` (202 for pending, 403 for denied)
+- `meho_backplane/operations/_errors.py` — `result_denied`,
+  `result_awaiting_approval`, `status_code_for_result` (202 for
+  `awaiting_approval`, 403 for denied)
+- `meho_backplane/operations/approval_queue.py` — `create_pending_request`
 
 ## Known issues
 
-- **No row-management API.** G11.2-T3 ships the resolver and schema only;
-  grant/revoke CLI + MCP + REST verbs are G11.2-T6 (#819).
-- **Approval queue stub.** `needs-approval` writes an audit row and returns HTTP
-  202 today; the durable approval-queue mechanics (G11.2-T4, #817) add the real
-  pending row + resume path.
+- **Rules for agents will change.** #3980 plans that only `safe` runs at
+  once for agents and token calls, and everything else waits for approval.
+  This page describes the code that runs today. Update it when that change
+  lands.
 - **Soft FK to principal.** `principal_sub` has no database FK to the
   agent-principal table (`agent_principal`, G11.2-T1); a tightening migration
   can add it later. `AgentGrantService.grant` now enforces the reference at the
@@ -213,7 +293,13 @@ agree on the same `audit_id` rather than collapsing the 202 (a 2xx) to `ok`.
 - #3795 — enforce grants on the token's client identity (`azp`); `principal_kind=user-agent` for user-sub agent principals
 - `backend/src/meho_backplane/auth/permissions.py`
 - `backend/src/meho_backplane/auth/jwt.py` — `_extract_client_id` (surfaces the agent clientId)
-- `backend/src/meho_backplane/operations/_validate.py`
+- `backend/src/meho_backplane/operations/_validate.py` — `policy_gate`,
+  `_non_agent_verdict`, `_service_safety_gate_reason`
+- `backend/src/meho_backplane/operations/dispatcher.py` — `_handle_needs_approval`
+- [agent-permission-grants.md](agent-permission-grants.md) — how to list,
+  create and revoke grants (REST, CLI, and the operator-plane MCP tools
+  `meho_agents_grant_list`, `_show`, `_create`, `_revoke`; G11.2-T6 #819)
+- [approvals.md](approvals.md) — the approval queue
 - `backend/src/meho_backplane/agents/grants.py` — `AgentGrantService.grant`
   create-time principal check (#2489)
 - `backend/src/meho_backplane/agents/identity_ref.py` — the sibling

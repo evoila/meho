@@ -578,6 +578,40 @@ missing and the Python jobs fail** — the intended fail-closed behaviour (a
 layout/pin regression must fail CI, not silently skip the lane); the entry is
 **not** removed to force green.
 
+### Extension: vcenter-8.0, vcf-installer-9.1, esxi-9.0 and vks-9.0 (#4330)
+
+This change checks out two more shelf folders, so two reconcile lanes run in
+CI instead of skipping. The same secret-gated checkout and the same rules
+apply (read-only, the runner is deleted when the job ends, never committed,
+never in artifacts or logs, no secret for fork PRs or Dependabot).
+
+| Shelf folder | Checked out | File the verify step requires | Lane that reads it |
+|---|---|---|---|
+| `vcenter-8.0` | yes | `vcenter-8.0/vcenter.yaml` | `backend/tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` |
+| `vcf-installer-9.1` | yes | `vcf-installer-9.1/vcf-installer-openapi.json` | `backend/tests/test_connectors_vcf_installer_spec_reconcile.py` |
+| `esxi-9.0` | no | none | none yet |
+| `vks-9.0` | no | none | none yet |
+
+- **`vcenter-8.0`** (~5 MB). The vSphere 8.0 U3 `vcenter.yaml`, made from a
+  vCenter's own API metadata and pinned on the shelf (provenance and sha256:
+  the `vsphere-8.x` entry of `docs/compatibility/vcf-api-contract-manifest.yaml`
+  and the shelf's `vcenter-8.0/MANIFEST.md`). This is a vendor-served file, so
+  the wave-3 blanket determination in the NSX section above covers it. No new
+  attestation is needed.
+- **`vcf-installer-9.1`** (~0.4 MB). The VCF Installer OpenAPI 3.0.1 file from
+  the **public, Apache-2.0** [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs)
+  repo (pinned at `3949fc33`). Provenance note of record: the shelf's
+  `vcf-installer-9.1/MANIFEST.md`. No attestation is needed.
+- **`esxi-9.0` and `vks-9.0`** are on the shelf, but no test in this repo reads
+  them yet. CI does not check them out, and the verify step does not require
+  them, because a required file that no lane reads checks nothing. The Task
+  that adds the first lane for one of these folders adds the folder to both
+  Python jobs' checkout list and its file to the verify step, in the same
+  pull request.
+
+Both lanes passed against the pinned files before this change was merged
+(9 tests, none skipped). There are no known gaps.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

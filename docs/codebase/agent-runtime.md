@@ -285,8 +285,9 @@ keeps the legacy two tools until it is migrated to a spec. Runbook, approval, an
 out of the catalog on purpose; this is not full 25-tool parity with MCP.
 
 Hosted calls to these four tools do not write the per-call MCP audit row
-(`mcp/audit.py`); that row belongs to the MCP transport. `call_operation`
-still writes its dispatch audit row as before.
+(`mcp/audit.py`); that row belongs to the MCP transport. They write the
+agent tool call row instead (see [Audit of agent tool calls](#audit-of-agent-tool-calls-4234)).
+`call_operation` still writes its dispatch audit row as before.
 
 ### Backplane health and connector discovery (#4233)
 
@@ -392,7 +393,7 @@ count), and logged as `agent_hosted_context_over_budget`. With
 
 Memory, knowledge base, and topology are on demand only; nothing loads them
 into the prompt. Like the #3737 tools, hosted reads do not write the per-call
-MCP audit row.
+MCP audit row; they write the agent tool call row.
 
 **Delivery receipt (#3763).** Each hosted context build also returns a
 `HostedContextReceipt` (`HostedContext.receipt`). It says what MEHO
@@ -437,6 +438,52 @@ Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
 `None`, granted-versus-denied capability, budget-overflow, usage-link, and
 run-id (two concurrent runs, a bound durable id, a parent and its child)
 cases.
+
+### Audit of agent tool calls (#4234)
+
+Every tool call a hosted agent makes leaves one `audit_log` row, keyed by
+`agent_session_id` = the run id. This covers discovery calls, broadcast
+reads, refused calls, calls that fail, and calls to a tool name the run
+cannot use. A run that fails before it reaches the dispatcher still shows
+what the agent tried. For a child run started by `invoke_agent`, the rows
+carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstructable)).
+
+- **Where.** `agent/tool_audit.py`. `ToolCallAudit` is a Pydantic AI
+  capability. `PydanticAgentRun._build_agent` passes it to every agent it
+  builds (`Agent(..., capabilities=[ToolCallAudit()])`), so its
+  `wrap_tool_execute` hook wraps every function tool: the catalog tools,
+  the legacy two-tool surface, and `invoke_agent`. Its
+  `on_tool_validate_error` hook records a call whose arguments failed
+  validation. Its `after_model_request` hook records a call to a tool name
+  the run cannot use: Pydantic AI rejects such a name before any tool hook
+  runs, so the hook reads the attempt from the model's response. The tool
+  is not enabled; the model still gets the framework's retry message.
+- **One row per call.** The hook opens the same classified record scope the
+  REST and MCP wrappers use (`audit_cutover.open_classified_record_scope`).
+  If the call already committed its own classified row for the caller (a
+  dispatch through `call_operation`), no second row is written. Each row
+  the hook writes gets its own scope, so a child run's row (for example a
+  child's unknown-tool or bad-arguments row after the cutover) never counts
+  as the record of the parent's `invoke_agent` call.
+- **Row shape.** `method="AGENT"`, `path="/agent/tools/call/<tool>"`. The
+  payload holds `op_id` (the tool name), `params_hash`, `op_class`,
+  `error_type` on a failure, and the agent model and provider. Arguments and
+  error text are never stored.
+- **Status.** 200 success, 403 a call the toolset refused (role floor or
+  connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
+  arguments, a retry the tool asked for, or a call to a tool name the run
+  cannot use (`error_type` is `UnknownToolError`), 500 an error. Pydantic AI wraps
+  a tool's `ModelRetry` in `ToolRetryError`; the hook reads the tool's own
+  exception from `__cause__`.
+- **Event class.** `legacy_request` while `AUDIT_WRAPPER_ROWS_RETIRED` is
+  off. With it on, a refusal is `policy_decision` and any other call is
+  `operation_execution`. An agent run has no request usage event, so its
+  routine calls keep their audit row after the cutover.
+- **Fail-closed.** The row commits before the result goes back to the
+  model. If the write fails, the tool call raises and the run fails.
+
+The run row records its end time in `ended_at` for every end state
+(succeeded, failed, cancelled); `operations/agent_run.transition` stamps it.
 
 ## Invocation surface (T4 #811)
 
@@ -696,8 +743,12 @@ The child run is recorded as a child of the parent in two parallel lineages:
   is nothing for the finalizer to close).
 - **Session lineage** — `current_agent_run_id_var` carries the current run's id
   for the duration of a child invocation, so a nested `invoke_agent` reads it as
-  the next child's `parent_run_id` and per-tool-call audit rows correlate to
-  their run.
+  the next child's `parent_run_id`. `agent_session_id_var` (the audit session
+  id) is bound to the child's run id for the same span (#4234), so every audit
+  row the child writes, including the dispatcher's rows, carries the child's
+  run id. The parent's own `invoke_agent` row is written after the child loop
+  ends and keeps the parent's run id. A query by either run id finds that
+  run's calls.
 
 ### Why a tool factory, not a standalone service
 
@@ -1237,6 +1288,11 @@ the architecture grounding it links back to.
 
 ## Testing
 
+- `backend/tests/test_agent_tool_audit.py` — one audit row per agent tool
+  call (#4234): a succeeding run, a run that fails before any dispatch,
+  arguments that fail validation, the classes after the wrapper cutover,
+  fail-closed on an audit write failure, and `ended_at` on succeeded,
+  failed and cancelled runs.
 - `backend/tests/test_agent_run.py` — unit tests against a deterministic
   `FunctionModel` (no network): the loop calls `call_operation` against a
   seeded typed op, the turn budget caps a runaway loop, `output_type` is

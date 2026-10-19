@@ -99,6 +99,13 @@ for each REST request and each MCP tool call or resource read:
 A request with no row also publishes no broadcast event. Every request
 still writes its usage event.
 
+Tool calls made by a hosted agent keep their audit row after the cutover
+(#4234). An agent run has no usage event, so the row is the only record.
+A refused call gets a `policy_decision` row. Every other call gets an
+`operation_execution` row; `payload.op_class` tells routine calls apart.
+The writer is `agent/tool_audit.py`; see
+[Audit of agent tool calls](agent-runtime.md#audit-of-agent-tool-calls-4234).
+
 The wrapper row carried the request's lineage: the agent session, the
 delegated actor, the parent record, the request id and the work
 reference. Many domain writers (a connector edit, a topology edit, ...)

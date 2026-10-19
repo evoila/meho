@@ -326,8 +326,11 @@ _TARGETS_OP = PrometheusOp(
             "When the result comes back as a handle, ``target_health`` is the "
             "stored row set: use ``result_query`` to filter "
             "``health = 'down'`` or to count rows grouped by ``health`` or "
-            "``job``. ``target_health`` is left out when there are no active "
-            "targets."
+            "``job``. Only the ``target_health`` rows are stored in the "
+            "handle: the raw ``data`` (``droppedTargets`` and the full labels "
+            "of each target) is not kept. To read dropped targets, call again "
+            "with ``state=dropped``. ``target_health`` is left out when there "
+            "are no active targets."
         ),
         "result_objects": {"objects": {"target_health_totals": ["up", "down", "unknown"]}},
     },

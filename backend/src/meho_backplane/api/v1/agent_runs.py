@@ -164,6 +164,20 @@ class AgentRunStatusResponse(BaseModel):
     error: str | None
     agent_definition_id: uuid.UUID | None
     agent_name: str | None
+    identity_sub: str | None = Field(
+        default=None,
+        description=(
+            "Who the run acts for: the person who started a direct run, "
+            "or the agent itself on a scheduled run."
+        ),
+    )
+    identity_act: str | None = Field(
+        default=None,
+        description=(
+            "The agent that acts for identity_sub on a direct run. "
+            "Null when the agent is itself the subject."
+        ),
+    )
 
 
 class AgentRunSummaryResponse(BaseModel):
@@ -188,6 +202,20 @@ class AgentRunSummaryResponse(BaseModel):
     work_ref: str | None
     agent_definition_id: uuid.UUID | None
     agent_name: str | None
+    identity_sub: str | None = Field(
+        default=None,
+        description=(
+            "Who the run acts for: the person who started a direct run, "
+            "or the agent itself on a scheduled run."
+        ),
+    )
+    identity_act: str | None = Field(
+        default=None,
+        description=(
+            "The agent that acts for identity_sub on a direct run. "
+            "Null when the agent is itself the subject."
+        ),
+    )
     created_at: datetime
     started_at: datetime | None
     ended_at: datetime | None
@@ -262,6 +290,8 @@ def _summary_response(summary: AgentRunSummary) -> AgentRunSummaryResponse:
         work_ref=summary.work_ref,
         agent_definition_id=summary.agent_definition_id,
         agent_name=summary.agent_name,
+        identity_sub=summary.identity_sub,
+        identity_act=summary.identity_act,
         created_at=summary.created_at,
         started_at=summary.started_at,
         ended_at=summary.ended_at,
@@ -411,6 +441,8 @@ async def get_run_status(
         error=view.error,
         agent_definition_id=view.agent_definition_id,
         agent_name=view.agent_name,
+        identity_sub=view.identity_sub,
+        identity_act=view.identity_act,
     )
 
 

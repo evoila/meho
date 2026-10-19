@@ -22744,6 +22744,18 @@
             "type": "string",
             "nullable": true,
             "title": "Agent Name"
+          },
+          "identity_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub",
+            "description": "Who the run acts for: the person who started a direct run, or the agent itself on a scheduled run."
+          },
+          "identity_act": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Act",
+            "description": "The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject."
           }
         },
         "type": "object",
@@ -22808,6 +22820,18 @@
             "type": "string",
             "nullable": true,
             "title": "Agent Name"
+          },
+          "identity_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub",
+            "description": "Who the run acts for: the person who started a direct run, or the agent itself on a scheduled run."
+          },
+          "identity_act": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Act",
+            "description": "The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject."
           },
           "created_at": {
             "type": "string",

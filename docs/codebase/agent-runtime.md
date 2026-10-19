@@ -369,6 +369,41 @@ persisted definition (T2 `AgentDefinitionService`), and the durable run row
   `(run_id, AgentRunEvent)` and recording the terminal outcome on the run
   row so a streamed run is still poll-able afterward.
 
+### Whose identity a direct run uses (#4237)
+
+A run is either **direct** (a person starts it over REST, MCP, CLI or the
+console, through `run` or `stream_events`) or **scheduled** (the scheduler
+starts it, through `run_scheduled`). The two use identity like this:
+
+| | Direct run | Scheduled run |
+|---|---|---|
+| Who calls the backplane | the person, with their own token | the agent, with its own `client_credentials` token |
+| `agent_run.identity_sub` | the person | the agent |
+| `agent_run.identity_act` | the agent (`identity_ref`, `agent:<name>`) | null |
+| Audit row `operator_sub` / `actor_sub` | person / agent | agent / null |
+| Broadcast `principal_sub` / `actor_sub` | person / agent | agent / null |
+| Grants that limit each call | the person's **and** the agent's (stricter wins) | the agent's |
+
+A direct run works "on behalf of" the person: the person stays the subject
+and the agent is the actor (RFC 8693 `sub` + `act`). `run` and
+`stream_events` bind the agent with `auth/delegation.py::actor_delegation`
+for the whole run. Every audit row, broadcast event and approval request the
+run makes reads that binding, so they all name both identities and carry the
+run id as `agent_session_id`.
+
+The policy gate (`operations/_validate.py::policy_gate`) also reads the
+binding. It works out the agent's verdict from its `agent:<name>` grants
+and the person's own verdict, and the stricter one wins. So the agent's
+grants limit a direct run the same way they limit a scheduled one: an op the
+agent's grants deny is denied, even when the person could run it alone. A
+call that must wait for approval follows the normal approval rules (the
+person who asked cannot approve their own request, unless the deploy allows it). See
+`agent-permission-model.md`.
+
+MEHO does not swap the person's token for the agent's on a direct run. That
+would need a token exchange the identity provider does not offer, and it
+would make the agent, not the person, the one who asked for each approval.
+
 **Why a run store.** The seam's `AgentRunHandle` wraps an in-memory
 `asyncio.Task`. A FastAPI request's task tree is torn down when the request
 returns, so a fire-and-forget async run would be cancelled the instant the

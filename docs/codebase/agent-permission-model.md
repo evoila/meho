@@ -68,15 +68,26 @@ G11.2-T1):
   to the approval queue, **not** hard-denied, since G11.7-T1 #1401 — ops-team
   operators authenticate as `user` principals, so the old hard-deny returned
   `denied` to the very people meant to run the op); otherwise `auto-execute`.
-  **The per-agent resolver is never consulted for a non-agent token: no
-  `agent_permission` row is loaded on this branch, so a grant has zero effect
-  on a `user`/`service`-kind dispatch.** This is deliberate (G11.2-T3) — an op a
+  **Outside a direct hosted-agent run, the per-agent resolver is never
+  consulted for a non-agent token: no `agent_permission` row is loaded on this
+  branch, so a grant has zero effect on a `user`/`service`-kind dispatch.** This is deliberate (G11.2-T3) — an op a
   human operator has always been able to run must not silently start
   pending/denying because someone wrote a grant.
 - **`agent`** — the full per-(principal, op, target) resolver below. After
   resolution, `requires_approval=True` folds the verdict up to at least
   `needs-approval`, so a connector-flagged op is never auto-executed by an agent
   regardless of its `safety_level`.
+- **`user` / `service` inside a direct hosted-agent run** (#4237) — when a
+  person starts a hosted agent run directly, the run binds the definition's
+  agent (`identity_ref`, `agent:<name>`) as the actor
+  (`auth/delegation.py::actor_delegation`). `policy_gate` sees the bound actor
+  and works out two verdicts: the agent's (the resolver below, keyed on
+  `agent:<name>`, with the person's role ceiling) and the person's (the
+  `user` / `service` branch above). The stricter one wins. An agent `deny`
+  returns before the person's verdict is worked out, so a standing grant is
+  never recorded as used for a call that does not run. The rule in one line:
+  a direct run may do only what both the person and the agent may do. See
+  `agent-runtime.md` "Whose identity a direct run uses".
 
 Because a grant is consulted **only** on the `agent` branch, a grant whose
 `principal_sub` names no registered, non-revoked agent principal can never be

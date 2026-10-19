@@ -33,6 +33,7 @@ import structlog
 from jsonschema import Draft202012Validator
 from referencing.exceptions import Unresolvable
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.db.engine import get_sessionmaker
@@ -490,6 +491,10 @@ async def policy_gate(
     ``requires_approval`` op now routes them to the **approval queue**
     (``needs-approval``) rather than hard-denying.
 
+    **Direct hosted-agent runs** (#4237): when an actor is bound, the call
+    gets the stricter of the person's and the agent's verdict
+    (:func:`_direct_run_verdict`).
+
     **Service principals** (client-credentials, ``principal_kind ==
     service``) additionally consult ``safety_level`` (#3152): a mutating
     ``caution`` / ``dangerous`` op parks even without ``requires_approval``.
@@ -510,18 +515,63 @@ async def policy_gate(
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
     """
-    # --- Human / service principals: default-allow, queue on approval --
-    # (a service principal additionally consults safety_level + standing
-    # grants — see :func:`_non_agent_verdict`).
-    if operator.principal_kind is not PrincipalKind.AGENT:
-        return await _non_agent_verdict(
+    if operator.principal_kind is PrincipalKind.AGENT:
+        return await _agent_verdict(operator=operator, descriptor=descriptor, target=target)
+    actor_sub = resolve_actor_sub()
+    if actor_sub is not None:
+        return await _direct_run_verdict(
             operator=operator,
+            actor_sub=actor_sub,
             descriptor=descriptor,
             target=target,
             connector_id=connector_id,
         )
+    return await _non_agent_verdict(
+        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+    )
 
-    # --- Agent principals: per-(principal, op, target) verdict ----------
+
+async def _direct_run_verdict(
+    *,
+    operator: Operator,
+    actor_sub: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+) -> tuple[PermissionVerdict, str | None]:
+    """Verdict for a call made by a direct hosted-agent run (#4237).
+
+    The person who started the run is the subject; the run's agent is the
+    actor. The agent's verdict uses its ``agent:<name>`` grants, the agent
+    safety defaults and the person's role ceiling. The stricter of the
+    agent's and the person's verdict wins. An agent denial returns first,
+    so a standing grant is never recorded as used for a call that does
+    not run.
+    """
+    agent = operator.model_copy(
+        update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
+    )
+    agent_verdict, agent_reason = await _agent_verdict(
+        operator=agent, descriptor=descriptor, target=target
+    )
+    agent_result = (agent_verdict, f"agent {actor_sub} acting for {operator.sub}: {agent_reason}")
+    if agent_verdict is PermissionVerdict.DENY:
+        return agent_result
+    verdict, reason = await _non_agent_verdict(
+        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+    )
+    if _more_restrictive(verdict, agent_verdict) is verdict:
+        return verdict, reason
+    return agent_result
+
+
+async def _agent_verdict(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+) -> tuple[PermissionVerdict, str | None]:
+    """Resolve the per-(principal, op, target) verdict for an agent principal."""
     target_id = getattr(target, "id", target) if target is not None else None
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

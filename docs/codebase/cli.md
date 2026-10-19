@@ -252,7 +252,7 @@ cli/
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
     │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
-    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams.
+    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams. A 200 with the backplane's `status: "rate_limited"` envelope is rendered as unexpected_response (exit 4) with the wait, in both ranked and `--op-id` mode.
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.

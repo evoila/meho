@@ -52,6 +52,49 @@ type SearchResponse struct {
 	QueryDurationMs float64     `json:"query_duration_ms"`
 }
 
+// rateLimitedError is returned when the backplane answers the search
+// with HTTP 200 and a `status: "rate_limited"` envelope instead of
+// hits or a contract. The caller is over its per-minute dispatch
+// budget; the envelope says how long to wait.
+type rateLimitedError struct {
+	Limit             int
+	RetryAfterSeconds int
+	Message           string
+}
+
+func (e *rateLimitedError) Error() string {
+	if e.RetryAfterSeconds > 0 {
+		return fmt.Sprintf(
+			"rate limited: %d requests per minute allowed; wait %d seconds and try again",
+			e.Limit, e.RetryAfterSeconds,
+		)
+	}
+	if e.Message != "" {
+		return "rate limited: " + e.Message
+	}
+	return "rate limited: wait a moment and try again"
+}
+
+// rateLimitedEnvelope decodes the 200 body far enough to tell a
+// rate-limit refusal from a real result. It returns nil for every
+// other body, including bodies that are not valid JSON.
+func rateLimitedEnvelope(body []byte) *rateLimitedError {
+	var env struct {
+		Status            string `json:"status"`
+		Limit             int    `json:"limit"`
+		RetryAfterSeconds int    `json:"retry_after_seconds"`
+		Error             string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || env.Status != "rate_limited" {
+		return nil
+	}
+	return &rateLimitedError{
+		Limit:             env.Limit,
+		RetryAfterSeconds: env.RetryAfterSeconds,
+		Message:           env.Error,
+	}
+}
+
 // newSearchCmd returns the `meho operation search` command.
 //
 // CLI shape:
@@ -217,7 +260,10 @@ func getSearch(ctx context.Context, client operationsAPI, opts searchOptions) (*
 }
 
 // fetchSearch sends the search GET (with one token refresh on 401) and
-// returns the raw 200 body. Shared by ranked and exact-op mode.
+// returns the raw 200 body. Shared by ranked and exact-op mode. A 200
+// that carries the backplane's rate_limited envelope is an error, not
+// a body: decoding it as hits or a contract would print empty fields
+// and exit 0.
 func fetchSearch(
 	ctx context.Context,
 	client operationsAPI,
@@ -238,6 +284,9 @@ func fetchSearch(
 	}
 	if resp.StatusCode() != http.StatusOK {
 		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+	}
+	if limited := rateLimitedEnvelope(resp.Body); limited != nil {
+		return nil, limited
 	}
 	return resp.Body, nil
 }

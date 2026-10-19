@@ -360,7 +360,10 @@ carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstruc
 - **One row per call.** The hook opens the same classified record scope the
   REST and MCP wrappers use (`audit_cutover.open_classified_record_scope`).
   If the call already committed its own classified row for the caller (a
-  dispatch through `call_operation`), no second row is written.
+  dispatch through `call_operation`), no second row is written. Each row
+  the hook writes gets its own scope, so a child run's row (for example a
+  child's unknown-tool or bad-arguments row after the cutover) never counts
+  as the record of the parent's `invoke_agent` call.
 - **Row shape.** `method="AGENT"`, `path="/agent/tools/call/<tool>"`. The
   payload holds `op_id` (the tool name), `params_hash`, `op_class`,
   `error_type` on a failure, and the agent model and provider. Arguments and

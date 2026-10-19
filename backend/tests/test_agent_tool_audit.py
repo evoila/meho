@@ -14,7 +14,8 @@ The tests drive real runs through :class:`AgentInvoker` with a scripted
 * A call to a tool name the run cannot use has a row for every attempt,
   even though Pydantic AI rejects the name before any tool hook runs.
 * A child run started by ``invoke_agent`` keys its rows by the child's run
-  id; the parent's ``invoke_agent`` row keeps the parent's run id.
+  id; the parent's ``invoke_agent`` row keeps the parent's run id. A child's
+  error row never replaces the parent's row after the cutover.
 * With ``AUDIT_WRAPPER_ROWS_RETIRED`` on, the rows carry a decision or
   execution class, not ``legacy_request``.
 * Audit is fail-closed: if the row cannot be written, the run fails.
@@ -304,6 +305,49 @@ async def test_child_run_rows_carry_the_child_run_id(
     assert [r.payload["op_id"] for r in child_agent_rows] == ["list_operation_groups"]
     dispatch_rows = [r for r in child_rows if r not in child_agent_rows]
     assert [r.event_class for r in dispatch_rows] == [AuditEventClass.OPERATION_EXECUTION]
+
+
+@pytest.mark.parametrize(
+    ("child_step", "error_type"),
+    [
+        pytest.param(
+            ToolCallPart("delete_everything", {"target": "vault-prod"}),
+            "UnknownToolError",
+            id="unknown-tool",
+        ),
+        pytest.param(
+            ToolCallPart("list_operation_groups", "{not json"),
+            "ValidationError",
+            id="bad-arguments",
+        ),
+    ],
+)
+async def test_child_error_rows_do_not_replace_the_parent_row_after_cutover(
+    monkeypatch: pytest.MonkeyPatch,
+    child_step: ToolCallPart,
+    error_type: str,
+) -> None:
+    # After the cutover a child's error row has an execution class. It must
+    # not count as the record of the parent's invoke_agent call, or the
+    # parent's own row is skipped.
+    monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+    monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
+    get_settings.cache_clear()
+    await _seed_definition(name="parent")
+    await _seed_definition(name="child", system_prompt="CHILD: you read secrets.")
+
+    invoker = _composing_invoker(_parent_invokes_child(child_step))
+    outcome = await invoker.run(_make_operator(), "parent", "go")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+    parent_rows = await _rows(outcome.run_id)
+    assert [(r.path, r.status_code, r.event_class) for r in parent_rows] == [
+        ("/agent/tools/call/invoke_agent", 200, AuditEventClass.OPERATION_EXECUTION)
+    ]
+    child_rows = await _rows(await _child_run_id(outcome.run_id))
+    assert [(r.payload["op_id"], r.status_code, r.payload["error_type"]) for r in child_rows] == [
+        (child_step.tool_name, 400, error_type)
+    ]
 
 
 async def test_rows_carry_decision_or_execution_class_after_cutover(

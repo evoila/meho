@@ -25,7 +25,9 @@ row unless the call already wrote its own record:
 * A call that committed its own classified row for the same caller (a
   dispatch through ``call_operation``) gets no second row. The check uses
   the same record scope the REST and MCP wrappers use
-  (:mod:`meho_backplane.audit_cutover`).
+  (:mod:`meho_backplane.audit_cutover`). Each row this module writes gets
+  its own scope, so a child run's row never counts as the record of the
+  parent's ``invoke_agent`` call.
 * The payload stores the tool name, a hash of the arguments, the op class,
   and for a failure the error type. It never stores the arguments or the
   error text.
@@ -297,6 +299,12 @@ class ToolCallAudit(AbstractCapability[Operator]):
         start: float,
         error: BaseException | None,
     ) -> None:
+        # The row gets its own record scope. A child run started by
+        # invoke_agent runs inside the parent's scope, and after the cutover
+        # this row has an execution class. Without its own scope, a child's
+        # error row would count as the record of the parent's invoke_agent
+        # call, and the parent's own row would be skipped.
+        scope = open_classified_record_scope()
         try:
             await write_agent_tool_row(
                 operator=operator,
@@ -311,3 +319,5 @@ class ToolCallAudit(AbstractCapability[Operator]):
             # call (and the run) fails instead of running without a record.
             _log.exception("agent_tool_audit_write_failed", tool=tool_name, status_code=status_code)
             raise
+        finally:
+            close_classified_record_scope(scope)

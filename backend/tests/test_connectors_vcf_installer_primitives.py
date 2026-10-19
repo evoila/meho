@@ -485,6 +485,7 @@ async def test_sddc_list_propagates_401_for_session_recovery() -> None:
 # --------------------------------------------------------------- depot family (#3121)
 
 _DEPOT_PATH = "/v1/system/settings/depot"
+_DEPOT_SYNC_PATH = "/v1/system/settings/depot/depot-sync-info"
 _CERTS_PATH = "/v1/sddc-manager/trusted-certificates"
 _BUNDLES_PATH = "/v1/bundles"
 
@@ -521,6 +522,63 @@ async def test_depot_get_scrubs_every_password_key() -> None:
     assert result["offlineAccount"]["status"] == "DEPOT_CONNECTION_SUCCESSFUL"
     assert "password" not in result["offlineAccount"]
     assert "SECRET" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_sync_status_reads_sync_info() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        route = mock.get(_DEPOT_SYNC_PATH).respond(
+            200,
+            json={
+                "syncStatus": "IN_PROGRESS",
+                "lastSyncCompletionTimestamp": "2026-10-01T10:00:00Z",
+            },
+        )
+        result = await connector.system_depot_sync_status(_make_operator(), _TARGET, {})
+
+    assert route.call_count == 1
+    assert route.calls.last.request.headers["Authorization"] == "Bearer tok-abc"
+    assert result == {
+        "syncStatus": "IN_PROGRESS",
+        "lastSyncCompletionTimestamp": "2026-10-01T10:00:00Z",
+    }
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_sync_status_keeps_error_and_scrubs_passwords() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_DEPOT_SYNC_PATH).respond(
+            200,
+            json={
+                "syncStatus": "FAILED",
+                "errorMessage": "Depot is not reachable",
+                "account": {"username": "depot-svc", "password": "SECRET-depot"},
+            },
+        )
+        result = await connector.system_depot_sync_status(_make_operator(), _TARGET, {})
+
+    assert result["syncStatus"] == "FAILED"
+    assert result["errorMessage"] == "Depot is not reachable"
+    assert result["account"] == {"username": "depot-svc"}
+    assert "SECRET" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_sync_status_propagates_401_for_session_recovery() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        login = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_DEPOT_SYNC_PATH).respond(401, json={"message": "expired"})
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector.system_depot_sync_status(_make_operator(), _TARGET, {})
+    assert login.call_count == 1
     await connector.aclose()
 
 

@@ -24,7 +24,9 @@ a fresh boot with zero catalog ingest:
 Plus the **air-gapped depot lifecycle** family (#3121, group
 ``installer-depot``): ``installer.system.depot.get`` / ``.set`` (read /
 configure the release depot, PUT running the vendor connection check
-synchronously), ``installer.system.trusted-certificates.list`` / ``.add``
+synchronously), ``installer.system.depot.sync-status`` (the catalog
+ingest that runs after a connect, #3406),
+``installer.system.trusted-certificates.list`` / ``.add``
 (outbound trust store — the depot TLS-trust fix), and
 ``installer.bundles.list`` / ``.download`` (bundle inventory + the mandatory
 explicit GA pre-download), plus ``installer.bundles.download-status`` (the
@@ -130,8 +132,13 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "depot, first import the depot's TLS certificate via "
         "installer.system.trusted-certificates.add (approval-gated; "
         "installer.system.trusted-certificates.list reads the trust store) "
-        "and retry; after a successful connect the catalog ingests and "
-        "installer.bundles.list populates within about a minute; then "
+        "and retry; after a successful connect the appliance ingests the "
+        "release catalog in the background, so poll "
+        "installer.system.depot.sync-status until the sync has finished "
+        "(errorMessage empty and lastSyncCompletionTimestamp later than the "
+        "depot.set call; a non-empty errorMessage means the sync failed) "
+        "instead of polling installer.bundles.list blindly; then "
+        "installer.bundles.list lists the ingested bundles; then "
         "installer.bundles.download (approval-gated, one batch) explicitly "
         "downloads the release bundles BEFORE validating a spec — a freshly "
         "connected installer pins components to the newest catalog versions "
@@ -688,6 +695,56 @@ _DEPOT_SET = InstallerTypedOp(
     ),
 )
 
+_DEPOT_SYNC_STATUS = InstallerTypedOp(
+    op_id="installer.system.depot.sync-status",
+    handler_attr="system_depot_sync_status",
+    summary="Read the Installer's depot catalog sync (ingest) state.",
+    description=(
+        "Reads GET /v1/system/settings/depot/depot-sync-info — the "
+        "DepotSyncInfo object (syncStatus / errorMessage / "
+        "lastSyncCompletionTimestamp). After installer.system.depot.set "
+        "connects a depot, the appliance ingests the release catalog in the "
+        "background; installer.bundles.list stays empty until that ingest "
+        "finishes. This read tells 'ingest still running' apart from "
+        "'ingest failed' and 'ingest done', so callers can wait for it "
+        "before listing or downloading bundles. Password keys are scrubbed. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={
+        "type": "object",
+        "properties": {
+            "syncStatus": {"type": "string"},
+            "errorMessage": {"type": "string"},
+            "lastSyncCompletionTimestamp": {"type": "string"},
+        },
+        "additionalProperties": True,
+    },
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "depot", "system", "sync"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call after installer.system.depot.set succeeds, and poll it, to "
+            "know when the depot catalog has finished ingesting — before "
+            "installer.bundles.list / installer.bundles.download. Also call "
+            "when installer.bundles.list is empty, to tell 'still ingesting' "
+            "from 'ingest failed'."
+        ),
+        output_shape=(
+            "{syncStatus, errorMessage?, lastSyncCompletionTimestamp?}. "
+            "syncStatus is the vendor's state string, passed through as sent "
+            "(the 9.1 API does not list its values). The catalog is ready when "
+            "errorMessage is empty and lastSyncCompletionTimestamp is later "
+            "than the depot.set call; a non-empty errorMessage means the sync "
+            "failed — fix the depot instead of waiting. Confirm with a "
+            "non-empty installer.bundles.list."
+        ),
+        parameter_hints={},
+    ),
+)
+
 _TRUSTED_CERTIFICATES_LIST = InstallerTypedOp(
     op_id="installer.system.trusted-certificates.list",
     handler_attr="system_trusted_certificates_list",
@@ -926,8 +983,9 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 #: in submit → poll order per primitive pair (the bring-up trio adds the
 #: failed-task retry between its submit and its poll, and the id-less task
 #: list after its poll; the depot family runs
-#: in its air-gapped lifecycle order: settings read/write → trust store
-#: read/write → bundle inventory read / download-detail read / download).
+#: in its air-gapped lifecycle order: settings read/write → catalog sync
+#: read → trust store read/write → bundle inventory read / download-detail
+#: read / download).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
@@ -937,6 +995,7 @@ INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SDDC_LIST,
     _DEPOT_GET,
     _DEPOT_SET,
+    _DEPOT_SYNC_STATUS,
     _TRUSTED_CERTIFICATES_LIST,
     _TRUSTED_CERTIFICATE_ADD,
     _BUNDLES_LIST,

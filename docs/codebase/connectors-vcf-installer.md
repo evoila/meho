@@ -102,18 +102,20 @@ machinery exist here.
 | `installer.sddc.list` | `GET /v1/sddcs` (`getSddcTasks`) → `PageOfSddcTask`, cut down per task | `safe` |
 | `installer.system.depot.get` | `GET /v1/system/settings/depot` → `DepotSettings` (passwords scrubbed) | `safe` |
 | `installer.system.depot.set` | `PUT /v1/system/settings/depot` (sync connection check) | `caution` + `requires_approval` |
+| `installer.system.depot.sync-status` | `GET /v1/system/settings/depot/depot-sync-info` → `DepotSyncInfo` (catalog ingest state) | `safe` |
 | `installer.system.trusted-certificates.list` | `GET /v1/sddc-manager/trusted-certificates` | `safe` |
 | `installer.system.trusted-certificates.add` | `POST /v1/sddc-manager/trusted-certificates` | `caution` + `requires_approval` |
 | `installer.bundles.list` | `GET /v1/bundles` → `PageOfBundle` | `safe` |
 | `installer.bundles.download-status` | `GET /v1/bundles/download-status` → `PageOfBundleDownloadStatusInfo` | `safe` |
 | `installer.bundles.download` | `PATCH /v1/bundles/{id}` per id (one approved batch) | `caution` + `requires_approval` |
 
-The bottom seven rows are the **air-gapped depot lifecycle** (#3121, group
+The bottom eight rows are the **air-gapped depot lifecycle** (#3121, group
 `installer-depot`) — the steps that used to force a governed bring-up
 out-of-band: configure the depot (`depot.set` maps the vendor rejection to a
 structured `depot_error`, with inline remediation for the common
 `VMWARE_DEPOT_CONNECT_FAILURE` TLS-trust case → `trusted-certificates.add`,
-then retry), then explicitly download the release bundles
+then retry), wait for the catalog ingest (`depot.sync-status`, below), then
+explicitly download the release bundles
 (`bundles.download`, one approval per batch; per-bundle failures collected as
 `status="partial"`, not fatal) **before** validating a spec — a freshly
 connected installer pins components to the newest catalog versions and
@@ -134,6 +136,22 @@ per-`downloadStatus` counts and the `IN_PROGRESS` bundle ids inline. `FAILED`
 rows are not copied inline, because a depot outage fails every row; read them
 with `bundle_id` or `result_query`. The vendor schema has no credential
 fields, so nothing is scrubbed.
+
+**Waiting for the catalog ingest (#3406).** `depot.set` returns as soon as the
+depot connection check passes (about a second). The appliance then ingests the
+release catalog in the background, and `bundles.list` stays empty until that
+finishes. `depot.sync-status` reads the vendor `DepotSyncInfo`
+(`syncStatus` / `errorMessage` / `lastSyncCompletionTimestamp`) and returns it
+as sent, with `password` keys scrubbed. The 9.1 spec does not list the
+`syncStatus` values, so MEHO does not interpret them. The documented "catalog
+ready" rule, carried in the op's `llm_instructions` and the group
+`when_to_use`, is: `errorMessage` is empty and `lastSyncCompletionTimestamp`
+is later than the `depot.set` call. A non-empty `errorMessage` means the sync
+failed, so the caller fixes the depot instead of waiting. A non-empty
+`bundles.list` confirms it. The order is `depot.set` → poll
+`depot.sync-status` → `bundles.list` → `bundles.download`. The vendor also
+has `PATCH .../depot-sync-info` to start a new sync; MEHO does not register
+it yet.
 The group's `when_to_use` and the `spec` parameter hint on the submit
 primitives carry the 9.1 field rules proven live (three unique
 `vspClusterSpec` FQDNs outside the pool, ≤20-char core passwords, the
@@ -242,7 +260,8 @@ Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
 
 Every hand-coded `METHOD:/path` — `POST:/v1/tokens`,
 `GET:/v1/system/appliance-info` (fingerprint), the typed reads'
-`GET:/v1/sddcs/{id}`, `GET:/v1/sddcs` and `GET:/v1/sddcs/validations/{id}`
+`GET:/v1/sddcs/{id}`, `GET:/v1/sddcs`, `GET:/v1/sddcs/validations/{id}` and
+the depot-family reads such as `GET:/v1/system/settings/depot/depot-sync-info`
 (the `_*_PATH` constants of `typed_reads.py`, among others), the submit primitives'
 `POST:/v1/sddcs/validations` and `POST:/v1/sddcs` (introspected from
 `typed_writes.TYPED_WRITE_DECLARED_OP_IDS`), and the composite's

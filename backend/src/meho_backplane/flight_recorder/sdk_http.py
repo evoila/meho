@@ -21,7 +21,12 @@ the **same** ``vendor_call`` span shape, through the **same** redaction path
   Kubernetes: the response object's ``uid`` / ``resourceVersion`` /
   ``managedFields``). The summary is read from the body after every
   redaction rule ran, so a body-path rule or the credential-shape scrub
-  applies to it too. No summary is built when the body is not recorded.
+  applies to it too. No summary is built when the body is not recorded;
+* an explicit response-body omission (``response_body_omitted``): the
+  transport can withhold a body it could not mask itself -- for example a
+  body over the span cap, where a cut body might still parse and keep a
+  secret value. The span then stores the omission marker and the given
+  reason, and the trace is marked uncertain, as for any other omitted body.
 
 Like every capture function, it never raises and is a no-op when capture is
 off (F7). Any redaction uncertainty degrades the trace to operator-only (F5).
@@ -43,7 +48,7 @@ from meho_backplane.flight_recorder.capture import (
     _vendor_attributes,
 )
 from meho_backplane.flight_recorder.store import SpanInput
-from meho_backplane.redaction.flight_recorder import redact_query
+from meho_backplane.redaction.flight_recorder import BODY_OMITTED_MARKER, redact_query
 
 __all__ = ["record_sdk_vendor_call"]
 
@@ -78,6 +83,7 @@ def record_sdk_vendor_call(
     query: Any = None,
     safe_query_names: Iterable[str] = (),
     response_summary: Callable[[Any], Mapping[str, Any] | None] | None = None,
+    response_body_omitted: str | None = None,
 ) -> None:
     """Record one SDK-made vendor HTTP call as a ``vendor_call`` span (F7).
 
@@ -92,6 +98,11 @@ def record_sdk_vendor_call(
     attributes. It is skipped when the body was not recorded at all (a
     secret-bearing op family), so nothing on the span comes from the raw
     response.
+
+    *response_body_omitted*, when given, is the reason the transport did not
+    hand over the response body. *response_body* is then ignored: the span
+    stores :data:`BODY_OMITTED_MARKER` with that reason, no summary is
+    built, and the trace is marked uncertain (F5).
     """
     scope = _active_capture_var.get()
     if start is None or scope is None:
@@ -101,7 +112,7 @@ def record_sdk_vendor_call(
         view = _ResponseView(
             status_code=status_code,
             headers=response_headers,
-            content=response_body,
+            content=None if response_body_omitted is not None else response_body,
             request=_RequestView(url=url),
         )
         content_type = _header(request_headers, "content-type")
@@ -112,10 +123,22 @@ def record_sdk_vendor_call(
             request_body=request_body,
             request_content_type=content_type,
         )
+        if response_body_omitted is not None:
+            redaction = redaction.model_copy(
+                update={
+                    "response_body": BODY_OMITTED_MARKER,
+                    "uncertain": True,
+                    "reasons": (*redaction.reasons, response_body_omitted),
+                }
+            )
         attributes = _vendor_attributes(redaction, method, safe_url, truncated)
         redacted_query = redact_query(query, safe_query_names)
         attributes["query"] = redacted_query.value
-        if response_summary is not None and redaction.body_recorded:
+        if (
+            response_summary is not None
+            and redaction.body_recorded
+            and response_body_omitted is None
+        ):
             summary = response_summary(redaction.response_body)
             if summary:
                 attributes.update(summary)

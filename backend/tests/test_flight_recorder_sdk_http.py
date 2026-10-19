@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextvars import Token
 from typing import Any
 
+import aiohttp
 import pytest
 from aiohttp import web
 from kubernetes_asyncio import client
@@ -31,8 +32,10 @@ from meho_backplane.connectors.kubernetes.redaction import (
     REDACTED_PREFIX,
 )
 from meho_backplane.flight_recorder import capture
+from meho_backplane.flight_recorder._capture_util import MAX_SPAN_BODY_BYTES
 from meho_backplane.flight_recorder.sdk_http import record_sdk_vendor_call
 from meho_backplane.redaction.flight_recorder import (
+    BODY_OMITTED_MARKER,
     BODY_PATH_MARKER,
     HEADER_ALLOWLIST,
     QUERY_VALUE_MARKER,
@@ -242,6 +245,31 @@ def test_response_summary_skipped_when_body_not_recorded(scope: capture._Capture
     assert span.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
 
 
+def test_record_sdk_vendor_call_omitted_response_body(scope: capture._CaptureScope) -> None:
+    """An explicit omission stores the marker + reason, no summary, and is uncertain."""
+    record_sdk_vendor_call(
+        capture.span_start(),
+        method="GET",
+        url="https://k8s.test:6443/api/v1/namespaces/demo/secrets/app",
+        status="200",
+        request_body={"metadata": {"name": "demo"}},
+        response_headers={"Audit-Id": "a-1", "Content-Type": "application/json"},
+        response_body=b'{"data": {"k": "' + _OPAQUE_B64.encode() + b'"}}',
+        response_body_omitted="response body not recorded: too big",
+        response_summary=lambda body: {"response_object": {"seen": True}},
+    )
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert span.status == "200"
+    assert attrs["response_body"] == BODY_OMITTED_MARKER
+    assert attrs["request_body"] == {"metadata": {"name": "demo"}}
+    assert attrs["response_headers"]["audit-id"] == "a-1"
+    assert "response_object" not in attrs
+    assert "response body not recorded: too big" in attrs["redaction_reasons"]
+    assert _OPAQUE_B64 not in json.dumps(attrs)
+    assert scope.redaction_uncertain is True
+
+
 def test_record_sdk_vendor_call_swallows_errors(
     scope: capture._CaptureScope, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -319,10 +347,45 @@ async def _secret_list(request: web.Request) -> web.Response:
     return web.json_response(_SECRET_LIST, headers=_K8S_HEADERS)
 
 
+def _oversized_secret_text() -> str:
+    """A Secret whose JSON fills exactly the span cap, followed by a newline.
+
+    The shared redactor cuts the body at the cap, which here removes only the
+    newline, so the cut body still parses -- the shape that used to keep the
+    Secret value.
+    """
+    base = json.dumps({**_SECRET, "pad": ""})
+    text = json.dumps({**_SECRET, "pad": "x" * (MAX_SPAN_BODY_BYTES - len(base))})
+    assert len(text.encode()) == MAX_SPAN_BODY_BYTES
+    return text + "\n"
+
+
+async def _oversized_secret(request: web.Request) -> web.Response:
+    return web.Response(
+        text=_oversized_secret_text(), content_type="application/json", headers=_K8S_HEADERS
+    )
+
+
+async def _broken_body(request: web.Request) -> web.StreamResponse:
+    """Send status + headers, then drop the connection before the body ends."""
+    response = web.StreamResponse(
+        status=200, headers={**_K8S_HEADERS, "Content-Type": "application/json"}
+    )
+    response.content_length = 4096
+    await response.prepare(request)
+    await response.write(b'{"kind": "Namespace"')
+    assert request.transport is not None
+    request.transport.close()
+    return response
+
+
 @pytest.fixture
 async def api_client() -> AsyncIterator[client.ApiClient]:
     app = web.Application()
     app.router.add_route("*", "/api/v1/namespaces/{name}", _namespace)
+    app.router.add_get("/api/v1/namespaces/broken", _broken_body)
+    # Dynamic routes match in registration order: "big" must come first.
+    app.router.add_get("/api/v1/namespaces/{namespace}/secrets/big", _oversized_secret)
     app.router.add_route("*", "/api/v1/namespaces/{namespace}/secrets/{name}", _secret)
     app.router.add_get("/api/v1/namespaces/{namespace}/secrets", _secret_list)
     runner = web.AppRunner(app)
@@ -508,6 +571,58 @@ async def test_k8s_cr_list_of_secrets_records_no_secret_value(
     assert _OPAQUE_B64 not in dumped
     assert "opaque-page-token" not in dumped
     assert scope.redaction_uncertain is False
+
+
+@pytest.mark.asyncio
+async def test_k8s_oversized_secret_response_is_omitted(
+    api_client: client.ApiClient, scope: capture._CaptureScope
+) -> None:
+    """A response over the span cap stores no body at all, only the marker."""
+    token = capture._op_context_var.set(_op("k8s.cr.info"))
+    try:
+        response = await api_client.call_api(
+            "/api/v1/namespaces/{namespace}/secrets/{name}",
+            "GET",
+            path_params={"namespace": "demo", "name": "big"},
+            auth_settings=["BearerToken"],
+            _preload_content=False,
+        )
+        assert (await response.json())["data"]["tls.key"] == _OPAQUE_B64
+    finally:
+        capture._op_context_var.reset(token)
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert span.status == "200"
+    assert attrs["response_body"] == BODY_OMITTED_MARKER
+    assert attrs["response_headers"]["audit-id"] == "audit-123"
+    assert "response_object" not in attrs
+    assert any("over the" in reason for reason in attrs["redaction_reasons"])
+    assert _OPAQUE_B64 not in json.dumps(attrs)
+    assert scope.redaction_uncertain is True
+
+
+@pytest.mark.asyncio
+async def test_k8s_unreadable_body_still_records_the_span(
+    api_client: client.ApiClient, scope: capture._CaptureScope
+) -> None:
+    """A body-read failure on a raw response keeps the request, status, and headers."""
+    response = await api_client.call_api(
+        "/api/v1/namespaces/{name}",
+        "GET",
+        path_params={"name": "broken"},
+        auth_settings=["BearerToken"],
+        _preload_content=False,
+    )
+    with pytest.raises(aiohttp.ClientPayloadError):
+        await response.read()
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert span.status == "200"
+    assert span.name.endswith("/api/v1/namespaces/broken")
+    assert attrs["method"] == "GET"
+    assert attrs["response_headers"]["audit-id"] == "audit-123"
+    assert attrs["response_body"] is None
+    assert "response_object" not in attrs
 
 
 @pytest.mark.asyncio

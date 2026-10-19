@@ -910,7 +910,12 @@ labelled shapes and would keep an opaque base64 Secret value, and ops such
 as `k8s.apply` or `k8s.cr.info` are not secret-bearing families, so the
 structural pass is what masks a Secret manifest or a Secret read on the
 `vendor_call` span. The span's `response_object` summary is then built from
-the redacted body, never from the raw response.
+the redacted body, never from the raw response. A response body over the
+64 KiB span cap is not handed to the F2 path at all: the hook passes an
+explicit omission reason (`record_sdk_vendor_call(response_body_omitted=...)`),
+the span stores `BODY_OMITTED_MARKER`, and the trace is marked uncertain.
+This closes the case where the F2 cap cuts only a trailing newline, the cut
+body still parses, and an unmasked Secret value would otherwise be kept.
 
 ## References
 

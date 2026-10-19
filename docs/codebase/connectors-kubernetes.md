@@ -846,6 +846,13 @@ happened" apply could not be explained from the trace.
   places. When the body is not recorded (a secret-bearing op such as
   `k8s.secret.create`, a body over the 64 KiB cap, or a body that is
   not JSON) there is no `response_object`.
+- A response body over the 64 KiB span cap is not recorded at all. The
+  shared redactor cuts an oversized body at the cap, and a cut body can
+  still parse as JSON (when only a trailing newline was cut), so Secret
+  data in it would have been stored. The hook hands over no body; the
+  span stores the omission marker plus a reason, and the trace is marked
+  uncertain (operator-only). Request bodies are masked whole before
+  the cap applies.
 - Secret payloads are masked before capture. Every JSON request and
   response body first goes through the connector's structural Secret
   redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
@@ -859,7 +866,11 @@ happened" apply could not be explained from the trace.
   (`status` = HTTP code or `error:<ExceptionClass>`) and re-raised
   unchanged. With `_preload_content=False` the wrapper reads the body
   first; `aiohttp` caches it, so the caller's later `json()` still
-  works. A `watch` / `follow` stream is never read.
+  works. A `watch` / `follow` stream is never read. When that read
+  fails (a timeout, a connection dropped mid-body), the span is still
+  recorded with the request, the HTTP status, and the response headers;
+  only the body is missing. The caller's own read raises the same
+  error.
 - When capture is off the wrapper costs one contextvar read.
 - Not covered: `k8s.exec` over `WsApiClient` (websocket transport).
 

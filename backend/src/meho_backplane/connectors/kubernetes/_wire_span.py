@@ -31,6 +31,18 @@ path then runs over that masked body as usual. The metadata summary is
 built from the body **after** redaction, so a body-path rule or the
 credential-shape scrub applies to the summary too.
 
+A response body over the span body cap (64 KiB) is not recorded at all. The
+shared redactor cuts an oversized body at the cap, and a cut body can still
+parse as JSON (for example when only a trailing newline was cut), so Secret
+data in it would be stored. The hook therefore hands over no body, and the
+recorder stores the omission marker, the reason, and marks the trace
+uncertain (operator-only). Request bodies are masked whole before the cap.
+
+When the response body cannot be read (a timeout or a broken payload while
+reading a raw ``aiohttp`` response), the span is still recorded with the
+request, the HTTP status, and the response headers; only the body is left
+out. The trace must not lose the request when an apply's outcome is unclear.
+
 When capture is off the wrapper costs one contextvar read. It never changes
 what the SDK returns or raises: an ``ApiException`` and any transport error
 are re-raised unchanged after the span is recorded.
@@ -193,6 +205,8 @@ class _Call:
     def record(self, status: str, response_headers: Any, response_body: Any) -> None:
         """Hand the round-trip to the recorder. Never raises (F7)."""
         try:
+            raw = _as_bytes(response_body)
+            omitted = _oversize_reason(raw)
             record_sdk_vendor_call(
                 self.start,
                 method=self.method,
@@ -201,9 +215,10 @@ class _Call:
                 request_headers=self.headers,
                 request_body=_masked_body(self.body, _content_type(self.headers)),
                 response_headers=response_headers,
-                response_body=_masked_bytes(
-                    _as_bytes(response_body), _content_type(response_headers)
+                response_body=(
+                    None if omitted else _masked_bytes(raw, _content_type(response_headers))
                 ),
+                response_body_omitted=omitted,
                 query=self.query,
                 safe_query_names=SAFE_QUERY_NAMES,
                 response_summary=_response_object_summary,
@@ -219,14 +234,23 @@ class _Call:
                 # ``RESTResponse``: body already read by the SDK.
                 self.record(status, response.getheaders(), response.data)
                 return
-            # Raw ``aiohttp.ClientResponse`` (``_preload_content=False``, as
-            # ``DynamicClient`` uses). ``read()`` caches the body, so the
-            # caller's later ``json()`` / ``read()`` gets the same bytes. A
-            # watch / follow stream is never read here: it would not end.
-            body = None if _is_stream(query) else await response.read()
-            self.record(status, response.headers, body)
+            headers = response.headers
         except Exception:
             _log.warning("kubernetes_wire_span_failed", exc_info=True)
+            return
+        # Raw ``aiohttp.ClientResponse`` (``_preload_content=False``, as
+        # ``DynamicClient`` uses). ``read()`` caches the body, so the
+        # caller's later ``json()`` / ``read()`` gets the same bytes. A
+        # watch / follow stream is never read here: it would not end.
+        body = None
+        if not _is_stream(query):
+            try:
+                body = await response.read()
+            except Exception:
+                # The caller's own read raises the same error. The span
+                # still gets the request, status, and headers.
+                _log.warning("kubernetes_wire_span_body_unread", exc_info=True)
+        self.record(status, headers, body)
 
 
 def _is_stream(query: Any) -> bool:
@@ -290,13 +314,28 @@ def _masked_body(body: Any, content_type: str | None) -> Any:
     return body
 
 
+def _oversize_reason(body: bytes | None) -> str | None:
+    """The omission reason for a response body over the span cap, else ``None``.
+
+    An oversized body is never handed to the recorder: cut at the cap it may
+    still parse as JSON, and the Secret masking below did not run over it.
+    """
+    if body is None or len(body) <= MAX_SPAN_BODY_BYTES:
+        return None
+    return (
+        f"response body not recorded: {len(body)} bytes is over the "
+        f"{MAX_SPAN_BODY_BYTES}-byte span cap, so Secret masking could not be "
+        "proven (fail-closed)"
+    )
+
+
 def _masked_bytes(body: bytes | None, content_type: str | None) -> bytes | None:
     """Mask Kubernetes Secret data in a JSON response body; keep it as bytes.
 
-    A body over the span body cap is left alone: the shared redactor cuts
-    and omits it anyway. A body that is not JSON passes through unchanged.
+    A body that is not JSON passes through unchanged. Oversized bodies never
+    reach here (see :func:`_oversize_reason`).
     """
-    if body is None or len(body) > MAX_SPAN_BODY_BYTES or not _is_json_like(content_type):
+    if body is None or not _is_json_like(content_type):
         return body
     parsed = _parse_json(body)
     if not isinstance(parsed, (dict, list)):

@@ -294,6 +294,12 @@ and parked requests expire on a TTL. The full story — including the
 audited single-operator break-glass — is the
 [approvals & break-glass guide](approvals-and-break-glass.md).
 
+`safety_level` works differently: what happens depends on who calls. For
+example, an agent's `caution` call waits for approval, but a person's
+`caution` call runs at once. The table in the
+[agent permission model](https://github.com/evoila/meho/blob/main/docs/codebase/agent-permission-model.md#safety-levels-at-a-glance)
+shows each safety level for agents, people and service accounts.
+
 Before approving *any* fan-out write: open the approval payload and
 verify the resolved object list first. An unconstrained filter is how
 a one-VM drill becomes a cluster-wide incident.

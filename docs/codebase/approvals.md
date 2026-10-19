@@ -10,6 +10,11 @@ guard, resume-target fix, write-op secret redaction) + #1503 (G0.20-T3
 
 ## Overview
 
+Which calls wait for approval depends on the op's safety level and on who
+calls it (an agent, a person, or a service account). The table in
+[agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance)
+shows each case.
+
 The approval substrate parks `requires_approval` / `caution` / `dangerous`
 dispatches durably and lets an operator approve or reject them
 across **REST, MCP, and CLI** transports. Two layers, one source of

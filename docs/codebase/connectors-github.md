@@ -318,6 +318,14 @@ into `fetch_more.native_pagination`. The hint only says how to ask for
 the next page. The stored handle keeps `source_coverage=unknown` (see
 [result-spill.md](result-spill.md)).
 
+The `example_next_call` is a template, not a ready call. It names every
+argument `call_operation` needs (`connector_id`, `op_id`, `params`) with
+placeholders for `connector_id`, `owner` and `repo`. Its `assumes` text
+says the example stands for a first call with `state=open` and
+`per_page=100`. The agent must repeat its own first call unchanged and
+add 1 to `page` only. Changing `per_page` or a filter between pages
+skips or repeats rows.
+
 ## Dependencies
 
 - **`HttpConnector`** (`connectors/adapters/http.py`) — pooled

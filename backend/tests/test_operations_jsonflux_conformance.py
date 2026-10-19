@@ -391,6 +391,33 @@ async def test_github_issue_list_hint_surfaces_native_pagination() -> None:
     assert native.example_next_call["args"]["params"]["page"] == 2
 
 
+def test_github_issue_list_hint_example_is_a_complete_next_call() -> None:
+    """The example names every required call_operation arg and says what it assumes."""
+    from meho_backplane.connectors.github.pagination_hints import (
+        GH_ISSUE_LIST_OP_ID,
+        GH_ISSUE_LIST_PAGINATION_HINT,
+    )
+    from meho_backplane.connectors.schemas import PaginationHint
+
+    hint = PaginationHint.model_validate(GH_ISSUE_LIST_PAGINATION_HINT)
+    example = hint.example_next_call
+    assert example["tool"] == "call_operation"
+    args = example["args"]
+    assert {"connector_id", "op_id", "params"} <= set(args)
+    assert args["connector_id"].startswith("<")
+    assert args["op_id"] == GH_ISSUE_LIST_OP_ID
+
+    # The example assumes per_page=100 and state=open. The text must say so,
+    # and must tell the caller to keep their own values and change only page.
+    params = args["params"]
+    assumes = example["assumes"]
+    assert f"per_page={params['per_page']}" in assumes
+    assert f"state={params['state']}" in assumes
+    assert "change only page" in assumes
+    assert "add 1 to page only" in hint.params["page"]
+    assert "same value on every page" in hint.params["per_page"]
+
+
 @pytest.mark.asyncio
 async def test_list_without_hint_reports_native_pagination_unavailable() -> None:
     """Without a hint the envelope keeps the curated unavailable rationale."""

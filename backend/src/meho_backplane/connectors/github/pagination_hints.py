@@ -33,11 +33,15 @@ GH_ISSUE_LIST_OP_ID = "GET:/repos/{owner}/{repo}/issues"
 #: matches :class:`~meho_backplane.connectors.schemas.PaginationHint`.
 GH_ISSUE_LIST_PAGINATION_HINT: dict[str, Any] = {
     "params": {
-        "per_page": "Rows per page. Default 30, maximum 100.",
+        "per_page": (
+            "Rows per page. Default 30, maximum 100. Use the same value on "
+            "every page, or the pages will not line up."
+        ),
         "page": (
-            "Page number, starting at 1 (the default). Add 1 to get the next "
-            "page. A page with fewer than per_page rows is the last page. One "
-            "call returns one page only, so a reduced result may not hold "
+            "Page number, starting at 1 (the default). To get the next page, "
+            "repeat the first call with every param unchanged and add 1 to "
+            "page only. A page with fewer than per_page rows is the last page. "
+            "One call returns one page only, so a reduced result may not hold "
             "every issue."
         ),
         "state": "Which issues to list: open (default), closed, or all.",
@@ -47,7 +51,13 @@ GH_ISSUE_LIST_PAGINATION_HINT: dict[str, Any] = {
     },
     "example_next_call": {
         "tool": "call_operation",
+        "assumes": (
+            "The first call used state=open and per_page=100 and returned "
+            "page 1. If your first call used other values, keep those values "
+            "and change only page."
+        ),
         "args": {
+            "connector_id": "<connector_id of the first call>",
             "op_id": GH_ISSUE_LIST_OP_ID,
             "params": {
                 "owner": "<owner>",

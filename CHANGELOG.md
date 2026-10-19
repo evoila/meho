@@ -90,37 +90,6 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Added — the chart can bring its own PostgreSQL, with pgvector turned on (#4039)
-
-- New in-tree subchart `deploy/charts/meho/charts/postgres/`, values key
-  `corePostgres`. It is **off by default**. With it off, the chart renders
-  what it rendered before (one named exception, below).
-- When on, it runs one PostgreSQL 17 server (`pgvector/pgvector:0.8.7-pg17-bookworm`,
-  pinned by digest) with one disk and two databases: `meho` and
-  `keycloak`. Each is owned by a role of the same name, and neither role is
-  a superuser. The chart creates the `vector` extension itself, so nobody
-  runs a database command by hand before the install.
-- It makes no password. It reads `<release>-core-postgres-superuser`,
-  `-meho` and `-keycloak`, which the install's secrets Job makes (#4041).
-  The superuser Secret is mounted by the PostgreSQL pod alone; the
-  [pgvector decision](docs/decisions/pgvector-superuser-prerequisite.md)
-  records this one exception.
-- A sidecar in the PostgreSQL pod sets the role passwords again at every
-  pod start and when the Secrets change, so a new or restored Secret never
-  drifts from the database.
-- New value `global.openshift` (default `false`). When true, the built-in
-  PostgreSQL leaves out `runAsUser`, `runAsGroup` and `fsGroup`, so
-  OpenShift picks them. Otherwise it runs as user 999.
-- **Changed for every install (the named exception):** the helm test pod
-  (`templates/tests/test-pgvector.yaml`) now runs the chart's PostgreSQL
-  image instead of `bitnami/postgresql:16`, as user 999. Bitnami no longer
-  publishes that image under its old name.
-- The database tests and their CI image pins move from
-  `pgvector/pgvector:pg16` to the same pinned PostgreSQL 17 image, so the
-  tested PostgreSQL is the shipped one.
-- No backplane change, no database migration. Wiring the backplane to the
-  built-in PostgreSQL comes with #4041 and #4047.
-
 ## [0.35.22] - 2026-10-13
 
 This release fixes a security problem in the audit clean-up. The

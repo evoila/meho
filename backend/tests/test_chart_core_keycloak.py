@@ -354,17 +354,26 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
 
 
 @pytest.mark.parametrize(
-    ("extra", "message"),
+    ("extra", "messages"),
     [
-        (["--set", "corePostgres.enabled=false"], "then"),
-        (["--set", "coreKeycloak.hostname=other.test"], "must equal ingress.host"),
-        (["--set", "coreKeycloak.hostname="], "coreKeycloak.hostname is empty"),
-        (["--set", "coreKeycloak.firstTenantId=not-a-uuid"], "firstTenantId"),
-        (["--set", "coreKeycloak.unknownKey=1"], "unknownKey"),
+        # Helm 3 and Helm 4 word a failed if/then rule differently.
+        (["--set", "corePostgres.enabled=false"], ('Must validate "then"', "'allOf' failed")),
+        (["--set", "coreKeycloak.hostname=other.test"], ("must equal ingress.host",)),
+        (["--set", "coreKeycloak.hostname="], ("coreKeycloak.hostname is empty",)),
+        (["--set", "coreKeycloak.firstTenantId="], ("coreKeycloak.firstTenantId is empty",)),
+        (["--set", "coreKeycloak.firstTenantId=not-a-uuid"], ("firstTenantId",)),
+        (["--set", "coreKeycloak.unknownKey=1"], ("unknownKey",)),
     ],
-    ids=["needs-postgres", "host-mismatch", "no-hostname", "bad-tenant-id", "unknown-key"],
+    ids=[
+        "needs-postgres",
+        "host-mismatch",
+        "no-hostname",
+        "no-tenant-id",
+        "bad-tenant-id",
+        "unknown-key",
+    ],
 )
-def test_bad_values_fail_at_render(extra: list[str], message: str) -> None:
+def test_bad_values_fail_at_render(extra: list[str], messages: tuple[str, ...]) -> None:
     result = _run(*_ON, *extra)
     assert result.returncode != 0
-    assert message in result.stderr or "allOf" in result.stderr, result.stderr
+    assert any(m in result.stderr for m in messages), result.stderr

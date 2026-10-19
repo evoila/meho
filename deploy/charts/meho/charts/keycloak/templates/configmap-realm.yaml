@@ -1,8 +1,8 @@
 {{- if not .Values.hostname }}
 {{- fail "coreKeycloak.hostname is empty. Set it to MEHO's public DNS name (the same value as ingress.host)." }}
 {{- end }}
-{{- if not (regexMatch "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" .Values.firstTenantId) }}
-{{- fail "coreKeycloak.firstTenantId must be a UUID. Pick one per install (for example with uuidgen) and keep it." }}
+{{- if not .Values.firstTenantId }}
+{{- fail "coreKeycloak.firstTenantId is empty. Set it to a UUID: pick one per install (for example with uuidgen) and keep it." }}
 {{- end }}
 # The MEHO realm, imported by Keycloak at its first start (`--import-realm`).
 # No secret is in this file: every `${...}` is filled by Keycloak from the

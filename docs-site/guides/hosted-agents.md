@@ -458,18 +458,31 @@ identity. In such a run the grants from Step 5 apply, so `pod-reader`
 can only run `k8s.pod.list` on `cluster-a`. This is the run that is
 truly read-only.
 
+The scheduler takes the definition's id, not its name. Look the id up
+first:
+
+```bash
+meho agent show pod-reader
+```
+
+Copy the value of the `id:` line. It is a UUID, for example
+`3f2a9c6e-1b4d-4e8f-9a7c-2d5e6f7a8b9c`. With `--json`, the same value
+is the `id` field.
+
 A one-off trigger fires once, at a UTC time you give. Pick a time a few
-minutes from now:
+minutes from now, and pass the id you copied:
 
 ```bash
 meho scheduler create --kind one_off \
-  --agent-definition pod-reader \
+  --agent-definition 3f2a9c6e-1b4d-4e8f-9a7c-2d5e6f7a8b9c \
   --fire-at 2026-10-20T02:00:00Z \
   --inputs '{"task": "List the pods in namespace web on cluster-a that are not running."}'
 ```
 
-`--inputs` is a JSON object. MEHO puts it into the agent's prompt when
-the trigger fires. Creating a trigger needs `tenant_admin`.
+`--agent-definition` must be the UUID. The CLI rejects a name before it
+creates the trigger. `--inputs` is a JSON object. MEHO puts it into the
+agent's prompt when the trigger fires. Creating a trigger needs
+`tenant_admin`.
 
 Before the first scheduled run, two things must be in place:
 

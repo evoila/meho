@@ -142,6 +142,7 @@ from meho_backplane.operations._handler_resolve import import_handler
 from meho_backplane.operations.composite_invariant import (
     assert_registered_composites_have_no_ingested_dispatch,
 )
+from meho_backplane.operations.dead_handler_sweep import retire_dead_handler_rows
 from meho_backplane.operations.embed import (
     build_embedding_text,
     compute_embedding_text_hash,
@@ -424,8 +425,19 @@ async def run_typed_op_registrars(
     fails the boot closed. The sweep runs on **every** path (fresh pass and
     replay) because the violation is a function of live descriptor state,
     not of which registration path produced the rows.
+
+    Dead-handler retirement (#3866)
+    -------------------------------
+
+    Before the invariant sweep, built-in typed/composite rows whose
+    ``handler_ref`` no longer imports are deleted
+    (:func:`~meho_backplane.operations.dead_handler_sweep.retire_dead_handler_rows`).
+    These are rows an older release registered for an op this release
+    removed; left in place, discovery advertises them and every call
+    fails with ``handler_unreachable``.
     """
     await _run_typed_op_registrars(embedding_service=embedding_service)
+    await retire_dead_handler_rows()
     await assert_registered_composites_have_no_ingested_dispatch()
 
 

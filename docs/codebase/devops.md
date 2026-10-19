@@ -80,6 +80,9 @@ deploy/charts/meho/
 │   ├── serviceaccount.yaml # Pod identity
 │   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast / result-cache egress conditional)
 │   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
+│   ├── _core-secrets.tpl   # built-in core: hook account name, core Secret names, the secrets Job's plan
+│   ├── core-secrets-rbac.yaml # built-in core: hook ServiceAccount + Role + RoleBinding (weight -40)
+│   ├── core-secrets-job.yaml  # built-in core: makes missing <release>-core-* Secrets (weight -30)
 │   ├── _core-postgres-helpers.tpl # shared core helpers: image triple, OpenShift-aware pod security context
 │   ├── tests/test-pgvector.yaml   # helm test pod on the chart's PostgreSQL image
 │   └── NOTES.txt           # post-install hints
@@ -377,6 +380,21 @@ prerequisite). The chart does **not** ship a superuser migration DSN. With
 the built-in PostgreSQL (`corePostgres.enabled: true`, below) the chart
 pre-creates the extension itself, so this step goes away; the migrations
 still run as a role that is not a superuser.
+
+### Core secrets Job (`templates/core-secrets-*.yaml`)
+
+Rendered only when a built-in part is on (`corePostgres.enabled` or
+`coreKeycloak.enabled`); with every part off the chart renders none of these
+objects. A pre-install and pre-upgrade hook Job (weight -30) runs
+`python -m meho_backplane.core.secrets` from the backplane image and makes
+every missing `<release>-core-*` Secret: database passwords, the Keycloak
+first-start service account, the three MEHO client secrets, the approval
+hand-off key, the Valkey password and a first TLS certificate. It never
+changes an existing Secret and prints no value. It runs under its own hook
+ServiceAccount, Role and RoleBinding (weight -40, all four phases), which
+may create Secrets, read and patch only the `<release>-core-*` names, and
+read the Secrets the operator names in values.
+Secret table, rules and rights: [core-secrets.md](core-secrets.md).
 
 ### Broadcast subchart (`charts/broadcast/`)
 
@@ -773,6 +791,8 @@ them).
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
+| `corePostgres.enabled` / `coreKeycloak.enabled` | `false` | Built-in core parts (#4041). When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). |
+| `corePostgres.existingSecrets.{superuser,keycloak}` / `coreKeycloak.existingSecrets.bootstrap` | `""` | Your own Secret instead of a made one; the Job only checks its keys. |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
 | `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 

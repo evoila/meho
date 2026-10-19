@@ -10,8 +10,8 @@
 //
 // The first member of this tree is `admin keycloak bootstrap-clients`
 // (G0.9.1-T11, #791): provisions the public CLI device-code client +
-// the public MCP client + their 5 protocol mappers + 4 default client
-// scopes + a meho-admins group + an admin user against a Keycloak
+// the public MCP client + their 6 protocol mappers + 4 default client
+// scopes + the five MEHO role groups + an admin user against a Keycloak
 // realm, idempotently. The verb encodes the 5-step recipe documented
 // in deploy/values-examples/README.md § Auth onramp recipe.
 //

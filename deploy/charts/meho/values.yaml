@@ -1052,37 +1052,52 @@ approvalHandoff:
   secretName: ""
   secretKey: approval_handoff_encryption_key
 
-# Built-in PostgreSQL (`charts/postgres/`, #4039). One PostgreSQL 17 server
-# with pgvector, one StatefulSet with one replica and one disk, holding two
-# databases: `meho` and `keycloak`. Each is owned by a login role of the
-# same name, and neither role is a superuser. The chart creates the
-# `vector` extension itself, so the pgvector step described at
-# `postgres.credentialsSecret` is not needed.
+# Built-in core: the Secrets the install makes (#4041).
 #
-# The chart makes no password itself. It reads three Secrets that the
-# install's secrets Job makes before the pod starts:
-# `<release>-core-postgres-superuser` (mounted by the PostgreSQL pod
-# alone), `<release>-core-postgres-meho` and
-# `<release>-core-postgres-keycloak`. A sidecar in the PostgreSQL pod sets
-# the two role passwords again whenever those Secrets change, so a new or
-# restored Secret never drifts from the database.
+# When a built-in part is on, a hook Job runs before every install and
+# upgrade (templates/core-secrets-job.yaml). It makes each password and key
+# that part needs as a Kubernetes Secret named `<release>-core-…`, if the
+# Secret is missing. It never changes an existing Secret and prints no
+# value. Secret names, keys and formats: docs/codebase/core-secrets.md.
 #
-# Off by default for now. It turns on by default once the existing
-# bring-your-own installs set `corePostgres.enabled: false`. With it off,
-# the chart renders exactly what it rendered before.
+# To use your own Secret instead, put its name in the matching values key
+# (for example `postgres.credentialsSecret` or `approvalHandoff.secretName`).
+# The Job then only checks that your Secret holds the keys MEHO reads. An
+# empty key, or the `<release>-core-…` name itself, lets the install make the
+# Secret.
+#
+# The Job reuses `migrationJob.backoffLimit`, `ttlSecondsAfterFinished` and
+# `resources`. The PostgreSQL and Keycloak subcharts add their own settings
+# to the two blocks below.
 corePostgres:
+  # -- Built-in PostgreSQL. When on, the install makes
+  # `<release>-core-postgres-superuser`, `-core-postgres-meho` and
+  # `-core-postgres-keycloak`.
   enabled: false
+  existingSecrets:
+    # -- Your own Secret with the PostgreSQL superuser password (key
+    # `password`). Empty = the install makes
+    # `<release>-core-postgres-superuser`.
+    superuser: ""
+    # -- Your own Secret with the password of the `keycloak` database role
+    # (key `password`). Empty = the install makes
+    # `<release>-core-postgres-keycloak`.
+    keycloak: ""
+  # The subchart settings below (#4039): one PostgreSQL 17 server with
+  # pgvector and two databases, `meho` and `keycloak`, each owned by a role
+  # of the same name that is not a superuser. The chart creates the
+  # `vector` extension itself, so the pgvector step described at
+  # `postgres.credentialsSecret` is not needed. A sidecar in the
+  # PostgreSQL pod sets the role passwords again whenever the Secrets
+  # change. The superuser Secret is mounted by the PostgreSQL pod alone.
+  # Off by default for now; it turns on by default once the existing
+  # bring-your-own installs set `corePostgres.enabled: false`.
   image:
     repository: pgvector/pgvector
     tag: "0.8.7-pg17-bookworm"
     # -- When set, the pod uses `repository@digest`; the tag is a label.
     digest: "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
     pullPolicy: IfNotPresent
-  # -- Operator-made Secrets (key `password`) to use instead of the
-  # generated `<release>-core-postgres-superuser` / `-keycloak` ones.
-  existingSecrets:
-    superuser: ""
-    keycloak: ""
   persistence:
     # -- Data disk size. Fixed after the first install (StatefulSet rule).
     size: 10Gi
@@ -1133,6 +1148,16 @@ corePostgres:
     keycloakPodLabels:
       app.kubernetes.io/name: keycloak
     extraAllowedSelectors: []
+coreKeycloak:
+  # -- Built-in Keycloak. When on, the install makes
+  # `<release>-core-keycloak-bootstrap` and the three MEHO client secrets
+  # `-core-keycloak-admin`, `-core-ui-auth` and `-core-check-runner`.
+  enabled: false
+  existingSecrets:
+    # -- Your own Secret with Keycloak's first-start service account (keys
+    # `client_id` and `client_secret`). Empty = the install makes
+    # `<release>-core-keycloak-bootstrap`.
+    bootstrap: ""
 
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store

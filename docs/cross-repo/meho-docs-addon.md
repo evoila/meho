@@ -182,7 +182,8 @@ Accepted claim shapes (the backplane tolerates all three):
 
 This is the **same realm wiring shape** as the `tenant_id` / `tenant_role`
 mappers — see [`keycloak-tenant-claims.md`](keycloak-tenant-claims.md)
-for the protocol-mapper recipe (group-attribute or script mapper). Drive
+for the protocol-mapper recipe (a User Attribute mapper that reads a
+group attribute). Drive
 the capabilities claim off a tenant/group attribute so a tenant_admin can
 grant or revoke the add-on and individual collections without a code
 change.

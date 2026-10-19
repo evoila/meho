@@ -858,6 +858,21 @@
         }
       }
     },
+    "coreKeycloak": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner unless you name your own Secret. See docs/codebase/core-secrets.md.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bootstrap": { "type": "string", "description": "Your own Secret with Keycloak's first-start service account (keys `client_id` and `client_secret`). Empty = the install makes <release>-core-keycloak-bootstrap." }
+          }
+        }
+      }
+    },
     "audit": {
       "type": "object",
       "additionalProperties": false,

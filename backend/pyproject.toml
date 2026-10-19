@@ -402,7 +402,8 @@ ignore_missing_imports = true
 # ``py.typed`` marker as of 32.x. The connector module
 # (:mod:`meho_backplane.connectors.kubernetes`) localises the untyped
 # surface to the ``ApiClient`` / ``VersionApi`` / ``config.*`` calls;
-# the rest of the codebase never imports kubernetes_asyncio directly.
+# the only other importer is the install-time secrets Job
+# (:mod:`meho_backplane.core.secrets`, Secret read + create only).
 # Drop this override if upstream later ships stubs (open issue
 # tomplus/kubernetes_asyncio#260 tracks the request).
 [[tool.mypy.overrides]]

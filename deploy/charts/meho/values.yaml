@@ -1044,6 +1044,48 @@ approvalHandoff:
   secretName: ""
   secretKey: approval_handoff_encryption_key
 
+# Built-in core: the Secrets the install makes (#4041).
+#
+# When a built-in part is on, a hook Job runs before every install and
+# upgrade (templates/core-secrets-job.yaml). It makes each password and key
+# that part needs as a Kubernetes Secret named `<release>-core-…`, if the
+# Secret is missing. It never changes an existing Secret and prints no
+# value. Secret names, keys and formats: docs/codebase/core-secrets.md.
+#
+# To use your own Secret instead, put its name in the matching values key
+# (for example `postgres.credentialsSecret` or `approvalHandoff.secretName`).
+# The Job then only checks that your Secret holds the keys MEHO reads. An
+# empty key, or the `<release>-core-…` name itself, lets the install make the
+# Secret.
+#
+# The Job reuses `migrationJob.backoffLimit`, `ttlSecondsAfterFinished` and
+# `resources`. The PostgreSQL and Keycloak subcharts add their own settings
+# to the two blocks below.
+corePostgres:
+  # -- Built-in PostgreSQL. When on, the install makes
+  # `<release>-core-postgres-superuser`, `-core-postgres-meho` and
+  # `-core-postgres-keycloak`.
+  enabled: false
+  existingSecrets:
+    # -- Your own Secret with the PostgreSQL superuser password (key
+    # `password`). Empty = the install makes
+    # `<release>-core-postgres-superuser`.
+    superuser: ""
+    # -- Your own Secret with the password of the `keycloak` database role
+    # (key `password`). Empty = the install makes
+    # `<release>-core-postgres-keycloak`.
+    keycloak: ""
+coreKeycloak:
+  # -- Built-in Keycloak. When on, the install makes
+  # `<release>-core-keycloak-bootstrap` and the three MEHO client secrets
+  # `-core-keycloak-admin`, `-core-ui-auth` and `-core-check-runner`.
+  enabled: false
+  existingSecrets:
+    # -- Your own Secret with Keycloak's first-start service account (keys
+    # `client_id` and `client_secret`). Empty = the install makes
+    # `<release>-core-keycloak-bootstrap`.
+    bootstrap: ""
+
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store
   # mirror is explicitly v0.2 per Goal #11 spec.

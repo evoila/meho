@@ -715,6 +715,37 @@
         "then": { "required": ["secretName"], "properties": { "secretName": { "type": "string", "minLength": 1 } } }
       }]
     },
+    "corePostgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Built-in PostgreSQL. When enabled, the core secrets Job makes <release>-core-postgres-superuser, -core-postgres-meho and -core-postgres-keycloak unless you name your own Secret. See docs/codebase/core-secrets.md.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "superuser": { "type": "string", "description": "Your own Secret with the PostgreSQL superuser password (key `password`). Empty = the install makes <release>-core-postgres-superuser." },
+            "keycloak": { "type": "string", "description": "Your own Secret with the password of the `keycloak` database role (key `password`). Empty = the install makes <release>-core-postgres-keycloak." }
+          }
+        }
+      }
+    },
+    "coreKeycloak": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner unless you name your own Secret. See docs/codebase/core-secrets.md.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bootstrap": { "type": "string", "description": "Your own Secret with Keycloak's first-start service account (keys `client_id` and `client_secret`). Empty = the install makes <release>-core-keycloak-bootstrap." }
+          }
+        }
+      }
+    },
     "audit": {
       "type": "object",
       "additionalProperties": false,

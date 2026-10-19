@@ -105,11 +105,10 @@ Field-to-source mapping:
 | `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0106`). See [Event class](#event-class-3733). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
-The three computed fields use exactly the same rules
-`meho_backplane.audit._publish_broadcast_event` applies on the publish side,
-so a row returned by the query API and a `BroadcastEvent` observed on the SSE
-feed for the same `audit_id` agree on the `(op_id, op_class, result_status)`
-trio.
+The three computed fields use the same rules the audit writers apply when
+they store the row, so a row returned by the query API and the stored row
+agree on the `(op_id, op_class, result_status)` trio. Since #3758 no
+automatic Broadcast event is published for a row; the row is the record.
 
 ### `AuditQueryResult` — page
 

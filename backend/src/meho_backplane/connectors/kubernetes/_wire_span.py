@@ -21,6 +21,16 @@ redacted bodies, and the response object's metadata (``uid``,
 ``last-applied-configuration`` with secret data, and ``fieldsV1`` lists field
 names.
 
+Secret payloads are masked before capture. A JSON request or response body
+is parsed here and passed through the connector's structural Secret
+redactor (:func:`meho_backplane.connectors.kubernetes.redaction.redact_kubernetes_payload`),
+so every ``data`` / ``stringData`` value of a ``kind: Secret`` object -- in a
+``k8s.apply`` manifest, a single read, or the items of a ``SecretList`` --
+reaches the recorder only as a key name plus a digest. The shared redaction
+path then runs over that masked body as usual. The metadata summary is
+built from the body **after** redaction, so a body-path rule or the
+credential-shape scrub applies to the summary too.
+
 When capture is off the wrapper costs one contextvar read. It never changes
 what the SDK returns or raises: an ``ApiException`` and any transport error
 are re-raised unchanged after the span is recorded.
@@ -38,6 +48,8 @@ import structlog
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.rest import ApiException
 
+from meho_backplane.connectors.kubernetes.redaction import redact_kubernetes_payload
+from meho_backplane.flight_recorder._capture_util import MAX_SPAN_BODY_BYTES
 from meho_backplane.flight_recorder.capture import SpanStart, span_start
 from meho_backplane.flight_recorder.sdk_http import record_sdk_vendor_call
 
@@ -80,9 +92,9 @@ SAFE_QUERY_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Above this size the response body is not parsed for the metadata
-#: summary, so a huge list never costs a second full JSON parse.
-_MAX_METADATA_PARSE_BYTES: Final[int] = 2 * 1024 * 1024
+#: The one non-``json`` content type the SDK still sends as JSON text
+#: (server-side apply). Bodies of this type are parsed for Secret masking.
+_APPLY_PATCH_CONTENT_TYPE: Final[str] = "application/apply-patch+yaml"
 
 #: Upper bound on ``managedFields`` entries copied into the summary.
 _MAX_MANAGED_FIELDS: Final[int] = 20
@@ -181,19 +193,20 @@ class _Call:
     def record(self, status: str, response_headers: Any, response_body: Any) -> None:
         """Hand the round-trip to the recorder. Never raises (F7)."""
         try:
-            body = _as_bytes(response_body)
             record_sdk_vendor_call(
                 self.start,
                 method=self.method,
                 url=self.url,
                 status=status,
                 request_headers=self.headers,
-                request_body=self.body,
+                request_body=_masked_body(self.body, _content_type(self.headers)),
                 response_headers=response_headers,
-                response_body=body,
+                response_body=_masked_bytes(
+                    _as_bytes(response_body), _content_type(response_headers)
+                ),
                 query=self.query,
                 safe_query_names=SAFE_QUERY_NAMES,
-                extra=_response_object_extra(body),
+                response_summary=_response_object_summary,
             )
         except Exception:
             _log.warning("kubernetes_wire_span_failed", exc_info=True)
@@ -235,23 +248,86 @@ def _as_bytes(body: Any) -> bytes | None:
     return None
 
 
-def _response_object_extra(body: bytes | None) -> dict[str, Any] | None:
-    """Summarise the response object's metadata. Never raises."""
-    if not body or len(body) > _MAX_METADATA_PARSE_BYTES:
-        return None
+def _content_type(headers: Any) -> str | None:
+    """Case-insensitive ``content-type`` read from any header mapping; never raises."""
     try:
-        obj = json.loads(body)
+        for key, value in headers.items():
+            if str(key).lower() == "content-type" and isinstance(value, str):
+                return value
+    except Exception:
+        return None
+    return None
+
+
+def _is_json_like(content_type: str | None) -> bool:
+    """``True`` when the body is JSON text the Secret masking pass can parse.
+
+    An absent content type counts as JSON-like, as in the shared redactor,
+    which also attempts a JSON parse then.
+    """
+    base = (content_type or "").split(";", 1)[0].strip().lower()
+    return base in (
+        "",
+        "application/json",
+        "text/json",
+        _APPLY_PATCH_CONTENT_TYPE,
+    ) or base.endswith("+json")
+
+
+def _masked_body(body: Any, content_type: str | None) -> Any:
+    """Mask Kubernetes Secret data in a request body before it is recorded.
+
+    The SDK hands the transport a parsed ``dict`` (typed and dynamic calls
+    alike); JSON text is parsed first. Any other shape passes through
+    unchanged and the shared redactor decides what to do with it.
+    """
+    if isinstance(body, (dict, list)):
+        return redact_kubernetes_payload(body)
+    if isinstance(body, (str, bytes, bytearray)) and _is_json_like(content_type):
+        parsed = _parse_json(body)
+        if isinstance(parsed, (dict, list)):
+            return redact_kubernetes_payload(parsed)
+    return body
+
+
+def _masked_bytes(body: bytes | None, content_type: str | None) -> bytes | None:
+    """Mask Kubernetes Secret data in a JSON response body; keep it as bytes.
+
+    A body over the span body cap is left alone: the shared redactor cuts
+    and omits it anyway. A body that is not JSON passes through unchanged.
+    """
+    if body is None or len(body) > MAX_SPAN_BODY_BYTES or not _is_json_like(content_type):
+        return body
+    parsed = _parse_json(body)
+    if not isinstance(parsed, (dict, list)):
+        return body
+    masked = redact_kubernetes_payload(parsed)
+    return json.dumps(masked, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _parse_json(body: str | bytes | bytearray) -> Any:
+    try:
+        return json.loads(body)
     except (ValueError, UnicodeDecodeError, RecursionError):
         return None
-    if not isinstance(obj, dict):
+
+
+def _response_object_summary(body: Any) -> dict[str, Any] | None:
+    """Summarise the metadata of a **redacted** response object. Never raises.
+
+    *body* is what the recorder will store as ``response_body``: a parsed
+    structure, ``None``, or an omission marker. Only a JSON object gives a
+    summary; whatever a redaction rule replaced in it is replaced here too.
+    """
+    if not isinstance(body, dict):
         return None
     summary: dict[str, Any] = {
-        key: obj[key] for key in ("kind", "apiVersion") if isinstance(obj.get(key), str)
+        key: body[key] for key in ("kind", "apiVersion") if isinstance(body.get(key), str)
     }
-    metadata = obj.get("metadata")
+    metadata = body.get("metadata")
     if isinstance(metadata, dict):
         summary.update(_metadata_summary(metadata))
-    items = obj.get("items")
+    items = body.get("items")
     if isinstance(items, list):
         summary["item_count"] = len(items)
     return {"response_object": summary} if summary else None

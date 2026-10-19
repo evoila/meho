@@ -22,10 +22,18 @@ from aiohttp import web
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.rest import ApiException
 
-from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
+from meho_backplane.connectors.kubernetes._wire_span import (
+    _response_object_summary,
+    instrument_api_client,
+)
+from meho_backplane.connectors.kubernetes.redaction import (
+    LAST_APPLIED_ANNOTATION,
+    REDACTED_PREFIX,
+)
 from meho_backplane.flight_recorder import capture
 from meho_backplane.flight_recorder.sdk_http import record_sdk_vendor_call
 from meho_backplane.redaction.flight_recorder import (
+    BODY_PATH_MARKER,
     HEADER_ALLOWLIST,
     QUERY_VALUE_MARKER,
     SECRET_FAMILY_OMITTED_MARKER,
@@ -34,15 +42,21 @@ from meho_backplane.redaction.flight_recorder import (
 
 _TOKEN = "Bearer abc.def.ghi-secret-token-value"
 
+# A base64 Secret value that matches no named credential pattern, so a green
+# assertion proves the structural Secret masking fired, not the shape net.
+_OPAQUE_B64 = "cGxhaW4tYXBwLXRva2VuLXdpdGgtbm8tbGFiZWw="
 
-def _op(op_id: str = "k8s.apply", tags: tuple[str, ...] = ()) -> capture._OpContext:
+
+def _op(
+    op_id: str = "k8s.apply", tags: tuple[str, ...] = (), body_paths: tuple[str, ...] = ()
+) -> capture._OpContext:
     return capture._OpContext(
         op_id=op_id,
         connector_id="kubernetes",
         impl_id="kubernetes-1",
         product="kubernetes",
         tags=tags,
-        body_paths=(),
+        body_paths=body_paths,
         # Set (not None) so the classifier does not read app settings.
         delete_shaped_patterns=(),
     )
@@ -123,7 +137,7 @@ def test_record_sdk_vendor_call_records_redacted_span(scope: capture._CaptureSco
         response_body=b'{"metadata": {"uid": "u-1"}}',
         query=[("dryRun", "All")],
         safe_query_names={"dryRun"},
-        extra={"response_object": {"uid": "u-1"}},
+        response_summary=lambda body: {"response_object": {"uid": body["metadata"]["uid"]}},
     )
     (span,) = scope.spans
     attrs = _attrs(span)
@@ -157,6 +171,74 @@ def test_record_sdk_vendor_call_secret_family_omits_bodies(
         capture._op_context_var.reset(token)
     (span,) = scope.spans
     assert span.attributes["request_body"] == SECRET_FAMILY_OMITTED_MARKER
+    assert span.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
+
+
+def test_response_summary_is_built_from_the_scrubbed_body(scope: capture._CaptureScope) -> None:
+    """A credential shape removed from ``response_body`` never reappears in the summary."""
+    raw = {"kind": "Namespace", "metadata": {"uid": "u-1", "managedFields": [{"manager": _TOKEN}]}}
+    record_sdk_vendor_call(
+        capture.span_start(),
+        method="GET",
+        url="https://k8s.test/api/v1/namespaces/demo",
+        status="200",
+        response_headers={"Content-Type": "application/json"},
+        response_body=json.dumps(raw).encode(),
+        response_summary=_response_object_summary,
+    )
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert attrs["response_object"]["uid"] == "u-1"
+    (entry,) = attrs["response_object"]["managedFields"]
+    assert entry["manager"] == attrs["response_body"]["metadata"]["managedFields"][0]["manager"]
+    assert "secret-token-value" not in json.dumps(attrs)
+    assert scope.redaction_uncertain is False
+
+
+def test_response_summary_honours_body_path_rules(scope: capture._CaptureScope) -> None:
+    """A field a body-path rule removed is removed from the summary too."""
+    token = capture._op_context_var.set(_op(body_paths=("metadata.uid",)))
+    try:
+        record_sdk_vendor_call(
+            capture.span_start(),
+            method="GET",
+            url="https://k8s.test/api/v1/namespaces/demo",
+            status="200",
+            response_headers={"Content-Type": "application/json"},
+            response_body=json.dumps(
+                {"kind": "Namespace", "metadata": {"uid": "uid-hidden", "name": "demo"}}
+            ).encode(),
+            response_summary=_response_object_summary,
+        )
+    finally:
+        capture._op_context_var.reset(token)
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert attrs["response_body"]["metadata"]["uid"] == BODY_PATH_MARKER
+    assert attrs["response_object"] == {
+        "kind": "Namespace",
+        "name": "demo",
+        "uid": BODY_PATH_MARKER,
+    }
+    assert "uid-hidden" not in json.dumps(attrs)
+    assert scope.redaction_uncertain is False
+
+
+def test_response_summary_skipped_when_body_not_recorded(scope: capture._CaptureScope) -> None:
+    token = capture._op_context_var.set(_op("k8s.secret.create"))
+    try:
+        record_sdk_vendor_call(
+            capture.span_start(),
+            method="POST",
+            url="https://k8s.test/api/v1/namespaces/demo/secrets",
+            status="201",
+            response_body=b'{"kind": "Secret", "metadata": {"uid": "u-1"}}',
+            response_summary=_response_object_summary,
+        )
+    finally:
+        capture._op_context_var.reset(token)
+    (span,) = scope.spans
+    assert "response_object" not in span.attributes
     assert span.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
 
 
@@ -198,6 +280,28 @@ _NAMESPACE = {
 }
 _K8S_HEADERS = {"Audit-Id": "audit-123", "Warning": '299 - "deprecated"', "Server": "kube"}
 
+# What the API server returns for a Secret: the values are back in ``data``
+# and once more inside the last-applied annotation.
+_SECRET = {
+    "kind": "Secret",
+    "apiVersion": "v1",
+    "type": "Opaque",
+    "metadata": {
+        "name": "app",
+        "namespace": "demo",
+        "uid": "sec-uid",
+        "resourceVersion": "77",
+        "annotations": {LAST_APPLIED_ANNOTATION: json.dumps({"data": {"tls.key": _OPAQUE_B64}})},
+    },
+    "data": {"tls.key": _OPAQUE_B64},
+}
+_SECRET_LIST = {
+    "kind": "SecretList",
+    "apiVersion": "v1",
+    "metadata": {"resourceVersion": "78"},
+    "items": [{k: v for k, v in _SECRET.items() if k not in ("kind", "apiVersion")}],
+}
+
 
 async def _namespace(request: web.Request) -> web.Response:
     if request.match_info["name"] == "missing":
@@ -207,10 +311,20 @@ async def _namespace(request: web.Request) -> web.Response:
     return web.json_response(_NAMESPACE, headers=_K8S_HEADERS)
 
 
+async def _secret(request: web.Request) -> web.Response:
+    return web.json_response(_SECRET, headers=_K8S_HEADERS)
+
+
+async def _secret_list(request: web.Request) -> web.Response:
+    return web.json_response(_SECRET_LIST, headers=_K8S_HEADERS)
+
+
 @pytest.fixture
 async def api_client() -> AsyncIterator[client.ApiClient]:
     app = web.Application()
     app.router.add_route("*", "/api/v1/namespaces/{name}", _namespace)
+    app.router.add_route("*", "/api/v1/namespaces/{namespace}/secrets/{name}", _secret)
+    app.router.add_get("/api/v1/namespaces/{namespace}/secrets", _secret_list)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -290,6 +404,110 @@ async def test_k8s_raw_response_is_recorded_and_still_readable(
     (span,) = scope.spans
     assert span.status == "200"
     assert _attrs(span)["response_object"]["resourceVersion"] == "4242"
+
+
+def _assert_secret_masked(obj: dict[str, Any]) -> None:
+    assert obj["data"]["tls.key"].startswith(REDACTED_PREFIX)
+    assert obj["metadata"]["annotations"][LAST_APPLIED_ANNOTATION].startswith(REDACTED_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_k8s_apply_of_a_secret_records_no_secret_value(
+    api_client: client.ApiClient, scope: capture._CaptureScope
+) -> None:
+    """``k8s.apply`` (server-side apply through the dynamic client) of a Secret."""
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "app", "namespace": "demo"},
+        "stringData": {"config.ini": "plain-value-with-no-label"},
+        "data": {"tls.key": _OPAQUE_B64},
+    }
+    response = await api_client.call_api(
+        "/api/v1/namespaces/{namespace}/secrets/{name}",
+        "PATCH",
+        path_params={"namespace": "demo", "name": "app"},
+        query_params=[("fieldManager", "meho"), ("force", "true")],
+        header_params={"Content-Type": "application/apply-patch+yaml"},
+        body=manifest,
+        auth_settings=["BearerToken"],
+        _preload_content=False,
+    )
+    assert (await response.json())["data"]["tls.key"] == _OPAQUE_B64  # SDK result unchanged
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert span.status == "200"
+    assert attrs["op_id"] == "k8s.apply"
+    assert attrs["query"] == "fieldManager=meho&force=true"
+    assert attrs["request_body"]["data"]["tls.key"].startswith(REDACTED_PREFIX)
+    assert attrs["request_body"]["stringData"]["config.ini"].startswith(REDACTED_PREFIX)
+    assert attrs["request_body"]["metadata"]["name"] == "app"
+    _assert_secret_masked(attrs["response_body"])
+    assert attrs["response_body"]["type"] == "Opaque"
+    assert attrs["response_object"]["uid"] == "sec-uid"
+    dumped = json.dumps(attrs)
+    assert _OPAQUE_B64 not in dumped
+    assert "plain-value-with-no-label" not in dumped
+    assert scope.redaction_uncertain is False
+
+
+@pytest.mark.asyncio
+async def test_k8s_cr_info_of_a_secret_records_no_secret_value(
+    api_client: client.ApiClient, scope: capture._CaptureScope
+) -> None:
+    token = capture._op_context_var.set(_op("k8s.cr.info"))
+    try:
+        await api_client.call_api(
+            "/api/v1/namespaces/{namespace}/secrets/{name}",
+            "GET",
+            path_params={"namespace": "demo", "name": "app"},
+            auth_settings=["BearerToken"],
+            _preload_content=False,
+        )
+    finally:
+        capture._op_context_var.reset(token)
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert attrs["op_id"] == "k8s.cr.info"
+    _assert_secret_masked(attrs["response_body"])
+    assert attrs["response_object"]["uid"] == "sec-uid"
+    assert _OPAQUE_B64 not in json.dumps(attrs)
+    assert scope.redaction_uncertain is False
+
+
+@pytest.mark.asyncio
+async def test_k8s_cr_list_of_secrets_records_no_secret_value(
+    api_client: client.ApiClient, scope: capture._CaptureScope
+) -> None:
+    """The items of a ``SecretList`` carry no ``kind``; they are masked all the same."""
+    token = capture._op_context_var.set(_op("k8s.cr.list"))
+    try:
+        await api_client.call_api(
+            "/api/v1/namespaces/{namespace}/secrets",
+            "GET",
+            path_params={"namespace": "demo"},
+            query_params=[("limit", 50), ("continue", "opaque-page-token")],
+            auth_settings=["BearerToken"],
+            _preload_content=False,
+        )
+    finally:
+        capture._op_context_var.reset(token)
+    (span,) = scope.spans
+    attrs = _attrs(span)
+    assert attrs["op_id"] == "k8s.cr.list"
+    assert attrs["query"] == f"limit=50&continue={QUERY_VALUE_MARKER}"
+    (item,) = attrs["response_body"]["items"]
+    _assert_secret_masked(item)
+    assert attrs["response_object"] == {
+        "kind": "SecretList",
+        "apiVersion": "v1",
+        "resourceVersion": "78",
+        "item_count": 1,
+    }
+    dumped = json.dumps(attrs)
+    assert _OPAQUE_B64 not in dumped
+    assert "opaque-page-token" not in dumped
+    assert scope.redaction_uncertain is False
 
 
 @pytest.mark.asyncio

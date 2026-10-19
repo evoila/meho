@@ -891,7 +891,7 @@ new structure, matched to that connector's payload contract.
 | --- | --- | --- |
 | keycloak | `connectors/keycloak/redaction.py` | `ClientRepresentation.secret`, `UserRepresentation.credentials`, and the generic credential key names, recursively (#1394). |
 | rabbitmq | `connectors/rabbitmq/redact.py` | `amqp://user:pass@` URI userinfo + any `*password*` / `*secret*` key (#2233). |
-| kubernetes | `connectors/kubernetes/redaction.py` | Every `data` / `stringData` value of a `kind: Secret` object — replaced with a fixed placeholder + a `sha256:` digest, key names kept — in single-object, list, and dynamic `k8s.cr.*` reads (#3501). |
+| kubernetes | `connectors/kubernetes/redaction.py` | Every `data` / `stringData` value of a `kind: Secret` object — replaced with a fixed placeholder + a `sha256:` digest, key names kept — in single-object, list, and dynamic `k8s.cr.*` reads (#3501). Also the kind-less items of a `SecretList` envelope and the `kubectl.kubernetes.io/last-applied-configuration` annotation of a Secret, which repeats its values (#3841). |
 | argocd | `connectors/argocd/redaction.py` | Repository credential fields (`password` / `sshPrivateKey` / `tlsClientCertKey` / `bearerToken` / `githubAppPrivateKey`) on `argocd.repo.list` (#3501). ArgoCD destination-cluster creds are dropped separately by `argocd.cluster.list`'s whole-`config` strip (#2855). |
 
 The kubernetes redactor is deliberately **structural, not pattern-based**:
@@ -901,6 +901,16 @@ so a read still answers "which keys does this Secret carry?" without ever
 returning the bytes. It leaves `k8s.secret.read_to_ref` (#3496) untouched
 — that op returns only a Vault `secret_ref` + a SHA-256, never a `data`
 map, so there is nothing for the walk to match.
+
+The flight recorder reuses the same walk (#3841). The Kubernetes transport
+hook (`connectors/kubernetes/_wire_span.py`) parses every JSON request and
+response body and runs `redact_kubernetes_payload` over it before the body
+reaches the shared F2 redaction path. The F2 engine on its own keys on
+labelled shapes and would keep an opaque base64 Secret value, and ops such
+as `k8s.apply` or `k8s.cr.info` are not secret-bearing families, so the
+structural pass is what masks a Secret manifest or a Secret read on the
+`vendor_call` span. The span's `response_object` summary is then built from
+the redacted body, never from the raw response.
 
 ## References
 

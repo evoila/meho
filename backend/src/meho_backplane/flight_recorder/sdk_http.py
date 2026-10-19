@@ -17,8 +17,11 @@ the **same** ``vendor_call`` span shape, through the **same** redaction path
 
 * ``query`` -- the query string, with values kept only for names the
   transport lists as safe (:func:`~meho_backplane.redaction.flight_recorder.redact_query`);
-* any non-secret ``extra`` attributes the transport adds (for Kubernetes: the
-  response object's ``uid`` / ``resourceVersion`` / ``managedFields`` summary).
+* a summary the transport builds from the **redacted** response body (for
+  Kubernetes: the response object's ``uid`` / ``resourceVersion`` /
+  ``managedFields``). The summary is read from the body after every
+  redaction rule ran, so a body-path rule or the credential-shape scrub
+  applies to it too. No summary is built when the body is not recorded.
 
 Like every capture function, it never raises and is a no-op when capture is
 off (F7). Any redaction uncertainty degrades the trace to operator-only (F5).
@@ -26,7 +29,7 @@ off (F7). Any redaction uncertainty degrades the trace to operator-only (F5).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,7 +77,7 @@ def record_sdk_vendor_call(
     response_body: bytes | None = None,
     query: Any = None,
     safe_query_names: Iterable[str] = (),
-    extra: dict[str, Any] | None = None,
+    response_summary: Callable[[Any], Mapping[str, Any] | None] | None = None,
 ) -> None:
     """Record one SDK-made vendor HTTP call as a ``vendor_call`` span (F7).
 
@@ -83,6 +86,12 @@ def record_sdk_vendor_call(
     redacted *query* is recorded. *status* is the HTTP status as text, or
     ``error:<ExceptionClass>`` when no response came back. Headers and bodies
     are redacted before anything is placed on the span.
+
+    *response_summary*, when given, is called with the **redacted** response
+    body (a parsed structure, or an omission marker) and returns extra span
+    attributes. It is skipped when the body was not recorded at all (a
+    secret-bearing op family), so nothing on the span comes from the raw
+    response.
     """
     scope = _active_capture_var.get()
     if start is None or scope is None:
@@ -106,8 +115,10 @@ def record_sdk_vendor_call(
         attributes = _vendor_attributes(redaction, method, safe_url, truncated)
         redacted_query = redact_query(query, safe_query_names)
         attributes["query"] = redacted_query.value
-        if extra:
-            attributes.update(extra)
+        if response_summary is not None and redaction.body_recorded:
+            summary = response_summary(redaction.response_body)
+            if summary:
+                attributes.update(summary)
         scope.add(
             SpanInput(
                 span_kind="vendor_call",

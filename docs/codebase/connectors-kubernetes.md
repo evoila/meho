@@ -840,6 +840,21 @@ happened" apply could not be explained from the trace.
   `generation`, and a `managedFields` summary (manager, operation,
   apiVersion, time, subresource). Annotations, labels and `fieldsV1`
   are never copied into `response_object`.
+- `response_object` is read from the response body **after** redaction,
+  never from the raw response. So a field a body-path rule removed, or
+  a credential shape the scrub replaced, shows the same marker in both
+  places. When the body is not recorded (a secret-bearing op such as
+  `k8s.secret.create`, a body over the 64 KiB cap, or a body that is
+  not JSON) there is no `response_object`.
+- Secret payloads are masked before capture. Every JSON request and
+  response body first goes through the connector's structural Secret
+  redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
+  `data` / `stringData` value of a `kind: Secret` object, and its
+  `last-applied-configuration` annotation, is replaced by a placeholder
+  plus a digest; key names stay. This covers a `k8s.apply` of a Secret
+  manifest, a `k8s.cr.info` read of one, and the items of a
+  `SecretList` (which carry no `kind` of their own). The normal body
+  redaction then runs over the masked body.
 - Non-2xx (`ApiException`) and transport errors are recorded
   (`status` = HTTP code or `error:<ExceptionClass>`) and re-raised
   unchanged. With `_preload_content=False` the wrapper reads the body

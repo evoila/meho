@@ -235,7 +235,8 @@ async def get_search(
     a registered-but-not-ingested connector → ``404`` with the typed
     ``connector_not_ingested`` ``detail`` (same contract as ``/groups``,
     #1482); a known connector with no matching ops returns ``200`` with
-    an empty list.
+    an empty list. Every ``200`` body carries the ``outcome`` /
+    ``advisory`` / ``narrowing`` fields that say why (#3670).
 
     ``q`` is the canonical free-text query param across the kb / memory /
     operations-search list surfaces (#1854); ``query`` is its deprecated

@@ -57,6 +57,8 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.meta_tools import (
+    SEARCH_NARROWING_MAX,
+    SEARCH_OUTCOMES,
     ConnectorNotIngestedError,
     UnknownConnectorError,
     call_operation,
@@ -317,9 +319,17 @@ register_mcp_tool(
             "(`-32602`, `data.reason=unknown_connector`), and a "
             "registered-but-not-ingested connector is a recoverable error "
             "(`-32602`, `data.reason=connector_not_ingested` + "
-            "`data.next_step.verb` to run, then retry). An unknown group, "
-            "by contrast, narrows the result set to zero hits and is not "
-            "an error."
+            "`data.next_step.verb` to run, then retry). Every other result "
+            "carries `outcome`: `matched` (the top hit matched your words "
+            "and is clearly ahead), `ambiguous` (hits are weak or nearly "
+            "tied: call one only if it clearly does what was asked, "
+            "otherwise narrow the search), `no_match` (nothing matched; do "
+            "not call an operation this search did not return), "
+            "`unknown_group` (the group does not exist; `narrowing` lists "
+            "valid group keys), or `zero_enabled_operations` (nothing on "
+            "this connector is enabled; do not call it, an operator must "
+            "enable operations). `advisory` explains any outcome other than "
+            "`matched`; `narrowing` lists next steps."
         ),
         inputSchema={
             "type": "object",
@@ -385,8 +395,15 @@ register_mcp_tool(
                     },
                 },
                 "query_duration_ms": {"type": "number"},
+                "outcome": {"type": "string", "enum": list(SEARCH_OUTCOMES)},
+                "advisory": {"type": ["string", "null"]},
+                "narrowing": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": SEARCH_NARROWING_MAX,
+                },
             },
-            "required": ["hits", "query_duration_ms"],
+            "required": ["hits", "query_duration_ms", "outcome", "narrowing"],
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",

@@ -488,11 +488,18 @@ async def _render_detail(
             version=version,
             impl_id=impl_id,
         )
-    recent_ops = await _load_recent_ops(
-        db_session,
-        tenant_id=session_ctx.tenant_id,
-        target_id=target.id,
-    )
+    # Audit rows need the ``operator`` role, the same minimum the audit
+    # API applies. A ``read_only`` session (or a role lift that could
+    # not complete) gets the notice card and no rows.
+    if role_probe.is_operator:
+        recent_ops = await _load_recent_ops(
+            db_session,
+            tenant_id=session_ctx.tenant_id,
+            target_id=target.id,
+        )
+        recent_ops_context = _recent_ops_context(target.name, recent_ops)
+    else:
+        recent_ops_context = _recent_ops_forbidden_context()
 
     # The ``no_connector`` resolver verdict conflates two operationally
     # distinct cases (G0.15-T10 #1218): "fingerprint not cached yet"
@@ -516,7 +523,7 @@ async def _render_detail(
         "no_connector_cause": no_connector_cause,
         "valid_products": valid_products,
         "ops_matrix": ops_matrix,
-        **_recent_ops_context(target.name, recent_ops),
+        **recent_ops_context,
         # tenant_admin gate for the re-probe button. The handler in
         # :mod:`probe` re-checks the role server-side; the template
         # hides the button when the operator can't use it so the
@@ -546,9 +553,19 @@ def _recent_ops_context(target_name: str, rows: Iterable[AuditLog]) -> dict[str,
     """
     return {
         "recent_ops": _project_audit_rows(rows),
+        "recent_ops_forbidden": False,
         "recent_ops_url": f"/ui/connectors/{quote(target_name, safe='')}/recent-operations",
         "recent_ops_updated_at": datetime.now(UTC).isoformat(),
     }
+
+
+def _recent_ops_forbidden_context() -> dict[str, Any]:
+    """Template context for a session below the ``operator`` role.
+
+    The card renders a notice and carries no refresh URL, so
+    ``recent-ops-refresh.js`` does not poll a fragment that would 403.
+    """
+    return {"recent_ops": [], "recent_ops_forbidden": True}
 
 
 async def _render_recent_ops(
@@ -557,13 +574,22 @@ async def _render_recent_ops(
     target_name: str,
     session_ctx: UISessionContext,
     db_session: AsyncSession,
+    role_probe: OperatorRoleProbe,
 ) -> HTMLResponse:
     """Render the recent-ops card alone, for the 5-second refresh (#3758).
 
-    Same tenant scope and target resolution as the detail page: a name
-    that does not resolve in the session's tenant is a 404, so the
-    fragment never shows another tenant's rows.
+    Same role gate, tenant scope and target resolution as the detail
+    page: a session below the ``operator`` role gets the notice card at
+    403 before any lookup; a name that does not resolve in the session's
+    tenant is a 404, so the fragment never shows another tenant's rows.
     """
+    if not role_probe.is_operator:
+        return get_templates().TemplateResponse(
+            request,
+            "connectors/_recent_ops.html",
+            _recent_ops_forbidden_context(),
+            status_code=403,
+        )
     _resolve_target_or_404(target_name=target_name)
     target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
     rows = await _load_recent_ops(
@@ -611,6 +637,7 @@ def build_detail_router() -> APIRouter:
         name: str,
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_raw_session_dep,
+        role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
         """``GET /ui/connectors/{name}/recent-operations``."""
         return await _render_recent_ops(
@@ -618,6 +645,7 @@ def build_detail_router() -> APIRouter:
             target_name=name,
             session_ctx=session_ctx,
             db_session=db_session,
+            role_probe=role_probe,
         )
 
     router.add_api_route(

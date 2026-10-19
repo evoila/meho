@@ -18,11 +18,32 @@
   Every value renders through Jinja autoescaping. ``recent_ops_url`` is
   built on the server with the target name percent-encoded.
 
+  Role: audit rows need the ``operator`` role (the audit API's minimum).
+  With ``recent_ops_forbidden`` set the card shows a notice instead of
+  rows and carries no refresh attributes, so the script does not poll.
+  The fragment route returns this shape with HTTP 403.
+
   Context:
     recent_ops            -- list of projected audit rows (newest first)
     recent_ops_url        -- the refresh fragment path
     recent_ops_updated_at -- ISO-8601 time the rows were read (UTC)
+    recent_ops_forbidden  -- true when the session is below ``operator``
 -#}
+{% if recent_ops_forbidden %}
+<article
+  id="recent-ops-card"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-label="Recent operations on this target"
+>
+  <div class="card-body space-y-2">
+    <h2 class="card-title text-base">Recent operations</h2>
+    <p class="text-sm opacity-70" role="status" data-recent-ops-forbidden>
+      Recent operations need the <span class="font-mono">operator</span> role.
+      Your session does not hold it.
+    </p>
+  </div>
+</article>
+{% else %}
 <article
   id="recent-ops-card"
   class="card bg-base-100 border-base-300 border shadow-sm"
@@ -58,3 +79,4 @@
     {% endif %}
   </div>
 </article>
+{% endif %}

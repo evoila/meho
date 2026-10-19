@@ -2244,7 +2244,8 @@ the same way broadcast / topology / memory retired theirs.
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET` | `/ui/connectors` | Sortable + filterable targets list. URL: `?sort=name|product|host|last_probed_at|status&dir=asc|desc&product=<slug>`. Full-page render or `_table_rows.html` fragment (HX-Request branch). |
-| `GET` | `/ui/connectors/{name}` | Per-target detail. Renders properties + fingerprint card + recent-ops card (SSE-live) + available-operations matrix. Alias-aware target resolution via `resolve_target`. |
+| `GET` | `/ui/connectors/{name}` | Per-target detail. Renders properties + fingerprint card + recent-ops card (server-rendered from the audit log; rows need the `operator` role) + available-operations matrix. Alias-aware target resolution via `resolve_target`. |
+| `GET` | `/ui/connectors/{name}/recent-operations` | The recent-ops card alone (newest 10 `operation_execution` audit rows). `recent-ops-refresh.js` fetches it every 5 seconds while the page is visible. A session below `operator` gets the notice card at 403 (#3758). |
 | `POST` | `/ui/connectors/{name}/probe` | Re-probe action. Tenant_admin RBAC gated server-side (the template hides the button optimistically; the handler is the authority). Persists the new fingerprint and swaps the refreshed `_fingerprint_card.html` fragment. |
 | `GET` | `/ui/connectors/create` | (T2 #874) HTMX-loaded create-target modal. Tenant_admin gated. Product `<select>` server-rendered from `registered_product_tokens()`; auth_model `<select>` from the `AuthModel` enum. |
 | `POST` | `/ui/connectors/create` | (T2 #874) Create submit. Builds a `TargetCreate` and delegates to the REST `create_target` handler in-process. Success → 204 + `HX-Redirect: /ui/connectors`; validation failure → 422 + modal re-rendered with per-field errors. |
@@ -2268,9 +2269,11 @@ the same way broadcast / topology / memory retired theirs.
 
 The detail page's available-operations matrix and the re-probe action both consume `resolve_connector_or_label(target)` — the same helper the `/api/v1/targets/{name}/probe` REST route uses (G0.14-T1 #1142). The detail page then resolves the matching v2-registry entry to produce the canonical `"<impl_id>-<version>"` `connector_id` the operations meta-tool query reads (`list_operation_groups`'s shape). When the registry has the chosen class under multiple keys (the K8s pattern, both a v1 wildcard and a v2 versioned key), the detail page picks the versioned key — same precedence the G0.6 dispatcher's lookup uses.
 
-### SSE wiring for recent ops
+### Recent-ops card refresh and role gate (#3758)
 
-The recent-ops card on the detail page is live-driven by the existing G10.1 broadcast SSE bridge: the card embeds `sse-connect="/ui/broadcast/stream?target=<urlencoded-name>"` plus `sse-swap="broadcast"`. An Alpine controller (`connectorsRecentOps`, `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js`) hooks `htmx:sse-before-message`, parses each `event: broadcast` frame's JSON, and prepends a row to its bounded `events` array (cap 50; older rows trim). The card is initially seeded by the server-rendered last-10 audit rows so the page is useful even before any new event streams in.
+The recent-ops card is rendered on the server from the newest 10 `operation_execution` audit rows on the target. `recent-ops-refresh.js` swaps in a fresh copy from `GET /ui/connectors/{name}/recent-operations` every 5 seconds while the page is visible; the card shows when it was updated. There is no Broadcast subscription any more: Broadcast carries agent announcements only.
+
+Audit rows need the `operator` role, the same minimum the audit API applies (`require_role(TenantRole.OPERATOR)` in `api/v1/audit.py`). The page-load role probe (`resolve_role_probe`, `is_operator`) decides: a `read_only` session, or a role lift that could not complete, gets the card with a notice and no refresh URL, and the fragment answers 403 with the same notice. The dashboard tray (`GET /ui/dashboard/recent-operations`) applies the same gate through `meho_backplane.ui.roles.is_ui_operator`.
 
 ### RBAC posture for re-probe
 
@@ -2285,7 +2288,7 @@ Every list / detail / probe path filters on `session_ctx.tenant_id`:
 * Probe: same `resolve_target` gate before the write.
 * Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible.
 * Ops matrix: `(operation_group.tenant_id IS NULL OR operation_group.tenant_id = :tenant_id)` — same shape `list_operation_groups` uses for the agent surface.
-* Recent-ops SSE: the underlying `/ui/broadcast/stream` bridge takes the tenant from the session row, never from a query parameter, so the per-target filter cannot leak across tenants.
+* Recent-ops fragment: resolves the target name in the session's tenant (`resolve_target`, 404 on a cross-tenant name) after the role gate, so the fragment never shows another tenant's rows.
 
 ### Create / edit forms (Task #874)
 
@@ -2417,11 +2420,11 @@ detail surface that didn't exist when v0.7.0 cut:
 * `backend/src/meho_backplane/ui/templates/connectors/_table_rows.html` — list rows fragment (HTMX swap target).
 * `backend/src/meho_backplane/ui/templates/connectors/detail.html` — full-page detail template.
 * `backend/src/meho_backplane/ui/templates/connectors/_fingerprint_card.html` — fingerprint card (also returned by the re-probe POST).
-* `backend/src/meho_backplane/ui/templates/connectors/_recent_ops.html` — SSE-live recent-ops card.
+* `backend/src/meho_backplane/ui/templates/connectors/_recent_ops.html` — recent-ops card (server-rendered; also the fragment response; notice shape for a session below `operator`).
 * `backend/src/meho_backplane/ui/templates/connectors/_ops_matrix.html` — grouped operations matrix.
 * `backend/src/meho_backplane/ui/templates/connectors/_probe_alert.html` — failure alert fragment (no_connector / ambiguous).
-* `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js` — `connectorsRecentOps` Alpine controller.
-* `backend/tests/test_ui_connectors_view.py` — auth boundary, list (full + fragment + sort + filter + cross-tenant), detail (properties + alias + 404 + cross-tenant + recent ops + ops matrix + ambiguous / no-connector branches), fingerprint card (present / never), re-probe button visibility (operator vs tenant_admin), SSE wiring + URL-encoding, re-probe (success + 403 operator + 501 no-connector + 404 unknown).
+* `backend/src/meho_backplane/ui/static/src/app/recent-ops-refresh.js` — shared 5-second visible-page refresh for the connector card and the dashboard tray.
+* `backend/tests/test_ui_connectors_view.py` — auth boundary, list (full + fragment + sort + filter + cross-tenant), detail (properties + alias + 404 + cross-tenant + recent ops + ops matrix + ambiguous / no-connector branches), fingerprint card (present / never), re-probe button visibility (operator vs tenant_admin), recent-ops refresh wiring + URL-encoding + role gate (read_only 403 / operator / tenant_admin), re-probe (success + 403 operator + 501 no-connector + 404 unknown).
 
 ### Bulk import (Task #875)
 

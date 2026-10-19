@@ -80,7 +80,11 @@ was closed as not planned).
   (`GET /ui/connectors/{name}/recent-operations`, newest 10) render on
   the server from `operation_execution` audit rows. `recent-ops-refresh.js`
   swaps in a fresh copy every 5 seconds while the page is visible; the
-  card shows when it was updated.
+  card shows when it was updated. Both need the `operator` role, the
+  same minimum as the audit API: a `read_only` session (or a role lift
+  that cannot complete) sees a notice instead of rows, and the fragment
+  answers 403 (`ui/roles.py::is_ui_operator`, `connectors/operator.py`
+  `is_operator`).
 - *Checks.* See [`checks-broadcast.md`](checks-broadcast.md).
 
 Plain JS timers are used instead of `hx-trigger="every 5s [filter]"`

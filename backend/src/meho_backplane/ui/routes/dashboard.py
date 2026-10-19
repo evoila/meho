@@ -17,7 +17,10 @@ renders three components per the Initiative work-item #6:
   from ``GET /ui/dashboard/recent-operations`` every 5 seconds while the
   page is visible, and the tray shows when it was last updated. It used
   to follow the Broadcast SSE stream; Broadcast now carries deliberate
-  agent announcements only.
+  agent announcements only. The tray and its fragment need the
+  ``operator`` role, the same minimum the audit API applies
+  (:func:`~meho_backplane.ui.roles.is_ui_operator`); a ``read_only``
+  session gets a notice instead of rows, and the fragment answers 403.
 * A version + readiness card sourced from the deployed-build label the
   chassis Jinja env binds as the ``app_version`` global -- the same
   ``CHART_VERSION`` / ``GIT_SHA`` env metadata ``GET /version`` reads
@@ -57,6 +60,7 @@ from meho_backplane.db.models import AuditEventClass
 from meho_backplane.health import readiness_snapshot
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.roles import is_ui_operator
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_dashboard_router"]
@@ -141,6 +145,34 @@ _RECENT_OPS_LIMIT: Final[int] = 50
 #: Path of the tray's refresh fragment (#3758).
 _RECENT_OPS_URL: Final[str] = "/ui/dashboard/recent-operations"
 
+_require_ui_session_dep = Depends(require_ui_session)
+
+
+async def audit_read_allowed(session: UISessionContext = _require_ui_session_dep) -> bool:
+    """FastAPI dependency: may this session read audit rows on the console?
+
+    True for ``operator`` and ``tenant_admin``; False for ``read_only``
+    and for a role lift that cannot complete. Mirrors the audit API's
+    minimum role so the tray never shows rows the API would refuse.
+    """
+    return await is_ui_operator(session)
+
+
+_audit_read_allowed_dep = Depends(audit_read_allowed)
+
+
+def _recent_ops_forbidden_context() -> dict[str, object]:
+    """Template context for a session below the ``operator`` role.
+
+    The tray renders a notice and carries no refresh URL, so
+    ``recent-ops-refresh.js`` does not poll a fragment that would 403.
+    """
+    return {
+        "recent_ops": [],
+        "recent_ops_forbidden": True,
+        "recent_ops_limit": _RECENT_OPS_LIMIT,
+    }
+
 
 async def _recent_ops_context(session: UISessionContext) -> dict[str, object]:
     """Read the tenant's newest operation rows through the audit reader.
@@ -159,6 +191,7 @@ async def _recent_ops_context(session: UISessionContext) -> dict[str, object]:
         result = await query_audit(filters, tenant_id=session.tenant_id, session=db_session)
     return {
         "recent_ops": result.rows,
+        "recent_ops_forbidden": False,
         "recent_ops_url": _RECENT_OPS_URL,
         "recent_ops_limit": _RECENT_OPS_LIMIT,
         "recent_ops_updated_at": datetime.now(UTC).isoformat(),
@@ -167,9 +200,20 @@ async def _recent_ops_context(session: UISessionContext) -> dict[str, object]:
 
 async def _render_recent_ops(
     request: Request,
-    session: UISessionContext = Depends(require_ui_session),
+    session: UISessionContext = _require_ui_session_dep,
+    allowed: bool = _audit_read_allowed_dep,
 ) -> HTMLResponse:
-    """Render ``GET /ui/dashboard/recent-operations`` -- the tray alone."""
+    """Render ``GET /ui/dashboard/recent-operations`` -- the tray alone.
+
+    A session below the ``operator`` role gets the notice tray at 403.
+    """
+    if not allowed:
+        return get_templates().TemplateResponse(
+            request,
+            "_dashboard_recent_ops.html",
+            _recent_ops_forbidden_context(),
+            status_code=403,
+        )
     return get_templates().TemplateResponse(
         request, "_dashboard_recent_ops.html", await _recent_ops_context(session)
     )
@@ -194,7 +238,8 @@ async def _readiness_snapshot() -> dict[str, object]:
 
 async def _render_dashboard(
     request: Request,
-    session: UISessionContext = Depends(require_ui_session),
+    session: UISessionContext = _require_ui_session_dep,
+    audit_allowed: bool = _audit_read_allowed_dep,
 ) -> HTMLResponse:
     """Render ``GET /ui/`` for the authenticated operator.
 
@@ -218,6 +263,9 @@ async def _render_dashboard(
     # lock-step, and the dashboard's behaviour is unchanged (#1776).
     request.state.ui_ready = bool(readiness["ready"])
     csrf_token = mint_csrf_token(str(session.session_id))
+    recent_ops = (
+        await _recent_ops_context(session) if audit_allowed else _recent_ops_forbidden_context()
+    )
     context = {
         "page_title": "Dashboard",
         "ready": readiness["ready"],
@@ -226,7 +274,7 @@ async def _render_dashboard(
         "operator_sub": session.operator_sub,
         "tenant_id": str(session.tenant_id),
         "csrf_token": csrf_token,
-        **(await _recent_ops_context(session)),
+        **recent_ops,
     }
     response = get_templates().TemplateResponse(request, "dashboard.html", context)
     # Mirror the SameSite + Secure posture of the session cookie. The

@@ -30,17 +30,20 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import meho_backplane
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.routes.dashboard import build_dashboard_router
+from meho_backplane.ui.roles import is_ui_operator
+from meho_backplane.ui.routes.dashboard import audit_read_allowed, build_dashboard_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 
 _PACKAGE = Path(meho_backplane.__file__).parent
@@ -175,12 +178,20 @@ def _ui_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def _client(tenant_id: uuid.UUID) -> TestClient:
+def _client(tenant_id: uuid.UUID, *, audit_allowed: bool = True) -> TestClient:
+    """Dashboard-only app with the session and the role verdict overridden.
+
+    ``audit_allowed`` stands in for the role lift: True is an ``operator``
+    or ``tenant_admin`` session, False a ``read_only`` one. The real lift
+    is covered by ``test_is_ui_operator_*`` below and, end to end with a
+    signed token, by ``test_ui_chassis_smoke.py``.
+    """
     app = FastAPI()
     app.include_router(build_dashboard_router())
     app.dependency_overrides[require_ui_session] = lambda: UISessionContext(
         session_id=uuid.uuid4(), operator_sub="op-ui", tenant_id=tenant_id
     )
+    app.dependency_overrides[audit_read_allowed] = lambda: audit_allowed
     return TestClient(app)
 
 
@@ -267,6 +278,44 @@ async def test_dashboard_fragment_escapes_operation_text(_ui_env: None) -> None:
 async def test_dashboard_fragment_empty_state(_ui_env: None) -> None:
     body = _client(_TENANT_A).get("/ui/dashboard/recent-operations").text
     assert "No operations recorded yet." in body
+
+
+async def test_dashboard_fragment_denies_a_session_below_operator(_ui_env: None) -> None:
+    """A ``read_only`` session gets the notice tray at 403 and no rows."""
+    await _seed_audit(tenant_id=_TENANT_A, path="op.hidden.from.read.only")
+
+    response = _client(_TENANT_A, audit_allowed=False).get("/ui/dashboard/recent-operations")
+
+    assert response.status_code == 403
+    body = response.text
+    assert 'id="dashboard-recent-ops"' in body
+    assert "data-recent-ops-forbidden" in body
+    assert "data-refresh-url" not in body
+    assert "op.hidden.from.read.only" not in body
+    assert "<li " not in body
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        (TenantRole.READ_ONLY, False),
+        (TenantRole.OPERATOR, True),
+        (TenantRole.TENANT_ADMIN, True),
+    ],
+)
+async def test_is_ui_operator_matches_the_audit_api_minimum(
+    role: TenantRole, expected: bool
+) -> None:
+    session = UISessionContext(session_id=uuid.uuid4(), operator_sub="op-ui", tenant_id=_TENANT_A)
+    operator = Operator(sub="op-ui", raw_jwt="unused", tenant_id=_TENANT_A, tenant_role=role)
+    with patch("meho_backplane.ui.roles.resolve_ui_operator", AsyncMock(return_value=operator)):
+        assert await is_ui_operator(session) is expected
+
+
+async def test_is_ui_operator_denies_when_the_role_lift_fails() -> None:
+    session = UISessionContext(session_id=uuid.uuid4(), operator_sub="op-ui", tenant_id=_TENANT_A)
+    with patch("meho_backplane.ui.roles.resolve_ui_operator", AsyncMock(return_value=None)):
+        assert await is_ui_operator(session) is False
 
 
 # ---------------------------------------------------------------------------

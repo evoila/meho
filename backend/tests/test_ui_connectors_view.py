@@ -385,6 +385,21 @@ def _authenticated_client(session_id: uuid.UUID) -> TestClient:
     return client
 
 
+def _operator_client() -> tuple[TestClient, respx.MockRouter]:
+    """Client whose session lifts to the ``operator`` role (JWKS mocked).
+
+    The recent-ops card and its fragment need ``operator`` or higher
+    (#3758), so tests that read them use this client. The caller stops
+    ``mock`` when done.
+    """
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    return client, mock
+
+
 def _authenticated_client_with_role_jwks(
     *,
     tenant_id: uuid.UUID,
@@ -818,10 +833,11 @@ def test_detail_renders_recent_ops_for_target() -> None:
         status_code=200,
     )
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
-        client = _authenticated_client(session_id)
+    client, mock = _operator_client()
+    try:
         response = client.get("/ui/connectors/audited-target")
+    finally:
+        mock.stop()
     assert response.status_code == 200, response.text
     body = response.text
     assert "Recent operations" in body
@@ -864,10 +880,11 @@ def test_detail_recent_ops_lists_only_operation_rows() -> None:
         event_class=AuditEventClass.APPROVAL_DECISION,
     )
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
-        client = _authenticated_client(session_id)
+    client, mock = _operator_client()
+    try:
         response = client.get("/ui/connectors/class-target/recent-operations")
+    finally:
+        mock.stop()
     assert response.status_code == 200, response.text
     body = response.text
     assert "vsphere.vm.list" in body
@@ -888,10 +905,11 @@ def test_recent_ops_fragment_renders_card_bounded_to_ten() -> None:
             occurred_at=base + timedelta(seconds=index),
         )
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
-        client = _authenticated_client(session_id)
+    client, mock = _operator_client()
+    try:
         response = client.get("/ui/connectors/busy-target/recent-operations")
+    finally:
+        mock.stop()
     assert response.status_code == 200, response.text
     body = response.text
     assert "<html" not in body
@@ -912,10 +930,11 @@ def test_recent_ops_fragment_404s_for_another_tenants_target() -> None:
     target_id = _seed_target(tenant_id=_TENANT_B, name="b-only", product="ssh")
     _seed_audit_row(tenant_id=_TENANT_B, target_id=target_id, path="tenant.b.secret.op")
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
-        client = _authenticated_client(session_id)
+    client, mock = _operator_client()
+    try:
         response = client.get("/ui/connectors/b-only/recent-operations")
+    finally:
+        mock.stop()
     assert response.status_code == 404
     assert "tenant.b.secret.op" not in response.text
 
@@ -929,6 +948,91 @@ def test_recent_ops_fragment_requires_a_session() -> None:
         client = TestClient(_build_app(), follow_redirects=False)
         response = client.get("/ui/connectors/anon-target/recent-operations")
     assert response.status_code in (302, 401)
+
+
+def test_recent_ops_fragment_403s_for_read_only_role() -> None:
+    """A ``read_only`` session gets the notice card at 403, never the rows (#3758).
+
+    Audit rows need the ``operator`` role, the same minimum the audit
+    API applies. The notice carries no refresh URL, so the page script
+    does not keep polling a fragment that would 403.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="ro-target", product="ssh")
+    _seed_audit_row(tenant_id=_TENANT_A, target_id=target_id, path="op.hidden.from.read.only")
+
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub="op-read-only",
+        role=TenantRole.READ_ONLY,
+    )
+    try:
+        response = client.get("/ui/connectors/ro-target/recent-operations")
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    body = response.text
+    assert 'id="recent-ops-card"' in body
+    assert "data-recent-ops-forbidden" in body
+    assert "data-refresh-url" not in body
+    assert "op.hidden.from.read.only" not in body
+
+
+def test_detail_hides_recent_ops_for_read_only_role() -> None:
+    """The detail page renders for ``read_only``, with the notice instead of rows."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="ro-page", product="ssh")
+    _seed_audit_row(tenant_id=_TENANT_A, target_id=target_id, path="op.hidden.from.read.only")
+
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub="op-read-only",
+        role=TenantRole.READ_ONLY,
+    )
+    try:
+        response = client.get("/ui/connectors/ro-page")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Recent operations" in body
+    assert "data-recent-ops-forbidden" in body
+    assert "data-refresh-url" not in body
+    assert "op.hidden.from.read.only" not in body
+
+
+def test_recent_ops_fragment_renders_for_tenant_admin_role() -> None:
+    """``tenant_admin`` is above the minimum and sees the rows."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="admin-target", product="ssh")
+    _seed_audit_row(tenant_id=_TENANT_A, target_id=target_id, path="op.admin.sees")
+
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/admin-target/recent-operations")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "op.admin.sees" in response.text
+    assert 'data-refresh-url="/ui/connectors/admin-target/recent-operations"' in response.text
+
+
+def test_recent_ops_fragment_403s_when_the_role_lift_fails() -> None:
+    """A session whose token cannot be verified is treated as below ``operator``."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="nolift-target", product="ssh")
+    _seed_audit_row(tenant_id=_TENANT_A, target_id=target_id, path="op.hidden.without.lift")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors/nolift-target/recent-operations")
+    assert response.status_code == 403
+    assert "op.hidden.without.lift" not in response.text
 
 
 def test_detail_isolates_recent_ops_from_other_tenants() -> None:
@@ -946,10 +1050,11 @@ def test_detail_isolates_recent_ops_from_other_tenants() -> None:
         path="/api/v1/secret-action",
     )
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
-        client = _authenticated_client(session_id)
+    client, mock = _operator_client()
+    try:
         response = client.get("/ui/connectors/shared-name")
+    finally:
+        mock.stop()
     assert response.status_code == 200, response.text
     assert "/api/v1/secret-action" not in response.text
 
@@ -1313,10 +1418,11 @@ def test_detail_recent_ops_card_has_refresh_url_and_no_sse() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_target(tenant_id=_TENANT_A, name="sse-target", product="ssh")
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
-        client = _authenticated_client(session_id)
+    client, mock = _operator_client()
+    try:
         response = client.get("/ui/connectors/sse-target")
+    finally:
+        mock.stop()
     body = response.text
     assert 'data-refresh-url="/ui/connectors/sse-target/recent-operations"' in body
     assert "data-recent-ops-refresh" in body
@@ -1328,15 +1434,16 @@ def test_detail_refresh_url_percent_encodes_target_name() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_target(tenant_id=_TENANT_A, name="tricky name & co", product="ssh")
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
-        client = _authenticated_client(session_id)
+    client, mock = _operator_client()
+    try:
         response = client.get("/ui/connectors/tricky%20name%20%26%20co")
         assert response.status_code == 200, response.text
         # Jinja autoescapes the ``&`` of ``%26`` only if it were raw; the
         # path is percent-encoded first, so no raw ``&`` or space remains.
         assert "/ui/connectors/tricky%20name%20%26%20co/recent-operations" in response.text
         fragment = client.get("/ui/connectors/tricky%20name%20%26%20co/recent-operations")
+    finally:
+        mock.stop()
     assert fragment.status_code == 200, fragment.text
 
 

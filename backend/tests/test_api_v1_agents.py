@@ -37,7 +37,15 @@ from sqlalchemy import select
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentDefinition, AgentPrincipal, AuditLog, Tenant
+from meho_backplane.db.models import (
+    AgentDefinition,
+    AgentPrincipal,
+    AgentRun,
+    AgentRunStatus,
+    AgentRunTrigger,
+    AuditLog,
+    Tenant,
+)
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -464,3 +472,113 @@ async def test_patch_unknown_identity_ref_returns_422(client: TestClient) -> Non
     rows = await _fetch_defs(_TENANT_A)
     assert len(rows) == 1
     assert rows[0].identity_ref == "agent:incident-triage"
+
+
+# ---------------------------------------------------------------------------
+# Partial edits (#4235)
+# ---------------------------------------------------------------------------
+
+# The Go CLI sends every field of its generated PATCH type. A field the
+# operator did not set goes on the wire as ``null`` (only ``model_tier``
+# is left out). These bodies copy that shape.
+_CLI_NULLS: dict[str, Any] = {
+    "enabled": None,
+    "identity_ref": None,
+    "output_schema": None,
+    "system_prompt": None,
+    "toolset": None,
+    "turn_budget": None,
+}
+
+
+async def _seed_failed_run(definition_id: UUID) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            AgentRun(
+                agent_definition_id=definition_id,
+                tenant_id=_TENANT_A,
+                identity_sub="op-admin",
+                trigger=AgentRunTrigger.DIRECT.value,
+                model_tier="deep",
+                status=AgentRunStatus.FAILED.value,
+                error="test failure",
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch_body", "expected"),
+    [
+        pytest.param(
+            {**_CLI_NULLS, "system_prompt": "New prompt."},
+            {"system_prompt": "New prompt."},
+            id="cli-prompt-only",
+        ),
+        pytest.param(
+            {**_CLI_NULLS, "toolset": {"allow": ["search_knowledge"]}},
+            {"toolset": {"allow": ["search_knowledge"]}},
+            id="cli-toolset-only",
+        ),
+        pytest.param(
+            {**_CLI_NULLS, "identity_ref": "agent:incident-triage"},
+            {},
+            id="cli-identity-only",
+        ),
+        pytest.param({**_CLI_NULLS, "turn_budget": 7}, {"turn_budget": 7}, id="cli-budget-only"),
+        pytest.param({**_CLI_NULLS, "enabled": False}, {"enabled": False}, id="cli-enabled-only"),
+        pytest.param(
+            {**_CLI_NULLS, "model_tier": "fast"},
+            {"model_tier": "fast"},
+            id="cli-tier-only",
+        ),
+        pytest.param(_CLI_NULLS, {}, id="cli-all-null"),
+        pytest.param(
+            {"system_prompt": "New prompt."},
+            {"system_prompt": "New prompt."},
+            id="sparse-prompt-only",
+        ),
+        pytest.param(
+            {"toolset": {"allow": []}},
+            {"toolset": {"allow": []}},
+            id="sparse-toolset-only",
+        ),
+        pytest.param({"identity_ref": "agent:incident-triage"}, {}, id="sparse-identity-only"),
+        pytest.param({}, {}, id="empty-body"),
+    ],
+)
+async def test_partial_edit_changes_only_the_set_field(
+    client: TestClient,
+    patch_body: dict[str, Any],
+    expected: dict[str, Any],
+) -> None:
+    """A partial PATCH on a definition with a failed run returns 200.
+
+    Only the field with a value changes. A ``null`` field is treated
+    like a missing field: the stored value stays. Before the fix, a
+    ``null`` was written to a NOT NULL column and the route returned
+    500 (#4235).
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-partial-edit")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agents", json=_VALID_BODY, headers=headers)
+        assert created.status_code == 201, created.text
+        await _seed_failed_run(UUID(created.json()["id"]))
+
+        resp = client.patch("/api/v1/agents/incident-triage", json=patch_body, headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    want = {k: v for k, v in _VALID_BODY.items() if k != "name"} | expected
+    for field, value in want.items():
+        assert body[field] == value, field
+    rows = await _fetch_defs(_TENANT_A)
+    assert len(rows) == 1
+    assert rows[0].system_prompt == want["system_prompt"]
+    assert rows[0].output_schema == want["output_schema"]

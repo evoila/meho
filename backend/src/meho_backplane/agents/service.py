@@ -283,8 +283,12 @@ class AgentDefinitionService:
     ) -> AgentDefinitionRead | None:
         """Apply a partial update to ``(tenant_id, name)``; ``None`` if absent.
 
-        Only fields the caller explicitly set are applied
-        (``model_dump(exclude_unset=True)``); ``name`` is not updatable
+        Only fields the caller set to a value are applied
+        (``model_dump(exclude_unset=True, exclude_none=True)``). A field
+        sent as ``null`` is treated like a missing field: every editable
+        column except ``output_schema`` is NOT NULL, and the Go CLI sends
+        ``null`` for each flag the operator did not pass (#4235).
+        ``name`` is not updatable
         (it is the natural key, absent from :class:`AgentDefinitionUpdate`).
         Returns ``None`` when no row matches (absent or cross-tenant) so
         the boundary renders 404; the ``onupdate`` ORM hook bumps
@@ -299,7 +303,7 @@ class AgentDefinitionService:
         check that the principal is still live at invocation time is
         G11.3's responsibility, not this validator's.
         """
-        changes = payload.model_dump(exclude_unset=True)
+        changes = payload.model_dump(exclude_unset=True, exclude_none=True)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             result = await session.execute(

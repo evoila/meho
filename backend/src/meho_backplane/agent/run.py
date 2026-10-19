@@ -120,6 +120,7 @@ from meho_backplane.agent.models import (
     ModelResolver,
     ResolverError,
 )
+from meho_backplane.agent.tool_audit import ToolCallAudit
 from meho_backplane.agent.toolset import (
     ToolsetResolution,
     capability_versions,
@@ -1015,6 +1016,7 @@ class PydanticAgentRun:
                 system_prompt=definition.system_prompt,
                 output_type=definition.output_type if definition.output_type is not None else str,
                 tools=tools,
+                capabilities=[ToolCallAudit()],
             )
             versions = capability_versions(tools)
             omissions = _capability_omissions(resolution)
@@ -1048,6 +1050,7 @@ class PydanticAgentRun:
             system_prompt=definition.system_prompt,
             output_type=definition.output_type if definition.output_type is not None else str,
             tools=[invoke_tool] if invoke_tool is not None else [],
+            capabilities=[ToolCallAudit()],
         )
         _register_default_meta_tools(agent)
         return agent

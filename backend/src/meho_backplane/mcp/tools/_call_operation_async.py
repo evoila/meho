@@ -27,10 +27,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import OperationRun, OperationRunStatus
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations.delivery_budget import bound_complete_response
 from meho_backplane.operations.operation_run import OperationRunNotFoundError
 from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.settings import get_settings
 
 __all__ = ["poll_call", "submit_async_call"]
 
@@ -85,6 +88,30 @@ def _envelope(
     }
 
 
+def _stored_result_with_run_details(
+    stored: dict[str, Any], run_extras: dict[str, Any]
+) -> dict[str, Any]:
+    """Add the run details to a finished call's stored result.
+
+    The stored result passed the wire ceiling (``bound_complete_response``)
+    when the call finished. The run details make it larger, so the ceiling
+    is checked again on the answer that is sent. When it no longer fits,
+    the answer is trimmed the same way as a synchronous call: ``status``
+    stays ``ok``, the ``audit_id`` stays, and ``delivery`` says what was
+    left out.
+    """
+    stored_extras = stored.get("extras")
+    merged = {
+        **stored,
+        "extras": {**(stored_extras if isinstance(stored_extras, dict) else {}), **run_extras},
+    }
+    result = OperationResult.model_validate(merged)
+    bounded = bound_complete_response(
+        result, get_settings().result_complete_response_wire_max_bytes
+    )
+    return bounded.model_dump(mode="json")
+
+
 async def submit_async_call(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
     """Start the call in the background and return a ``pending`` answer."""
     started = time.monotonic()
@@ -128,10 +155,7 @@ async def poll_call(
 
     extras = _run_extras(row)
     if row.status == OperationRunStatus.SUCCEEDED and isinstance(row.result, dict):
-        result: dict[str, Any] = dict(row.result)
-        stored_extras = result.get("extras")
-        result["extras"] = {**(stored_extras if isinstance(stored_extras, dict) else {}), **extras}
-        return result
+        return _stored_result_with_run_details(row.result, extras)
 
     since = _aware(row.started_at) or _aware(row.created_at)
     until = _aware(row.ended_at) or datetime.now(UTC)

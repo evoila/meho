@@ -25,9 +25,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationRun, OperationRunOrigin, OperationRunStatus
 from meho_backplane.mcp import registry as mcp_registry
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
@@ -85,9 +88,11 @@ async def _insert_run(
     status: OperationRunStatus,
     op_id: str = _OP,
     error: str | None = None,
+    result: dict[str, Any] | None = None,
     tenant_id: uuid.UUID = OPERATOR_TENANT_ID,
 ) -> uuid.UUID:
     now = datetime.now(UTC)
+    ended = status in (OperationRunStatus.FAILED, OperationRunStatus.SUCCEEDED)
     async with get_sessionmaker()() as session:
         run = OperationRun(
             id=uuid.uuid4(),
@@ -98,8 +103,9 @@ async def _insert_run(
             op_id=op_id,
             status=status.value,
             error=error,
+            result=result,
             started_at=now - timedelta(minutes=5),
-            ended_at=now if status == OperationRunStatus.FAILED else None,
+            ended_at=now if ended else None,
         )
         session.add(run)
         await session.commit()
@@ -152,6 +158,87 @@ async def test_running_run_reports_running_with_start_time(
     assert payload["extras"]["started_at"] is not None
     assert payload["duration_ms"] >= 5 * 60 * 1000 - 1000
     assert "next_step" in payload["extras"]
+
+
+def _stored_ok_result_just_under_the_ceiling(limit: int) -> dict[str, Any]:
+    """Return a stored ``ok`` result that fits *limit* with less than 100 bytes to spare.
+
+    This is what the background runner stores: a result that already passed
+    the wire ceiling when the call finished. The run details the poll adds
+    are bigger than the room left, so the poll answer would break the limit
+    if it were not checked again.
+    """
+    audit_id = uuid.uuid4()
+
+    def _dump(padding: int) -> dict[str, Any]:
+        return OperationResult(
+            status="ok",
+            op_id=_OP,
+            result={"blob": "x" * padding},
+            duration_ms=12.5,
+            audit_id=audit_id,
+        ).model_dump(mode="json")
+
+    # Every padding byte goes on the wire twice: once in the text block and
+    # once in the structured block.
+    padding = (limit - measure_delivered_wire_bytes(_dump(0))) // 2
+    stored = _dump(padding)
+    size = measure_delivered_wire_bytes(stored)
+    assert limit - 100 < size <= limit, size
+    return stored
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_finished_run_near_the_ceiling_stays_within_the_limit(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The run details the poll adds must not push the answer over the wire limit."""
+    client, _op = client_with_operator
+    limit = get_settings().result_complete_response_wire_max_bytes
+    stored = _stored_ok_result_just_under_the_ceiling(limit)
+    run_id = await _insert_run(status=OperationRunStatus.SUCCEEDED, result=stored)
+
+    payload = _structured(
+        _call(client, {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(run_id)})
+    )
+
+    assert measure_delivered_wire_bytes(payload) <= limit
+    assert payload["status"] == "ok"
+    assert payload["audit_id"] == stored["audit_id"]
+    assert payload["delivery"] == "unavailable"
+    assert payload["result"] is None
+    assert payload["extras"]["retry"] is False
+    assert payload["extras"]["delivery_max_bytes"] == limit
+    assert payload["extras"]["delivered_bytes"] > limit
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_finished_run_with_room_keeps_its_result_and_run_details(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    client, _op = client_with_operator
+    stored = OperationResult(
+        status="ok",
+        op_id=_OP,
+        result={"node": "small"},
+        duration_ms=1.0,
+        audit_id=uuid.uuid4(),
+        extras={"from_call": True},
+    ).model_dump(mode="json")
+    run_id = await _insert_run(status=OperationRunStatus.SUCCEEDED, result=stored)
+
+    payload = _structured(
+        _call(client, {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(run_id)})
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["result"] == {"node": "small"}
+    assert payload["audit_id"] == stored["audit_id"]
+    assert payload["delivery"] is None
+    assert payload["extras"]["from_call"] is True
+    assert payload["extras"]["run_id"] == str(run_id)
+    assert payload["extras"]["run_status"] == OperationRunStatus.SUCCEEDED.value
+    assert payload["extras"]["ended_at"] is not None
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

@@ -425,7 +425,10 @@ dispatcher:
   While it runs: `status="pending"` or `"running"`, with
   `extras.started_at` and `duration_ms` counted from the start. When it is
   done: the stored `OperationResult` of the call, with `extras.run_id` added.
-  A failed or cancelled run gives `status="error"` and `extras.error_code`
+  The answer is checked against the wire limit again after the run details
+  are added, like a normal call: a result that no longer fits keeps
+  `status="ok"` and its `audit_id` and gets `delivery="partial"` or
+  `"unavailable"`. A failed or cancelled run gives `status="error"` and `extras.error_code`
   `run_failed` / `run_cancelled`. Checking never runs the call again.
 
 An unknown run, a run of another tenant, or a run of a different

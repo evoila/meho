@@ -81,6 +81,7 @@ def test_typed_read_path_constants_are_all_discovered() -> None:
     assert sorted(_typed_read_paths()) == [
         "_BUNDLES_PATH",
         "_DEPOT_SETTINGS_PATH",
+        "_DEPOT_SYNC_INFO_PATH",
         "_SDDC_LIST_PATH",
         "_SDDC_STATUS_PATH",
         "_TRUSTED_CERTIFICATES_PATH",

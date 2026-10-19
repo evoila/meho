@@ -6,7 +6,8 @@
 The bring-up *poll* primitives — the bring-up task status, the id-less
 bring-up task list (#3418), and the spec validation status — plus the
 air-gapped depot-lifecycle *reads* (#3121: depot settings, trusted
-certificates, bundle inventory) are registered as
+certificates, bundle inventory; #3406: depot catalog sync status) are
+registered as
 typed ops (``source_kind="typed"``) so they dispatch on a fresh boot with
 zero catalog state. Each function here is the body a thin bound-method shim
 on :class:`~meho_backplane.connectors.vcf_installer.connector.InstallerConnector`
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 __all__ = [
     "installer_bundles_list_impl",
     "installer_depot_settings_get_impl",
+    "installer_depot_sync_status_impl",
     "installer_sddc_bringup_status_impl",
     "installer_sddc_list_impl",
     "installer_sddc_validation_status_impl",
@@ -78,6 +80,11 @@ _VALIDATION_STATUS_PATH = "/v1/sddcs/validations/{id}"
 #: Depot settings (``DepotSettings``: vmwareAccount / offlineAccount /
 #: depotConfiguration) — the read half of #3121's depot pair.
 _DEPOT_SETTINGS_PATH = "/v1/system/settings/depot"
+
+#: Depot catalog sync state (``DepotSyncInfo``: syncStatus / errorMessage /
+#: lastSyncCompletionTimestamp) — the appliance ingests the release catalog
+#: asynchronously after a depot connect; this read reports that ingest (#3406).
+_DEPOT_SYNC_INFO_PATH = "/v1/system/settings/depot/depot-sync-info"
 
 #: Appliance outbound trust store (``TrustedCertificate`` page) — the read
 #: half of #3121's trusted-certificates pair.
@@ -186,6 +193,25 @@ async def installer_depot_settings_get_impl(
     ``DEPOT_CONNECTION_SUCCESSFUL``) survive, credentials never do.
     """
     payload = await connector._get_json(target, _DEPOT_SETTINGS_PATH, operator=operator)
+    return cast("dict[str, Any]", scrub_password_keys(payload))
+
+
+async def installer_depot_sync_status_impl(
+    connector: InstallerConnector,
+    operator: Operator,
+    target: InstallerTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``installer.system.depot.sync-status`` — read the depot catalog sync
+    state via ``GET /v1/system/settings/depot/depot-sync-info``.
+
+    Returns the vendor ``DepotSyncInfo`` (``syncStatus`` / ``errorMessage`` /
+    ``lastSyncCompletionTimestamp``). The 9.1 spec does not enumerate the
+    ``syncStatus`` values, so the object is returned as the vendor sends it.
+    ``password`` keys are scrubbed the same way as the depot settings read,
+    so a credential can never leak even if the vendor adds one.
+    """
+    payload = await connector._get_json(target, _DEPOT_SYNC_INFO_PATH, operator=operator)
     return cast("dict[str, Any]", scrub_password_keys(payload))
 
 

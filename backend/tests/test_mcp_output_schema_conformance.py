@@ -60,6 +60,7 @@ from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import BACKPLANE_CONTRACT_VERSION
 from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.meta_tools import SEARCH_OUTCOMES
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from meho_backplane.topology.resolvers import NodeNotFoundError
@@ -572,6 +573,7 @@ def test_search_operations_conforms(
         ),
     )
     assert isinstance(payload["hits"], list)
+    assert payload["outcome"] in SEARCH_OUTCOMES
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

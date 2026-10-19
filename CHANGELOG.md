@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- The Helm chart has a new setting, `networkPolicy.extraEgress`, for
+  extra outgoing network rules (#3516). Before, with network rules on
+  (`networkPolicy.enabled: true`, the chart default), MEHO could only
+  connect to PostgreSQL, Vault, Keycloak, its own stores and DNS. It
+  could not reach the systems it manages or the AI service, but it still
+  reported ready. Vault or Keycloak behind an in-cluster ingress were
+  also cut off, because the cluster redirects the connection to the
+  ingress Pod's own port (8443 for Traefik) before the rule is checked,
+  and the chart's ports were fixed. Now each item of `extraEgress` is a
+  normal Kubernetes egress rule that the chart adds as written. Every
+  rule must have a `to` list; the chart refuses a rule without one,
+  because Kubernetes reads a missing `to` as "every destination".
+  Without the new key the chart renders exactly as before. The install
+  guide explains what to list. A chart test covers the Traefik case and
+  the refused rules.
+
 ## [0.35.22] - 2026-10-13
 
 This release fixes a security problem in the audit clean-up. The

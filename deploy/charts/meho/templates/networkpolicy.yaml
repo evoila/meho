@@ -115,4 +115,12 @@ spec:
       ports:
         - port: 53
           protocol: UDP
+    {{- with .Values.networkPolicy.extraEgress }}
+    # Operator-supplied egress rules, rendered verbatim (#3516): the
+    # systems MEHO manages, the AI service, and anything the fixed rules
+    # above cannot express (Vault / Keycloak behind an ingress, whose
+    # traffic is redirected to the ingress Pod port before the rule is
+    # checked). Default empty — nothing is added.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 {{- end }}

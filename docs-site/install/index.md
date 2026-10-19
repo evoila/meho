@@ -240,6 +240,62 @@ networkPolicy:
     re-run the same `helm upgrade` from Step 7. The broadcast subchart
     renders its own ingress NetworkPolicy and Valkey auth alongside.
 
+### Let MEHO reach the systems it manages
+
+With `networkPolicy.enabled: true`, MEHO can only connect to PostgreSQL,
+Vault and Keycloak (the three CIDRs above), its own stores, and DNS.
+Everything else is blocked: vCenter, NSX, ESXi, SSH and WinRM hosts, and
+the AI service. MEHO still reports ready, because its readiness check only
+tests its own parts. So list those networks in `networkPolicy.extraEgress`.
+Each item is a normal Kubernetes egress rule, and the chart adds it as
+written:
+
+```yaml
+networkPolicy:
+  extraEgress:
+    # The systems MEHO manages, on every port.
+    - to:
+        - ipBlock:
+            cidr: 10.5.0.0/16
+    # The AI service and other public APIs, on 443 only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+      ports:
+        - port: 443
+          protocol: TCP
+```
+
+Every rule needs a `to` list. The chart refuses a rule without one,
+because Kubernetes reads a rule with no `to` as "every destination".
+
+**Vault or Keycloak behind your ingress.** Kubernetes does not define
+whether a network rule is checked before or after the cluster redirects a
+connection. On Calico and Canal with kube-proxy (RKE2's default), it is
+checked *after*. So when `vault.example.com` points at your ingress load
+balancer, the connection is redirected to an ingress Pod on that Pod's
+own port (8443 for Traefik), and the Vault rule on port 8200 never
+matches. Add a rule for the ingress Pods and their port:
+
+```yaml
+networkPolicy:
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - port: 8443
+          protocol: TCP
+```
+
+The same applies to any rule: name the real Pod or address and its port,
+not the load balancer address.
+
 For a **Google Secret Manager** deploy, replace the `vault` block and
 `config.vaultAddr` with the GSM fields — the exact delta is on the
 [credential backends](credential-backends.md#helm-values-per-backend)

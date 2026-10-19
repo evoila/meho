@@ -248,6 +248,20 @@ egress rules to:
   on `broadcast.enabled: true` and is omitted when the broadcast subchart
   is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
+- Operator rules — every item of `networkPolicy.extraEgress` (default
+  `[]`), appended verbatim after the rules above (#3516)
+
+Without `extraEgress` the backplane cannot reach the systems it manages
+or the AI service, yet `/ready` stays green, because readiness only checks
+MEHO's own dependencies. The schema requires a non-empty `to` list on each
+item: Kubernetes reads a missing or empty `to` as every destination, so a
+stray `- {}` would silently undo the default-deny egress. Kubernetes leaves
+it undefined whether a rule is checked before or after a Service redirect;
+Calico / Canal with kube-proxy check it after. So when Vault or Keycloak
+sit behind an in-cluster ingress, traffic arrives at the ingress Pod's own
+port (Traefik `websecure` 8443), the fixed `tcp/8200` / `tcp/443` rules do
+not match, and the operator adds an `extraEgress` rule selecting the
+ingress Pods on that port.
 
 The broadcast clause above is an **egress** allowance on the backplane
 side. A Pod is ingress-isolated only when *some* NetworkPolicy selects it,

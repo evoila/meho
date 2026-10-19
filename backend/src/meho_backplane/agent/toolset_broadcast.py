@@ -24,12 +24,14 @@ every other surface's.
 from __future__ import annotations
 
 import copy
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic_ai import ModelRetry
 
 from meho_backplane.agent.meta_tool import MetaToolSpec, _MetaToolHandler
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast.history import DEFAULT_WINDOW_MINUTES
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
@@ -122,6 +124,25 @@ def _model_retry_on_mcp_error(handler: _MetaToolHandler) -> _MetaToolHandler:
     return _wrapped
 
 
+def _with_server_time(handler: _MetaToolHandler) -> _MetaToolHandler:
+    """Wrap the recent handler so each answer says what time it is now.
+
+    A hosted model does not know the current date. Without it, a request such
+    as "the last 24 hours" makes it guess a ``cursor`` time, and a guess that
+    is too early reads from the start of the stream (#4236). ``server_time``
+    is the server's current UTC time, in the same ISO-8601 form the
+    ``cursor`` argument accepts, so the model can compare it with each
+    event's ``ts`` and compute an earlier window start.
+    """
+
+    async def _wrapped(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await handler(operator, arguments)
+        now = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        return {**result, "server_time": now}
+
+    return _wrapped
+
+
 _BROADCAST_ANNOUNCE_DESCRIPTION = (
     "Announce your intent, progress, or completion on the tenant's shared "
     "coordination feed so peer operators and agents can see what you are "
@@ -145,8 +166,14 @@ _BROADCAST_RECENT_DESCRIPTION = (
     "Read the tenant's agent announcements -- what peer agents said they "
     "are starting, doing, or have finished -- so you can see what else is "
     "in flight before you act. Returns {events, next_cursor, "
-    "watch_checkpoint, gap}, oldest first. Pass `next_cursor` back as "
-    "`cursor` to read the next page of the same view; pass "
+    "watch_checkpoint, gap, server_time}, oldest first. With no `cursor` "
+    f"you get the last {DEFAULT_WINDOW_MINUTES} minutes. You do not "
+    "know today's date: `server_time` is the current UTC time, so compare "
+    "it with each event's `ts`. For a longer window (for example the last "
+    "24 hours), call once without `cursor`, subtract from `server_time`, "
+    "and pass that ISO-8601 time as `cursor`; never guess a date. Pass "
+    "`next_cursor` back as `cursor` to read the next page of the same "
+    "view; pass "
     "`watch_checkpoint` to `broadcast_watch` to wait for what comes next. "
     "`gap` is set when older announcements were removed, so the answer is "
     "not complete. The `filter` object narrows by principal / target / "
@@ -172,7 +199,8 @@ def build_broadcast_meta_tools() -> tuple[MetaToolSpec, ...]:
     """Build the three broadcast coordination meta-tools from the MCP tools.
 
     Each entry reuses the MCP handler verbatim (wrapped so handler-side
-    errors reach the model as :class:`ModelRetry`); the read tools publish
+    errors reach the model as :class:`ModelRetry`, and ``broadcast_recent``
+    also adds ``server_time``); the read tools publish
     the MCP tool's wire schema as-is, and announce publishes it minus the
     run-scoped fields the server stamps from the hosted run. ``OPERATOR`` floor matches the MCP
     tools' ``required_role`` — the same identity gate every broadcast surface
@@ -196,7 +224,7 @@ def build_broadcast_meta_tools() -> tuple[MetaToolSpec, ...]:
         ),
         MetaToolSpec(
             name=_BROADCAST_RECENT,
-            handler=_model_retry_on_mcp_error(recent_handler),
+            handler=_model_retry_on_mcp_error(_with_server_time(recent_handler)),
             description=_BROADCAST_RECENT_DESCRIPTION,
             parameter_schema=recent_schema,
             required_role=TenantRole.OPERATOR,

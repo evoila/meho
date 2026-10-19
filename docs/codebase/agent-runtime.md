@@ -204,6 +204,16 @@ publishers so a future bridged tool cannot regress it. Handler-side errors
 `ModelRetry` so a bad argument or a rate-limit hands feedback to the model
 instead of aborting the run.
 
+`broadcast_recent` adds one field to the MCP answer: `server_time`, the
+server's current UTC time in ISO-8601 form (#4236). A hosted model does not
+know today's date. When a user asked for "the last 24 hours", the model had
+to guess a `cursor` time, and a guess that was too early read from the start
+of the stream. With no `cursor` the tool reads the same default window as
+`meho_broadcast_recent` and `meho broadcast recent` (the last 30 minutes,
+`DEFAULT_WINDOW_MINUTES`). For a longer window the tool description tells the
+model to subtract from `server_time` and pass the result as `cursor`. The
+input schema stays the MCP wire schema; only the result gains the field.
+
 All three carry an `OPERATOR` floor (matching the MCP tools' `required_role`)
 and register only when a definition's `toolset` admits them — the same
 `spec ∩ identity-permissions` intersection as every other meta-tool. A

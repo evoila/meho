@@ -1001,6 +1001,58 @@ def test_detail_hides_recent_ops_for_read_only_role() -> None:
     assert "op.hidden.from.read.only" not in body
 
 
+def test_detail_ignores_a_session_supplied_in_the_request_body() -> None:
+    """The role check uses the cookie session only, never one sent in the body.
+
+    The cookie session is ``read_only`` in tenant A. The request body
+    carries an ``operator`` session from tenant B. The page must still
+    render the notice and no audit rows.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="body-target", product="ssh")
+    _seed_audit_row(tenant_id=_TENANT_A, target_id=target_id, path="op.hidden.from.read.only")
+
+    keypair, jwks = _make_keypair_and_jwks()
+    read_only_session = _seed_session_sync(
+        tenant_id=_TENANT_A,
+        access_token=_mint_token(
+            keypair,
+            sub="op-read-only",
+            tenant_id=str(_TENANT_A),
+            tenant_role=TenantRole.READ_ONLY.value,
+        ),
+        operator_sub="op-read-only",
+    )
+    other_session = _seed_session_sync(
+        tenant_id=_TENANT_B,
+        access_token=_mint_token(
+            keypair,
+            sub="op-other-tenant",
+            tenant_id=str(_TENANT_B),
+            tenant_role=TenantRole.OPERATOR.value,
+        ),
+        operator_sub="op-other-tenant",
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(read_only_session)
+        response = client.request(
+            "GET",
+            "/ui/connectors/body-target",
+            json={
+                "session_id": str(other_session),
+                "operator_sub": "op-other-tenant",
+                "tenant_id": str(_TENANT_B),
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "data-recent-ops-forbidden" in body
+    assert "data-refresh-url" not in body
+    assert "op.hidden.from.read.only" not in body
+
+
 def test_recent_ops_fragment_renders_for_tenant_admin_role() -> None:
     """``tenant_admin`` is above the minimum and sees the rows."""
     _seed_tenant(_TENANT_A, "tenant-a")

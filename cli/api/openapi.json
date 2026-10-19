@@ -13779,17 +13779,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",

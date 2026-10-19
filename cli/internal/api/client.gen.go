@@ -11995,9 +11995,6 @@ type UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONReque
 // UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody defines body for UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet for application/json ContentType.
 type UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody = UISessionContext
 
-// UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
-type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
-
 // UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody defines body for UiConnectorsEditSubmitUiConnectorsNamePatch for application/x-www-form-urlencoded ContentType.
 type UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody = BodyUiConnectorsEditSubmitUiConnectorsNamePatch
 
@@ -14460,10 +14457,8 @@ type ClientInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiConnectorsDetailUiConnectorsNameGet request
+	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBody request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19410,20 +19405,8 @@ func (c *Client) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdR
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(c.Server, name, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name, body)
+func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -37868,19 +37851,8 @@ func NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGrou
 	return req, nil
 }
 
-// NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
-func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server, name, "application/json", bodyReader)
-}
-
-// NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody generates requests for UiConnectorsDetailUiConnectorsNameGet with any type of body
-func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+// NewUiConnectorsDetailUiConnectorsNameGetRequest generates requests for UiConnectorsDetailUiConnectorsNameGet
+func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -37905,12 +37877,10 @@ func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name
 		return nil, err
 	}
 
-	req, err := http.NewRequest("GET", queryURL.String(), body)
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -45496,10 +45466,8 @@ type ClientWithResponsesInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithResponse(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
-
-	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+	// UiConnectorsDetailUiConnectorsNameGetWithResponse request
+	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
@@ -58076,17 +58044,9 @@ func (c *ClientWithResponses) UiConnectorsRegistryReviewGroupUiConnectorsRegistr
 	return ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse(rsp)
 }
 
-// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
-}
-
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, body, reqEditors...)
+// UiConnectorsDetailUiConnectorsNameGetWithResponse request returning *UiConnectorsDetailUiConnectorsNameGetResponse
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

@@ -492,6 +492,72 @@ def test_get_search_rejects_limit_over_50(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("admin", "expect_scores"),
+    [(False, False), (True, True)],
+)
+async def test_get_search_scores_only_for_admin_opt_in(
+    client: TestClient,
+    stub_embedding_service: AsyncMock,
+    admin: bool,
+    expect_scores: bool,
+) -> None:
+    """#3668: ``include_scores`` adds ranking scores only for a tenant_admin."""
+    await _seed_descriptor(op_id="vault.kv.read", summary="Read a secret.")
+    key = make_rsa_keypair("kid-A")
+    token = _admin_token(key) if admin else _operator_token(key)
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&q=read&include_scores=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    hit = response.json()["hits"][0]
+    assert ("fused_score" in hit) is expect_scores
+    assert ("bm25_score" in hit) is expect_scores
+    assert ("cosine_score" in hit) is expect_scores
+
+
+@pytest.mark.asyncio
+async def test_get_search_exact_op_returns_contract(client: TestClient) -> None:
+    """#3668: ``op_id`` returns one call contract; no ``q`` needed."""
+    await _seed_descriptor(op_id="vault.kv.read", summary="Read a secret.")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&op_id=vault.kv.read",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert "hits" not in body
+    assert body["operation"]["op_id"] == "vault.kv.read"
+    assert body["operation"]["parameter_schema"] == {"type": "object"}
+
+
+@pytest.mark.asyncio
+async def test_get_search_exact_op_unknown_op_returns_structured_404(
+    client: TestClient,
+) -> None:
+    """#3668: an unknown op on a known connector is a 404 with ``reason=unknown_op``."""
+    await _seed_descriptor(op_id="vault.kv.read")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&op_id=vault.nope",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["reason"] == "unknown_op"
+    assert detail["op_id"] == "vault.nope"
+    assert detail["connector_id"] == "vault-1.x"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/operations/call
 # ---------------------------------------------------------------------------

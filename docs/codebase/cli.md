@@ -1241,11 +1241,15 @@ narrow-waist contract.
   per group + a `when_to_use` blurb the agent consults to pick a group
   to search within. Unknown `connector_id` returns an empty `groups`
   list (operationally meaningful, never 404).
-- `meho operation search <connector_id> <query> [--group K] [--limit N]`
+- `meho operation search <connector_id> <query> [--group K] [--limit N] [--scores]`
   — calls `GET /api/v1/operations/search`. Runs hybrid BM25 + cosine
   RRF over `endpoint_descriptor` rows scoped to the connector
   (optionally narrowed to one `group_key`) and renders the top hits
-  with `fused_score`. `--limit` is clamped by the API at 50.
+  with their `safety_level`. `--limit` is clamped by the API at 50.
+  `--scores` shows the ranking score; the backplane sends it only to a
+  `tenant_admin` (#3668). With `--op-id <op_id>` (no query needed) it
+  prints that one operation's call contract instead: parameter
+  schema, examples, target rule, result shape and retry rules.
 - `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,

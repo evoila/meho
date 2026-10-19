@@ -328,6 +328,64 @@ func TestGetSearchPassesTypedParams(t *testing.T) {
 	}
 }
 
+// TestGetSearchSendsIncludeScores — --scores maps to include_scores=true.
+func TestGetSearchSendsIncludeScores(t *testing.T) {
+	body, _ := json.Marshal(SearchResponse{Hits: nil})
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	opts := searchOptions{ConnectorID: "vault-1.x", Query: "secret", Scores: true}
+	if _, err := getSearch(context.Background(), f, opts); err != nil {
+		t.Fatalf("getSearch: %v", err)
+	}
+	p := f.lastSearchParams
+	if p.IncludeScores == nil || !*p.IncludeScores {
+		t.Fatalf("--scores should send include_scores=true; got %+v", p.IncludeScores)
+	}
+}
+
+// TestGetExactOpSendsOpIDAndDecodesContract — --op-id sends only
+// connector_id + op_id and decodes the single contract (#3668).
+func TestGetExactOpSendsOpIDAndDecodesContract(t *testing.T) {
+	body := []byte(`{"operation": {"connector_id": "vault-1.x", "op_id": "vault.kv.read",
+		"summary": "Read a secret.", "description": null, "group_key": "kv",
+		"safety_level": "safe", "requires_approval": false,
+		"parameter_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+		"examples": [{"source": "parameter_schema", "param": "path", "value": "secret/app"}],
+		"target": {"required": true, "resolves_by": "name", "guidance": "Pass the target name."},
+		"result_shape": {"envelope_fields": ["status", "handle"], "guidance": "Use result_query."},
+		"pagination_hint": null, "recovery": ["Fix params and call again."]}}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	opts := searchOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", Limit: 10, GroupKey: "kv"}
+	got, err := getExactOp(context.Background(), f, opts)
+	if err != nil {
+		t.Fatalf("getExactOp: %v", err)
+	}
+	p := f.lastSearchParams
+	if p.OpId == nil || *p.OpId != "vault.kv.read" {
+		t.Fatalf("getExactOp should send op_id; got %+v", p.OpId)
+	}
+	if p.Q != nil || p.Group != nil || p.Limit != nil {
+		t.Fatalf("getExactOp should not send q/group/limit; got %+v", p)
+	}
+	if got.Operation.OpID != "vault.kv.read" || !got.Operation.Target.Required {
+		t.Fatalf("contract not decoded; got %+v", got.Operation)
+	}
+	var buf bytes.Buffer
+	printContract(&buf, &got.Operation)
+	for _, want := range []string{"vault.kv.read", "Pass the target name.", `"path"`, "secret/app", "Use result_query.", "Fix params"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("printContract missing %q in output:\n%s", want, buf.String())
+		}
+	}
+}
+
 // TestGetSearchOmitsOptionalParamsWhenEmpty — Group + Limit are
 // nil-pointer when the operator didn't supply them, so the generator's
 // omitempty form keeps them out of the URL.

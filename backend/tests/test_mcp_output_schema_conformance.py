@@ -572,6 +572,63 @@ def test_search_operations_conforms(
         ),
     )
     assert isinstance(payload["hits"], list)
+    # #3668: an operator's ranked hits are slim even when scores are asked for.
+    slim = _assert_conforms(
+        "search_operations",
+        _call(
+            client,
+            "search_operations",
+            {"connector_id": "vault-1.x", "query": "health", "include_scores": True},
+            req_id=2,
+        ),
+    )
+    assert slim["hits"], slim
+    for hit in slim["hits"]:
+        assert not {"fused_score", "bm25_score", "cosine_score"} & set(hit)
+    # #3668: exact-op mode returns one call contract that conforms too.
+    exact = _assert_conforms(
+        "search_operations",
+        _call(
+            client,
+            "search_operations",
+            {"connector_id": "vault-1.x", "op_id": "vault.sys.health"},
+            req_id=3,
+        ),
+    )
+    assert "hits" not in exact
+    assert exact["operation"]["op_id"] == "vault.sys.health"
+    assert exact["operation"]["target"]["resolves_by"] == "name"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_search_operations_admin_scores_conform(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3668: the tenant_admin ``include_scores`` opt-in adds the scores."""
+    client, _op = client_with_operator
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+
+    def _fake_get_embedding_service() -> Any:
+        return service
+
+    monkeypatch.setattr(
+        "meho_backplane.operations._search.get_embedding_service",
+        _fake_get_embedding_service,
+    )
+    payload = _assert_conforms(
+        "search_operations",
+        _call(
+            client,
+            "search_operations",
+            {"connector_id": "vault-1.x", "query": "health", "include_scores": True},
+        ),
+    )
+    assert payload["hits"], payload
+    assert all("fused_score" in hit for hit in payload["hits"])
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

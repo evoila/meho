@@ -64,7 +64,7 @@ exception that keeps uvicorn's own plain format.
 
 ```
 deploy/charts/meho/
-├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast, result-cache
+├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast, result-cache, keycloak (alias coreKeycloak)
 ├── .helmignore             # standard exclusions
 ├── values.yaml             # safe-by-default; required fields are blank
 ├── values.schema.json      # draft-07 typed contract; rejects typos and empty required fields
@@ -77,6 +77,7 @@ deploy/charts/meho/
 │   ├── serviceaccount.yaml # Pod identity
 │   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast / result-cache egress conditional)
 │   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
+│   ├── _core-keycloak.tpl  # /auth paths added to the Ingress (coreKeycloak.enabled only)
 │   └── NOTES.txt           # post-install hints
 └── charts/
     ├── broadcast/          # in-tree Valkey 9.x subchart (ADR 0005)
@@ -89,7 +90,13 @@ deploy/charts/meho/
     │       ├── configmap.yaml     # minimal valkey.conf (requirepass Secret-sourced, no persistence)
     │       ├── secret.yaml        # chart-managed requirepass Secret (#276)
     │       └── networkpolicy.yaml # own ingress policy: 6379 from backplane only (#276)
-    └── result-cache/       # dedicated Valkey for result handles (#3639), same file set
+    ├── result-cache/       # dedicated Valkey for result handles (#3639), same file set
+    └── keycloak/           # built-in Keycloak, off by default (#4040)
+        ├── Chart.yaml
+        ├── values.yaml
+        ├── values.schema.json     # checked only when coreKeycloak.enabled is true
+        ├── files/meho-realm.json  # the MEHO realm, imported at the first start
+        └── templates/             # statefulset, service, configmap-realm, networkpolicy
 ```
 
 ## Chart contract
@@ -508,6 +515,138 @@ central deploy and any GitOps-managed install) gains one result-cache pod.
    then written to the result-cache store. Old handles stay readable from
    the broadcast store until their TTL ends.
 
+### Built-in Keycloak subchart (`charts/keycloak/`)
+
+The install can bring its own Keycloak, the login server, so nobody sets
+up a realm by hand. It is **off by default** (`coreKeycloak.enabled:
+false`). With it off, the chart renders exactly what it rendered before.
+
+**What it needs.** The built-in PostgreSQL (`corePostgres.enabled:
+true`; the schema refuses `coreKeycloak` without it) and five Secrets
+that the install's secrets Job creates. Keycloak only reads them:
+
+| Secret (default name) | Keys | Used for |
+| --- | --- | --- |
+| `<release>-core-postgres-keycloak` | `password` | `KC_DB_PASSWORD`, the `keycloak` database role |
+| `<release>-core-keycloak-bootstrap` | `client_id`, `client_secret` | the temporary admin service account in the master realm |
+| `<release>-core-keycloak-admin` | `client_secret` | the `meho-admin` client |
+| `<release>-core-ui-auth` | `client_secret` | the `meho-web` client (web console login) |
+| `<release>-core-check-runner` | `client_secret` | the `meho-check-runner` client |
+
+`coreKeycloak.existingSecrets.<key>` replaces a name when you made the
+Secret yourself. The pod does not start until all five exist.
+
+**What it renders.**
+
+| Object | Shape |
+| --- | --- |
+| StatefulSet `<release>-keycloak` | one pod, `quay.io/keycloak/keycloak:26.8.1` pinned by digest, `start --import-realm`, `KC_CACHE=local` |
+| init container `wait-for-database` | the PostgreSQL image; loops `pg_isready -U keycloak -d keycloak` until the database answers, because Keycloak does not retry at start |
+| ConfigMap `<release>-keycloak-realm` | `meho-realm.json`, mounted at `/opt/keycloak/data/import` |
+| Service `<release>-keycloak` | port 8080, plain HTTP inside the namespace |
+| two more paths on the backplane's Ingress (parent chart, `templates/_core-keycloak.tpl`) | on `ingress.host`: `/auth/realms/meho` and `/auth/resources` only (`Prefix`), to the Keycloak Service; `coreKeycloak.ingress.exposeAdmin: true` adds `/auth/admin` and `/auth/realms/master`. One Ingress keeps one set of annotations and one TLS certificate for the host |
+| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods and `networkPolicy.extraFrom` |
+
+**Addresses.** Browsers, the CLI and the `iss` claim use the public URL
+`https://<coreKeycloak.hostname>/auth` (`KC_HOSTNAME`,
+`KC_HTTP_RELATIVE_PATH=/auth`). `coreKeycloak.hostname` must equal
+`ingress.host`; the render fails otherwise. Pods use the Service,
+`http://<release>-keycloak:8080/auth`. With
+`KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`, the discovery document fetched
+at the Service URL names the public `issuer` and Service-URL
+`jwks_uri` and `token_endpoint`, so tokens keep the public `iss`.
+`KC_PROXY_HEADERS=xforwarded`, because TLS ends at the ingress.
+
+**Settings that matter.** `KC_DB_POOL_MAX_SIZE=20` (initial and minimum
+2), so Keycloak and the backplane fit PostgreSQL's 100 connections. Probes
+use the management port 9000: `startupProbe` on `/auth/health/started`
+(60 × 5 s, for the build, the schema and the import at the first start),
+then `/auth/health/ready` and `/auth/health/live`. Resources: request
+250m / 1Gi, limit 1 CPU / 2Gi (the heap is 70 % of the limit). Measured on
+kind: about 45 seconds from container start to ready; 168 MiB written to
+the container's own disk by the build at start.
+
+**Security.** No `runAsUser`: the image runs as user 1000 in group 0 and
+`runAsNonRoot` checks that number. `global.openshift: true` removes
+`runAsUser`, `runAsGroup` and `fsGroup` from every security context of the
+subchart (OpenShift assigns them). The init container uses user 999 (the
+PostgreSQL image has no `USER` line), also removed under
+`global.openshift`. `readOnlyRootFilesystem: false` for the Keycloak
+container only: the stock image rebuilds under `/opt/keycloak` at every
+start. Checked on kind: the pod starts under the `restricted` Pod Security
+Admission label, and again with user id 1000650000 in group 0.
+
+#### The realm (`charts/keycloak/files/meho-realm.json`)
+
+Keycloak imports the file at its **first start only**. When the realm
+exists, the import is skipped, so a changed file does not change a running
+realm. Changes after the first start go through the realm stage of the
+bootstrap Job.
+
+The file holds **no secret and no host name**. Keycloak fills every
+`${...}` from the pod's environment during the import:
+
+| Placeholder | Value |
+| --- | --- |
+| `MEHO_REALM_PUBLIC_URL` | `https://<coreKeycloak.hostname>` |
+| `MEHO_REALM_TENANT_ID` | `coreKeycloak.firstTenantId` (a UUID; pick one per install and keep it for a move) |
+| `MEHO_REALM_ADMIN_CLIENT_SECRET`, `MEHO_REALM_WEB_CLIENT_SECRET`, `MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET` | the three client Secrets above |
+
+**Groups.** Each group carries the first tenant id and a role:
+
+| Group | `tenant_role` | Other attribute |
+| --- | --- | --- |
+| MEHO-Readers | `read_only` | |
+| MEHO-Operators | `operator` | |
+| MEHO-SA-Operators | `operator` | |
+| MEHO-Admins | `tenant_admin` | |
+| MEHO-Approvers | `read_only` | `approver` = `true` |
+
+**A person is in exactly one of these groups.** The mappers take the first
+group that has the attribute; with two groups the result is not
+predictable. The realm keeps Keycloak's default user profile, which does
+not accept attributes it does not declare, so nobody can put `tenant_role`
+on a person directly: the claim always comes from the group.
+
+**Clients.**
+
+| Client | Kind | Notes |
+| --- | --- | --- |
+| `meho-backplane` | confidential, no login flow | the token audience only |
+| `meho-cli` | public, device flow | `meho login`; no `offline_access` (as `bootstrap-clients` without `--cli-offline-access`) |
+| `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
+| `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
+| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users` |
+| `meho-check-runner` | confidential, service account | its tokens carry the audience `meho-check-runner`, not `meho-backplane` |
+
+The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
+have the default scopes `basic`, `roles`, `web-origins`, `acr`,
+`profile`, `email` and five mappers: `tenant_id`, `tenant_role` and
+`approver` with the stock User Attribute mapper (`aggregate.attrs` and
+`multivalued` false, into the access token), plus the audience mappers for
+`meho-backplane` and `https://<host>/mcp`. No client has a fixed-value
+tenant or role mapper.
+
+**Realm settings.** Offline sessions end after 7 days at most
+(`offlineSessionMaxLifespanEnabled`). Brute-force detection is on.
+Registration is off. `identityProviders` is empty: the company login comes
+later. `attributes.CreateDefaultClientScopes: "true"` keeps Keycloak's
+built-in client scopes (`basic`, `profile`, `roles`, …) even though the
+file lists its own `mcp:*` scopes; this attribute needs Keycloak 26.6 or
+newer.
+
+**Known limits.**
+
+- The backplane still fetches the discovery document from
+  `KEYCLOAK_ISSUER_URL` (the public URL). Pointing it at the Service URL
+  needs the `KEYCLOAK_DISCOVERY_URL` setting, which comes with the core
+  wiring Task (#4047). The readiness probe code is green against the
+  Service URL (checked on kind).
+- The admin console does not work through `kubectl port-forward`: its
+  login page uses the public address, and `/auth/realms/master` is not
+  routed unless `exposeAdmin` is true. The Admin REST API works through
+  the Service and through `port-forward`.
+
 ### Metrics scrape wiring (`templates/servicemonitor.yaml`, `templates/prometheusrule.yaml`)
 
 The backplane serves Prometheus exposition at an unauthenticated
@@ -666,6 +805,7 @@ them).
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
+| `coreKeycloak.enabled` | `false` | Deploys the built-in Keycloak subchart (#4040). When true it needs `corePostgres.enabled: true`, `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
 | `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 

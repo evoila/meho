@@ -59,3 +59,11 @@ dependencies:
     alias: resultCache
     version: 0.1.0
     repository: ""
+  # Built-in Keycloak, the login server of the MEHO core (`charts/keycloak/`),
+  # off by default. The `alias` maps the parent's `coreKeycloak:` values block
+  # onto the subchart; its helpers pin the resource names to `keycloak`.
+  - name: keycloak
+    condition: coreKeycloak.enabled
+    alias: coreKeycloak
+    version: 0.1.0
+    repository: ""

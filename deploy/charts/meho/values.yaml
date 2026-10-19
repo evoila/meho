@@ -1175,6 +1175,25 @@ resultCache:
       app.kubernetes.io/name: meho
     extraAllowedSelectors: []
 
+# Built-in Keycloak (`charts/keycloak/`), the login server of the MEHO core.
+# Off by default; with it off the chart renders exactly what it rendered
+# before. When on, the install brings Keycloak on the official image with the
+# MEHO realm loaded at the first start, reachable at `https://<host>/auth`.
+# It needs the built-in PostgreSQL (`corePostgres.enabled: true`) and the
+# Secrets the install's secrets Job creates. Every key is described in
+# `charts/keycloak/values.yaml`; set any of them here under `coreKeycloak:`.
+coreKeycloak:
+  enabled: false
+  # -- MEHO's public DNS name. Set the same value as `ingress.host`.
+  hostname: ""
+  # -- The first tenant's id (a UUID). Pick one per install and keep it.
+  firstTenantId: ""
+  ingress:
+    # -- Also route the admin console (`/auth/admin`, `/auth/realms/master`)
+    # on the MEHO host. Default false: the admin console is then not
+    # reachable from outside the cluster.
+    exposeAdmin: false
+
 # Pre-install / pre-upgrade migration Job (Helm hook).
 #
 # Runs `python -m meho_backplane.db.migrate` (the entrypoint shipped by

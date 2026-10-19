@@ -1060,6 +1060,30 @@
         }
       }
     },
+    "coreKeycloak": {
+      "type": "object",
+      "description": "Built-in Keycloak subchart values (`charts/keycloak/`), the login server of the MEHO core. Off by default; off renders exactly what the chart rendered before. Helm checks the keys against `charts/keycloak/values.schema.json` only when `enabled` is true. Needs the built-in PostgreSQL (`corePostgres.enabled: true`), enforced by the allOf below.",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "corePostgres": {
+      "type": "object",
+      "description": "Built-in PostgreSQL subchart values. Only `enabled` is checked here; `coreKeycloak` needs it on.",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "global": {
+      "type": "object",
+      "description": "Values Helm shares with every subchart.",
+      "properties": {
+        "openshift": {
+          "type": "boolean",
+          "description": "True on OpenShift: the built-in parts then set no user or group id, because OpenShift assigns them."
+        }
+      }
+    },
     "migrationJob": {
       "type": "object",
       "description": "Pre-install / pre-upgrade migration Job (Helm hook) running `python -m meho_backplane.db.migrate` before the Deployment rolls forward.",
@@ -1407,6 +1431,27 @@
           }
         },
         "required": ["config"]
+      }
+    },
+    {
+      "description": "The built-in Keycloak keeps its data in the built-in PostgreSQL, so `coreKeycloak.enabled: true` needs `corePostgres.enabled: true`.",
+      "if": {
+        "properties": {
+          "coreKeycloak": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["coreKeycloak"]
+      },
+      "then": {
+        "properties": {
+          "corePostgres": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["corePostgres"]
       }
     }
   ],

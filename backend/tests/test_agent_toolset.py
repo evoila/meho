@@ -43,6 +43,7 @@ hosted context assembler plus its wiring into a configured run.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 from collections.abc import Iterator
@@ -55,7 +56,14 @@ import pytest
 import structlog
 from pydantic import ValidationError
 from pydantic_ai import ModelRetry, RunContext
-from pydantic_ai.messages import ModelMessage, ModelResponse, SystemPromptPart, TextPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    ToolCallPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import func, select
 from structlog.testing import capture_logs
@@ -72,6 +80,7 @@ from meho_backplane.agent.hosted_context import (
     assemble_hosted_context,
     read_context_resource,
 )
+from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.agent.toolset import (
     META_TOOL_NAMES,
     OPT_IN_META_TOOL_NAMES,
@@ -1181,6 +1190,100 @@ async def test_receipt_links_to_one_context_selected_usage_event(
     # A run task that outlives the request cannot note a lost selection.
     assert task_context.run(note_context_selected) is None
     assert await _audit_row_count() == 0
+
+
+async def test_receipt_logs_name_each_run_without_usage_collection() -> None:
+    """Two runs of one agent log receipts under their own run ids, with no correlation id."""
+    operator = _tenant_operator(uuid4())
+    model = FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("ok")]))
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(
+        name="receipt", system_prompt="SERVER POLICY.", request_limit=2, toolset={"meta_tools": []}
+    )
+    with capture_logs() as logs:
+        first = runtime.start(definition, operator, "hi")
+        second = runtime.start(definition, operator, "hi")
+        results = await asyncio.gather(runtime.result(first), runtime.result(second))
+
+    assert first.run_id != second.run_id
+    assert [result.context_receipt.correlation_id for result in results] == [None, None]
+    delivered = [log for log in logs if log["event"] == "agent_hosted_context_delivered"]
+    assert {log["run_id"] for log in delivered} == {str(first.run_id), str(second.run_id)}
+
+
+async def test_receipt_log_names_the_bound_durable_run_id() -> None:
+    """A run started under a bound ``agent_run`` id logs that id, not the handle's."""
+    durable_id = uuid4()
+    token = current_agent_run_id_var.set(durable_id)
+    try:
+        with capture_logs() as logs:
+            await _run_definition({"meta_tools": []}, _tenant_operator(uuid4()))
+    finally:
+        current_agent_run_id_var.reset(token)
+
+    (delivered,) = [log for log in logs if log["event"] == "agent_hosted_context_delivered"]
+    assert delivered["run_id"] == str(durable_id)
+
+
+async def test_child_receipt_log_names_the_child_run_id() -> None:
+    """A recorded child logs its receipt under its own id; the parent keeps its own."""
+    parent_id, child_id = uuid4(), uuid4()
+    operator = _tenant_operator(uuid4())
+    parent_def = AgentDefinition(
+        name="parent", system_prompt="You delegate.", request_limit=5, toolset={"meta_tools": []}
+    )
+    child_def = AgentDefinition(
+        name="child",
+        system_prompt="You answer sub-questions.",
+        request_limit=5,
+        toolset={"meta_tools": []},
+    )
+
+    async def resolver(operator: Operator, agent_name: str) -> AgentDefinition | None:
+        return child_def if agent_name == "child" else None
+
+    async def recorder(
+        *, operator: Operator, definition: AgentDefinition, parent_run_id: UUID | None
+    ) -> tuple[UUID, str]:
+        assert parent_run_id == parent_id
+        return child_id, "lease-owner"
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        parts = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        ]
+        if any(
+            part.part_kind == "system-prompt" and "sub-questions" in part.content for part in parts
+        ):
+            return ModelResponse(parts=[TextPart("child done")])
+        if any(part.part_kind == "tool-return" for part in parts):
+            return ModelResponse(parts=[TextPart("parent done")])
+        return ModelResponse(
+            parts=[ToolCallPart("invoke_agent", {"agent_name": "child", "inputs": "sub-task"})]
+        )
+
+    runtime = PydanticAgentRun(
+        model_factory=lambda: FunctionModel(model_fn),
+        child_agent_resolver=resolver,
+        child_run_recorder=recorder,
+    )
+    token = current_agent_run_id_var.set(parent_id)
+    try:
+        with capture_logs() as logs:
+            result = await runtime.result(runtime.start(parent_def, operator, "delegate"))
+    finally:
+        current_agent_run_id_var.reset(token)
+
+    assert result.output == "parent done"
+    delivered = {
+        log["agent"]: log["run_id"]
+        for log in logs
+        if log["event"] == "agent_hosted_context_delivered"
+    }
+    assert delivered == {"parent": str(parent_id), "child": str(child_id)}
 
 
 # ---------------------------------------------------------------------------

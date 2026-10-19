@@ -112,6 +112,7 @@ from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
     ChildRunRecorder,
+    current_agent_run_id_var,
     make_invoke_agent_tool,
 )
 from meho_backplane.agent.models import (
@@ -964,6 +965,7 @@ class PydanticAgentRun:
         self,
         definition: AgentDefinition,
         operator: Operator,
+        run_id: UUID | None = None,
         receipts: list[HostedContextReceipt] | None = None,
     ) -> Agent[Operator, Any]:
         """Construct the framework agent for *definition* under *operator*.
@@ -981,6 +983,12 @@ class PydanticAgentRun:
         the first part, unchanged. The legacy ``None`` path gets no hosted
         context. Each time the hosted context is built, its delivery
         receipt (#3763) is logged and appended to *receipts* when given.
+        The log line names the run: the durable ``agent_run`` id bound in
+        :data:`~meho_backplane.agent.invoke.current_agent_run_id_var` when
+        there is one (a recorded child run has its own), else *run_id*,
+        the runtime's handle for this run. Two runs of the same definition
+        therefore log distinguishable receipts even with usage collection
+        off, when the receipt itself has no correlation id.
 
         When this runtime carries a :attr:`child_agent_resolver` (G11.1-T5),
         the ``invoke_agent`` composition tool is appended to whichever surface
@@ -1020,8 +1028,10 @@ class PydanticAgentRun:
                     versions,
                     capability_omissions=omissions,
                 )
+                logged_run_id = current_agent_run_id_var.get() or run_id
                 _log.info(
                     "agent_hosted_context_delivered",
+                    run_id=str(logged_run_id) if logged_run_id is not None else None,
                     agent=definition.name,
                     operator_sub=ctx.deps.sub,
                     tenant_id=str(ctx.deps.tenant_id),
@@ -1171,6 +1181,10 @@ class PydanticAgentRun:
         loop) and returns the child's output directly rather than a handle: the
         parent tool needs the child's answer to continue, and the child's
         lifecycle is bounded by the parent tool call.
+
+        The child's receipt log line (#3763) names the run id the
+        ``invoke_agent`` tool bound before calling here: the child's own
+        recorded ``agent_run`` id, or the parent's when no recorder is wired.
         """
         child = self._build_agent(definition, operator)
         limits = UsageLimits(request_limit=definition.request_limit)
@@ -1216,8 +1230,8 @@ class PydanticAgentRun:
                 "the sync invocation surface (T4) bridges at the edge",
             ) from exc
         receipts: list[HostedContextReceipt] = []
-        agent = self._build_agent(definition, operator, receipts)
         run_id = uuid4()
+        agent = self._build_agent(definition, operator, run_id, receipts)
         task = asyncio.create_task(
             self._run_loop(agent, definition, operator, inputs, run_id, receipts),
             name=f"agent-run-{run_id}",
@@ -1312,7 +1326,7 @@ class PydanticAgentRun:
         """
         emitted_tool_returns = 0
         try:
-            agent = self._build_agent(definition, operator)
+            agent = self._build_agent(definition, operator, run_id)
             limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
                 async for node in run:

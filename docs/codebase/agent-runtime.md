@@ -356,11 +356,16 @@ it belongs to the run's own tenant.
 Where it goes:
 
 - **Run trace.** `PydanticAgentRun._build_agent` logs it as
-  `agent_hosted_context_delivered` (with the agent name, operator, and
-  tenant) every time the hosted context is built, child runs included. A
-  run started with `start()` also returns it on
-  `AgentRunResult.context_receipt`. A legacy run (`toolset is None`) has no
-  hosted context, so no log line and `context_receipt=None`.
+  `agent_hosted_context_delivered` every time the hosted context is built,
+  child runs included. The line carries the agent name, operator, tenant,
+  and `run_id`. The `run_id` is the durable `agent_run` id bound for the
+  run by the invocation layer; a recorded child run logs its own id. A run
+  with no bound id (the runtime used on its own) logs the id of its
+  `AgentRunHandle`. So two runs of the same agent stay apart in the log
+  even when usage collection is off and the receipt has no
+  `correlation_id`. A run started with `start()` also returns the receipt
+  on `AgentRunResult.context_receipt`. A legacy run (`toolset is None`)
+  has no hosted context, so no log line and `context_receipt=None`.
 - **Request usage sink (#3734).** `assemble_hosted_context` calls
   `note_context_selected()`. When usage collection is on and the run started
   inside an open request, that request stores one `context_selected` event
@@ -371,7 +376,8 @@ Where it goes:
 - **Never `audit_log`.** A receipt is telemetry, not an accountable action.
 
 Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
-`None`, granted-versus-denied capability, budget-overflow, and usage-link
+`None`, granted-versus-denied capability, budget-overflow, usage-link, and
+run-id (two concurrent runs, a bound durable id, a parent and its child)
 cases.
 
 ## Invocation surface (T4 #811)

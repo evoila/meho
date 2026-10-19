@@ -83,9 +83,10 @@ G11.2-T1):
   (`auth/delegation.py::actor_delegation`). `policy_gate` sees the bound actor
   and works out two verdicts: the agent's (the resolver below, keyed on
   `agent:<name>`, with the person's role ceiling) and the person's (the
-  `user` / `service` branch above). The stricter one wins. An agent `deny`
-  returns before the person's verdict is worked out, so a standing grant is
-  never recorded as used for a call that does not run. The rule in one line:
+  `user` / `service` branch above). The stricter one wins. The person's
+  verdict is worked out only when the agent may run the op (agent verdict
+  `auto-execute`). An agent `deny` or `needs-approval` returns at once, so a
+  standing grant is recorded as used only when the call runs. The rule in one line:
   a direct run may do only what both the person and the agent may do. See
   `agent-runtime.md` "Whose identity a direct run uses".
 

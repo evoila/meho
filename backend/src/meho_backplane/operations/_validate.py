@@ -544,9 +544,11 @@ async def _direct_run_verdict(
     The person who started the run is the subject; the run's agent is the
     actor. The agent's verdict uses its ``agent:<name>`` grants, the agent
     safety defaults and the person's role ceiling. The stricter of the
-    agent's and the person's verdict wins. An agent denial returns first,
-    so a standing grant is never recorded as used for a call that does
-    not run.
+    agent's and the person's verdict wins. The person's verdict is worked
+    out only when the agent may run the op (agent verdict auto-execute).
+    The person's verdict can only make the result stricter, so this does
+    not change the outcome. It means a standing grant is recorded as used
+    only when the call runs.
     """
     agent = operator.model_copy(
         update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
@@ -555,7 +557,7 @@ async def _direct_run_verdict(
         operator=agent, descriptor=descriptor, target=target
     )
     agent_result = (agent_verdict, f"agent {actor_sub} acting for {operator.sub}: {agent_reason}")
-    if agent_verdict is PermissionVerdict.DENY:
+    if agent_verdict is not PermissionVerdict.AUTO_EXECUTE:
         return agent_result
     verdict, reason = await _non_agent_verdict(
         operator=operator, descriptor=descriptor, target=target, connector_id=connector_id

@@ -19,11 +19,20 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
+import meho_backplane.broadcast.publisher as _publisher
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPermission, PermissionVerdict, Tenant
+from meho_backplane.db.models import (
+    AgentPermission,
+    AuditLog,
+    EndpointDescriptor,
+    PermissionVerdict,
+    ServicePrincipalGrant,
+    Tenant,
+)
 from meho_backplane.operations import _validate
 from meho_backplane.operations._validate import policy_gate
 from meho_backplane.settings import get_settings
@@ -166,3 +175,64 @@ async def test_agent_denial_skips_the_person_verdict(monkeypatch: pytest.MonkeyP
             connector_id="vault-1.x",
         )
     assert verdict is PermissionVerdict.DENY
+
+
+async def test_agent_needs_approval_does_not_use_the_person_standing_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that waits for approval does not record a standing grant as used."""
+    published: list[Any] = []
+
+    async def _record(event: Any) -> None:
+        published.append(event)
+
+    monkeypatch.setattr(_publisher, "publish_event", _record)
+    async with get_sessionmaker()() as session:
+        if await session.get(Tenant, _TENANT) is None:
+            session.add(Tenant(id=_TENANT, slug="t-4237", name="Tenant 4237"))
+            await session.flush()
+        session.add(
+            ServicePrincipalGrant(
+                tenant_id=_TENANT,
+                principal_sub="alice",
+                op_id="vmware.composite.vm.create",
+                connector_id="vmware-rest-9.0",
+                reason="unattended build",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id="vmware.composite.vm.create",
+        source_kind="composite",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+
+    with actor_delegation(_AGENT):
+        verdict, _reason = await policy_gate(
+            operator=_person(principal_kind=PrincipalKind.SERVICE),
+            descriptor=descriptor,
+            target=None,
+            connector_id="vmware-rest-9.0",
+        )
+
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.method == "APPROVAL", AuditLog.path == "approval.decision"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert not [r for r in rows if r.payload.get("decision") == "auto-approved"]
+    assert not [e for e in published if e.op_id == "approval.auto_approved"]

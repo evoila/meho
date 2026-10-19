@@ -28,15 +28,21 @@ criteria from #1077 map onto the tests as:
 * ``test_default_openai_builder_picks_vendor_from_base_url_hint`` —
   the settings-driven default picks the Ollama profile when the
   configured base URL contains ``ollama`` (host hint heuristic).
+* ``test_openai_compat_request_goes_to_base_url_with_api_key`` — one
+  real openai SDK request, captured at the ``httpx2`` transport, goes
+  to the configured base URL and carries the API key.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import cast
 from uuid import UUID
 
+import httpx2
 import pytest
+from pydantic_ai import Agent
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
@@ -58,6 +64,8 @@ from meho_backplane.agent import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
+
+from ._httpx2_capture import OPENAI_TEXT_REPLY, capture_httpx2_requests
 
 _TENANT_AIRGAP = UUID("33333333-3333-3333-3333-333333333333")
 _TENANT_SAAS = UUID("44444444-4444-4444-4444-444444444444")
@@ -224,6 +232,37 @@ def test_openai_compat_builder_honours_vendor_profile_for_ollama() -> None:
     profile = _extract_profile(model)
     assert profile["openai_supports_strict_tool_definition"] is False
     assert profile["openai_chat_supports_multiple_system_messages"] is False
+
+
+async def test_openai_compat_request_goes_to_base_url_with_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One real SDK request goes to the configured base URL with the API key.
+
+    The openai SDK builds the request. Only the ``httpx2`` transport is
+    replaced, so the test reads the exact URL, header and body that would
+    go on the wire. The ``.invalid`` host could not resolve anyway.
+    """
+    sent = capture_httpx2_requests(
+        monkeypatch, lambda _request: httpx2.Response(200, json=OPENAI_TEXT_REPLY)
+    )
+    model = openai_compat_backend_builder(
+        vendor=OpenAICompatVendor.VLLM,
+        model_id="meta-llama/Llama-3.1-8B-Instruct",
+        base_url="http://vllm.invalid/v1",
+        api_key="test-key",
+    )()
+
+    result = await Agent(model).run("hi")
+
+    assert result.output == "ok"
+    assert len(sent) == 1
+    request = sent[0]
+    assert str(request.url) == "http://vllm.invalid/v1/chat/completions"
+    assert request.headers["Authorization"] == "Bearer test-key"
+    body = json.loads(request.content)
+    assert body["model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert body["messages"][-1] == {"role": "user", "content": "hi"}
 
 
 def test_resolver_routes_air_gapped_tenant_to_on_prem_openai_compat() -> None:

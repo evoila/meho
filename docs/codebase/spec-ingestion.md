@@ -550,14 +550,26 @@ stays vendor-neutral, so a connector can register a correction in
 parsed proto, and returns the same proto or a fixed copy. It runs just before
 the safety floor, on both the register path and the dry-run path.
 
+A connector can also register a batch correction
+(`register_ingest_batch_correction`). It gets the catalog `version` and every
+proto of one spec, for a fix that must compare operations with each other.
+`apply_spec_corrections` runs the per-operation correction on each proto and
+then the batch correction; both ingest paths call it.
+
 A correction may also set `llm_instructions`. Registration stores it on a new
 row. On re-ingest it fills `llm_instructions` only when the row has none, so
 an operator's own edit is never replaced.
 
-VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`.
-Today there is one: on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
-`{filter_spec, result_spec}` body (see
-[connectors-vmware-rest.md](connectors-vmware-rest.md)).
+VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
+
+- on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
+  `{filter_spec, result_spec}` body;
+- an operation with no summary gets the first sentence of its description
+  (at most 120 characters);
+- a VI-JSON operation whose summary another operation of the same spec shares
+  gets its managed object type in front.
+
+See [connectors-vmware-rest.md](connectors-vmware-rest.md).
 
 #### Catalog safety overlay (#3340)
 

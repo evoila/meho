@@ -16,6 +16,14 @@
 # suitable for the chassis-stage backplane; tune via overrides for higher-
 # throughput deployments.
 
+# Values Helm hands to the parent chart and every subchart.
+global:
+  # -- Set to true on OpenShift. The built-in core parts then leave out
+  # `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user
+  # id from the project's range (it refuses a fixed one outside it). On
+  # other clusters keep false: the pods run with fixed, non-root user ids.
+  openshift: false
+
 # -- Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2.
 replicaCount: 1
 
@@ -1075,6 +1083,71 @@ corePostgres:
     # (key `password`). Empty = the install makes
     # `<release>-core-postgres-keycloak`.
     keycloak: ""
+  # The subchart settings below (#4039): one PostgreSQL 17 server with
+  # pgvector and two databases, `meho` and `keycloak`, each owned by a role
+  # of the same name that is not a superuser. The chart creates the
+  # `vector` extension itself, so the pgvector step described at
+  # `postgres.credentialsSecret` is not needed. A sidecar in the
+  # PostgreSQL pod sets the role passwords again whenever the Secrets
+  # change. The superuser Secret is mounted by the PostgreSQL pod alone.
+  # Off by default for now; it turns on by default once the existing
+  # bring-your-own installs set `corePostgres.enabled: false`.
+  image:
+    repository: pgvector/pgvector
+    tag: "0.8.7-pg17-bookworm"
+    # -- When set, the pod uses `repository@digest`; the tag is a label.
+    digest: "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
+    pullPolicy: IfNotPresent
+  persistence:
+    # -- Data disk size. Fixed after the first install (StatefulSet rule).
+    size: 10Gi
+    # -- Storage class. Empty = the cluster default.
+    storageClass: ""
+  # -- UID/GID 999 is the image's `postgres` user. `global.openshift: true`
+  # leaves out `runAsUser`, `runAsGroup` and `fsGroup`.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 128Mi
+  reconcile:
+    # -- Resources of the reconcile sidecar.
+    resources:
+      limits:
+        cpu: 100m
+        memory: 64Mi
+        ephemeral-storage: 64Mi
+      requests:
+        cpu: 10m
+        memory: 32Mi
+        ephemeral-storage: 16Mi
+  # -- The subchart's own ingress NetworkPolicy: tcp/5432 only from the
+  # backplane pods (also the migration step and the helm test pod) and the
+  # Keycloak pods of this release.
+  networkPolicy:
+    enabled: true
+    backplanePodLabels:
+      app.kubernetes.io/name: meho
+    keycloakPodLabels:
+      app.kubernetes.io/name: keycloak
+    extraAllowedSelectors: []
 coreKeycloak:
   # -- Built-in Keycloak. When on, the install makes
   # `<release>-core-keycloak-bootstrap` and the three MEHO client secrets

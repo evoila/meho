@@ -454,6 +454,17 @@
         }
       }
     },
+    "global": {
+      "type": "object",
+      "description": "Values Helm hands to the parent chart and every subchart.",
+      "additionalProperties": false,
+      "properties": {
+        "openshift": {
+          "type": "boolean",
+          "description": "Set to true on OpenShift. The built-in core parts then leave out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
+        }
+      }
+    },
     "vault": {
       "type": "object",
       "additionalProperties": false,
@@ -717,17 +728,133 @@
     },
     "corePostgres": {
       "type": "object",
+      "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. Off by default; with it off the chart renders exactly what it rendered before.",
       "additionalProperties": false,
-      "description": "Built-in PostgreSQL. When enabled, the core secrets Job makes <release>-core-postgres-superuser, -core-postgres-meho and -core-postgres-keycloak unless you name your own Secret. See docs/codebase/core-secrets.md.",
+      "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
+            },
+            "tag": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$" },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[0-9a-f]{64})?$",
+              "description": "Image digest (`sha256:<64 hex>`). When set, the pod uses `repository@digest` and the tag is only a label. Empty string = use the tag."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
         "existingSecrets": {
           "type": "object",
           "additionalProperties": false,
+          "description": "Names of operator-made Secrets (key `password`) to use instead of the generated ones. Empty = `<release>-core-postgres-superuser` / `<release>-core-postgres-keycloak`.",
           "properties": {
-            "superuser": { "type": "string", "description": "Your own Secret with the PostgreSQL superuser password (key `password`). Empty = the install makes <release>-core-postgres-superuser." },
-            "keycloak": { "type": "string", "description": "Your own Secret with the password of the `keycloak` database role (key `password`). Empty = the install makes <release>-core-postgres-keycloak." }
+            "superuser": { "type": "string" },
+            "keycloak": { "type": "string" }
           }
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$",
+              "description": "Data disk size. A StatefulSet cannot change it after the first install."
+            },
+            "storageClass": {
+              "type": "string",
+              "description": "Storage class of the data disk. Empty = the cluster default."
+            }
+          }
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "securityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limits": { "$ref": "#/definitions/resourceQuantities" },
+            "requests": { "$ref": "#/definitions/resourceQuantities" }
+          }
+        },
+        "reconcile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "limits": { "$ref": "#/definitions/resourceQuantities" },
+                "requests": { "$ref": "#/definitions/resourceQuantities" }
+              }
+            }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "backplanePodLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "keycloakPodLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "extraAllowedSelectors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "affinity": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "global": {
+          "type": "object",
+          "description": "Helm injects the parent chart's `.Values.global` into every subchart's values namespace. The key must be permitted by the schema.",
+          "additionalProperties": true
         }
       }
     },

@@ -391,7 +391,7 @@ jobs:
       # so the env-only swap requires no source-code changes.
       # `docker/login-action` below stays load-bearing until #78's Half
       # B sees a green cache-hit week and retires it.
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim pinned to an explicit release tag (same rule as the
       # pgvector/valkey/Vault rows — never `:latest`) so the
@@ -1123,7 +1123,7 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
       # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
@@ -1490,7 +1490,7 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
       # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
@@ -1706,7 +1706,7 @@ jobs:
       # The 3 forward-compat rollback tests spin up pgvector via
       # testcontainers; route the pull through the Harbor proxy cache like
       # the sibling jobs (never `:latest`).
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
     defaults:
       run:

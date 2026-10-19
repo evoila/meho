@@ -83,6 +83,7 @@ from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.db.models import AuditLog
 from meho_backplane.settings import get_settings
+from tests._pgvector_image import pgvector_test_image
 
 
 def _docker_socket_present() -> bool:
@@ -175,7 +176,7 @@ def pg() -> Iterator[_Pg]:
     """One PostgreSQL for the module: migrate to ``0102``, record the guard, then to head."""
     from testcontainers.postgres import PostgresContainer
 
-    image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+    image = pgvector_test_image()
     with PostgresContainer(image) as container:
         async_url = _async_url_from(container.get_connection_url())
         _alembic(async_url, "upgrade", "0102")

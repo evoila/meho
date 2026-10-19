@@ -566,6 +566,35 @@ jobs:
           fi
           echo ">> observability scrape wiring verified: renders on opt-in, absent by default"
 
+      - name: Helm template + kubeconform with the built-in PostgreSQL (#4039)
+        # `corePostgres` is off by default, so the render above never shows
+        # the PostgreSQL subchart. Render it on (and once with
+        # global.openshift=true) and validate the manifests the same way.
+        run: |
+          set -euo pipefail
+          for extra in "" "--set global.openshift=true"; do
+            # shellcheck disable=SC2086  # $extra is empty or one flag pair
+            helm template test deploy/charts/meho/ \
+              --set image.tag=test \
+              --set ingress.host=meho.test \
+              --set ingress.tls.secretName=meho-tls \
+              --set postgres.credentialsSecret=meho-postgres \
+              --set vault.address=https://vault.test \
+              --set keycloak.issuer=https://keycloak.test/realms/meho \
+              --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+              --set config.keycloakAudience=meho-backplane \
+              --set config.vaultAddr=https://vault.test \
+              --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+              --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+              --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+              --set corePostgres.enabled=true \
+              $extra > /tmp/rendered-core-postgres.yaml
+            grep -Eq '^kind: StatefulSet$' /tmp/rendered-core-postgres.yaml \
+              || { echo "::error::corePostgres.enabled=true did not render the PostgreSQL StatefulSet"; exit 1; }
+            kubeconform -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary \
+              /tmp/rendered-core-postgres.yaml
+          done
+
   helm-test:
     # Internal "run" job — the REQUIRED branch-protection context lives on the
     # `helm-test-gate` aggregator below, not here. A required job that is gated
@@ -707,97 +736,77 @@ jobs:
         #
         #   - ghcr.io/evoila/meho:test         locally built above
         #   - valkey/valkey:9.0-alpine         broadcast subchart pod
-        #   - bitnami/postgresql:16            helm-test ``pgvector-check``
-        #                                      container (psql client) --
-        #                                      see note below
+        #   - the chart's PostgreSQL image     the built-in PostgreSQL
+        #     (``corePostgres.image``)         below and the helm-test
+        #                                      ``pgvector-check`` pod
         #
         # Pre-loading the Docker Hub images sidesteps Docker Hub's
         # anonymous-pull rate-limit that's tripped this repo's other
         # CI lanes (Python lane, image build, Semgrep) on busy days.
         #
-        # ``bitnami/postgresql:16`` deprecation workaround: Bitnami
-        # moved its Docker Hub catalog to the ``bitnamilegacy/``
-        # namespace in August 2025; ``docker pull bitnami/postgresql:16``
-        # now returns 404. The chart's
-        # templates/tests/test-pgvector.yaml still references the
-        # original tag. We pull from the new namespace and re-tag
-        # to the chart's expected reference before sideloading --
-        # keeps the chart untouched (its ``imagePullPolicy: IfNotPresent``
-        # resolves the loaded image locally by name). The proper fix
-        # belongs in a follow-up that updates the chart's test pod
-        # image to ``postgres:16-alpine`` (no Bitnami dependency); T8
-        # stays workflow-only.
+        # The PostgreSQL image is pulled by the digest the chart pins,
+        # then tagged and loaded by tag: ``kind load`` keeps the tag, so
+        # the steps below render it by tag (``corePostgres.image.digest=``).
+        # The content is still exactly the pinned digest.
         run: |
+          set -euo pipefail
+          values=deploy/charts/meho/values.yaml
+          pg_repo=$(yq '.corePostgres.image.repository' "$values")
+          pg_tag=$(yq '.corePostgres.image.tag' "$values")
+          pg_digest=$(yq '.corePostgres.image.digest' "$values")
           docker pull valkey/valkey:9.0-alpine
-          docker pull bitnamilegacy/postgresql:16
-          docker tag bitnamilegacy/postgresql:16 bitnami/postgresql:16
+          docker pull "${pg_repo}@${pg_digest}"
+          docker tag "${pg_repo}@${pg_digest}" "${pg_repo}:${pg_tag}"
           kind load docker-image \
             ghcr.io/evoila/meho:test \
             valkey/valkey:9.0-alpine \
-            bitnami/postgresql:16 \
+            "${pg_repo}:${pg_tag}" \
             --name meho-helm-test
 
-      - name: Deploy pgvector sidecar (Postgres + extension)
-        # Install pgvector/pgvector:pg16 as a single-pod Deployment in
-        # the cluster, expose it on a Service the chart's
-        # ``postgres.host`` points at. Inline manifest keeps the test
-        # self-contained -- no Helm subchart wrangling for the
-        # sidecar.
+      - name: Start the chart's built-in PostgreSQL (corePostgres, #4039)
+        # Runs the chart's own PostgreSQL subchart: initdb, the two
+        # databases and roles, the `vector` extension and the reconcile
+        # sidecar. The three Secrets are made here the way the install's
+        # secrets Job makes them (same names, keys and URL shape), with
+        # throwaway passwords.
+        #
+        # Only the subchart's objects are applied (`--show-only`), because
+        # the pre-install migration Job of a full corePostgres install
+        # would run before the database exists. The release below then
+        # installs in bring-your-own mode against this database, so its
+        # migration Job runs every migration as the `meho` role, which is
+        # not a superuser.
         run: |
+          set -euo pipefail
           kubectl create namespace meho-test
-          kubectl -n meho-test apply -f - <<'EOF'
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: pgvector
-          spec:
-            selector:
-              app: pgvector
-            ports:
-              - port: 5432
-                targetPort: 5432
-          ---
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: pgvector
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: pgvector
-            template:
-              metadata:
-                labels:
-                  app: pgvector
-              spec:
-                containers:
-                  - name: pg
-                    image: pgvector/pgvector:pg16
-                    env:
-                      - name: POSTGRES_PASSWORD
-                        value: test-pw-not-secret
-                      - name: POSTGRES_USER
-                        value: meho
-                      - name: POSTGRES_DB
-                        value: meho
-                    ports:
-                      - containerPort: 5432
-                    readinessProbe:
-                      exec:
-                        command: ["pg_isready", "-U", "meho"]
-                      initialDelaySeconds: 5
-                      periodSeconds: 5
-          EOF
-          kubectl -n meho-test rollout status deploy/pgvector --timeout=120s
-
-      - name: Create chart-side Secret (postgres credentials)
-        # The chart references ``postgres.credentialsSecret`` by name
-        # and looks for a ``url`` key. The asyncpg DSN points at the
-        # in-cluster pgvector service we just created.
-        run: |
-          kubectl -n meho-test create secret generic meho-postgres \
-            --from-literal=url='postgresql+asyncpg://meho:test-pw-not-secret@pgvector:5432/meho'
+          meho_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-superuser \
+            --from-literal=password="$(openssl rand -hex 16)"
+          kubectl -n meho-test create secret generic meho-test-core-postgres-meho \
+            --from-literal=password="$meho_pw" \
+            --from-literal=url="postgresql+asyncpg://meho:${meho_pw}@meho-test-postgres:5432/meho"
+          kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
+            --from-literal=password="$(openssl rand -hex 16)"
+          helm template meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --set image.tag=test \
+            --set ingress.enabled=false \
+            --set networkPolicy.enabled=false \
+            --set postgres.credentialsSecret=meho-test-core-postgres-meho \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set config.backplaneUrl=https://meho-test.test \
+            --set corePostgres.enabled=true \
+            --set corePostgres.image.digest= \
+            --show-only charts/corePostgres/templates/configmap.yaml \
+            --show-only charts/corePostgres/templates/service.yaml \
+            --show-only charts/corePostgres/templates/networkpolicy.yaml \
+            --show-only charts/corePostgres/templates/statefulset.yaml \
+            | kubectl -n meho-test apply -f -
+          kubectl -n meho-test rollout status statefulset/meho-test-postgres --timeout=180s
 
       - name: Pre-create ServiceAccount referenced by the migration Job hook
         # G6.1-T8 (#432) — chart hook-ordering workaround.
@@ -881,6 +890,10 @@ jobs:
           # itself is render-tested by
           # backend/tests/test_chart_broadcast_hardening.py and the chart
           # `validate` job (helm template + kubeconform), not here.
+          #
+          # #4039: the database is the chart's built-in PostgreSQL started
+          # above. Its own NetworkPolicy stays on: the migration Job and
+          # the helm-test pod carry the backplane labels it admits.
           helm install meho-test ./deploy/charts/meho \
             --namespace meho-test \
             --wait-for-jobs \
@@ -890,8 +903,9 @@ jobs:
             --set networkPolicy.enabled=false \
             --set broadcast.networkPolicy.enabled=false \
             --set broadcast.auth.enabled=false \
-            --set postgres.credentialsSecret=meho-postgres \
-            --set postgres.host=pgvector \
+            --set postgres.credentialsSecret=meho-test-core-postgres-meho \
+            --set postgres.host=meho-test-postgres \
+            --set corePostgres.image.digest= \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
             --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
@@ -933,6 +947,43 @@ jobs:
           helm test meho-test \
             --namespace meho-test \
             --timeout 2m
+
+      - name: Check the built-in PostgreSQL roles, extension and reconcile (#4039)
+        # The roles are not superusers, each database is fenced to its
+        # owner, `vector` is in `meho`, and after a changed Secret plus a
+        # pod restart the reconcile sidecar sets the new password (the
+        # failure shape of a regenerated database password).
+        run: |
+          set -euo pipefail
+          pg() {
+            kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
+              psql -X -tA -h /var/run/postgresql -U postgres "$@"
+          }
+          test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'meho'")" = f
+          test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'keycloak'")" = f
+          test "$(pg -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'keycloak'")" = keycloak
+          test "$(pg -d meho -c "SELECT extname FROM pg_extension WHERE extname = 'vector'")" = vector
+          test "$(pg -c "SELECT has_database_privilege('keycloak', 'meho', 'CONNECT')")" = f
+          test "$(pg -c "SELECT has_database_privilege('meho', 'keycloak', 'CONNECT')")" = f
+
+          new_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
+            --from-literal=password="$new_pw" --dry-run=client -o yaml \
+            | kubectl -n meho-test replace -f -
+          kubectl -n meho-test delete pod meho-test-postgres-0 --wait=true
+          for _ in $(seq 1 60); do
+            kubectl -n meho-test get pod meho-test-postgres-0 >/dev/null 2>&1 && break
+            sleep 2
+          done
+          kubectl -n meho-test wait --for=condition=Ready pod/meho-test-postgres-0 --timeout=180s
+          for _ in $(seq 1 30); do
+            logs=$(kubectl -n meho-test logs meho-test-postgres-0 -c reconcile)
+            grep -q 'roles and databases match the mounted Secrets' <<<"$logs" && break
+            sleep 2
+          done
+          kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
+            env PGPASSWORD="$new_pw" psql -X -tA -h 127.0.0.1 -U keycloak -d keycloak -c 'SELECT 1'
+          echo ">> built-in PostgreSQL verified: no superuser roles, fenced databases, vector, reconcile"
 
       - name: Broadcast load + chaos verification (G6.1-T9)
         # G6.1-T9 (#433) acceptance:
@@ -1138,8 +1189,10 @@ jobs:
           # and this diagnostic step.
           kubectl -n meho-test logs -l job-name=meho-test-migrate || true
           kubectl -n meho-test logs -l job-name=meho-test-migrate --previous || true
-          echo "=== pgvector logs ==="
-          kubectl -n meho-test logs deploy/pgvector || true
+          echo "=== built-in PostgreSQL (server + reconcile sidecar) ==="
+          kubectl -n meho-test describe pod/meho-test-postgres-0 || true
+          kubectl -n meho-test logs pod/meho-test-postgres-0 -c postgres || true
+          kubectl -n meho-test logs pod/meho-test-postgres-0 -c reconcile || true
           echo "=== broadcast (Valkey) logs ==="
           kubectl -n meho-test logs deploy/meho-test-broadcast || true
           echo "=== broadcast load-runner Pod (G6.1-T9) ==="

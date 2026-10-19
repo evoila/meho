@@ -705,7 +705,6 @@ def default_model_factory() -> Model:
     from meho_backplane.settings import get_settings
 
     from .invocation import _split_model_id
-    from .models import _AGENT_MAX_OUTPUT_TOKENS
 
     settings = get_settings()
     api_key = settings.anthropic_api_key
@@ -723,7 +722,7 @@ def default_model_factory() -> Model:
     return AnthropicModel(
         model_name,
         provider=provider,
-        settings=AnthropicModelSettings(max_tokens=_AGENT_MAX_OUTPUT_TOKENS),
+        settings=AnthropicModelSettings(max_tokens=settings.agent_max_output_tokens),
     )
 
 

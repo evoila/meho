@@ -203,10 +203,8 @@ async def _render_recent_ops(
     session: UISessionContext = _require_ui_session_dep,
     allowed: bool = _audit_read_allowed_dep,
 ) -> HTMLResponse:
-    """Render ``GET /ui/dashboard/recent-operations`` -- the tray alone.
-
-    A session below the ``operator`` role gets the notice tray at 403.
-    """
+    """Render ``GET /ui/dashboard/recent-operations`` -- the tray alone."""
+    # A session below the ``operator`` role gets the notice tray at 403.
     if not allowed:
         return get_templates().TemplateResponse(
             request,

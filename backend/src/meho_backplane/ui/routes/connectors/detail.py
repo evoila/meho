@@ -637,9 +637,12 @@ def build_detail_router() -> APIRouter:
         name: str,
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_raw_session_dep,
-        role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
         """``GET /ui/connectors/{name}/recent-operations``."""
+        # Called directly, not declared as a dependency: declared, its
+        # optional session argument would show up as a JSON request body
+        # in the OpenAPI document of this GET route.
+        role_probe = await resolve_role_probe(request, session_ctx)
         return await _render_recent_ops(
             request,
             target_name=name,

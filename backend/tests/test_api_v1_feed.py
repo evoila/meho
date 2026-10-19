@@ -40,6 +40,7 @@ import pytest
 import respx
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport
+from sqlalchemy import delete
 
 import meho_backplane.api.v1.feed as feed_module
 from meho_backplane.api.v1.feed import (
@@ -58,6 +59,8 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.broadcast.archive_cursor import encode_watch_checkpoint
 from meho_backplane.broadcast.archive_reader import AnnouncementFilter
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from tests._oidc_jwt_helpers import (
@@ -840,6 +843,28 @@ class TestFeedGenerator:
         frames = await _take(_frames(start=start), n=2, timeout=1.0)
 
         assert [_data(frame)["activity"] for frame in frames] == ["recent"]
+
+    async def test_since_before_retention_sends_gap_frame_then_kept_rows(
+        self, wake: _FakeWake
+    ) -> None:
+        """Replay from a time whose rows were pruned says so before the first event."""
+        for activity in ("pruned", "kept one", "kept two"):
+            await seed_announcement(_TENANT_A, activity=activity)
+        async with get_sessionmaker()() as session:
+            await session.execute(
+                delete(AgentAnnouncement).where(
+                    AgentAnnouncement.tenant_id == _TENANT_A, AgentAnnouncement.seq <= 1
+                )
+            )
+            await session.commit()
+
+        start = FeedStart(since=datetime.now(UTC) - timedelta(days=400))
+        frames = await _take(_frames(start=start), n=3, timeout=1.0)
+
+        assert frames[0].startswith("event: gap\n")
+        assert _data(frames[0])["reason"] == "retention_trimmed"
+        assert _data(frames[0])["missed_events"] is None
+        assert [_data(frame)["activity"] for frame in frames[1:]] == ["kept one", "kept two"]
 
     async def test_tenant_scoping(self, wake: _FakeWake) -> None:
         """Tenant A's feed never shows tenant B's announcements."""

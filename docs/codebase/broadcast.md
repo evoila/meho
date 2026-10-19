@@ -689,8 +689,9 @@ instead of claiming to be complete:
   checkpoint, a history page cursor, or a fresh window whose scanned
   range is missing N rows.
 - `{"reason": "retention_trimmed", "missed_events": null, ...}` — a
-  fresh recent window that starts before
-  `broadcast_announcement_retention_days` while rows were pruned.
+  fresh recent window, or an SSE feed `since=<time>`, that starts before
+  `broadcast_announcement_retention_days` while rows were pruned. The
+  feed sends this frame before the first replayed announcement.
 - `{"reason": "checkpoint_ahead", ...}` — a watch checkpoint above the
   tenant's current `last_seq` (for example after a database restore);
   watching restarts at the current end.

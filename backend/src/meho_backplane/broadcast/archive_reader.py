@@ -553,14 +553,18 @@ async def latest_announcements(
     )
 
 
-async def first_seq_since(operator: Operator, since: datetime) -> int:
-    """Return the resume point (a sequence number) just before *since*.
+async def first_seq_since(operator: Operator, since: datetime) -> tuple[int, dict[str, Any] | None]:
+    """Return the resume point just before *since*, and the retention gap.
 
-    A watcher that starts there sees every announcement stored at or
-    after *since*. When none exists it is the current watermark.
+    A watcher that starts at the returned sequence number sees every
+    announcement still stored at or after *since*. When none exists it
+    is the current watermark. The gap (:func:`_window_gap`) is set when
+    *since* reaches before the retention window and rows were pruned:
+    announcements from that time may be gone, and a later scan cannot
+    count them because the resume point is already past them.
     """
     tenant_id = operator.tenant_id
     async with get_sessionmaker()() as session:
         await _number_older_writes(session, tenant_id)
-        position, _gap = await _history_start(session, tenant_id, since)
-    return position.after_seq
+        position, gap = await _history_start(session, tenant_id, since)
+    return position.after_seq, gap

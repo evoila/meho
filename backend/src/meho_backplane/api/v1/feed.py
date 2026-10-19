@@ -235,7 +235,8 @@ async def _start_position(
     if start.after is not None:
         return [], start.after
     if start.since is not None:
-        return [], await first_seq_since(operator, start.since)
+        after, gap = await first_seq_since(operator, start.since)
+        return ([_format_gap(gap)] if gap is not None else []), after
     latest = await latest_announcements(operator, limit=_BACKLOG_PRELUDE_COUNT, flt=flt)
     return [_format_event(operator, item) for item in latest.events], latest.watermark
 

@@ -28,6 +28,17 @@ class it knows. Nothing is guessed from `method` / `path`.
 | `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
 | `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
 
+### Error results a handler returns (#4274)
+
+A typed or multi-step handler can return an error result instead of
+raising one. MEHO still writes one `operation_execution` row for it, with
+`result_status="error"` and the result's `error_code`. The row uses the
+operation's own `audit_id`. So the rows of the steps that already ran
+(their `parent_audit_id`) and the flight-recorder trace point at a row
+that exists. The caller gets the same result as before, plus that
+`audit_id`. A returned result that waits for approval or is denied gets
+no row here; #4275 decides how to record those.
+
 ### Class counters and execution-only traces (#3747)
 
 - `count_event_classes(filters, *, tenant_id, session)` returns one row

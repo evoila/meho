@@ -44,11 +44,12 @@ from sqlalchemy import select
 import meho_backplane.operations._audit as audit_module
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations import (
     PassThroughReducer,
     dispatch,
@@ -666,3 +667,108 @@ async def test_dispatch_streamed_non2xx_returns_structured_error_with_audit_row(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
     assert rows[0].payload["error"]["error_code"] == "connector_error"
+
+
+# ---------------------------------------------------------------------------
+# A handler that RETURNS an error result, instead of raising (#4274)
+# ---------------------------------------------------------------------------
+
+
+_returned_result: list[OperationResult] = []
+
+
+async def _module_returning_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> OperationResult:
+    """Typed handler that returns a built OperationResult instead of raising."""
+    return _returned_result[0]
+
+
+def _returned_error() -> OperationResult:
+    return OperationResult(
+        status="error",
+        op_id="demo.thing.returns",
+        error="demo_refused: the handler stopped before it did anything",
+        duration_ms=0.0,
+        extras={"error_code": "demo_refused", "remediation": "Do something else."},
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_returned_error_result_writes_one_execution_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A returned error result gets exactly one execution row with its error_code."""
+    returned = _returned_error()
+    _returned_result[:] = [returned]
+    await _register_op(
+        "demo.thing.returns",
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_returning_handler,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.thing.returns",
+        target=_FakeTarget(),
+        params={},
+    )
+
+    rows = await _committed_rows_for("demo.thing.returns")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.event_class == AuditEventClass.OPERATION_EXECUTION.value
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "demo_refused"
+
+    # The caller gets the handler's result as it was, plus the audit receipt.
+    assert result.audit_id == row.id
+    assert result.model_dump(exclude={"audit_id"}) == returned.model_dump(exclude={"audit_id"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "returned",
+    [
+        OperationResult(
+            status="awaiting_approval",
+            op_id="demo.thing.returns",
+            duration_ms=0.0,
+            extras={"approval_request_id": "00000000-0000-0000-0000-000000000001"},
+        ),
+        OperationResult(
+            status="denied",
+            op_id="demo.thing.returns",
+            error="denied: policy denied",
+            duration_ms=0.0,
+        ),
+    ],
+    ids=["awaiting_approval", "denied"],
+)
+async def test_handler_returned_non_error_result_is_unchanged(
+    stub_embedding_service: AsyncMock,
+    returned: OperationResult,
+) -> None:
+    """Waiting and denied results stay as before: passed through, no new row."""
+    _returned_result[:] = [returned]
+    await _register_op(
+        "demo.thing.returns",
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_returning_handler,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.thing.returns",
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert result == returned
+    assert await _committed_rows_for("demo.thing.returns") == []

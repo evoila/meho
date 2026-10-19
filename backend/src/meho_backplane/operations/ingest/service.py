@@ -261,6 +261,8 @@ class ReviewService:
         self,
         connector_id: str,
         tenant_id: UUID | None,
+        *,
+        allow_platform_admin_cross_tenant: bool = False,
     ) -> None:
         """Raise :class:`ConnectorNotFoundError` if the operator can't act on the scope.
 
@@ -270,6 +272,11 @@ class ReviewService:
         at the DB-query site). The unified exception class prevents
         an unprivileged operator from enumerating other tenants
         via status-code differential.
+
+        ``allow_platform_admin_cross_tenant`` lets a ``platform_admin``
+        act on another tenant's scope. Only :meth:`record_profile_stamp`
+        sets it: the ingest pipeline has already allowed that write
+        (#3800). Every review and enable path keeps the strict check.
         """
         if tenant_id is None:
             if self._operator.tenant_role is not TenantRole.TENANT_ADMIN:
@@ -277,6 +284,8 @@ class ReviewService:
                     connector_id=connector_id,
                     tenant_id=tenant_id,
                 )
+            return
+        if allow_platform_admin_cross_tenant and self._operator.platform_admin:
             return
         if tenant_id != self._operator.tenant_id:
             raise ConnectorNotFoundError(
@@ -288,6 +297,8 @@ class ReviewService:
         self,
         connector_id: str,
         tenant_id: UUID | None,
+        *,
+        allow_platform_admin_cross_tenant: bool = False,
     ) -> ConnectorScope:
         """Authorise + parse a ``(connector_id, tenant_id)`` pair.
 
@@ -296,7 +307,11 @@ class ReviewService:
         perspective, an unparseable identifier is indistinguishable
         from a non-existent connector.
         """
-        self._authorize_scope(connector_id, tenant_id)
+        self._authorize_scope(
+            connector_id,
+            tenant_id,
+            allow_platform_admin_cross_tenant=allow_platform_admin_cross_tenant,
+        )
         try:
             product, version, impl_id = parse_connector_id(connector_id)
         except ValueError:
@@ -918,7 +933,7 @@ class ReviewService:
                 f"(shim_kind == {shim_kind(connector_class)!r})"
             )
 
-        scope = self._resolve_scope(connector_id, tenant_id)
+        scope = self._resolve_scope(connector_id, tenant_id, allow_platform_admin_cross_tenant=True)
         triple = (scope.product, scope.version, scope.impl_id)
         if triple in all_connectors_v2():
             # Already stamped (or a hand-coded/bare class occupies the

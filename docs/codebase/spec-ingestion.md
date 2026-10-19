@@ -1777,6 +1777,39 @@ modal's Write-scope select (`global`/`tenant` discriminator; the BFF
 derives the UUID from the authenticated operator, never from the
 client).
 
+**Platform-admin ingest into another tenant (#3800).** One exception
+to the "any other UUID is rejected" rule. An operator whose token
+carries `platform_admin` may name another tenant's UUID in
+`tenant_id` (CLI: `--tenant-id`). This lets a platform operator seed
+a tenant-scoped connector row for a new tenant that has no usable
+admin seat yet. The rules:
+
+- It only applies when the tenant id is given. An omitted or `null`
+  `tenant_id` still means the built-in scope, for every operator.
+- Without `platform_admin`, a foreign UUID is still rejected (REST
+  403, MCP `-32602`), exactly as before. The route's `tenant_admin`
+  floor still applies too.
+- Before any row is written, `ingest()` commits one
+  `meho_connector_ingest_cross_tenant` (`OP_CROSS_TENANT_INGEST`)
+  audit row. The row is attributed to the acting operator
+  (`operator_sub` and the operator's own `tenant_id`); the payload
+  names the `connector_id` and the `target_tenant_id`. The row also
+  carries the agent session (`agent_session_id`), read through
+  `resolve_agent_session_id` like every row `write_audit_row` builds,
+  so a session search finds it whether or not
+  `AUDIT_WRAPPER_ROWS_RETIRED` is on. The async MCP path keeps the
+  session too: the background task copies the tool call's context.
+  If that write fails, the ingest stops with nothing written. A dry
+  run writes no audit row.
+- The `--auth-scheme` profile stamp follows the same allowance:
+  `ReviewService.record_profile_stamp` passes
+  `allow_platform_admin_cross_tenant=True` to `_resolve_scope`. No
+  other `ReviewService` path sets it, so review, enable and delete
+  stay strict.
+- A `platform_admin` may poll an ingest job in another tenant
+  (`IngestJobRegistry.get(..., is_platform_admin=...)`), and the REST
+  async job's "is it dispatchable" check probes the target tenant.
+
 **Shared scope resolution (`get_review_payload` + `enable_reads`,
 G0.13-T5 #1135 / G0.26-T1 #1801).** Every read/enable-reads path
 applies the same "operator's-tenant rows + built-ins (`tenant_id IS

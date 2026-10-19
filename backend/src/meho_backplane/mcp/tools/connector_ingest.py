@@ -492,6 +492,7 @@ async def _ingest_status_handler(
             job_id,
             tenant_id=operator.tenant_id,
             is_tenant_admin=operator.tenant_role is TenantRole.TENANT_ADMIN,
+            is_platform_admin=operator.platform_admin,
         )
     except IngestJobNotFoundError as exc:
         raise McpInvalidParamsError("ingest_job_not_found") from exc
@@ -561,7 +562,10 @@ _INGEST_DESCRIPTION: Final[str] = (
     "null for built-in / global ingest (tenant_admin only); pass the "
     "operator's own tenant UUID for tenant-scoped ingest. Any other "
     "UUID is rejected immediately with an invalid-params error on both "
-    "the inline and async paths — no job is created. The REST "
+    "the inline and async paths — no job is created — unless the "
+    "operator holds platform_admin: a platform_admin may name another "
+    "tenant's UUID to ingest on that tenant's behalf, and the write is "
+    "audited. The REST "
     "endpoint POST /api/v1/connectors/ingest accepts the same optional "
     "tenant_id body field with identical semantics — omitted or null "
     "resolves to the built-in / global scope on both surfaces (#2085), "

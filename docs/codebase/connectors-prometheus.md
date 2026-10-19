@@ -108,6 +108,46 @@ happens to parse (a port `"443"`, a version, a serial) from `unknown` to a
 live state on upgrade. `prometheus.alerts`' per-alert string `value` is left
 as-is (out of the minimal scope).
 
+## Derived target health (#3673)
+
+`prometheus.targets` returns the raw `{status, data: {activeTargets,
+droppedTargets}}` body. The target list sits one level deep under `data`,
+and result reduction only looks for a collection at the top level. So a
+large target list never became rows that `result_query` can count or
+group, and an agent could not answer "how many targets are down?".
+
+`targets` therefore runs the body through `_augment_target_health`
+(`connectors/prometheus/ops_read.py`). It leaves `status` and `data`
+**byte-identical** and adds two top-level members, in the same additive
+shape as `_augment_numeric_samples`:
+
+- **`target_health`** — one flat row per active target:
+  - `health`: `up`, `down` or `unknown`. A missing, empty or other value
+    counts as `unknown`.
+  - `job` and `instance` (from `labels`), `scrape_pool`, `scrape_url`,
+    `last_scrape`, `last_error`.
+  - `has_last_error`: true when `lastError` is a non-empty string.
+- **`target_health_totals`** — `{"up": N, "down": M, "unknown": K}`.
+
+`target_health` is the only top-level list, so result reduction picks it
+as the collection with no change to the reducer. When the result comes
+back as a handle, a `result_query` with `group_by: ["health"]` and a
+`COUNT` aggregate returns the totals, and a filter `health = 'down'`
+lists the failing targets with their `last_error`. The op's
+`result_objects` hint keeps `target_health_totals` inline in the reduced
+summary, so the totals are visible without a query.
+
+Limits:
+
+- `target_health` is left out when there are no active targets (for
+  example `state=dropped`). An empty list would be picked as the
+  collection and stop a large `droppedTargets` body from being kept
+  whole as a document record. `target_health_totals` is always present.
+- When the body is reduced on `target_health`, the raw `data` object is
+  not part of the stored rows. Call with `state=dropped` to read dropped
+  targets; that body has no `target_health` and is kept whole as a
+  document record when it is large.
+
 ## Optional auth
 
 In-cluster Prometheus is typically reached via port-forward and is

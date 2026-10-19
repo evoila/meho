@@ -149,6 +149,69 @@ def _augment_numeric_samples(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+_TARGET_HEALTH_STATES = ("up", "down", "unknown")
+
+
+def _target_health_row(entry: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one raw ``activeTargets`` entry into a queryable row."""
+    health = entry.get("health")
+    labels = entry.get("labels")
+    if not isinstance(labels, dict):
+        labels = {}
+    last_error = entry.get("lastError")
+    return {
+        "health": health if health in _TARGET_HEALTH_STATES else "unknown",
+        "job": labels.get("job"),
+        "instance": labels.get("instance"),
+        "scrape_pool": entry.get("scrapePool"),
+        "scrape_url": entry.get("scrapeUrl"),
+        "last_scrape": entry.get("lastScrape"),
+        "last_error": last_error,
+        "has_last_error": isinstance(last_error, str) and last_error != "",
+    }
+
+
+def _augment_target_health(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach flat target-health rows and totals to a ``targets`` envelope.
+
+    The raw ``data.activeTargets`` list sits one level deep, and result
+    reduction only finds a collection at the top level. So a large target
+    list was never turned into rows that ``result_query`` can count or group.
+    This adds two top-level derived members and leaves ``status`` / ``data``
+    byte-identical (wire fidelity), the same shape as
+    :func:`_augment_numeric_samples`:
+
+    * ``target_health`` -- one row per active target: ``health`` (``up`` /
+      ``down`` / ``unknown``; a missing or other value counts as ``unknown``),
+      ``job`` and ``instance`` (from ``labels``), ``scrape_pool``,
+      ``scrape_url``, ``last_scrape``, ``last_error`` and ``has_last_error``
+      (true when ``lastError`` is a non-empty string). It is the only
+      top-level list, so result reduction picks it as the collection.
+      Left out when there are no active targets: an empty list would be
+      picked as the collection and stop a large ``droppedTargets`` body from
+      being kept as a document record.
+    * ``target_health_totals`` -- ``{"up": N, "down": M, "unknown": K}``,
+      always present.
+
+    Mutates *payload* in place (the freshly parsed body ``_api_get`` owns per
+    call) and returns it.
+    """
+    data = payload.get("data")
+    active = data.get("activeTargets") if isinstance(data, dict) else None
+    rows = (
+        [_target_health_row(entry) for entry in active if isinstance(entry, dict)]
+        if isinstance(active, list)
+        else []
+    )
+    totals = dict.fromkeys(_TARGET_HEALTH_STATES, 0)
+    for row in rows:
+        totals[row["health"]] += 1
+    if rows:
+        payload["target_health"] = rows
+    payload["target_health_totals"] = totals
+    return payload
+
+
 class PrometheusReadOps(_Base):
     """Typed read-op handlers + fingerprint-augmentation helpers.
 
@@ -284,9 +347,10 @@ class PrometheusReadOps(_Base):
         state = params.get("state")
         if state is not None:
             query["state"] = state
-        return await self._api_get(
+        payload = await self._api_get(
             target, "/api/v1/targets", operator=operator, params=query or None
         )
+        return _augment_target_health(payload)
 
     async def rules(
         self, operator: Operator, target: Any, params: dict[str, Any]

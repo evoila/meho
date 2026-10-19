@@ -24,8 +24,8 @@ The audited set:
 
 * ``nsx.node.status`` -- ``GET /api/v1/node`` (manager identity: version,
   build, node UUID).
-* ``nsx.cluster.status`` -- ``GET /api/v1/cluster/status`` (management +
-  control cluster health).
+* ``nsx.cluster.status`` -- ``GET /api/v1/cluster/status`` (cluster
+  health, plus flat ``health_*`` fields and ``group_status_counts``).
 * ``nsx.backup.config`` -- ``GET /api/v1/cluster/backups/config``, the
   first-class backup read the adopter flagged (a retention/schedule
   misconfig of the Broadcom KB 442696 class filled a router disk and took
@@ -158,6 +158,73 @@ def _redact_secrets(value: Any) -> Any:
     return value
 
 
+#: Literal written for a derived health field whose vendor source is
+#: missing or not a usable string. Lowercase on purpose: it never collides
+#: with a vendor ``UNKNOWN`` enum value, which is passed through verbatim.
+_HEALTH_UNKNOWN = "unknown"
+
+#: Closed ``ClusterGroupStatus.group_status`` enum (NSX 9.0 spec). Any
+#: other value -- missing, not a string, or a value outside this set --
+#: counts in the ``unknown`` bucket, so ``group_status_counts`` never has
+#: more than ``len(_GROUP_STATUS_VALUES) + 1`` keys.
+_GROUP_STATUS_VALUES: frozenset[str] = frozenset({"STABLE", "DEGRADED", "UNSTABLE", "UNAVAILABLE"})
+
+
+def _status_or_unknown(value: Any) -> str:
+    """Return *value* when it is a non-empty string, else ``"unknown"``."""
+    return value if isinstance(value, str) and value else _HEALTH_UNKNOWN
+
+
+def _nested_status(payload: dict[str, Any], key: str, field: str) -> Any:
+    """Return ``payload[key][field]`` when ``payload[key]`` is a dict, else ``None``."""
+    section = payload.get(key)
+    return section.get(field) if isinstance(section, dict) else None
+
+
+def _augment_cluster_health(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach flat health fields to an NSX ``ClusterStatus`` body.
+
+    Answering "is the cluster healthy, and how many groups are degraded?"
+    from the raw body means walking the nested tree. This adds flat
+    top-level siblings so the answer is one read, and leaves every vendor
+    field byte-identical (wire fidelity, same shape as the Prometheus
+    ``_augment_numeric_samples``):
+
+    * ``health_overall`` -- top-level ``overall_status``, else
+      ``detailed_cluster_status.overall_status`` (both non-deprecated).
+    * ``health_mgmt`` -- ``mgmt_cluster_status.status`` (deprecated).
+    * ``health_control`` -- ``control_cluster_status.status`` (deprecated).
+    * ``group_status_counts`` -- how many
+      ``detailed_cluster_status.groups[]`` entries carry each
+      ``group_status`` value; at most five keys.
+
+    A missing or unusable source gives ``"unknown"`` (scalar) or the
+    ``"unknown"`` count bucket -- never null, never omitted -- so absence
+    is never read as healthy. Every access is isinstance-guarded: the
+    helper never raises into dispatch. Mutates *payload* in place -- it is
+    the freshly parsed body ``_get_json`` owns per call -- and returns it.
+    """
+    overall = payload.get("overall_status")
+    if not (isinstance(overall, str) and overall):
+        overall = _nested_status(payload, "detailed_cluster_status", "overall_status")
+    counts: dict[str, int] = {}
+    groups = _nested_status(payload, "detailed_cluster_status", "groups")
+    if isinstance(groups, list):
+        for group in groups:
+            status = group.get("group_status") if isinstance(group, dict) else None
+            key = status if status in _GROUP_STATUS_VALUES else _HEALTH_UNKNOWN
+            counts[key] = counts.get(key, 0) + 1
+    payload["health_overall"] = _status_or_unknown(overall)
+    payload["health_mgmt"] = _status_or_unknown(
+        _nested_status(payload, "mgmt_cluster_status", "status")
+    )
+    payload["health_control"] = _status_or_unknown(
+        _nested_status(payload, "control_cluster_status", "status")
+    )
+    payload["group_status_counts"] = counts
+    return payload
+
+
 async def nsx_node_status_impl(
     connector: NsxConnector,
     operator: Operator,
@@ -185,13 +252,18 @@ async def nsx_cluster_status_impl(
 ) -> dict[str, Any]:
     """``nsx.cluster.status`` -- ``GET /api/v1/cluster/status``.
 
-    Returns the management-plane health: ``mgmt_cluster_status`` (overall
-    management cluster state), ``control_cluster_status``, and per-member
-    ``detail``. The read an operator runs when a control-plane outage is
-    suspected.
+    Returns the vendor ``ClusterStatus`` body (``overall_status``,
+    ``detailed_cluster_status``, ``node_services_status``, and the
+    deprecated ``mgmt_cluster_status`` / ``control_cluster_status``)
+    unchanged, plus the flat health fields
+    :func:`_augment_cluster_health` adds. The read an operator runs when a
+    control-plane outage is suspected.
     """
     del params  # schema declares the param object empty
-    return await connector._get_json(target, _CLUSTER_STATUS_PATH, operator=operator)
+    raw = await connector._get_json(target, _CLUSTER_STATUS_PATH, operator=operator)
+    if not isinstance(raw, dict):
+        return raw
+    return _augment_cluster_health(raw)
 
 
 async def nsx_backup_config_impl(

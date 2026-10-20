@@ -492,6 +492,72 @@ def test_get_search_rejects_limit_over_50(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("admin", "expect_scores"),
+    [(False, False), (True, True)],
+)
+async def test_get_search_scores_only_for_admin_opt_in(
+    client: TestClient,
+    stub_embedding_service: AsyncMock,
+    admin: bool,
+    expect_scores: bool,
+) -> None:
+    """#3668: ``include_scores`` adds ranking scores only for a tenant_admin."""
+    await _seed_descriptor(op_id="vault.kv.read", summary="Read a secret.")
+    key = make_rsa_keypair("kid-A")
+    token = _admin_token(key) if admin else _operator_token(key)
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&q=read&include_scores=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    hit = response.json()["hits"][0]
+    assert ("fused_score" in hit) is expect_scores
+    assert ("bm25_score" in hit) is expect_scores
+    assert ("cosine_score" in hit) is expect_scores
+
+
+@pytest.mark.asyncio
+async def test_get_search_exact_op_returns_contract(client: TestClient) -> None:
+    """#3668: ``op_id`` returns one call contract; no ``q`` needed."""
+    await _seed_descriptor(op_id="vault.kv.read", summary="Read a secret.")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&op_id=vault.kv.read",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert "hits" not in body
+    assert body["operation"]["op_id"] == "vault.kv.read"
+    assert body["operation"]["parameter_schema"] == {"type": "object"}
+
+
+@pytest.mark.asyncio
+async def test_get_search_exact_op_unknown_op_returns_structured_404(
+    client: TestClient,
+) -> None:
+    """#3668: an unknown op on a known connector is a 404 with ``reason=unknown_op``."""
+    await _seed_descriptor(op_id="vault.kv.read")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&op_id=vault.nope",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["reason"] == "unknown_op"
+    assert detail["op_id"] == "vault.nope"
+    assert detail["connector_id"] == "vault-1.x"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/operations/call
 # ---------------------------------------------------------------------------
@@ -797,6 +863,42 @@ def test_post_call_not_found_result_rides_200_envelope(
     assert body["extras"]["resource_id"] == "missing-vm"
     dispatch_mock.assert_awaited_once()
     assert dispatch_mock.await_args.kwargs["op_id"] == "vmware.vm.info"
+
+
+@pytest.mark.asyncio
+async def test_post_call_rate_limited_rides_200_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3500: a rate-limited dispatch is a ``rate_limited`` envelope on HTTP 200.
+
+    The real dispatcher runs with the per-principal rate limit forced over
+    its cap. The route keeps the #136/#2110 always-200 contract: no HTTP
+    429 on ``/call``. The agent's back-off signal is the envelope itself,
+    ``status="rate_limited"`` with ``extras.retry_after_seconds``.
+    """
+    import meho_backplane.operations.dispatcher as dispatcher
+
+    await _seed_descriptor(op_id="vault.kv.read")
+    monkeypatch.setattr(dispatcher, "resolve_dispatch_rate_limit", lambda s, t: 5)
+    monkeypatch.setattr(dispatcher, "check_dispatch_rate_limit", AsyncMock(return_value=30))
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": None,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "rate_limited", body
+    assert body["extras"]["error_code"] == "rate_limited"
+    assert body["extras"]["retry_after_seconds"] == 30
 
 
 @pytest.mark.asyncio

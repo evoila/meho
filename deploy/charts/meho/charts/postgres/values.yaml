@@ -1,0 +1,125 @@
+# Default values for the built-in PostgreSQL subchart (`charts/postgres/`).
+#
+# The subchart ships inside the parent `meho` chart. The parent maps its
+# `corePostgres:` values block onto it through a dependency `alias`, so
+# operators set these keys under `corePostgres:`.
+#
+# The subchart makes no password. The three Secrets it reads are made by
+# the install's secrets Job before the pod starts:
+#   - `<release>-core-postgres-superuser` (key `password`): the image
+#     superuser. Only the `postgres` container mounts it; initdb reads it
+#     once, on an empty disk.
+#   - `<release>-core-postgres-meho` (key `password`): the `meho` role.
+#   - `<release>-core-postgres-keycloak` (key `password`): the `keycloak`
+#     role.
+
+# -- Master switch. The parent Chart.yaml's `dependencies` entry reads it
+# via `condition: corePostgres.enabled`. Off by default for now. It turns
+# on by default once the existing bring-your-own installs set
+# `corePostgres.enabled: false`.
+enabled: false
+
+image:
+  # -- Image repository. A community image built FROM the official
+  # `postgres:17-bookworm` image (same entrypoint), with pgvector added.
+  repository: pgvector/pgvector
+  # -- Image tag. PostgreSQL 17, pgvector 0.8.7. A minor update is a new
+  # digest and a pod restart. A major update (17 to 18) is a manual
+  # dump-and-restore step, never an automatic image change.
+  tag: "0.8.7-pg17-bookworm"
+  # -- Image digest (`sha256:<64 hex>`). When set, the pod uses
+  # `repository@digest` and the tag is only a label.
+  digest: "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Names of Secrets the operator made, used instead of the generated
+# ones. Each needs the key `password`. Empty = `<release>-core-postgres-…`.
+existingSecrets:
+  superuser: ""
+  keycloak: ""
+
+persistence:
+  # -- Size of the data disk. The StatefulSet cannot change it after the
+  # first install; grow the PVC by hand if the storage class allows it.
+  size: 10Gi
+  # -- Storage class of the data disk. Empty = the cluster default.
+  storageClass: ""
+
+# -- Pod security context. UID and GID 999 are the `postgres` user of the
+# image. With `global.openshift: true` the chart leaves out `runAsUser`,
+# `runAsGroup` and `fsGroup`, so OpenShift can pick them.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context, for the server and the reconcile
+# sidecar. The root filesystem stays read-only: the data disk and
+# emptyDirs at /var/run/postgresql, /tmp and /dev/shm are the only
+# writable paths.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Resources of the PostgreSQL server container.
+resources:
+  limits:
+    cpu: "1"
+    memory: 1Gi
+    ephemeral-storage: 1Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+    ephemeral-storage: 128Mi
+
+reconcile:
+  # -- Resources of the reconcile sidecar. It runs `psql` once at start
+  # and again only when a mounted Secret or the SQL file changes.
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+      ephemeral-storage: 64Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+      ephemeral-storage: 16Mi
+
+# -- The subchart's own ingress NetworkPolicy. It selects the PostgreSQL
+# pod and admits tcp/5432 only from the backplane pods (this also covers
+# the migration step and the helm test pod, which carry the same labels)
+# and the Keycloak pods of this release.
+networkPolicy:
+  enabled: true
+  # -- Labels of the backplane pods. The `.Release.Name` instance label is
+  # added automatically.
+  backplanePodLabels:
+    app.kubernetes.io/name: meho
+  # -- Labels of the built-in Keycloak pods. The instance label is added
+  # automatically.
+  keycloakPodLabels:
+    app.kubernetes.io/name: keycloak
+  # -- More pod selectors (label maps) allowed to reach PostgreSQL.
+  extraAllowedSelectors: []
+
+# -- Pod-level annotations.
+podAnnotations: {}
+
+# -- Pod-level labels.
+podLabels: {}
+
+# -- Node selector.
+nodeSelector: {}
+
+# -- Tolerations.
+tolerations: []
+
+# -- Affinity rules.
+affinity: {}

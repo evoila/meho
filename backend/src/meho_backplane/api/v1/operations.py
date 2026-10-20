@@ -60,6 +60,7 @@ from meho_backplane.operations.meta_tools import (
     OperationDescriptor,
     PreviewOperationBody,
     UnknownConnectorError,
+    UnknownOperationError,
     call_operation,
     describe_descriptor,
     list_operation_groups,
@@ -226,6 +227,25 @@ async def get_search(
     ),
     group: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
+    op_id: str | None = Query(
+        default=None,
+        min_length=1,
+        description=(
+            "Exact-op mode. Look up this one operation and return its call "
+            "contract (`{operation: {...}}`: the parameter schema, examples, "
+            "target rule, result shape and retry guidance) instead of ranked "
+            "hits. `q`, `group` and `limit` are ignored when it is set. An "
+            "unknown op_id is a 404 with `detail.reason=unknown_op`."
+        ),
+    ),
+    include_scores: bool = Query(
+        default=False,
+        description=(
+            "Add the ranking scores (`fused_score`, `bm25_score`, "
+            "`cosine_score`) to each ranked hit. Only honoured for a "
+            "tenant_admin caller; ignored for everyone else."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.
@@ -235,7 +255,8 @@ async def get_search(
     a registered-but-not-ingested connector → ``404`` with the typed
     ``connector_not_ingested`` ``detail`` (same contract as ``/groups``,
     #1482); a known connector with no matching ops returns ``200`` with
-    an empty list.
+    an empty list. Every ``200`` body carries the ``outcome`` /
+    ``advisory`` / ``narrowing`` fields that say why (#3670).
 
     ``q`` is the canonical free-text query param across the kb / memory /
     operations-search list surfaces (#1854); ``query`` is its deprecated
@@ -243,12 +264,18 @@ async def get_search(
     required: supplying neither is a ``422`` (the search has nothing to
     match), and supplying both with different values is a ``422`` rather
     than a silent pick.
+
+    With ``op_id`` (#3668) the route skips ranking and returns one
+    operation's call contract; a known connector with no such op is a
+    ``404`` whose ``detail`` carries ``reason="unknown_op"``.
     """
     search_query = resolve_free_text_filter(
         q=q,
         legacy_value=query,
         legacy_name="query",
     )
+    if op_id is not None:
+        return await _exact_op_search(operator, connector_id, op_id)
     if search_query is None:
         raise HTTPException(
             status_code=422,
@@ -265,12 +292,28 @@ async def get_search(
                 "query": search_query,
                 "group": group,
                 "limit": limit,
+                "include_scores": include_scores,
             },
         )
     except ConnectorNotIngestedError as exc:
         raise connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+async def _exact_op_search(operator: Operator, connector_id: str, op_id: str) -> dict[str, Any]:
+    """Run ``search_operations`` in exact-op mode and map its errors to ``404``."""
+    try:
+        return await search_operations(operator, {"connector_id": connector_id, "op_id": op_id})
+    except ConnectorNotIngestedError as exc:
+        raise connector_not_ingested_404(exc) from exc
+    except UnknownConnectorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except UnknownOperationError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"message": str(exc), **exc.as_error_data()},
+        ) from exc
 
 
 @router.post("/call")

@@ -213,6 +213,38 @@ plus a `coverage_note` — so a `COUNT` over a capped spill is labelled as
 covering the stored subset, **never** presented as a whole-inventory
 total.
 
+### Source coverage and storage coverage (#3676)
+
+A stored record carries two coverage labels. They answer different
+questions, and neither one changes the other:
+
+- **`storage_coverage`** — did the store keep every row this call
+  returned? `complete` when `stored_rows == captured_rows`, `partial`
+  when the row cap or the byte cap dropped some.
+- **`source_coverage`** — did this call return all of the vendor's data?
+  The row spill (`ResultHandleStore.spill`) always writes `unknown`. A
+  vendor API that pages its results may have sent only the first page,
+  and a cap says nothing about that.
+
+So an uncapped spill is `storage_coverage=complete`,
+`source_coverage=unknown`. The row spill never writes
+`source_coverage=complete`; that needs a checked vendor fact, which no
+code reads yet.
+
+The agent-facing prose follows the same rule. The available drill-in
+rationale says the handle holds "the N rows this call returned" and ends
+with a note that a paged vendor API may hold more (see
+`native_pagination`). It never calls the handle the full result set.
+
+`fetch_more.native_pagination` is how the agent learns to ask the vendor
+for the next page. It is filled from the op's `pagination_hint`
+(`llm_instructions.pagination_hint`, a `PaginationHint`). Ingested ops
+have no `llm_instructions`, so an operator adds a curated hint through
+the operator-review `edit_op` path. The GitHub issue-list hint lives in
+`connectors/github/pagination_hints.py` (see
+[connectors-github.md](connectors-github.md)). A hint is static text:
+MEHO does not follow `Link` headers or fetch more pages by itself.
+
 ### Admission and the worker pool (#3640)
 
 Every read path (paging, query, and a `path` read) must be admitted

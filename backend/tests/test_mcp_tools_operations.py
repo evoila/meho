@@ -180,7 +180,7 @@ def test_tools_call_list_operation_groups_returns_seeded_groups(
 def test_tools_call_search_operations_rejects_missing_query(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``search_operations`` requires ``query`` per its inputSchema."""
+    """``search_operations`` needs ``query`` or ``op_id`` per its inputSchema."""
     from meho_backplane.mcp.schemas import INVALID_PARAMS
 
     client, _op = client_with_operator
@@ -198,6 +198,36 @@ def test_tools_call_search_operations_rejects_missing_query(
     )
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_search_operations_exact_op_unknown_is_typed_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#3668: an unknown ``op_id`` on a known connector is ``-32602`` + ``unknown_op``."""
+    from meho_backplane.mcp.schemas import INVALID_PARAMS
+
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "search_operations",
+                "arguments": {"connector_id": "vault-1.x", "op_id": "vault.nope"},
+            },
+        },
+    )
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["reason"] == "unknown_op"
+    assert body["error"]["data"]["op_id"] == "vault.nope"
 
 
 @pytest.mark.parametrize(

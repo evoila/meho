@@ -23,7 +23,8 @@ What lives here
   that *made* the call -- so a composite child that mints a session has its
   body hard-excluded by the child's op family, not the parent's.
 * The three capture entry points the seams call:
-  :func:`span_start` + :func:`record_vendor_call` (the shared httpx seam),
+  :func:`span_start` + :func:`record_vendor_call` (the shared httpx seam;
+  :func:`record_vendor_call_error` when the request raises a transport fault),
   :func:`record_jsonflux_reduction` (the JSONFlux reducer), and the
   ``composite_step`` marker emitted by :func:`begin_dispatch_capture` when a
   nested child dispatch is detected.
@@ -75,6 +76,7 @@ from meho_backplane.flight_recorder._capture_util import (
     request_id,
     response_content,
     safe_url,
+    transport_fault_phase,
 )
 from meho_backplane.flight_recorder.config import should_capture
 from meho_backplane.flight_recorder.store import SpanInput, record_trace
@@ -87,6 +89,7 @@ __all__ = [
     "end_dispatch_capture",
     "record_jsonflux_reduction",
     "record_vendor_call",
+    "record_vendor_call_error",
     "span_start",
 ]
 
@@ -359,6 +362,52 @@ def record_vendor_call(
             scope.redaction_uncertain = True
     except Exception:
         _log.warning("flight_recorder_vendor_span_failed", exc_info=True)
+
+
+def record_vendor_call_error(start: SpanStart | None, *, method: str, exc: BaseException) -> None:
+    """Capture a vendor HTTP call that raised a transport fault (#3408, F7).
+
+    The httpx seam calls this when the request raises before a response exists
+    (a timeout, a refused connection, a network error), then re-raises. The
+    span records the method, the safe URL, the fault class, the phase (same
+    labels as the ``connector_timeout`` error result) and the time spent, so a
+    timed-out call is not a silent gap in the trace. It carries no header or
+    body, so no vendor byte reaches the span. The URL is read from the
+    exception inside this guarded function: ``httpx`` raises ``RuntimeError``
+    when no request is attached. Any error is logged and swallowed.
+    """
+    scope = _active_capture_var.get()
+    if start is None or scope is None:
+        return
+    try:
+        try:
+            url = safe_url(exc.request.url)  # type: ignore[attr-defined]
+        except Exception:
+            url = "?"
+        op = _op_context_var.get()
+        attributes: dict[str, Any] = {
+            "connector_id": op.connector_id if op else None,
+            "op_id": op.op_id if op else None,
+            "method": method,
+            "url": url,
+            "exception_class": type(exc).__name__,
+            "phase": transport_fault_phase(exc),
+        }
+        rid = request_id()
+        if rid is not None:
+            attributes["request_id"] = rid
+        scope.add(
+            SpanInput(
+                span_kind="vendor_call",
+                name=f"{method} {url}",
+                started_at=start.started_at,
+                duration_ms=elapsed_ms(start.monotonic),
+                status="error",
+                attributes=attributes,
+            )
+        )
+    except Exception:
+        _log.warning("flight_recorder_vendor_error_span_failed", exc_info=True)
 
 
 def _redact_vendor_call(

@@ -89,6 +89,7 @@ from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _ISSUER
+from tests._pgvector_image import pgvector_test_image
 
 # ---------------------------------------------------------------------------
 # Docker-availability skip — same shape as test_migration_rollback /
@@ -172,8 +173,8 @@ def async_pg_url() -> Iterator[str]:
     from docker.errors import APIError as _DockerAPIError
     from testcontainers.postgres import PostgresContainer
 
-    # pgvector/pgvector:pg16 — Postgres 16 with the pgvector extension
-    # pre-installed. After G0.4-T1 (#258) migration 0003 runs
+    # The chart's own PostgreSQL 17 image with the pgvector extension
+    # pre-installed (``tests/_pgvector_image.py``, #4039). After G0.4-T1 (#258) migration 0003 runs
     # ``CREATE EXTENSION IF NOT EXISTS vector`` as part of
     # ``alembic upgrade head``, so the testcontainers image must ship
     # the extension. Stock ``postgres:16-alpine`` (the v0.1-chassis
@@ -185,7 +186,7 @@ def async_pg_url() -> Iterator[str]:
     # cache, internal Harbor) does not require a code change — same
     # env-knob shape ``test_db_engine`` / ``test_migration_rollback``
     # honour.
-    image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+    image = pgvector_test_image()
     pg = PostgresContainer(image)
     try:
         pg.start()

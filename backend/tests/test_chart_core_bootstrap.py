@@ -278,7 +278,7 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     assert "kubectl -n {{ .Release.Namespace }} get secret" in block
     assert "-o jsonpath='{.data.admin_password}' | base64 -d" in block
     assert "meho login https://{{ .Values.coreKeycloak.hostname }}" in block
-    assert "new password at the first login" in block
+    assert "new password, a name and an email at the first login" in block
     assert "MEHO-Admins" in block
     assert "MEHO-SA-Operators" in block
     assert "{{- if .Values.coreKeycloak.enabled }}" in notes[: notes.index("First login")]

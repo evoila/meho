@@ -256,13 +256,22 @@ def _password_login(kc: _Keycloak, username: str, password: str) -> httpx.Respon
     )
 
 
-def _clear_required_actions(kc: _Keycloak, username: str) -> dict[str, Any]:
-    """What the browser's first login does, minus the new password."""
+def _finish_first_login(kc: _Keycloak, username: str) -> dict[str, Any]:
+    """What the browser's first login does, minus the new password.
+
+    Keycloak refuses a direct login while a required action is pending or
+    the profile is incomplete ("Account is not fully set up"): the realm's
+    user profile wants a first name, a last name and an email, which the
+    person types in at the first browser login.
+    """
     admin = f"{kc.base_url}/admin/realms/meho"
     headers = _admin_headers(kc)
     user = _user(kc, username)
     user_rep = httpx.get(f"{admin}/users/{user['id']}", headers=headers).json()
     user_rep["requiredActions"] = []
+    user_rep.update(
+        {"firstName": "Test", "lastName": username, "email": f"{username}@example.test"}
+    )
     httpx.put(f"{admin}/users/{user['id']}", headers=headers, json=user_rep).raise_for_status()
     return user
 
@@ -287,14 +296,14 @@ async def test_first_admin_must_change_the_password_then_is_a_platform_admin(
     assert first_login["admin_username"] == "admin"
     _allow_password_grant_on_cli(keycloak)
 
-    # Keycloak wants a new password before any login with the temporary one.
+    # Keycloak wants a new password (and the profile) before any login.
     pending = _password_login(keycloak, "admin", first_login["admin_password"])
     assert pending.status_code == 400
     assert "not fully set up" in pending.json()["error_description"]
 
-    # Once the required action is done, the password from the Secret is the
-    # one Keycloak holds, and the login carries the first admin's claims.
-    _clear_required_actions(keycloak, "admin")
+    # Once the first login's steps are done, the password from the Secret is
+    # the one Keycloak holds, and the login carries the first admin's claims.
+    _finish_first_login(keycloak, "admin")
     assert _password_login(keycloak, "admin", "not-the-password").status_code == 401
     operator = await _operator_for(keycloak, "admin", first_login["admin_password"], monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
@@ -308,7 +317,7 @@ async def test_second_person_is_an_operator(
 ) -> None:
     first_login = keycloak.first_login
     assert first_login["approver_username"] == "approver"
-    _clear_required_actions(keycloak, "approver")
+    _finish_first_login(keycloak, "approver")
 
     operator = await _operator_for(
         keycloak, "approver", first_login["approver_password"], monkeypatch

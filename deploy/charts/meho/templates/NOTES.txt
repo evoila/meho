@@ -62,7 +62,7 @@ First login (built-in Keycloak):
        kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d
   (keys: admin_username, admin_password, approver_username, approver_password)
   Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
-  Keycloak asks for a new password at the first login.
+  Keycloak asks for a new password, a name and an email at the first login.
 {{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 

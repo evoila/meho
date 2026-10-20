@@ -43,7 +43,10 @@ What is true after the Job ran:
 
 Both get a 32-character password from the one alphabet `[A-Za-z0-9]`, stored
 as a temporary credential with the required action `UPDATE_PASSWORD`, so
-Keycloak forces a change at the first login.
+Keycloak forces a change at the first login. The realm's user profile also
+wants a first name, a last name and an email, so the first browser login
+asks for those too. Until both are done, a login without a browser (for
+example the password grant) is refused with "Account is not fully set up".
 
 The Secret `<release>-core-first-login` holds `admin_username`,
 `admin_password`, `approver_username` and `approver_password`. The install

@@ -21,6 +21,16 @@ description: |
   error strings) is handled by the Tier-2 Presidio adapter (#1072).
 
 rules:
+  # This rule runs first. BIND allows a comment between the ``secret``
+  # keyword and the value, and the rule only finds the value when the
+  # comment is still whole. A later rule such as api_key can redact a
+  # ``password=...`` inside the comment and take the closing ``*/``
+  # with it, so the real value would stay visible (#4620 review).
+  - name: strip-bind-key-secret
+    pattern: bind_key_secret
+    action: redact
+    reason: "TSIG / rndc key secret in a BIND config file"
+
   - name: strip-authorization-header
     pattern: authorization_header
     action: redact

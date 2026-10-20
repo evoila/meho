@@ -901,6 +901,7 @@
         "podSecurityContext": { "type": "object" },
         "securityContext": { "type": "object" },
         "resources": { "type": "object" },
+        "unseal": { "type": "object", "description": "`resources` of the `unseal` helper container. Whether it unseals depends only on whether the Secret `<release>-core-vault-unseal` exists." },
         "service": { "type": "object" },
         "networkPolicy": { "type": "object" },
         "nodeSelector": { "type": "object" },

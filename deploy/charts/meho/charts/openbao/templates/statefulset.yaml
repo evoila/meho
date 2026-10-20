@@ -85,10 +85,61 @@ spec:
             - name: config
               mountPath: {{ $home }}/config
               readOnly: true
+        # Unseals the server after every restart while the Secret
+        # `<release>-core-vault-unseal` exists (#4046). Deleting the Secret
+        # switches to "keyholder at boot": a person then unseals by hand.
+        - name: unseal
+          image: {{ include "meho.core.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          # `key=@<file>` makes the program read the key from the file
+          # itself: the key is never on a command line or in a shell
+          # variable, and nothing keeps it between passes, so a deleted
+          # Secret takes effect on the next pass. The unseal call's output
+          # is thrown away; only fixed lines are logged.
+          args:
+            - |
+              trap 'exit 0' TERM
+              last=""
+              while true; do
+                {{ .Values.binary }} status >/dev/null 2>&1
+                rc=$?
+                if [ "$rc" -eq 0 ]; then
+                  msg="unsealed"
+                elif [ "$rc" -ne 2 ]; then
+                  msg="the server does not answer yet"
+                elif [ ! -f /unseal/key ]; then
+                  msg="sealed, no unseal key in /unseal (keyholder mode, or not set up yet)"
+                elif {{ .Values.binary }} write sys/unseal key=@/unseal/key >/dev/null 2>&1; then
+                  msg="sealed, sent the unseal key"
+                else
+                  msg="sealed, the unseal call failed (output hidden: it could hold the key)"
+                fi
+                if [ "$msg" != "$last" ]; then echo "unseal: $msg"; last="$msg"; fi
+                sleep 5 & wait $!
+              done
+          env:
+            - name: {{ $env }}_ADDR
+              value: "http://127.0.0.1:8200"
+          resources:
+            {{- toYaml .Values.unseal.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: unseal
+              mountPath: /unseal
+              readOnly: true
       volumes:
         - name: config
           configMap:
             name: {{ include "coreVault.fullname" . }}-config
+        # `optional`: the pod also starts without the Secret (keyholder
+        # mode). No `subPath`, so the kubelet removes the file when the
+        # Secret is deleted and puts it back when the Secret returns.
+        - name: unseal
+          secret:
+            secretName: {{ printf "%s-core-vault-unseal" .Release.Name }}
+            optional: true
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

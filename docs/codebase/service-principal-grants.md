@@ -322,6 +322,12 @@ Role: **`operator`** (not `tenant_admin`) — a standing grant is the
 persistent form of the approve decision an operator already makes on the
 approval queue.
 
+Create and revoke need a person. A token of an agent, a service principal
+or a runner gets 403 `human_principal_required` (the same check
+`require_human_principal` in `auth/rbac.py` that the approval decision
+routes and the agent-grant create / elevate routes use, #4616). List and
+show keep the role check alone.
+
 | Verb | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/v1/service-principals/grants` | List (`principal_sub`, `include_revoked`, `include_expired` (default `true`), `limit`, `offset`). |

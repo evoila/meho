@@ -16,8 +16,15 @@ so a pattern added in a future task fails CI until a row is added.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from meho_backplane.redaction import (
+    DEFAULT_POLICY_PACKAGE,
+    DEFAULT_POLICY_RESOURCE,
+    load_policy_yaml,
+)
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.patterns import (
     NAMED_PATTERNS,
@@ -130,6 +137,36 @@ def test_bind_key_secret_skips_comments_before_the_value(separator: str) -> None
     result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
     assert result.redacted == "secret" + separator + "[REDACTED:bind_key_secret];"
     assert "exampleTsig" not in result.redacted
+
+
+@pytest.mark.parametrize(
+    "comment_run",
+    ["#" * 80, "//" * 40, "/*" * 40, "# a\n" * 40],
+    ids=["hash-run", "slash-run", "unclosed-block-run", "many-lines"],
+)
+def test_bind_key_secret_comments_without_a_value_finish_fast(comment_run: str) -> None:
+    """A comment run with no quoted value after it must not stall (#4620 review).
+
+    The gap between ``secret`` and the value is matched once. Before the
+    possessive quantifier a run of ``#`` characters could be split into
+    comments in exponentially many ways, and 24 of them already took
+    seconds through the default policy, which every connector uses.
+    """
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    payload = "secret " + comment_run + " no value here"
+    started = time.perf_counter()
+    result = redact(payload, policy)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, f"redaction took {elapsed:.2f}s"
+    assert result.redacted == payload
+
+
+def test_bind_key_secret_ignores_a_value_commented_out_on_the_same_line() -> None:
+    """``secret # "..."`` is a comment to BIND, so nothing is a secret here."""
+    line = 'secret # "exampleTsigValue==";'
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == line
+    assert result.manifest == ()
 
 
 @pytest.mark.parametrize(

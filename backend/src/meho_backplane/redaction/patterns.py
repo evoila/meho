@@ -190,11 +190,19 @@ _KUBECONFIG = re.compile(
 # must be base64 (BIND lets whitespace split it). The text from a
 # name's closing quote to the real value's opening quote holds ``{``
 # and ``;``, so it never passes as a value.
+#
+# The gap between the keyword and the value is matched once and never
+# re-tried (possessive ``*+``). A line comment runs to the end of its
+# line, so a value on the same line after ``#`` or ``//`` is commented
+# out in BIND and is not matched. Without the possessive quantifier a
+# run of ``#`` characters with no quoted value after it could be split
+# into comments in exponentially many ways, and one short payload kept
+# the middleware busy for seconds (#4620 review).
 _BIND_COMMENT = r"(?:/\*[^*]*(?:\*(?!/)[^*]*)*\*/|//[^\n]*|#[^\n]*)"
 _BIND_KEY_SECRET = re.compile(
     r"(?<![\w\"'-])secret(?:\s|"
     + _BIND_COMMENT
-    + r')*(?P<value>"[A-Za-z0-9+/=\s]{1,'
+    + r')*+(?P<value>"[A-Za-z0-9+/=\s]{1,'
     + str(_VALUE_MAX)
     + r'}")',
     re.IGNORECASE,

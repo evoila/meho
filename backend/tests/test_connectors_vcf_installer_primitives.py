@@ -398,9 +398,94 @@ def test_bringup_retry_registers_its_own_preview_builder() -> None:
     )
 
 
+# --------------------------------------------------------------- sddc.list (#3418)
+
+
+def _sddc_task_row(task_id: str, status: str) -> dict[str, object]:
+    """A vendor ``SddcTask`` as ``GET /v1/sddcs`` returns it (9.1 field names)."""
+    return {
+        "id": task_id,
+        "name": f"bring-up {task_id}",
+        "status": status,
+        "deploymentType": "VCF",
+        "vcfInstanceName": "vcf-mgmt-01",
+        "creationTimestamp": "2026-10-01T08:00:00.000Z",
+        "localizableNamePack": {"component": "VCF"},
+        "sddcSubTasks": [{"name": f"subtask-{i}", "status": status} for i in range(260)],
+        "milestones": [{"name": "Deploy vCenter", "status": status}],
+        "unexpectedVendorField": {"rootPassword": "SECRET-vendor"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_sddc_list_returns_each_task_id_and_status_without_an_id() -> None:
+    """The list needs no id and keeps only the summary fields of each task."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        list_route = mock.get(_SDDCS_PATH).respond(
+            200,
+            json={
+                "elements": [
+                    _sddc_task_row("sddc-old", "COMPLETED_WITH_FAILURE"),
+                    _sddc_task_row("sddc-new", "IN_PROGRESS"),
+                ],
+                "pageMetadata": {"pageNumber": 0, "totalElements": 2},
+            },
+        )
+        result = await connector.sddc_list(_make_operator(), _TARGET, {})
+
+    assert list_route.call_count == 1
+    assert list_route.calls[0].request.headers.get("authorization") == "Bearer tok-abc"
+    assert [(t["id"], t["status"]) for t in result["elements"]] == [
+        ("sddc-old", "COMPLETED_WITH_FAILURE"),
+        ("sddc-new", "IN_PROGRESS"),
+    ]
+    assert set(result["elements"][0]) == {
+        "id",
+        "name",
+        "status",
+        "deploymentType",
+        "vcfInstanceName",
+        "creationTimestamp",
+    }
+    assert result["pageMetadata"] == {"pageNumber": 0, "totalElements": 2}
+    assert "SECRET-vendor" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sddc_list_returns_empty_elements_when_no_bring_up_exists() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_SDDCS_PATH).respond(200, json={})
+        result = await connector.sddc_list(_make_operator(), _TARGET, {})
+
+    assert result == {"elements": []}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sddc_list_propagates_401_for_session_recovery() -> None:
+    """A session-expiry 401 reaches the dispatcher's #2067 recovery arm unretried."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        list_route = mock.get(_SDDCS_PATH).respond(401, json={"message": "token expired"})
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector.sddc_list(_make_operator(), _TARGET, {})
+
+    assert exc_info.value.response.status_code == 401
+    assert token_route.call_count == 1
+    assert list_route.call_count == 1
+    await connector.aclose()
+
+
 # --------------------------------------------------------------- depot family (#3121)
 
 _DEPOT_PATH = "/v1/system/settings/depot"
+_DEPOT_SYNC_PATH = "/v1/system/settings/depot/depot-sync-info"
 _CERTS_PATH = "/v1/sddc-manager/trusted-certificates"
 _BUNDLES_PATH = "/v1/bundles"
 
@@ -437,6 +522,63 @@ async def test_depot_get_scrubs_every_password_key() -> None:
     assert result["offlineAccount"]["status"] == "DEPOT_CONNECTION_SUCCESSFUL"
     assert "password" not in result["offlineAccount"]
     assert "SECRET" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_sync_status_reads_sync_info() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        route = mock.get(_DEPOT_SYNC_PATH).respond(
+            200,
+            json={
+                "syncStatus": "IN_PROGRESS",
+                "lastSyncCompletionTimestamp": "2026-10-01T10:00:00Z",
+            },
+        )
+        result = await connector.system_depot_sync_status(_make_operator(), _TARGET, {})
+
+    assert route.call_count == 1
+    assert route.calls.last.request.headers["Authorization"] == "Bearer tok-abc"
+    assert result == {
+        "syncStatus": "IN_PROGRESS",
+        "lastSyncCompletionTimestamp": "2026-10-01T10:00:00Z",
+    }
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_sync_status_keeps_error_and_scrubs_passwords() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_DEPOT_SYNC_PATH).respond(
+            200,
+            json={
+                "syncStatus": "FAILED",
+                "errorMessage": "Depot is not reachable",
+                "account": {"username": "depot-svc", "password": "SECRET-depot"},
+            },
+        )
+        result = await connector.system_depot_sync_status(_make_operator(), _TARGET, {})
+
+    assert result["syncStatus"] == "FAILED"
+    assert result["errorMessage"] == "Depot is not reachable"
+    assert result["account"] == {"username": "depot-svc"}
+    assert "SECRET" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_sync_status_propagates_401_for_session_recovery() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        login = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_DEPOT_SYNC_PATH).respond(401, json={"message": "expired"})
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector.system_depot_sync_status(_make_operator(), _TARGET, {})
+    assert login.call_count == 1
     await connector.aclose()
 
 

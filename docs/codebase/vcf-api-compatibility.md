@@ -211,17 +211,14 @@ an 8.x catalog is ingested. Ingest the `vmware-rest-8.0` catalog
 operations on fingerprinted 8.0.x targets; typed and composite ops are
 unaffected either way.
 
-**Acquisition gap (Package 1, 8.0 U3).** The pinned 8.0 U3 vendor `vcenter.yaml`
-/ `vi-json.yaml` are **not yet acquired** — the public `vmware/vcf-api-specs`
-repo is tagged 9.0/9.1 only, and the appliance/portal specs need authenticated
-retrieval (Broadcom Developer Portal login, or generation off a live 8.0.3
-vCenter). The `vsphere-8.x` artifact in the contract manifest therefore stays
-`availability: unavailable`, and the VCF 5.2.x release rows it serves are
-`evidence_level: registered` (the class advertises the 8.0.x band) rather than
-`spec-fixture-qualified`. Pinning the raw catalog to the shelf's
-`docs/vcenter-8.0/` arms the always-shipped reconcile lane
-(`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py`) to compare the
-shipped minimal against the vendor surface.
+**Acquisition (Package 1, 8.0 U3).** The 8.0 U3 `vcenter.yaml` is pinned on
+the private shelf as `docs/vcenter-8.0/vcenter.yaml`. It was made from a live
+8.0.3 vCenter's API metadata, because the public `vmware/vcf-api-specs` repo is
+tagged 9.0/9.1 only (the `vsphere-8.x` artifact in the contract manifest has the
+provenance and sha256). CI checks out that folder and requires the file, so the
+reconcile lane (`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py`)
+compares the shipped minimal against the vendor surface on every run. An 8.0
+`vi-json.yaml` is not pinned yet.
 
 ## References
 

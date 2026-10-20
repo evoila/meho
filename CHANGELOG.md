@@ -90,14 +90,114 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `meho admin keycloak bootstrap-clients` no longer has the flags
+  `--tenant-role` and `--admin-group-name` (#4590 / #4596). A script
+  that still passes them stops with `unknown flag` before any Keycloak
+  call. Roles now come from the five login groups; see the entry under
+  Changed.
+
 ### Added
 
+- The install now makes the passwords and keys for the built-in parts
+  of the core (#4041 / #4599). When `corePostgres.enabled` or
+  `coreKeycloak.enabled` is on, a Job named `<release>-core-secrets`
+  runs before every install and upgrade. It makes each missing
+  `<release>-core-*` Secret, so nobody creates these Secrets by hand.
+  It runs from the backplane image, so no new image is needed. It uses
+  its own ServiceAccount, `<release>-core-bootstrap`, with narrow
+  rights: it can create Secrets, read or change only the
+  `<release>-core-*` names, and read the Secrets you name in values.
+  Nothing cluster-wide. New values keys: `corePostgres.enabled`,
+  `corePostgres.existingSecrets.{superuser,keycloak}`,
+  `coreKeycloak.enabled` and `coreKeycloak.existingSecrets.bootstrap`.
+  Both flags are off by default. With both off, the chart renders
+  exactly what it rendered before. The rules:
+  - A Secret that already exists wins and is never changed.
+  - A Secret you name in values is only checked. If it lacks a key
+    MEHO reads, the install stops with one sentence that names the
+    Secret and the key.
+  - If a read fails for any reason other than "not found", the Job
+    stops before it creates anything.
+  - The Job output shows Secret names and `created`, `kept` or
+    `checked`, never a value.
+  - `helm uninstall` leaves the made Secrets in place.
+- The chart can now run its own PostgreSQL database, with pgvector
+  (the add-on MEHO uses for vector search) turned on (#4039 / #4600).
+  It is off by default (`corePostgres.enabled`). With it off, the
+  chart renders what it rendered before, except for the helm test pod
+  (see the last point). When on:
+  - One PostgreSQL 17 server runs
+    (`pgvector/pgvector:0.8.7-pg17-bookworm`, pinned by digest), with
+    one disk and two databases: `meho` and `keycloak`. Each is owned
+    by a role of the same name. Neither role is a superuser.
+  - The chart turns on the `vector` extension itself. Nobody runs a
+    database command by hand before the install.
+  - The chart makes no password. It reads the Secrets that the
+    install's secrets Job makes. Only the PostgreSQL pod mounts the
+    superuser Secret. The decision record
+    `docs/decisions/pgvector-superuser-prerequisite.md` explains this
+    one exception.
+  - A helper container in the PostgreSQL pod sets the role passwords
+    again at every start and when a Secret changes. So a new or
+    restored Secret always matches the database.
+  - New value `global.openshift` (default `false`). When true, the
+    built-in PostgreSQL leaves out `runAsUser`, `runAsGroup` and
+    `fsGroup`, so OpenShift picks them. Otherwise it runs as user 999.
+  - No backplane change and no database migration. The backplane is
+    wired to the built-in PostgreSQL in a later change (#4047).
+  - **Changed for every install:** the helm test pod
+    (`templates/tests/test-pgvector.yaml`) now uses the chart's
+    PostgreSQL 17 image instead of `bitnami/postgresql:16`, as user
+    999. Bitnami no longer publishes that image under its old name.
+    The database tests in CI now use the same image, so the tested
+    PostgreSQL is the shipped one.
+- The chart can now run its own Keycloak, the login server
+  (#4040 / #4602). It is off by default (`coreKeycloak.enabled`). With
+  it off, the chart renders exactly what it rendered before. When on:
+  - It runs Keycloak 26.8.1 on the official image, pinned by digest,
+    at `https://<host>/auth`.
+  - At the first start it loads the MEHO realm. The realm has the five
+    login groups, each with the first tenant id and a role
+    (`MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`,
+    `MEHO-Admins`, `MEHO-Approvers`). It also has the clients
+    `meho-backplane`, `meho-cli`, `meho-mcp`, `meho-web`, `meho-admin`
+    and `meho-check-runner`.
+  - The realm file holds no secret.
+  - It needs the built-in PostgreSQL and the Secrets that the
+    install's secrets Job makes.
 - CI now checks that the Helm chart installs with the rights of a
   namespace admin. The chart check fails when any render makes an object
   outside its namespace, and names the object and its template file. The
   kind install runs `helm install` and `helm test` as a namespace admin.
   `docs/deploying.md` has a new section, "Rights the installer needs"
   (#4099).
+
+### Changed
+
+- `meho admin keycloak bootstrap-clients` now takes each person's
+  tenant and role from their Keycloak group (#4590 / #4596). Before,
+  it put one fixed tenant and the role `tenant_admin` into every token
+  of the shared `meho-cli` and `meho-mcp` clients. So everyone who
+  logged in through them was an admin.
+  - The command creates five groups. Each carries `tenant_id` (from
+    `--tenant-id`) and `tenant_role`: `MEHO-Readers` (`read_only`),
+    `MEHO-Operators` and `MEHO-SA-Operators` (`operator`),
+    `MEHO-Admins` (`tenant_admin`), and `MEHO-Approvers`
+    (`read_only`, plus `approver`). It puts the first admin user into
+    `MEHO-Admins`.
+  - Keycloak's standard user attribute mappers copy these values into
+    the token. On a realm made by an older version, the command
+    replaces the old fixed-value mappers in place. It is still safe to
+    run twice.
+  - What you must do: put each person in exactly one of the five
+    groups, and pass the same `--tenant-id` on every run. On an older
+    realm, take the first admin out of the old `meho-admins` group.
+    Keep Keycloak's "Unmanaged Attributes" setting at "Disabled" (the
+    default) or admin-only, so people cannot set their own role.
+  - The new decision record `docs/decisions/login-role-groups.md`
+    explains the five groups and the one-group rule.
 
 ## [0.35.22] - 2026-10-13
 

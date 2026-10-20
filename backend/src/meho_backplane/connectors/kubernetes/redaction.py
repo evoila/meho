@@ -34,6 +34,11 @@ core Secrets with ``group=""``, ``version="v1"``, ``plural="secrets"``)
 -- wired through ``ops_customresource.custom_resource_row``. A future
 single-object / list Secret read reuses this same helper.
 
+The flight recorder's Kubernetes transport hook (``_wire_span.py``,
+#3841) runs the same walk over every JSON request and response body
+before the body reaches the recorder, so a ``k8s.apply`` of a Secret or
+a ``k8s.cr.*`` read of one never records a value either.
+
 Note on the current CR projection: ``custom_resource_row`` otherwise
 keeps only ``metadata`` + a bounded ``.spec`` excerpt and drops every
 other top-level field, and a ``Secret`` has no ``.spec`` -- so before
@@ -51,9 +56,11 @@ import hashlib
 from typing import Any
 
 __all__ = [
+    "LAST_APPLIED_ANNOTATION",
     "REDACTED_PREFIX",
     "SECRET_DATA_FIELDS",
     "SECRET_KIND",
+    "SECRET_LIST_KIND",
     "redact_kubernetes_payload",
     "redact_secret_value",
 ]
@@ -63,6 +70,16 @@ __all__ = [
 #: ``"Secret"`` casing, and a case-insensitive match risks colliding with
 #: an unrelated custom resource whose kind merely spells the word.
 SECRET_KIND = "Secret"
+
+#: The ``kind`` of the envelope the API server returns for a Secret list
+#: (``GET .../secrets``). Its ``items`` carry no ``kind`` of their own, so
+#: the walk treats every kind-less item of such an envelope as a Secret.
+SECRET_LIST_KIND = "SecretList"
+
+#: The annotation ``kubectl apply`` writes with the full last manifest. On
+#: a Secret it repeats every ``data`` / ``stringData`` value, so the walk
+#: redacts it like a value.
+LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 
 #: The two maps on a ``Secret`` whose values are secret material:
 #: ``data`` (base64-encoded) and ``stringData`` (write-only plaintext,
@@ -98,16 +115,25 @@ def redact_kubernetes_payload(value: Any) -> Any:
     """Return *value* with every ``kind: Secret`` object's data redacted.
 
     Recursively walks dicts and lists. A mapping is treated as a
-    Kubernetes ``Secret`` when its ``kind`` equals :data:`SECRET_KIND`;
-    each value of its ``data`` / ``stringData`` maps is replaced via
-    :func:`redact_secret_value` (key names kept). Every other value is
-    walked so a ``Secret`` nested inside a ``List``-kind envelope or a
-    ``k8s.cr.list`` ``items`` array is still caught. Scalars pass through
-    unchanged. The input is never mutated -- a new structure is returned,
-    so a half-redacted object can never be left aliased elsewhere.
+    Kubernetes ``Secret`` when its ``kind`` equals :data:`SECRET_KIND`, or
+    when it has no ``kind`` and sits in the ``items`` of a
+    :data:`SECRET_LIST_KIND` envelope (the shape ``GET .../secrets``
+    returns). Each value of its ``data`` / ``stringData`` maps is replaced
+    via :func:`redact_secret_value` (key names kept), and so is its
+    :data:`LAST_APPLIED_ANNOTATION` annotation, which repeats those values.
+    Every other value is walked so a ``Secret`` nested inside a
+    ``List``-kind envelope or a ``k8s.cr.list`` ``items`` array is still
+    caught. Scalars pass through unchanged. The input is never mutated --
+    a new structure is returned, so a half-redacted object can never be
+    left aliased elsewhere.
     """
+    return _walk(value, in_secret_list=False)
+
+
+def _walk(value: Any, *, in_secret_list: bool) -> Any:
     if isinstance(value, dict):
-        is_secret = value.get("kind") == SECRET_KIND
+        kind = value.get("kind")
+        is_secret = kind == SECRET_KIND or (kind is None and in_secret_list)
         out: dict[Any, Any] = {}
         for key, item in value.items():
             if is_secret and key in SECRET_DATA_FIELDS and isinstance(item, dict):
@@ -115,9 +141,24 @@ def redact_kubernetes_payload(value: Any) -> Any:
                     inner_key: redact_secret_value(inner_val)
                     for inner_key, inner_val in item.items()
                 }
+            elif is_secret and key == "metadata" and isinstance(item, dict):
+                out[key] = _redact_secret_metadata(item)
+            elif key == "items" and isinstance(item, list):
+                out[key] = [_walk(entry, in_secret_list=kind == SECRET_LIST_KIND) for entry in item]
             else:
-                out[key] = redact_kubernetes_payload(item)
+                out[key] = _walk(item, in_secret_list=False)
         return out
     if isinstance(value, list):
-        return [redact_kubernetes_payload(item) for item in value]
+        return [_walk(item, in_secret_list=False) for item in value]
     return value
+
+
+def _redact_secret_metadata(metadata: dict[Any, Any]) -> dict[Any, Any]:
+    """Copy a Secret's ``metadata`` with the last-applied annotation redacted."""
+    out: dict[Any, Any] = _walk(metadata, in_secret_list=False)
+    annotations = out.get("annotations")
+    if isinstance(annotations, dict) and LAST_APPLIED_ANNOTATION in annotations:
+        annotations[LAST_APPLIED_ANNOTATION] = redact_secret_value(
+            annotations[LAST_APPLIED_ANNOTATION]
+        )
+    return out

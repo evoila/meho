@@ -363,7 +363,7 @@ func TestPrintSearchTable(t *testing.T) {
 	var buf bytes.Buffer
 	printSearchTable(&buf, "list domains", r)
 	out := buf.String()
-	for _, want := range []string{"sddc-rest-9.0", "list domains", "2 hit(s)", "GET:/v1/domains", "List VCF domains", "0.987"} {
+	for _, want := range []string{"sddc-rest-9.0", "list domains", "2 hit(s)", "GET:/v1/domains", "List VCF domains", "safety"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printSearchTable missing %q in:\n%s", want, out)
 		}

@@ -98,11 +98,11 @@ func printSearchTable(w io.Writer, query string, r *searchResponse) {
 	if len(r.Hits) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%-50s %6s  %s\n", "op_id", "score", "summary")
+	fmt.Fprintf(w, "%-50s %-11s  %s\n", "op_id", "safety", "summary")
 	for _, h := range r.Hits {
-		fmt.Fprintf(w, "%-50s %6.3f  %s\n",
+		fmt.Fprintf(w, "%-50s %-11s  %s\n",
 			truncate(h.OpID, 50),
-			h.FusedScore,
+			h.SafetyLevel,
 			truncate(strDeref(h.Summary), 80),
 		)
 	}

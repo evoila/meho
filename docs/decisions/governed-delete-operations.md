@@ -24,6 +24,7 @@ design home (design review → this decision → implementation Tasks)
 >    self-approval, no autonomous-session approval. This reuses the approvals
 >    plane's existing human-only line (v0.1-spec §7); it does not invent a second
 >    approval mechanism.
+>    No standing grant applies — except on an instance in sandbox mode; see [sandbox-mode.md](sandbox-mode.md).
 > 2. **Mandatory preview.** Dispatch is refused unless a `preview_operation` of the
 >    same `(connector_id, op_id, target, params)` was executed and **its result
 >    hash** is presented with the approval — the approver sees precisely what dies.

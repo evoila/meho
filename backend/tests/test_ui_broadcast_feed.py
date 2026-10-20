@@ -24,23 +24,20 @@ Two test surfaces:
   -- mirrors :mod:`backend.tests.test_ui_topology_table`: a minimal app
   wired with the UI session + CSRF middlewares, an authenticated client
   via a seeded ``web_session`` row, and the unauthenticated 302 check.
-* **SSE generator** (``TestBroadcastStreamGenerator``) -- drives the
-  UI stream's ``_ui_feed_generator`` directly with a mocked broadcast
-  client, mirroring :mod:`backend.tests.test_api_v1_feed`'s generator
-  suite. This is where the tenant-scoping (cross-tenant isolation) and
-  replay-cursor behaviour are asserted, because the SSE body never
-  reaches the TestClient's buffered-response model.
+* **SSE bridge** (``TestBroadcastStreamBridge``) -- since #3758 the
+  bridge hands the session tenant and the resolved start to the shared
+  archive generator (:func:`announcement_feed_frames`, covered in
+  :mod:`backend.tests.test_api_v1_feed`). These tests pin what the
+  bridge passes in: the session tenant (cross-tenant isolation), the
+  resume checkpoint, and the filters.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, patch
-from uuid import UUID, uuid4
+from datetime import timedelta
 
 import pytest
 import respx
@@ -49,15 +46,15 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1.feed import FeedStart
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.broadcast import (
     OP_CLASS_ENUM,
-    BroadcastEvent,
-    get_broadcast_blocking_client,
-    get_broadcast_client,
     reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
+from meho_backplane.broadcast.archive_cursor import encode_watch_checkpoint
+from meho_backplane.broadcast.archive_reader import AnnouncementFilter
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
@@ -76,12 +73,12 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.broadcast import stream as stream_module
 from meho_backplane.ui.routes.broadcast.feed import (
     IN_DOM_ROW_CAP,
     OP_CLASS_BADGE_CLASSES,
     OP_CLASS_FILTER_OPTIONS,
 )
-from meho_backplane.ui.routes.broadcast.stream import _ui_feed_generator
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
@@ -218,80 +215,6 @@ def _authenticated_client(session_id: uuid.UUID) -> TestClient:
     client = TestClient(_build_app(), follow_redirects=False)
     client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
     return client
-
-
-def _make_event(
-    *,
-    tenant_id: UUID = _TENANT_A,
-    op_class: str = "read",
-    principal_sub: str = "op-test",
-    target_name: str | None = "rdc-vcenter",
-    op_id: str = "vsphere.vm.list",
-) -> BroadcastEvent:
-    """Build a redacted-shape :class:`BroadcastEvent` for the stream tests."""
-    return BroadcastEvent(
-        event_id=uuid4(),
-        ts=datetime(2026, 5, 13, tzinfo=UTC),
-        tenant_id=tenant_id,
-        principal_sub=principal_sub,
-        target_name=target_name,
-        op_id=op_id,
-        op_class=op_class,
-        result_status="ok",
-        audit_id=UUID("33333333-3333-3333-3333-333333333333"),
-        payload={"op_class": op_class, "params": {}, "result_status": "ok"},
-    )
-
-
-def _xread_returning(events: list[BroadcastEvent]) -> AsyncMock:
-    """AsyncMock returning *events* once, then idling forever.
-
-    Mirrors :func:`backend.tests.test_api_v1_feed._xread_returning`: the
-    first ``xread`` returns the seeded entries; subsequent calls sleep a
-    tick and return ``None`` (the BLOCK-timeout shape) so the generator
-    has a yield point at which ``aclose()`` can land its
-    ``CancelledError``.
-    """
-    items = [
-        (f"{1715600000000 + i}-0", {"event": event.model_dump_json()})
-        for i, event in enumerate(events)
-    ]
-    call_count = {"n": 0}
-
-    async def _xread_side_effect(*_args: object, **_kwargs: object) -> object:
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            return [("meho:feed:<irrelevant>", items)]
-        await asyncio.sleep(0.01)
-        return None
-
-    return AsyncMock(side_effect=_xread_side_effect)
-
-
-async def _collect_n_frames(
-    gen: AsyncIterator[str],
-    *,
-    n: int,
-    timeout: float = 1.0,
-) -> list[str]:
-    """Read up to *n* SSE frames from *gen* then ``aclose()`` it cleanly.
-
-    Mirrors :func:`backend.tests.test_api_v1_feed._collect_n_frames`.
-    The ``TimeoutError`` from the wrapper is the termination mechanism
-    when *n* is unreachable (e.g. cursor-pass-through with ``n=0``).
-    """
-    frames: list[str] = []
-    try:
-        async with asyncio.timeout(timeout):
-            async for frame in gen:
-                frames.append(frame)
-                if len(frames) >= n:
-                    break
-    except TimeoutError:
-        pass
-    finally:
-        await gen.aclose()
-    return frames
 
 
 # ---------------------------------------------------------------------------
@@ -470,251 +393,69 @@ def test_broadcast_stub_is_replaced_by_real_route() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SSE generator -- tenant scoping (cross-tenant isolation) + replay cursor
+# SSE bridge -- tenant scoping, resume checkpoint, filters (#3758)
 # ---------------------------------------------------------------------------
 
 
-class TestBroadcastStreamGenerator:
-    """Drives :func:`_ui_feed_generator` directly with a mocked client."""
+def _capture_bridge(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Replace the shared generator with a finite one; record its inputs."""
+    calls: list[dict[str, object]] = []
 
-    async def test_basic_event_yield_uses_session_tenant_stream(self) -> None:
-        """One event → one SSE frame; the stream key is the session tenant."""
-        event = _make_event(tenant_id=_TENANT_A)
-        broadcast_client = get_broadcast_blocking_client()
-        mock = _xread_returning([event])
-        with patch.object(broadcast_client, "xread", new=mock):
-            gen = _ui_feed_generator(
-                tenant_id=_TENANT_A,
-                operator_sub="op-a",
-                cursor="$",
-                op_class=None,
-                principal=None,
-                target=None,
-            )
-            frames = await _collect_n_frames(gen, n=1)
+    async def _finite(operator: object, **kwargs: object) -> AsyncIterator[str]:
+        calls.append({"operator": operator, **kwargs})
+        yield ": heartbeat\n\n"
 
-        assert mock.await_count >= 1
-        # The stream key is derived from the session tenant -- the same
-        # key the publisher writes, so the UI tails the right stream.
-        stream_key_arg = mock.await_args_list[0].args[0]
-        assert stream_key_arg == {f"meho:feed:{_TENANT_A}": "$"}
-
-        assert len(frames) == 1
-        frame = frames[0]
-        # Byte-compatible frame shape with /api/v1/feed (reused helpers).
-        assert frame.startswith("event: broadcast\n")
-        assert "id: 1715600000000-0" in frame
-        data_line = next(line for line in frame.split("\n") if line.startswith("data: "))
-        decoded = json.loads(data_line[len("data: ") :])
-        assert decoded["tenant_id"] == str(_TENANT_A)
-
-    async def test_tenant_b_session_reads_only_tenant_b_stream(self) -> None:
-        """Cross-tenant isolation: a tenant-B session tails the B stream.
-
-        The generator takes the tenant id from the session, never a
-        query parameter, so a tenant-B operator's stream key is
-        ``meho:feed:{B}`` -- it can never read tenant-A's stream.
-        """
-        broadcast_client = get_broadcast_blocking_client()
-        # Idle mock: returns one empty batch then sleeps + returns None on
-        # every later call. The sleep is the load-bearing part -- a bare
-        # ``AsyncMock(return_value=None)`` never suspends to the event loop,
-        # so the generator's ``while True`` spins uncancellably and the
-        # ``_collect_n_frames`` ``asyncio.timeout`` can never fire (it pins a
-        # CI worker core until the runner is declared lost). ``_xread_returning``
-        # supplies the yield point; we only assert the stream key here.
-        mock = _xread_returning([])
-        with patch.object(broadcast_client, "xread", new=mock):
-            gen = _ui_feed_generator(
-                tenant_id=_TENANT_B,
-                operator_sub="op-b",
-                cursor="$",
-                op_class=None,
-                principal=None,
-                target=None,
-            )
-            await _collect_n_frames(gen, n=0)
-
-        assert mock.await_count >= 1
-        stream_key_arg = mock.await_args_list[0].args[0]
-        assert stream_key_arg == {f"meho:feed:{_TENANT_B}": "$"}
-        assert f"meho:feed:{_TENANT_A}" not in stream_key_arg
-
-    async def test_replay_cursor_passes_through_to_xread(self) -> None:
-        """An explicit cursor (replay) is forwarded verbatim to xread.
-
-        Reconnect via ``Last-Event-Id`` resolves to this cursor; the
-        feed cursor resolver + validator are reused, so a reconnect that
-        started on ``/api/v1/feed`` replays identically through the
-        bridge.
-        """
-        broadcast_client = get_broadcast_blocking_client()
-        # Idle mock with a real yield point (see the tenant-B test above for
-        # why a bare ``AsyncMock(return_value=None)`` hangs the generator).
-        mock = _xread_returning([])
-        with patch.object(broadcast_client, "xread", new=mock):
-            gen = _ui_feed_generator(
-                tenant_id=_TENANT_A,
-                operator_sub="op-a",
-                cursor="1715600000000-0",
-                op_class=None,
-                principal=None,
-                target=None,
-            )
-            await _collect_n_frames(gen, n=0)
-
-        assert mock.await_count >= 1
-        cursor_arg = mock.await_args_list[0].args[0]
-        assert cursor_arg == {f"meho:feed:{_TENANT_A}": "1715600000000-0"}
-
-    async def test_op_class_filter_drops_non_matching_events(self) -> None:
-        """A non-None op_class filter narrows the yielded frames."""
-        read_event = _make_event(op_class="read", op_id="vsphere.vm.list")
-        write_event = _make_event(op_class="write", op_id="vsphere.vm.create")
-        broadcast_client = get_broadcast_blocking_client()
-        mock = _xread_returning([read_event, write_event])
-        with patch.object(broadcast_client, "xread", new=mock):
-            gen = _ui_feed_generator(
-                tenant_id=_TENANT_A,
-                operator_sub="op-a",
-                cursor="$",
-                op_class="read",
-                principal=None,
-                target=None,
-            )
-            frames = await _collect_n_frames(gen, n=1)
-
-        assert len(frames) == 1
-        decoded = json.loads(
-            next(line for line in frames[0].split("\n") if line.startswith("data: "))[
-                len("data: ") :
-            ]
-        )
-        assert decoded["op_class"] == "read"
-
-    async def test_fresh_dollar_connection_replays_backlog_chronologically(self) -> None:
-        """G0.16-T3 (#1305): UI bridge prelude surfaces history on fresh ``$`` connection.
-
-        Mirrors :class:`backend.tests.test_api_v1_feed.TestFeedBacklogPrelude`'s
-        equivalent — the UI bridge imports
-        :func:`_emit_backlog_prelude` from
-        :mod:`meho_backplane.api.v1.feed` so the wire shape stays
-        byte-compatible. This test pins the call against the
-        bridge's own generator so a future divergence between the
-        two surfaces would surface here.
-        """
-        events = [
-            _make_event(op_id="audit.one", tenant_id=_TENANT_A),
-            _make_event(op_id="audit.two", tenant_id=_TENANT_A),
-        ]
-        # XREVRANGE returns latest-first by entry id: id 11 (newer)
-        # comes before id 10 (older). ``audit.two`` was published
-        # after ``audit.one`` so it carries the larger id.
-        xrevrange_items = [
-            ("1715600000011-0", {"event": events[1].model_dump_json()}),
-            ("1715600000010-0", {"event": events[0].model_dump_json()}),
-        ]
-        # Two-client split per RDC #789 N1 / Initiative #1353: prelude
-        # XREVRANGE on the fast (5 s) client; BLOCK XREAD on the
-        # long-poll (35 s) client.
-        fast_client = get_broadcast_client()
-        blocking_client = get_broadcast_blocking_client()
-        prelude = AsyncMock(return_value=xrevrange_items)
-        # Idle XREAD with a yield point — see :func:`_xread_returning`'s
-        # docstring for the cancellation rationale.
-        idle_xread = _xread_returning([])
-        with (
-            patch.object(fast_client, "xrevrange", new=prelude),
-            patch.object(blocking_client, "xread", new=idle_xread),
-        ):
-            gen = _ui_feed_generator(
-                tenant_id=_TENANT_A,
-                operator_sub="op-a",
-                cursor="$",
-                op_class=None,
-                principal=None,
-                target=None,
-            )
-            # n=3 reaches the BLOCK loop's first XREAD after the
-            # two prelude frames are yielded (see the API edge's
-            # equivalent test for the same async-generator drain
-            # rationale — ``_collect_n_frames`` only suspends past
-            # the last requested frame).
-            frames = await _collect_n_frames(gen, n=3, timeout=2.0)
-
-        assert prelude.await_count == 1
-        assert prelude.await_args_list[0].args[0] == f"meho:feed:{_TENANT_A}"
-        assert prelude.await_args_list[0].kwargs.get("count") == 50
-        assert len(frames) == 2
-        op_ids = [
-            json.loads(
-                next(line for line in frame.split("\n") if line.startswith("data: "))[
-                    len("data: ") :
-                ]
-            )["op_id"]
-            for frame in frames
-        ]
-        assert op_ids == ["audit.one", "audit.two"]
-        # BLOCK loop's first XREAD reads strictly past the prelude.
-        first_block_cursor = idle_xread.await_args_list[0].args[0]
-        assert first_block_cursor == {f"meho:feed:{_TENANT_A}": "1715600000011-0"}
-
-    async def test_explicit_replay_cursor_skips_prelude_on_ui_bridge(self) -> None:
-        """``Last-Event-Id`` reconnect via UI bridge bypasses backlog.
-
-        Same contract as the API edge: the caller pinned an
-        anchor; replaying from ``+`` would re-deliver entries the
-        EventSource already saw and produce duplicate frames on
-        reconnect.
-        """
-        fast_client = get_broadcast_client()
-        blocking_client = get_broadcast_blocking_client()
-        prelude = AsyncMock(return_value=[])
-        # Idle XREAD with a yield point — see :func:`_xread_returning`'s
-        # docstring for the cancellation rationale.
-        idle_xread = _xread_returning([])
-        with (
-            patch.object(fast_client, "xrevrange", new=prelude),
-            patch.object(blocking_client, "xread", new=idle_xread),
-        ):
-            gen = _ui_feed_generator(
-                tenant_id=_TENANT_A,
-                operator_sub="op-a",
-                cursor="1715600000000-0",
-                op_class=None,
-                principal=None,
-                target=None,
-            )
-            # n=1 lets the generator land in the BLOCK loop's xread
-            # (n=0 short-circuits through ``aclose`` before the
-            # generator's body runs at all — same drain rationale
-            # as the API edge tests).
-            await _collect_n_frames(gen, n=1, timeout=0.3)
-
-        assert prelude.await_count == 0
-        assert idle_xread.await_args_list[0].args[0] == {
-            f"meho:feed:{_TENANT_A}": "1715600000000-0"
-        }
+    monkeypatch.setattr(stream_module, "announcement_feed_frames", _finite)
+    return calls
 
 
-# ---------------------------------------------------------------------------
-# Stream cursor validation at the HTTP edge
-# ---------------------------------------------------------------------------
+def test_stream_reads_the_session_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tenant-B session streams tenant B; there is no tenant parameter."""
+    calls = _capture_bridge(monkeypatch)
+    session_id = _seed_session_sync(tenant_id=_TENANT_B)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/broadcast/stream", params={"tenant_id": str(_TENANT_A)})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert calls[0]["operator"].tenant_id == _TENANT_B  # type: ignore[attr-defined]
+    assert calls[0]["surface"] == "ui"
 
 
-def test_stream_invalid_last_event_id_returns_400() -> None:
-    """A malformed ``Last-Event-Id`` is rejected at the route boundary.
-
-    Returning 400 before streaming flips the EventSource state machine
-    to CLOSED rather than letting it hot-loop with the same bad cursor
-    -- the same guard ``/api/v1/feed`` applies, reused here.
-    """
+def test_stream_resumes_from_a_checkpoint_and_passes_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _capture_bridge(monkeypatch)
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    checkpoint = encode_watch_checkpoint(_TENANT_A, 12)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get(
             "/ui/broadcast/stream",
-            headers={"Last-Event-Id": "not-a-valkey-id"},
+            params={"principal": "agent-a", "target": "cluster-x"},
+            headers={"Last-Event-Id": checkpoint},
         )
+    assert response.status_code == 200
+    assert calls[0]["start"] == FeedStart(after=12)
+    assert calls[0]["flt"] == AnnouncementFilter(principal="agent-a", target="cluster-x")
+
+
+def test_stream_stale_last_event_id_starts_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An old Valkey id from before #3758 does not close the EventSource."""
+    calls = _capture_bridge(monkeypatch)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/broadcast/stream", headers={"Last-Event-Id": "1715600000000-0"})
+    assert response.status_code == 200
+    assert calls[0]["start"] == FeedStart()
+
+
+def test_stream_invalid_since_returns_400() -> None:
+    """A malformed ``since`` is rejected at the route boundary."""
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/broadcast/stream", params={"since": "not-a-time"})
     assert response.status_code == 400
     assert response.json()["detail"].startswith("invalid_cursor")

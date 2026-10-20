@@ -43,7 +43,7 @@ tasks land the schema additions:
 
 The three computed fields — ``op_id``, ``op_class``, ``result_status`` — are
 derived at query time using the same logic the broadcast middleware uses on
-the publish side (``meho_backplane.audit._publish_broadcast_event``,
+the publish side (``meho_backplane.audit._resolve_op_id_and_class_override``,
 ``meho_backplane.broadcast.events.classify_op``,
 ``meho_backplane.audit._classify_http_status``). MCP-written rows carry
 ``op_id`` / ``op_class`` inside the ``payload`` JSON dict (see

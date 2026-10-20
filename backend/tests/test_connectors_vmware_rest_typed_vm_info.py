@@ -427,7 +427,7 @@ async def test_dispatcher_maps_connector_missing_resource_to_not_found(
 ) -> None:
     """The dispatcher emits the structured result instead of connector_error."""
     audit = AsyncMock()
-    monkeypatch.setattr(dispatcher_module, "audit_and_broadcast_safe", audit)
+    monkeypatch.setattr(dispatcher_module, "audit_safe", audit)
     descriptor = SimpleNamespace(
         source_kind="typed",
         handler_ref=f"{__name__}._raise_missing_resource",

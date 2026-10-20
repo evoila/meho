@@ -372,16 +372,8 @@ def test_stream_key_derived_from_operator_tenant_id(
     another tenant's stream. Asserting the xadd key is the right shape
     proves the structural property holds.
 
-    The audit-driven publish-on-write hook
-    (:func:`meho_backplane.mcp.handlers._publish_after_dispatch` /
-    :func:`meho_backplane.broadcast.publisher.publish_event`) ALSO
-    calls ``xadd`` for the ``meho_broadcast_announce`` invocation
-    itself -- the MCP call is an audited operation, so two xadd
-    calls land per request: one for the announcement content (this
-    handler), one for the audit-driven sibling event. Both target
-    the same per-tenant key, but the assertion below pins the
-    announcement-side call distinctly by matching against the
-    JSON wire shape (``event_kind = "agent_announcement"``).
+    Since #3758 the MCP call itself publishes nothing: exactly one
+    stream write lands per request, the announcement.
     """
     client, op = client_with_operator
     bc = get_broadcast_client()
@@ -391,8 +383,8 @@ def test_stream_key_derived_from_operator_tenant_id(
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     expected_key = f"meho:feed:{op.tenant_id}"
-    # Every xadd MUST target the operator's tenant -- structural
-    # tenancy holds for the announcement AND the audit-driven sibling.
+    # Only the announcement is written; the MCP call adds no sibling event.
+    assert xa.await_count == 1
     keys_written = {call.args[0] for call in xa.await_args_list}
     assert keys_written == {expected_key}
     # And at least one of those calls carried the agent-announcement

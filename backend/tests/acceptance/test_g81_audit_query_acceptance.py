@@ -23,13 +23,13 @@ Coverage matrix (mirrors the 8 scenarios in the issue body #469):
    cursor.(ts, id)`` invariant means page 2 returns rows strictly
    older than the cursor — no duplicates, no skips. New rows are
    visible only on a fresh page-1 call.
-3. **Aggregate-only broadcast** (decision #3, ``docs/planning/
-   locked-decisions.md``) — issuing a ``query_audit`` call publishes
-   one ``BroadcastEvent`` to ``meho:feed:{tenant_id}`` whose
-   ``payload`` is exactly ``{op_class, result_status, row_count}``.
+3. **Aggregate-only audit row** (decision #3, ``docs/planning/
+   locked-decisions.md``) — issuing a ``query_audit`` call writes
+   one audit row whose payload carries only the op id, the
+   ``audit_query`` class, the row count and the detail decision.
    The filter contents (``principal``, ``op_id``, ``target``) NEVER
-   appear; this is the load-bearing PII contract the broadcast
-   classifier owns.
+   appear. A query publishes no Broadcast event (#3758), so the
+   stored row is where the PII contract is checked.
 4. **Pre-canned shortcuts** — ``GET /audit/who-touched/{target}``
    returns the same row set as ``POST /audit/query`` with the
    matching filter; ``GET /audit/my-recent`` infers
@@ -59,9 +59,8 @@ Coverage matrix (mirrors the 8 scenarios in the issue body #469):
 Real Postgres rather than SQLite: same reasoning as
 :mod:`tests.integration.test_tenant_isolation`. Real Valkey via
 ``testcontainers.redis.RedisContainer`` per the
-:mod:`tests.integration.test_broadcast_load` precedent — the
-aggregate-only assertion needs to read back from the actual
-publish-on-write pipeline, not a mock.
+:mod:`tests.integration.test_broadcast_load` precedent so the app's
+broadcast client is configured the way it is in production.
 """
 
 from __future__ import annotations
@@ -76,11 +75,10 @@ from typing import Any
 
 import httpx
 import pytest
-import redis.asyncio as redis_async
-import redis.exceptions
 import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker as sa_async_sessionmaker
 
@@ -88,7 +86,7 @@ from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.broadcast import client as broadcast_client_module
-from meho_backplane.broadcast.events import BroadcastEvent
+from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
 from meho_backplane.middleware import RequestContextMiddleware
@@ -139,10 +137,10 @@ MCP_RESOURCE_URI: str = "https://meho.test/mcp"
 async def valkey_url(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
     """Boot a per-test ``valkey/valkey:8`` container and pin its URL.
 
-    The broadcast publisher reads ``BROADCAST_REDIS_URL`` from the
-    chassis Settings; binding the env var here means the audit
-    middleware's publish-on-write hook lands in the testcontainer's
-    Valkey rather than the per-deploy production instance. Mirrors
+    The broadcast client reads ``BROADCAST_REDIS_URL`` from the
+    chassis Settings; binding the env var here points the app at the
+    testcontainer's Valkey rather than the per-deploy production
+    instance. Mirrors
     :mod:`tests.integration.test_broadcast_load`'s ``valkey_url``
     fixture verbatim; kept local rather than re-exported because the
     acceptance suite's lifecycle is auditable from its own conftest.
@@ -237,47 +235,6 @@ async def _session_for_url(async_url: str) -> AsyncSession:
     engine = create_async_engine(async_url)
     factory = sa_async_sessionmaker(engine, expire_on_commit=False)
     return factory()
-
-
-async def _read_broadcast_event_for_tenant(
-    valkey_url: str,
-    tenant_id: str,
-    *,
-    block_ms: int = 30_000,
-) -> BroadcastEvent | None:
-    """XREAD one event from ``meho:feed:{tenant_id}``.
-
-    Blocks up to *block_ms* (default 30 s — generous CI margin per
-    :mod:`tests.integration.test_broadcast_load`). Returns the parsed
-    :class:`BroadcastEvent` or ``None`` if the BLOCK timed out.
-    """
-    client = redis_async.from_url(valkey_url, decode_responses=True)
-    stream = f"meho:feed:{tenant_id}"
-    try:
-        try:
-            response = await client.xread(
-                streams={stream: "0-0"},
-                count=1,
-                block=block_ms,
-            )
-        except redis.exceptions.TimeoutError:
-            return None
-        if not response:
-            return None
-        # response shape: [[stream, [(entry_id, {field: value, ...})]], ...]
-        _stream, entries = response[0]
-        _entry_id, fields = entries[0]
-        # The publisher writes the BroadcastEvent as JSON under a
-        # single ``event`` field per ``broadcast/publisher.py``; if
-        # the wire shape changes the assertion will surface it loud.
-        if "event" in fields:
-            return BroadcastEvent.model_validate_json(fields["event"])
-        # Fallback: flatten the field dict; redis-py decode_responses
-        # produces a plain dict. Construct via model_validate to keep
-        # the contract pinned even if the publisher flattens.
-        return BroadcastEvent.model_validate(fields)
-    finally:
-        await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -589,21 +546,21 @@ async def test_scenario_2_concurrent_insert_does_not_corrupt_cursor(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 3 — Aggregate-only broadcast verification
+# Scenario 3 — Aggregate-only audit row verification
 # ---------------------------------------------------------------------------
 
 
-async def test_scenario_3_broadcast_payload_is_aggregate_only(
+async def test_scenario_3_audit_row_payload_is_aggregate_only(
     pg_engine: None,
     valkey_url: str,
     async_pg_url: str,
 ) -> None:
-    """Issue body scenario 3: BroadcastEvent.payload keys are exactly the aggregate trio.
+    """Issue body scenario 3: the query's own audit row carries only the aggregate.
 
     Calls POST /query with a rich filter (principal + op_id glob),
-    then XREADs the per-tenant Valkey stream. The published event's
-    payload must be EXACTLY ``{op_class, result_status, row_count}``
-    — no filter contents, no principal, no target, nothing else.
+    then reads the audit row the call wrote. Its payload must carry
+    only the op id, the ``audit_query`` class, the row count and the
+    detail decision — no filter contents, no principal, no target.
     This is the load-bearing PII contract from decision #3.
     """
     async with await _session_for_url(async_pg_url) as session:
@@ -631,23 +588,42 @@ async def test_scenario_3_broadcast_payload_is_aggregate_only(
             )
     assert resp.status_code == 200, resp.text
 
-    event = await _read_broadcast_event_for_tenant(valkey_url, TENANT_A_ID)
-    assert event is not None, "no BroadcastEvent landed in Valkey within the 30s window"
-    assert event.op_id == "meho.audit.query"
-    assert event.op_class == "audit_query"
-    # Exact key set — anything beyond these three would leak the
-    # filter contents the operator typed.
-    assert set(event.payload.keys()) == {"op_class", "result_status", "row_count"}, (
-        f"BroadcastEvent.payload leaked extra keys: {sorted(event.payload.keys())}"
-    )
+    async with await _session_for_url(async_pg_url) as session:
+        query_rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.tenant_id == uuid.UUID(TENANT_A_ID),
+                        AuditLog.path == "/api/v1/audit/query",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(query_rows) == 1, f"expected one audit row for the query, got {len(query_rows)}"
+    payload = query_rows[0].payload
+    assert payload["op_id"] == "meho.audit.query"
+    assert payload["op_class"] == "audit_query"
+    assert payload["row_count"] == 3
+    # Bounded key set — anything beyond these would leak the filter
+    # contents the operator typed.
+    assert set(payload.keys()) <= {
+        "op_id",
+        "op_class",
+        "row_count",
+        "broadcast_detail_origin",
+        "broadcast_detail_effective",
+    }, f"audit row payload leaked extra keys: {sorted(payload.keys())}"
     # Defensive: also confirm the filter contents are absent. A
-    # future redactor regression could keep the right key set while
-    # putting filter content into a `row_count`-shaped field; this
-    # asserts the specific leak vectors.
-    serialised = json.dumps(event.payload)
-    assert "vault.kv" not in serialised, "broadcast payload leaked op_id filter"
-    assert "principal" not in event.payload
-    assert "target" not in event.payload
+    # future regression could keep the right key set while putting
+    # filter content into a `row_count`-shaped field; this asserts
+    # the specific leak vectors.
+    serialised = json.dumps(payload)
+    assert "vault.kv" not in serialised, "audit row payload leaked op_id filter"
+    assert "damir" not in serialised, "audit row payload leaked the principal filter"
+    assert "principal" not in payload
+    assert "target" not in payload
 
 
 # ---------------------------------------------------------------------------

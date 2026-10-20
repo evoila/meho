@@ -658,7 +658,7 @@ async def enforce_subop_policy(
     from meho_backplane.operations._validate import compute_params_hash, policy_gate
     from meho_backplane.operations.approval_queue import (
         create_pending_request,
-        publish_approval_event,
+        record_approval_step_event,
         resume_requester_var,
     )
     from meho_backplane.operations.dispatcher import (
@@ -856,14 +856,12 @@ async def enforce_subop_policy(
                 requester=resume_requester_var.get(),
             )
             await session.commit()
-        # Publish AFTER commit so a broadcast can never outlive a failed
-        # transaction; the helper is fail-open, so a broadcast outage
-        # does not block the durable decision.
-        await publish_approval_event(
+        # Record AFTER commit so a step event can never outlive a failed
+        # transaction; the helper is fail-open.
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision="pending",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
         return result_awaiting_approval(op_id, request.id, duration_ms)

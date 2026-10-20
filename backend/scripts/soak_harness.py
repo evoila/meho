@@ -31,14 +31,14 @@ here, in one place, with tests:
   MEHO-effect, ignoring the *cosmetic* fields that always differ
   (timestamps, generated UIDs, resourceVersion). Implemented as
   :func:`state_diff` + :func:`idempotency_drift`.
-* **Stage 4 — audit + broadcast + approval completeness.** The
-  #817 invariant: one MEHO write must produce exactly one audit row,
-  exactly one broadcast event, and — being ``dangerous`` +
-  ``requires_approval`` — exactly the **two synchronous approval audit
-  rows** (``approval.request`` + ``approval.decision``), with the op
-  not returning until the decision row commits. Implemented as
-  :func:`assert_approval_completeness` over rows read back from
-  ``audit_log`` and the captured broadcast feed.
+* **Stage 4 — audit + approval completeness.** The
+  #817 invariant: one MEHO write must produce exactly one audit row
+  and — being ``dangerous`` + ``requires_approval`` — exactly the
+  **two synchronous approval audit rows** (``approval.request`` +
+  ``approval.decision``), with the op not returning until the decision
+  row commits. Implemented as :func:`assert_approval_completeness` over
+  rows read back from ``audit_log``. A dispatch publishes no Broadcast
+  event (#3758), so the feed is not part of the evidence.
 
 Stages 2 (dual-run on a disposable target) and 5 (bounded live soak)
 are operational protocols the shell driver and the runbook own; this
@@ -119,12 +119,10 @@ COSMETIC_KEYS: frozenset[str] = frozenset(
     }
 )
 
-#: Op-sensitivity classes whose broadcast payload must collapse to the
-#: aggregate-only view (no params, no response secret). Mirrors the
-#: sensitive set the broadcast resolver enforces (G6.1 + G11.7-T1 #1401)
-#: — the harness asserts membership rather than re-deriving it, so a
-#: future class added to the backplane is picked up by re-reading
-#: :func:`classify_op` output against this set.
+#: Op-sensitivity classes that carry a credential or an audit read
+#: (G6.1 + G11.7-T1 #1401). The harness asserts membership rather than
+#: re-deriving it, so a future class added to the backplane is picked
+#: up by re-reading :func:`classify_op` output against this set.
 REDACTED_OP_CLASSES: frozenset[str] = frozenset(
     {
         "credential_read",
@@ -317,13 +315,12 @@ def idempotency_drift(
 
 
 # ---------------------------------------------------------------------------
-# Stage 4 — audit + broadcast + approval completeness
+# Stage 4 — audit + approval completeness
 # ---------------------------------------------------------------------------
 
 
 def op_is_redacted(op_id: str) -> bool:
-    """Return ``True`` if *op_id* classifies into a redacted (aggregate-only)
-    broadcast class.
+    """Return ``True`` if *op_id* classifies into a secret-bearing class.
 
     Delegates to the backplane's own :func:`classify_op` so the harness
     tracks the shipped classification (including the ``credential_write``
@@ -337,15 +334,13 @@ def assert_approval_completeness(
     op_id: str,
     *,
     audit_rows: Sequence[Mapping[str, Any]],
-    broadcast_events: Sequence[Mapping[str, Any]],
     returned_after_decision: bool,
     decision: str = "approved",
 ) -> StageResult:
     """Stage 4: assert the governance-completeness invariant for one write.
 
     The #817 invariant a ``dangerous`` + ``requires_approval`` write must
-    satisfy, checked against rows the driver read back from ``audit_log``
-    and the captured broadcast feed:
+    satisfy, checked against rows the driver read back from ``audit_log``:
 
     1. **Exactly one** ``approval.request`` audit row (the synchronous
        row :func:`create_pending_request` writes alongside the pending
@@ -361,30 +356,23 @@ def assert_approval_completeness(
        the op runs). This is the durable write-record half of the #817
        invariant the approval rows bracket. A rejected decision never
        executes, so it produces **zero** such rows.
-    5. **Exactly one** non-approval broadcast event for the op
-       (the publish-on-write hook's single event). Approval-lifecycle
-       broadcast events (``approval.*``) are counted separately and not
-       required to be exactly one.
-    6. If *op_id* classifies as a redacted class
-       (:func:`op_is_redacted`), **no** broadcast event for the op may
-       carry a ``params`` key — the credential must never reach the
-       feed.
+
+    A dispatch publishes no Broadcast event (#3758), so there is no
+    feed-side check: the audit rows are the whole record.
 
     Each failed sub-check is a blocker. A rejected decision
-    (``decision="rejected"``) relaxes checks 4 and 5: a rejected op
-    never executes, so it produces no dispatch audit row and no
-    write-effect broadcast — both checks then require *zero* op rows /
-    events instead of one.
+    (``decision="rejected"``) relaxes check 4: a rejected op never
+    executes, so it produces no dispatch audit row — the check then
+    requires *zero* op rows instead of one.
     """
     findings: list[dict[str, Any]] = []
     findings += _check_approval_audit_rows(audit_rows, returned_after_decision)
     findings += _check_write_audit_row(op_id, audit_rows, decision)
-    findings += _check_op_broadcast(op_id, broadcast_events, decision)
 
     passed = not any(f["severity"] == Severity.BLOCKER.value for f in findings)
     return StageResult(
         stage=4,
-        name="audit + broadcast + approval completeness",
+        name="audit + approval completeness",
         passed=passed,
         findings=findings,
     )
@@ -445,49 +433,6 @@ def _check_write_audit_row(
                 f"(decision={decision}), got {len(write_rows)}",
             )
         )
-    return findings
-
-
-def _check_op_broadcast(
-    op_id: str, broadcast_events: Sequence[Mapping[str, Any]], decision: str
-) -> list[dict[str, Any]]:
-    """The single-broadcast + no-credential-leak half of the stage-4 invariant."""
-    findings: list[dict[str, Any]] = []
-    op_events = [e for e in broadcast_events if e.get("op_id") == op_id]
-    approval_events = [
-        e for e in broadcast_events if str(e.get("op_id", "")).startswith("approval.")
-    ]
-    expected_op_events = 0 if decision == "rejected" else 1
-    if len(op_events) != expected_op_events:
-        findings.append(
-            _blocker(
-                "broadcast_event_count",
-                f"expected exactly {expected_op_events} broadcast event(s) for {op_id} "
-                f"(decision={decision}), got {len(op_events)}",
-            )
-        )
-
-    if op_is_redacted(op_id):
-        leaking = [e for e in op_events if "params" in (e.get("payload") or {})]
-        if leaking:
-            findings.append(
-                _blocker(
-                    "credential_leak",
-                    f"{op_id} is a redacted op-class but a broadcast event carried "
-                    "a `params` key — the credential reached the feed",
-                )
-            )
-
-    # Surface the approval-lifecycle event count as INFO so the report is
-    # self-describing without making it a gate (the two audit rows are the
-    # durable record; the broadcast is fail-open by design).
-    findings.append(
-        {
-            "severity": Severity.INFO.value,
-            "kind": "approval_broadcast_count",
-            "detail": f"{len(approval_events)} approval.* broadcast event(s) observed",
-        }
-    )
     return findings
 
 

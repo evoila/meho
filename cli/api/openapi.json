@@ -3342,7 +3342,7 @@
           "feed"
         ],
         "summary": "Feed Endpoint",
-        "description": "Stream broadcast events for the operator's tenant as Server-Sent Events.\n\nHeaders:\n    ``Last-Event-Id``: optional SSE reconnect cursor. Takes\n    precedence over the ``since`` query parameter when both are\n    present.\n\nReturns:\n    :class:`StreamingResponse` with ``media_type=text/event-stream``.\n    ``Cache-Control: no-cache, no-store, must-revalidate`` and\n    ``X-Accel-Buffering: no`` keep intermediaries from buffering\n    the stream into a single response (nginx default behaviour\n    would otherwise stall every event behind its buffer flush).",
+        "description": "Stream the tenant's agent announcements as Server-Sent Events.\n\nHeaders:\n    ``Last-Event-Id``: optional SSE reconnect cursor. Takes\n    precedence over the ``since`` query parameter.\n\nReturns:\n    :class:`StreamingResponse` with ``media_type=text/event-stream``.",
         "operationId": "feed_endpoint_api_v1_feed_get",
         "parameters": [
           {
@@ -10313,7 +10313,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and publishes the ``approval.{approved,rejected}``\nbroadcast event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -11625,6 +11625,28 @@
         }
       }
     },
+    "/ui/dashboard/recent-operations": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Ui Dashboard Recent Operations",
+        "description": "Render ``GET /ui/dashboard/recent-operations`` -- the tray alone.",
+        "operationId": "ui_dashboard_recent_operations_ui_dashboard_recent_operations_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/": {
       "get": {
         "tags": [
@@ -11821,7 +11843,7 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Stream",
-        "description": "``GET /ui/broadcast/stream`` -- stream the session tenant's feed.\n\nTenant is taken from the validated session, never a query\nparameter. ``Last-Event-Id`` (sent by ``EventSource`` on\nreconnect) takes precedence over ``since`` for replay.",
+        "description": "``GET /ui/broadcast/stream`` -- stream the session tenant's announcements.",
         "operationId": "ui_broadcast_stream_ui_broadcast_stream_get",
         "parameters": [
           {
@@ -11893,7 +11915,7 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
+        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nReads the session tenant's stored announcements of the retention\nwindow (fail-soft, :func:`_fetch_history`), passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
         "parameters": [
           {
@@ -13782,17 +13804,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -14742,6 +14753,49 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/recent-operations": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Recent Operations",
+        "description": "``GET /ui/connectors/{name}/recent-operations``.",
+        "operationId": "ui_connectors_recent_operations_ui_connectors__name__recent_operations_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",

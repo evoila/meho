@@ -28,9 +28,8 @@ Honest limitation: the sweep is name-heuristic over declared schema
 properties. A secret riding inside a generically-named container
 (``vault.kv.put``'s ``data``) is invisible to it — that gap is covered
 by the runtime layer
-(:func:`~meho_backplane.broadcast.events.scrub_broadcast_params` +
-aggregate-collapse in ``publish_broadcast``), which is why both layers
-exist.
+(:func:`~meho_backplane.broadcast.events.scrub_broadcast_params`),
+which is why both layers exist.
 """
 
 from __future__ import annotations

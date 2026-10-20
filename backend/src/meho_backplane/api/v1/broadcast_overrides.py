@@ -100,7 +100,7 @@ router = APIRouter(prefix="/api/v1/broadcast/overrides", tags=["broadcast"])
 
 #: Canonical op_id every list call emits via the ``audit_op_id``
 #: contextvar override honoured by
-#: :func:`~meho_backplane.audit._publish_broadcast_event`. Set/remove
+#: :func:`~meho_backplane.audit._resolve_op_id_and_class_override`. Set/remove
 #: use distinct op_ids so ``meho audit query`` can filter to "rule
 #: mutations" vs reads.
 _OP_ID_LIST: Final[str] = "meho_broadcast_overrides_list"

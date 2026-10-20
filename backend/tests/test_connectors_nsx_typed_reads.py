@@ -422,6 +422,168 @@ async def test_segment_list_returns_cidr_occupancy_shape(
     assert segments[0]["resource_type"] == "Segment"
 
 
+#: NSX 9.0 ``ClusterStatus`` shape: non-deprecated ``overall_status`` +
+#: ``detailed_cluster_status.groups[]``, plus the deprecated mgmt/control
+#: status objects. The control status uses the vendor ``UNKNOWN`` enum value.
+_CLUSTER_STATUS_9_PAYLOAD: dict[str, Any] = {
+    "cluster_id": "cluster-1",
+    "overall_status": "DEGRADED",
+    "detailed_cluster_status": {
+        "cluster_id": "cluster-1",
+        "overall_status": "DEGRADED",
+        "groups": [
+            {"group_id": "g-1", "group_type": "MANAGER", "group_status": "STABLE"},
+            {"group_id": "g-2", "group_type": "CONTROLLER", "group_status": "STABLE"},
+            {"group_id": "g-3", "group_type": "POLICY", "group_status": "DEGRADED"},
+            {"group_id": "g-4", "group_type": "HTTPS"},
+            {"group_id": "g-5", "group_type": "DATASTORE", "group_status": "SURPRISE"},
+        ],
+    },
+    "node_services_status": {"status": "STABLE"},
+    "mgmt_cluster_status": {"status": "STABLE", "online_nodes": [{"uuid": "n-1"}]},
+    "control_cluster_status": {"status": "UNKNOWN"},
+}
+
+_DERIVED_HEALTH_KEYS = {"health_overall", "health_mgmt", "health_control", "group_status_counts"}
+
+
+async def _dispatch_cluster_status(_stub_embedding: AsyncMock, body: Any) -> Any:
+    """Dispatch ``nsx.cluster.status`` against a respx-mocked manager returning *body*."""
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_NSX_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/api/session/create").respond(200, headers=_XSRF_HEADERS)
+        mock.get("/api/v1/cluster/status").respond(200, json=body)
+        return await dispatch(
+            operator=_make_operator(),
+            connector_id=NSX_CONNECTOR_ID,
+            op_id="nsx.cluster.status",
+            target=_NsxReadTarget(),
+            params={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_cluster_status_derives_flat_health_fields(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#3674: flat health fields ride the body; every vendor key stays byte-identical."""
+    result = await _dispatch_cluster_status(_stub_embedding, _CLUSTER_STATUS_9_PAYLOAD)
+
+    assert result.status == "ok", result.error
+    body = result.result
+    assert isinstance(body, dict)
+    assert body["health_overall"] == "DEGRADED"
+    assert body["health_mgmt"] == "STABLE"
+    # Vendor uppercase UNKNOWN passes through, distinct from the derived token.
+    assert body["health_control"] == "UNKNOWN"
+    # Missing and out-of-enum group statuses land in the derived "unknown" bucket.
+    assert body["group_status_counts"] == {"STABLE": 2, "DEGRADED": 1, "unknown": 2}
+    assert set(body) == set(_CLUSTER_STATUS_9_PAYLOAD) | _DERIVED_HEALTH_KEYS
+    for key, value in _CLUSTER_STATUS_9_PAYLOAD.items():
+        assert body[key] == value
+
+
+@pytest.mark.asyncio
+async def test_cluster_status_unknown_when_sources_absent(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#3674: absent sources give lowercase "unknown", never null or omitted.
+
+    With no top-level ``overall_status``, ``health_overall`` falls back to
+    ``detailed_cluster_status.overall_status``.
+    """
+    payload: dict[str, Any] = {
+        "detailed_cluster_status": {
+            "overall_status": "UNAVAILABLE",
+            "groups": [{"group_id": "g-1", "group_status": None}],
+        },
+    }
+    result = await _dispatch_cluster_status(_stub_embedding, payload)
+
+    assert result.status == "ok", result.error
+    body = result.result
+    assert body["health_overall"] == "UNAVAILABLE"
+    assert body["health_mgmt"] == "unknown"
+    assert body["health_control"] == "unknown"
+    assert body["group_status_counts"] == {"unknown": 1}
+    assert body["detailed_cluster_status"] == payload["detailed_cluster_status"]
+
+
+@pytest.mark.asyncio
+async def test_cluster_status_malformed_body_defaults(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#3674: an unexpected body shape never raises; derived fields default."""
+    payload: dict[str, Any] = {
+        "overall_status": 7,
+        "detailed_cluster_status": "not-an-object",
+        "mgmt_cluster_status": ["STABLE"],
+        "control_cluster_status": None,
+    }
+    result = await _dispatch_cluster_status(_stub_embedding, payload)
+
+    assert result.status == "ok", result.error
+    body = result.result
+    for key, value in payload.items():
+        assert body[key] == value
+    assert body["health_overall"] == "unknown"
+    assert body["health_mgmt"] == "unknown"
+    assert body["health_control"] == "unknown"
+    assert body["group_status_counts"] == {}
+
+
+@pytest.mark.asyncio
+async def test_cluster_status_non_string_statuses_count_as_unknown(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#3674: a dict or list where a status string belongs never raises.
+
+    Each such value lands in the derived "unknown" bucket or scalar.
+    """
+    payload: dict[str, Any] = {
+        "overall_status": {"x": 1},
+        "detailed_cluster_status": {
+            "overall_status": ["DEGRADED"],
+            "groups": [
+                {"group_id": "g-1", "group_status": {"x": 1}},
+                {"group_id": "g-2", "group_status": ["STABLE"]},
+                {"group_id": "g-3", "group_status": "STABLE"},
+            ],
+        },
+        "mgmt_cluster_status": {"status": {"x": 1}},
+        "control_cluster_status": {"status": ["STABLE"]},
+    }
+    result = await _dispatch_cluster_status(_stub_embedding, payload)
+
+    assert result.status == "ok", result.error
+    body = result.result
+    assert body["health_overall"] == "unknown"
+    assert body["health_mgmt"] == "unknown"
+    assert body["health_control"] == "unknown"
+    assert body["group_status_counts"] == {"unknown": 2, "STABLE": 1}
+    for key, value in payload.items():
+        assert body[key] == value
+
+
+@pytest.mark.asyncio
+async def test_cluster_status_malformed_non_object_body_passes_through(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#3674: a non-object body is returned as is, with no augment and no raise.
+
+    The dispatcher wraps a bare scalar result as ``{"value": ...}``.
+    """
+    result = await _dispatch_cluster_status(_stub_embedding, "not-json-object")
+
+    assert result.status == "ok", result.error
+    assert result.result == {"value": "not-json-object"}
+
+
 @pytest.mark.asyncio
 async def test_transport_node_state_substitutes_id_into_path(
     _stub_embedding: AsyncMock,

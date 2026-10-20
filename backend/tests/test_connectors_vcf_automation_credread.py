@@ -58,9 +58,7 @@ import respx
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -161,18 +159,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events so the audit/broadcast leg is asserted."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -282,7 +268,6 @@ async def _seed_descriptors(session: AsyncSession, embedding: list[float]) -> No
 async def test_dispatch_executes_full_dual_plane_credread_chain_returns_ok(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The full provider+tenant cred-read chain returns status="ok" with no injected loader.
@@ -374,15 +359,11 @@ async def test_dispatch_executes_full_dual_plane_credread_chain_returns_ok(
     sent_auth = provider_login.calls[0].request.headers.get("authorization")
     assert sent_auth is not None and sent_auth.startswith("Basic ")
 
-    # ---- One audit/broadcast per dispatched op. ----
-    assert len(captured_events) == 2
-
 
 @pytest.mark.asyncio
 async def test_credread_chain_never_leaks_credential_or_jwt_in_result_or_logs(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No credential value and no Bearer JWT appears in OperationResult or any captured log.
@@ -400,8 +381,7 @@ async def test_credread_chain_never_leaks_credential_or_jwt_in_result_or_logs(
 
     * the ``OperationResult`` envelope ``repr`` (result / error / extras),
     * every structlog event captured during the dispatch chain
-      (loader / connector / dispatcher / audit / broadcast),
-    * the broadcast event payload list.
+      (loader / connector / dispatcher / audit).
     """
     await _seed_descriptors(session, stub_embedding_service.encode_one.return_value)
 
@@ -452,7 +432,6 @@ async def test_credread_chain_never_leaks_credential_or_jwt_in_result_or_logs(
         ("provider OperationResult", repr(provider_result)),
         ("tenant OperationResult", repr(tenant_result)),
         ("structlog capture", repr(captured)),
-        ("broadcast events", repr(captured_events)),
     ):
         for secret in secrets_to_check:
             assert secret not in blob, (

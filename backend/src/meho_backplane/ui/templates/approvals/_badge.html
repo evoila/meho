@@ -5,11 +5,10 @@
   Notifications-bell count badge fragment (G10.7-T3 #1778).
 
   Swapped into the app-shell bell's ``#meho-approvals-badge`` target. The
-  bell ``hx-get``s this on ``load`` (authoritative first paint) and again
-  whenever an ``approval.*`` SSE frame arrives or a decision completes --
-  so the count is always the server's tenant-scoped truth, never a
-  client-side counter that could drift (the live "without reload" behaviour
-  comes from the SSE-triggered re-fetch, not a JS increment).
+  bell ``hx-get``s this on ``load`` (authoritative first paint), every 5
+  seconds while the page is visible, and after a decision (#3758) -- so
+  the count is always the server's tenant-scoped truth, never a
+  client-side counter that could drift.
 
   This fragment is swapped into the bell's badge container (a prefixed,
   per-bell-instance ``id``) via ``hx-swap="innerHTML"``, so it carries no

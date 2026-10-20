@@ -48,7 +48,6 @@ from uuid import UUID
 import pytest
 from sqlalchemy import update
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
     BroadcastEvent,
@@ -453,18 +452,6 @@ def _reset_dispatch_state() -> Iterator[None]:
 
 
 @pytest.fixture
-def _quiet_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events instead of publishing to Valkey."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
-@pytest.fixture
 def stub_embedding_service() -> AsyncMock:
     """Deterministic embedding stub so registration doesn't pull ONNX."""
     service = AsyncMock()
@@ -492,7 +479,6 @@ async def _register_op(op_id: str, stub_embedding_service: AsyncMock) -> None:
 
 async def test_dispatch_success_carries_fragment_then_dedupes(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """A read-class dispatch carries the fragment once per caller+window.
 
@@ -529,7 +515,6 @@ async def test_dispatch_success_carries_fragment_then_dedupes(
 
 async def test_both_advisory_fragments_coexist_on_one_response(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """The #2550 fragment and the checks fragment ride one ``extras``.
 
@@ -576,7 +561,6 @@ async def test_both_advisory_fragments_coexist_on_one_response(
 
 async def test_advisory_never_gates_dispatch_on_total_failure(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """A dead advisory path (DB error mid-build) leaves the dispatch ok."""
     await _register_op("vault.kv.list", stub_embedding_service)

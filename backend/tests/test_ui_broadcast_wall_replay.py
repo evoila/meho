@@ -11,9 +11,9 @@ Acceptance criteria on issue #869:
 * Wall mode survives an access-token expiry without logging out (the
   server-side sliding-session extension in ``load_session``) -- asserted
   across a forced near-expiry.
-* The "Last 24h" replay tab pulls the tenant's last-24h events (a finite
-  ``XRANGE`` over ``meho:feed:{tenant}``) and renders historical rows
-  that open the same T2 drawer.
+* The "Last 24h" replay tab reads the tenant's stored agent
+  announcements of the last 24 hours from the archive (#3758) and renders
+  them with the same row partial.
 * Cross-tenant isolation holds in wall + replay (tenant-A events absent
   from tenant-B).
 * ``ruff`` + ``mypy`` clean; ``pytest -n auto`` passes.
@@ -23,11 +23,9 @@ Three test surfaces:
 * **Wall page** -- HTTP edge: a minimal app wired with the UI session +
   CSRF middlewares; asserts the wall layout drops the base.html chrome
   and embeds the same feed fragment.
-* **History fragment** -- HTTP edge with a mocked broadcast client's
-  ``xrange``: asserts the tenant-scoped key, the rendered rows, the
-  empty state, and cross-tenant isolation. ``xrange`` returns a finite
-  list, so the endpoint terminates -- there is no streaming loop to
-  hang.
+* **History fragment** -- HTTP edge over seeded archive rows: the
+  rendered rows, the empty state, the row cap, cross-tenant isolation,
+  and markup breakout.
 * **Sliding-session extension** -- drives ``load_session`` directly: a
   near-expiry session is extended on an active load; an at-cap session
   is not; ``sliding=0`` disables the extension.
@@ -39,8 +37,8 @@ import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, patch
-from uuid import UUID, uuid4
 
 import pytest
 import respx
@@ -51,7 +49,6 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.broadcast import (
-    BroadcastEvent,
     get_broadcast_client,
     reset_broadcast_client_for_testing,
 )
@@ -76,6 +73,7 @@ from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.broadcast.feed import IN_DOM_ROW_CAP
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests.broadcast_admission_helpers import seed_announcement
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
 # ---------------------------------------------------------------------------
@@ -195,49 +193,6 @@ def _authenticated_client(session_id: uuid.UUID) -> TestClient:
     client = TestClient(_build_app(), follow_redirects=False)
     client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
     return client
-
-
-def _make_event(
-    *,
-    tenant_id: UUID = _TENANT_A,
-    op_class: str = "read",
-    principal_sub: str = "op-test",
-    target_name: str | None = "rdc-vcenter",
-    op_id: str = "vsphere.vm.list",
-) -> BroadcastEvent:
-    """Build a redacted-shape :class:`BroadcastEvent` for the replay tests."""
-    return BroadcastEvent(
-        event_id=uuid4(),
-        ts=datetime(2026, 5, 13, tzinfo=UTC),
-        tenant_id=tenant_id,
-        principal_sub=principal_sub,
-        target_name=target_name,
-        op_id=op_id,
-        op_class=op_class,
-        result_status="ok",
-        audit_id=UUID("33333333-3333-3333-3333-333333333333"),
-        payload={"op_class": op_class, "params": {}, "result_status": "ok"},
-    )
-
-
-def _xrange_returning(events: list[BroadcastEvent]) -> AsyncMock:
-    """AsyncMock standing in for ``Redis.xrange`` returning *events*.
-
-    ``xrange`` is a **finite** read (not a BLOCKing stream loop), so a
-    plain ``AsyncMock(return_value=...)`` is correct here: the history
-    endpoint awaits it once, gets the list, and returns. There is no
-    ``while True`` to spin, so the async-hang failure mode that haunts
-    the stream tests (a bare ``return_value=None`` inside an XREAD loop)
-    does not apply -- the endpoint terminates regardless.
-
-    The returned shape mirrors redis-py's ``XRANGE`` reply: a list of
-    ``(entry_id, fields_dict)`` tuples, ascending (oldest-first).
-    """
-    items = [
-        (f"{1715600000000 + i}-0", {"event": event.model_dump_json()})
-        for i, event in enumerate(events)
-    ]
-    return AsyncMock(return_value=items)
 
 
 # ---------------------------------------------------------------------------
@@ -390,184 +345,83 @@ class TestSlidingSessionExtension:
 # ---------------------------------------------------------------------------
 
 
-class TestHistoryReplay:
-    """``GET /ui/broadcast/history`` -- the finite XRANGE replay fragment."""
+def _seed(tenant_id: uuid.UUID, **fields: Any) -> None:
+    asyncio.run(seed_announcement(tenant_id, **fields))
 
-    def test_history_renders_events_from_session_tenant_stream(self) -> None:
-        """The pane pulls the session tenant's stream key via XRANGE."""
+
+class TestHistoryReplay:
+    """``GET /ui/broadcast/history`` -- the archive-backed replay fragment (#3758)."""
+
+    def test_history_renders_the_session_tenants_announcements(self) -> None:
         session_id = _seed_session_sync(tenant_id=_TENANT_A)
-        event = _make_event(tenant_id=_TENANT_A, op_id="vsphere.vm.list")
-        mock = _xrange_returning([event])
-        broadcast_client = get_broadcast_client()
-        with (
-            respx.mock(assert_all_called=False),
-            patch.object(broadcast_client, "xrange", new=mock),
-        ):
+        _seed(_TENANT_A, activity="rolling the cluster")
+        with respx.mock(assert_all_called=False):
             client = _authenticated_client(session_id)
             response = client.get("/ui/broadcast/history")
         assert response.status_code == 200, response.text
-        # The XRANGE was issued against the session tenant's key.
-        assert mock.await_count == 1
-        assert mock.await_args.args[0] == f"meho:feed:{_TENANT_A}"
-        # The event JSON is seeded into the shared controller; the row
-        # partial + the 24h-window status copy render.
         body = response.text
-        assert "vsphere.vm.list" in body
+        assert "rolling the cluster" in body
         assert "broadcastFeed(" in body
         assert "Last 24h replay" in body
 
     def test_history_empty_window_renders_empty_state(self) -> None:
-        """No events in the 24h window renders the empty-state copy."""
         session_id = _seed_session_sync(tenant_id=_TENANT_A)
-        mock = _xrange_returning([])
-        broadcast_client = get_broadcast_client()
-        with (
-            respx.mock(assert_all_called=False),
-            patch.object(broadcast_client, "xrange", new=mock),
-        ):
+        with respx.mock(assert_all_called=False):
             client = _authenticated_client(session_id)
             response = client.get("/ui/broadcast/history")
         assert response.status_code == 200, response.text
         assert "No activity in the last" in response.text
 
-    def test_history_xrange_is_bounded_by_window_and_cap(self) -> None:
-        """XRANGE spans the 24h window to '+' and is COUNT-capped.
-
-        Proves the pull is finite (a row cap, not an unbounded read), so
-        the endpoint terminates -- there is no streaming loop here.
-        """
+    def test_history_is_bounded_by_window_and_cap(self) -> None:
+        """Rows older than the window are left out; at most the row cap renders."""
         session_id = _seed_session_sync(tenant_id=_TENANT_A)
-        mock = _xrange_returning([_make_event()])
-        broadcast_client = get_broadcast_client()
-        with (
-            respx.mock(assert_all_called=False),
-            patch.object(broadcast_client, "xrange", new=mock),
-        ):
+        _seed(_TENANT_A, activity="too old", ts=datetime.now(UTC) - timedelta(days=3))
+        for index in range(IN_DOM_ROW_CAP + 2):
+            _seed(_TENANT_A, activity=f"row-{index:04d}")
+        with respx.mock(assert_all_called=False):
             client = _authenticated_client(session_id)
-            client.get("/ui/broadcast/history")
-        kwargs = mock.await_args.kwargs
-        # End anchor is the live tail; count is the in-DOM row cap.
-        assert kwargs["max"] == "+"
-        assert kwargs["count"] == IN_DOM_ROW_CAP
-        # Start id is a bare ms-timestamp (24h window), strictly positive.
-        assert int(kwargs["min"]) > 0
+            response = client.get("/ui/broadcast/history")
+        body = response.text
+        assert "too old" not in body
+        assert "row-0001" not in body
+        assert f"row-{IN_DOM_ROW_CAP + 1:04d}" in body
 
     def test_history_cross_tenant_isolation(self) -> None:
-        """A tenant-B session reads only tenant-B's stream, never A's."""
+        """A tenant-B session never sees tenant A's announcements."""
         session_id = _seed_session_sync(tenant_id=_TENANT_B)
-        mock = _xrange_returning([])
-        broadcast_client = get_broadcast_client()
-        with (
-            respx.mock(assert_all_called=False),
-            patch.object(broadcast_client, "xrange", new=mock),
-        ):
+        _seed(_TENANT_A, activity="tenant a secret plan")
+        with respx.mock(assert_all_called=False):
             client = _authenticated_client(session_id)
             response = client.get("/ui/broadcast/history")
         assert response.status_code == 200, response.text
-        key = mock.await_args.args[0]
-        assert key == f"meho:feed:{_TENANT_B}"
-        assert str(_TENANT_A) not in key
-
-    def test_history_skips_malformed_entries(self) -> None:
-        """A malformed stream entry is skipped, not 500'd."""
-        session_id = _seed_session_sync(tenant_id=_TENANT_A)
-        good = _make_event(op_id="vsphere.vm.list")
-        # One good entry, one with a non-JSON event field, one with no
-        # event field at all -- only the good one should render.
-        items = [
-            ("1715600000000-0", {"event": good.model_dump_json()}),
-            ("1715600000001-0", {"event": "not-json{"}),
-            ("1715600000002-0", {"other": "field"}),
-        ]
-        mock = AsyncMock(return_value=items)
-        broadcast_client = get_broadcast_client()
-        with (
-            respx.mock(assert_all_called=False),
-            patch.object(broadcast_client, "xrange", new=mock),
-        ):
-            client = _authenticated_client(session_id)
-            response = client.get("/ui/broadcast/history")
-        assert response.status_code == 200, response.text
-        assert "vsphere.vm.list" in response.text
+        assert "tenant a secret plan" not in response.text
 
     def test_history_event_fields_cannot_break_out_of_markup(self) -> None:
-        """A quote-/markup-bearing event field renders harmlessly (B1).
+        """A quote-/markup-bearing announcement field renders harmlessly (B1).
 
-        Regression for PR #1044 B1: the pane used to interpolate the
-        serialised event array into a double-quoted ``x-data="…"``
-        attribute via ``| safe`` (no escaping). Any event field carrying
-        a double-quote broke out of the attribute and injected live event
-        handlers, and a ``</script>`` could close the seed element early.
-
-        The fix emits the events as inert
+        Regression for PR #1044 B1: the pane emits events as inert
         ``<script type="application/json">`` text rendered through Jinja
-        ``| tojson``. This test seeds an event whose free-text fields
-        contain ``"`` ``'`` ``<`` ``>`` ``&`` AND a literal ``</script>``
-        and asserts:
-
-        * the injected markup never appears as raw HTML (no attribute or
-          script breakout, no live event handler),
-        * the literal ``</script>`` never appears unescaped (it cannot
-          close the seed element early), and
-        * the payload still round-trips into the controller seed (the
-          escaped form is present in the data island), so the rows still
-          render + open the drawer.
-
-        It fails on the pre-fix ``| safe``/double-quoted-attribute code
-        and passes after the data-island fix.
+        ``| tojson``. An announcement whose free-text fields contain
+        ``"`` ``'`` ``<`` ``>`` ``&`` and a literal ``</script>`` must not
+        break out of the data island, and must still round-trip into it.
         """
         session_id = _seed_session_sync(tenant_id=_TENANT_A)
-        # Every breakout primitive in one string: attribute-breaking
-        # double-quote, an injected handler, single-quote, angle
-        # brackets, ampersand, and a literal closing script tag.
         injection = (
             "</script><img src=x onerror=alert(1)>\" autofocus onfocus=alert(2) ' < > & done"
         )
-        event = _make_event(
-            tenant_id=_TENANT_A,
-            op_id=injection,
-            target_name=injection,
-            principal_sub=injection,
-        )
-        mock = _xrange_returning([event])
-        broadcast_client = get_broadcast_client()
-        with (
-            respx.mock(assert_all_called=False),
-            patch.object(broadcast_client, "xrange", new=mock),
-        ):
+        _seed(_TENANT_A, activity=injection, target=injection, principal_sub=injection)
+        with respx.mock(assert_all_called=False):
             client = _authenticated_client(session_id)
             response = client.get("/ui/broadcast/history")
         assert response.status_code == 200, response.text
         body = response.text
-
-        # --- No breakout: the raw injection must never reach the DOM as
-        #     markup. ``| tojson`` escapes ``<`` ``>`` ``&`` ``'`` (and
-        #     keeps ``"`` JSON-escaped as ``\"``) for the script-text
-        #     context, so the field stays inert JSON data -- the injected
-        #     tag/element-closer sequences cannot appear verbatim.
-        #
-        #     On the pre-fix ``| safe`` / double-quoted-``x-data`` code
-        #     each of these assertions fails: the raw ``<img>`` tag, the
-        #     raw ``</script><img`` element-closer-then-injection, and
-        #     two extra raw ``</script>`` (one per injected field) all
-        #     reach the DOM. ---
-        # The injected raw markup tag must never materialise.
         assert "<img src=x onerror=" not in body
-        # The field's literal closing-script sequence must be escaped --
-        # a raw close-then-inject sequence would terminate the seed
-        # element early and start live markup.
         assert "</script><img" not in body
-        # The ONLY raw "</script>" allowed is the data island's own
-        # closer; the three injected fields contributing raw closers is
-        # exactly the pre-fix breakout this test guards against.
+        # The only raw "</script>" allowed is the data island's own closer.
         assert body.count("</script>") == 1
-
-        # --- Round-trip: the field still seeds the controller, just in
-        #     its tojson-escaped form. Confirm the escaped markers are in
-        #     the data island so the rows render. ---
         assert 'id="broadcast-history-data"' in body
-        assert "\\u003c/script\\u003e" in body  # escaped </script>
-        assert "\\u003cimg" in body  # escaped <img
+        assert "\\u003c/script\\u003e" in body
+        assert "\\u003cimg" in body
         assert "seedFrom: 'broadcast-history-data'" in body
 
     def test_history_unauthenticated_redirects_to_login(self) -> None:
@@ -578,30 +432,21 @@ class TestHistoryReplay:
         assert response.status_code == 302
         assert response.headers["location"].startswith("/ui/auth/login?return_to=")
 
-    def test_history_returns_200_and_empty_when_valkey_unreachable(self) -> None:
-        """A Valkey teardown degrades the pane to its empty state, not a 500.
-
-        Acceptance criterion (G6.4-T4 #1103): the UI history route MUST
-        keep its fail-soft contract -- a transient broadcast-subchart
-        blip degrades the Last-24h pane to its empty state rather than
-        500-ing the fragment. The shared helper's fail-soft wrapper
-        catches :class:`redis.exceptions.RedisError`; this test pins the
-        end-to-end behaviour at the HTTP edge.
-        """
+    def test_history_does_not_need_valkey(self) -> None:
+        """The pane reads the archive; a Valkey outage does not affect it."""
         from redis.exceptions import ConnectionError as RedisConnectionError
 
         session_id = _seed_session_sync(tenant_id=_TENANT_A)
+        _seed(_TENANT_A, activity="stored while valkey is down")
         broadcast_client = get_broadcast_client()
         mock = AsyncMock(side_effect=RedisConnectionError("simulated valkey teardown"))
         with (
             respx.mock(assert_all_called=False),
             patch.object(broadcast_client, "xrange", new=mock),
+            patch.object(broadcast_client, "xrevrange", new=mock),
         ):
             client = _authenticated_client(session_id)
             response = client.get("/ui/broadcast/history")
-        # The fragment renders successfully with the empty-state copy --
-        # no 500, no broken HTMX swap target.
         assert response.status_code == 200, response.text
-        assert "No activity in the last" in response.text
-        # The teardown was actually exercised (sanity).
-        assert mock.await_count == 1
+        assert "stored while valkey is down" in response.text
+        assert mock.await_count == 0

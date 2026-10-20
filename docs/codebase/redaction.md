@@ -848,14 +848,19 @@ exhaust; under-exclusion leaks.
 | --- | --- | --- |
 | secret-bearing (credential-read / -mint / -write) | **single-sourced** with `broadcast.events.classify_op` (`_CREDENTIAL_*_OPS`) | never |
 | secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + token-split `SECRET_FAMILY_TAGS` | never |
-| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag | never |
+| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
 | everything else | — | yes (subject to F2.2) |
 
 The destructive family is **single-sourced** with the delete-shaped
 classifier at `operations/service_grants.py` (`_delete_shaped_reason_by_pattern`
 / `_delete_shaped_reason_by_descriptor`) so the two lists cannot drift;
 `classify_body_exclusion` reads the same `Settings` tuple rather than
-re-declaring it. This honours the pending cross-ref amendment to
+re-declaring it. The vendor action name is the third sign (#4632): a
+VI-JSON delete such as `POST:/VirtualMachine/{moId}/Destroy_Task` is a
+`POST`, so neither the method nor a pattern catches it. The classifier
+reads the parser's word list from `meho_backplane/delete_names.py` (a module
+that imports nothing from MEHO) and puts such an op in the `destructive`
+family, so its body is never recorded. This honours the pending cross-ref amendment to
 [`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
 noted in the flight-recorder decision's "Interactions with sibling
 decisions" section — the destructive family joins the hard-exclusion set

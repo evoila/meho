@@ -91,8 +91,8 @@ service:
   port: 8200
 
 # -- The subchart's own ingress NetworkPolicy. Off by default. It selects the
-# OpenBao pod and admits port 8200 only from the backplane pods, the parent
-# chart's setup Jobs and the peers in `extraFrom`.
+# OpenBao pod and admits port 8200 only from the backplane pods and the
+# peers in `extraFrom`.
 networkPolicy:
   enabled: false
   # -- Labels of the backplane pods (the parent chart's selector labels).

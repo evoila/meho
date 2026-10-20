@@ -298,6 +298,7 @@ jobs:
             --set coreKeycloak.enabled=true \
             --set coreKeycloak.hostname=meho.test \
             --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c \
+            --set coreVault.enabled=true \
             > /tmp/rendered-core.yaml
           kubeconform \
             -strict \
@@ -310,6 +311,9 @@ jobs:
           # The built-in Keycloak subchart (#4040) renders in the same pass.
           grep -q 'name: test-keycloak$' /tmp/rendered-core.yaml \
             || { echo "::error::built-in Keycloak StatefulSet did not render with coreKeycloak on"; exit 1; }
+          # The built-in OpenBao subchart (#4044) renders in the same pass.
+          grep -q 'name: test-vault$' /tmp/rendered-core.yaml \
+            || { echo "::error::built-in OpenBao StatefulSet did not render with coreVault on"; exit 1; }
 
       - name: Assert agent-runtime credentials wire via secretKeyRef (#1363)
         # G0.18-T10 (#1363): when an operator opts into the G11.1 agent

@@ -339,12 +339,17 @@ async def test_kb_search_ranks_current_passages_without_duplicates(pg_engine: No
     assert by_slug["legacy-entry"].passages == []
 
 
-async def _wait_for_a_lock_waiter(timeout: float = 10.0) -> None:
+async def _wait_for_a_lock_waiter(
+    timeout: float = 10.0, first_check_done: asyncio.Event | None = None
+) -> None:
     """Return once one database session is waiting for a row lock.
 
     Each check runs in its own transaction. PostgreSQL collects the list
     of sessions once per transaction, so a check that kept one transaction
     open would never see a session that connected after its first look.
+
+    ``first_check_done`` is set as soon as the first check has finished,
+    so a test can start a late session only after that point.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -353,6 +358,8 @@ async def _wait_for_a_lock_waiter(timeout: float = 10.0) -> None:
             waiting = await session.scalar(
                 text("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'")
             )
+        if first_check_done is not None:
+            first_check_done.set()
         if waiting:
             return
         await asyncio.sleep(0.05)
@@ -379,8 +386,11 @@ async def test_lock_waiter_sees_a_session_that_connects_after_its_first_check(
     try:
         async with get_sessionmaker()() as holder:
             await holder.execute(lock_tenant_row, {"id": tenant_id})
-            checker = asyncio.create_task(_wait_for_a_lock_waiter())
-            await asyncio.sleep(0.5)
+            first_check_done = asyncio.Event()
+            checker = asyncio.create_task(
+                _wait_for_a_lock_waiter(first_check_done=first_check_done)
+            )
+            await asyncio.wait_for(first_check_done.wait(), timeout=10)
             assert not checker.done()
 
             async def lock_on_a_new_connection() -> None:

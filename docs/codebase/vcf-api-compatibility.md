@@ -256,7 +256,7 @@ one method is in the list:
 
 | Method | Missing in | Why it is safe |
 |---|---|---|
-| `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` | 8.0 U1, U2, U3 | It is a vSAN health service method, not a vim25 method; no 8.0 VI/JSON file has vSAN paths. `vmware.host.vsan_health` calls it best-effort and returns `overall_health: null` with a `read_note` when the call fails. |
+| `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` | 8.0 U1, U2, U3 | It is a vSAN health service method, not a vim25 method; no 8.0 VI/JSON file has the vSAN health service (`VsanVcClusterHealthSystem`) paths. `vmware.host.vsan_health` calls it best-effort and returns `overall_health: null` with a `read_note` when the call fails. |
 
 All other 49 methods are in all three files.
 

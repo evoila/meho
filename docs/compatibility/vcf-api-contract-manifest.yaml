@@ -253,7 +253,7 @@ catalog_profiles:
     meho_exposure: {typed: "legacy SDDC typed subset", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
   vsphere-8.x:
     artifact_refs: [vsphere-8.x, vsphere-vi-json-8.0u1, vsphere-vi-json-8.0u2, vsphere-vi-json-8.0u3]
-    contract_delta: {endpoint: "REST: 8.0 U3 only, full 8-to-9 diff unavailable. VI JSON: 1709 (U1), 1726 (U2), 1902 (U3) paths; every VI JSON method MEHO calls is in all three, except the vSAN health method (no 8.0 VI JSON file has vSAN paths)", schema: "unavailable", auth: "session and capability evidence required", feature_state: "VI JSON exists from 8.0 U1 at /sdk/vim25/<release>; MEHO /api construction is separately incompatible"}
+    contract_delta: {endpoint: "REST: 8.0 U3 only, full 8-to-9 diff unavailable. VI JSON: 1709 (U1), 1726 (U2), 1902 (U3) paths; every VI JSON method MEHO calls is in all three, except the vSAN health method (no 8.0 VI/JSON file has the vSAN health service (VsanVcClusterHealthSystem) paths)", schema: "unavailable", auth: "session and capability evidence required", feature_state: "VI JSON exists from 8.0 U1 at /sdk/vim25/<release>; MEHO /api construction is separately incompatible"}
     meho_exposure: {typed: "existing composites and vmomi reads require per-op gating", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
   vsphere-9.0:
     artifact_refs: [vsphere-9.0, vsphere-vi-json-9.0, vim-wsdl-9.0]

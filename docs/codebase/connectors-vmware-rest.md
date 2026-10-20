@@ -684,8 +684,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    method the connector calls (from the source) and checks it against the
    vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
    version gate or an entry with the reason in the lane's exclusion list.
-   Today only the vSAN health method is listed: no 8.0 VI/JSON file has vSAN
-   paths, and `vmware.host.vsan_health` calls it best-effort. See
+   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
+   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
+   `vmware.host.vsan_health` calls it best-effort. See
    [vcf-api-compatibility.md](vcf-api-compatibility.md).
    **Operation summaries (#4329).** Search and the operation-group step
    read each operation's one-line `summary`. The full vendor specs fall

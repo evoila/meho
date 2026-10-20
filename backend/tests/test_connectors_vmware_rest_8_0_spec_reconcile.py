@@ -237,7 +237,8 @@ _NOT_IN_8_0_VI_JSON: dict[str, tuple[frozenset[str], str]] = {
     "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary": (
         frozenset(_VI_JSON_8_0_FILES),
         "vSAN health service method, not a vim25 method: no 8.0 VI/JSON file has "
-        "vSAN paths. vmware.host.vsan_health calls it best-effort and returns "
+        "the vSAN health service (VsanVcClusterHealthSystem) paths. "
+        "vmware.host.vsan_health calls it best-effort and returns "
         "overall_health=null with a read_note when the call fails.",
     ),
 }

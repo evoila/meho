@@ -394,7 +394,7 @@ async def nsx_transport_node_list_impl(
     Returns the transport-node fabric inventory -- the edge and host nodes
     that carry the NSX overlay. ``{"results": [...], "result_count": N}``
     where each node carries ``id``, ``display_name``, and
-    ``node_deployment_info.resource_type`` (``EdgeNode`` / ``EsxiNode`` --
+    ``node_deployment_info.resource_type`` (``EdgeNode`` / ``HostNode`` --
     the field that distinguishes an edge node from a host node). This list
     row does **not** carry live health: NSX exposes per-node
     fabric/tunnel/realization state on the separate ``.../state``

@@ -145,7 +145,7 @@ NSX_CANARY_TRANSPORT_NODES: dict[str, object] = {
         {
             "id": f"transport-node-{i}",
             "display_name": f"esx-canary-{i:02d}",
-            "node_deployment_info": {"resource_type": "EsxiNode"},
+            "node_deployment_info": {"resource_type": "HostNode"},
             "host_switch_spec": {"host_switches": []},
         }
         for i in range(3)

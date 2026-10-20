@@ -605,7 +605,9 @@ _TRANSPORT_NODE_LIST = NsxTypedOp(
                 "description": "How the node is deployed.",
                 "properties": {
                     "resource_type": _field(
-                        "string", "EdgeNode for an edge node, or a host type such as EsxiNode."
+                        "string",
+                        "EdgeNode for an edge node, HostNode for a host node, or "
+                        "PublicCloudGatewayNode.",
                     ),
                 },
                 "additionalProperties": True,

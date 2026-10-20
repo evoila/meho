@@ -2952,6 +2952,16 @@ genuinely small action. The read composites register no builder.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
+- **`performance.summary` request bodies (#4038)** — both vi-json calls
+  send `entity` as an annotated `ManagedObjectReference`
+  (`vim_body.vim_moref`), never a bare moid string: vCenter 8.0.3 answers
+  the string with 500 `InvalidArgument: Unexpected string value`. The
+  type comes from the optional `entity_type` input, or else from the moid
+  prefix (`host-` HostSystem, `vm-` VirtualMachine, `domain-c`
+  ClusterComputeResource); an unknown prefix without `entity_type` fails
+  before any call. `QueryAvailablePerfMetric` gets `entity` + `intervalId`;
+  `QueryPerf` gets `querySpec: [PerfQuerySpec{entity, intervalId,
+  maxSample}]`, the shape the pinned `vi-json.yaml` declares.
 - **VI-JSON mount for vmomi reads *and writes* — `/sdk/vim25/{release}`
   (#2466, mutating writes #2893)** —
   vmomi (VI-JSON) methods (`RetrievePropertiesEx`,

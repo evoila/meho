@@ -1328,7 +1328,7 @@ async def _run_branch_with_error_handling(
     and the stage-the-credential remediation instead.
     """
     try:
-        return await _run_source_kind_branch(
+        raw = await _run_source_kind_branch(
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -1673,6 +1673,17 @@ async def _run_branch_with_error_handling(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
+    else:
+        return await _audit_returned_error_result(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
 
 
 def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
@@ -1688,6 +1699,46 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     """
     extras = result.extras
     return dict(extras) if extras else None
+
+
+async def _audit_returned_error_result(
+    raw: Any,
+    *,
+    audit_id: uuid.UUID,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    started: float,
+) -> Any:
+    """Write the error audit row when a handler *returns* an error result (#4274).
+
+    A typed or composite handler can return an :class:`OperationResult` instead
+    of raising (for example a composite's ``composite_resume_unsupported``, or
+    an ``enforce_subop_policy`` refusal it passes on). Without this, no row
+    carries this dispatch's ``audit_id``, yet the composite's step rows point
+    at it as ``parent_audit_id`` and the flight-recorder trace is stored under
+    it. Only ``status='error'`` is audited here; ``awaiting_approval`` and
+    ``denied`` results pass through unchanged (#4275). Anything that is not an
+    :class:`OperationResult` is the raw payload and passes through too.
+
+    The caller gets the handler's result as it was, plus the ``audit_id``
+    receipt :func:`_audit_error_and_return` adds. The row records the real
+    elapsed time, because a handler-built result may carry ``duration_ms=0``.
+    """
+    if not isinstance(raw, OperationResult) or raw.status != "error":
+        return raw
+    return await _audit_error_and_return(
+        raw,
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=_elapsed_ms(started),
+    )
 
 
 async def _audit_error_and_return(
@@ -1960,7 +2011,7 @@ async def _retry_after_session_invalidation(
     """
     await invalidate_session(target)
     try:
-        return await _run_source_kind_branch(
+        raw = await _run_source_kind_branch(
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -2031,6 +2082,17 @@ async def _retry_after_session_invalidation(
             params=params,
             params_hash=params_hash,
             duration_ms=duration_ms,
+        )
+    else:
+        return await _audit_returned_error_result(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
         )
 
 

@@ -448,14 +448,53 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
 
-The `outputSchema` is a top-level `oneOf` of the ranked shape and the
-exact-op shape. The `inputSchema` needs `query` or `op_id` through a
+The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
+the `outcome` fields described in the next section) and the exact-op
+shape. The `inputSchema` needs `query` or `op_id` through a
 top-level `anyOf`; that combinator is removed from the wire copy (see
 `_wire_safe_input_schema`) and still checked on the server. The REST
 twin is `GET /api/v1/operations/search?op_id=...` (and
 `include_scores=true`); the CLI twin is
 `meho operation search <connector_id> --op-id <op_id>` (and `--scores`).
 Code: `operations/_contract.py`, `operations/meta_tools.py`.
+
+### Why a search found nothing, or nothing good (#3670)
+
+`search_operations` tells the agent why a search found no suitable
+operation. This helps the agent stop instead of calling the wrong one.
+
+Two cases are errors (`-32602` on MCP, `404` on REST), unchanged since
+#1482:
+
+- `data.reason="unknown_connector"` — no connector has this id.
+- `data.reason="connector_not_ingested"` — the connector exists, but its
+  operations are not loaded yet. `data.next_step.verb` says what to run.
+
+Every other result has an `outcome` field:
+
+| `outcome` | Meaning | What the agent should do |
+|---|---|---|
+| `matched` | The top hit matched the query's words and is clearly ahead. | Check `safety_level` and `requires_approval`, then call it. |
+| `ambiguous` | Hits came back, but the top hit matched no query word (it is only close in meaning), or the top two are nearly tied. | Do not call any hit. Narrow the search first. |
+| `no_match` | The connector has enabled operations, but none matched. | Do not call anything. Search again with other words. |
+| `unknown_group` | The `group` filter names no visible group. | Retry with a group key from `narrowing`. |
+| `zero_enabled_operations` | The connector is loaded, but no operation is enabled for this caller. | Do not call it. An operator must enable operations. |
+
+`advisory` explains any outcome other than `matched` in one sentence.
+`narrowing` lists next steps, at most `SEARCH_NARROWING_MAX` entries.
+
+- The outcome reads the scores the search already made. Hit order does
+  not change. The search always reads at least two hits from the
+  retriever (`SEARCH_CLASSIFY_MIN_HITS`), even for `limit=1`, so a tied
+  second hit cannot hide. The returned list is then cut to `limit`.
+- The near-tie band is `SEARCH_NEAR_TIE_BAND`: one list position at the
+  top of one ranking signal.
+- The enabled-operation check and the group list use the same tenant
+  filter as dispatch, and count enabled rows only. So the text never
+  names a disabled operation or another tenant's operation.
+
+Code: `operations/meta_tools.py` (`search_operations`, `_run_search`,
+`_classify_hits`). Tests: `tests/test_operations_meta_tools.py`.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 

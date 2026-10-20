@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "corePostgres.fullname" . }}-config
+  labels:
+    {{- include "corePostgres.labels" . | nindent 4 }}
+data:
+  # The one SQL file for both paths. It runs once from
+  # /docker-entrypoint-initdb.d on an empty disk, and again from the
+  # reconcile sidecar at every pod start and whenever a mounted Secret
+  # changes. Every statement is safe to run twice. Passwords reach SQL only
+  # as psql variables, never written into a statement. Neither role is a
+  # superuser; each owns its own database and nothing else. The superuser
+  # creates `vector`, so MEHO's migrations never need a superuser.
+  core.sql: |
+    \getenv meho_pw MEHO_DB_PASSWORD
+    \getenv keycloak_pw KEYCLOAK_DB_PASSWORD
+    SELECT 'CREATE ROLE meho' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'meho')\gexec
+    SELECT 'CREATE ROLE keycloak' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak')\gexec
+    ALTER ROLE meho LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 60 PASSWORD :'meho_pw';
+    ALTER ROLE keycloak LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 25 PASSWORD :'keycloak_pw';
+    SELECT 'CREATE DATABASE meho OWNER meho ENCODING ''UTF8''' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'meho')\gexec
+    SELECT 'CREATE DATABASE keycloak OWNER keycloak ENCODING ''UTF8''' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')\gexec
+    REVOKE CONNECT, TEMPORARY ON DATABASE meho FROM PUBLIC;
+    REVOKE CONNECT, TEMPORARY ON DATABASE keycloak FROM PUBLIC;
+    \c meho
+    CREATE EXTENSION IF NOT EXISTS vector;
+    -- After a new image brings a newer pgvector, this moves the extension
+    -- in the database to it. It does nothing when it is already current.
+    ALTER EXTENSION vector UPDATE;
+
+  # Runs core.sql once over the local socket as the image superuser
+  # (initdb's `local all all trust` line), with the two role passwords
+  # read from the mounted Secret files. Used by both paths: the server
+  # container runs it from /docker-entrypoint-initdb.d, the sidecar from
+  # its loop.
+  apply.sh: |
+    #!/bin/sh
+    set -eu
+    secrets=/etc/core-postgres/secrets
+    MEHO_DB_PASSWORD=$(cat "$secrets/meho/password")
+    KEYCLOAK_DB_PASSWORD=$(cat "$secrets/keycloak/password")
+    if [ -z "$MEHO_DB_PASSWORD" ] || [ -z "$KEYCLOAK_DB_PASSWORD" ]; then
+      echo "core-postgres: a mounted password file is empty; nothing changed" >&2
+      exit 1
+    fi
+    export MEHO_DB_PASSWORD KEYCLOAK_DB_PASSWORD
+    export PGOPTIONS="-c client_min_messages=warning"
+    exec psql -X -q -v ON_ERROR_STOP=1 -h /var/run/postgresql -U postgres -d postgres \
+      -f /etc/core-postgres/config/core.sql
+
+  # The reconcile sidecar. It checks whether the SQL file or a mounted
+  # password changed since its last good run, and if so runs apply.sh. So a
+  # new or restored Secret never drifts from the live role. It checks every
+  # 2 s until the server first answers, then every 30 s. It waits for the
+  # server on TCP, not on the socket: the temporary server that runs the
+  # initdb script listens on the socket only, and the two must not run
+  # core.sql at the same time.
+  reconcile.sh: |
+    #!/bin/sh
+    set -u
+    # As PID 1, sh ignores SIGTERM unless it traps it; without this the pod
+    # would wait the full grace period on every stop.
+    trap 'exit 0' TERM INT
+    config=/etc/core-postgres/config
+    secrets=/etc/core-postgres/secrets
+    applied=""
+    interval=2
+    while :; do
+      if pg_isready -q -h 127.0.0.1 -p 5432 -U postgres; then
+        current=$(cat "$config/core.sql" "$secrets/meho/password" "$secrets/keycloak/password" | sha256sum)
+        if [ "$current" != "$applied" ]; then
+          if "$config/apply.sh"; then
+            applied=$current
+            echo "core-postgres: roles and databases match the mounted Secrets"
+          else
+            echo "core-postgres: reconcile failed; retrying in 30 s" >&2
+          fi
+        fi
+        interval=30
+      fi
+      sleep "$interval" &
+      wait $!
+    done

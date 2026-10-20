@@ -106,7 +106,9 @@ func newIngestCmd() *cobra.Command {
 			"tenant) — the request then leaves tenant_id unset, the\n" +
 			"omit-equals-global semantics the REST and MCP surfaces share.\n" +
 			"Pass your OWN tenant UUID for a tenant-curated ingest; the\n" +
-			"backplane rejects any other tenant's UUID with HTTP 403.\n\n" +
+			"backplane rejects any other tenant's UUID with HTTP 403. A\n" +
+			"platform_admin may pass another tenant's UUID to ingest on that\n" +
+			"tenant's behalf; the write is audited.\n\n" +
 			"--auth-scheme (manual mode) selects a named auth scheme from the\n" +
 			"closed catalog so the connector is stamped DISPATCHABLE (a profiled\n" +
 			"connector), still staged behind review/enable — never auto-enabled.\n" +
@@ -159,7 +161,8 @@ func newIngestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tenantID, "tenant-id", "",
 		"write scope for the ingested rows (works with both modes): omit for the built-in / "+
 			"global scope (tenant_id left unset — visible to every tenant); pass your own "+
-			"tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403)")
+			"tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 "+
+			"unless you hold platform_admin)")
 	cmd.Flags().StringVar(&authScheme, "auth-scheme", "",
 		"manual mode: select a named auth scheme (closed catalog) so the connector is stamped "+
 			"DISPATCHABLE (a profiled connector, still staged behind review) instead of a "+

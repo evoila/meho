@@ -305,11 +305,14 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 			w.WriteHeader(http.StatusNoContent)
 		case sub == "groups" && r.Method == http.MethodGet:
 			f.calls["GET /groups"]++
-			searchName := r.URL.Query().Get("search")
+			// Like Keycloak: the search is a case-insensitive substring
+			// match, and the answer is the short form (no attributes).
+			searchName := strings.ToLower(r.URL.Query().Get("search"))
 			var hits []groupRep
 			for _, g := range f.groups {
-				if searchName == "" || strings.Contains(g.Name, searchName) {
-					hits = append(hits, *g)
+				if searchName == "" ||
+					strings.Contains(strings.ToLower(g.Name), searchName) {
+					hits = append(hits, groupRep{ID: g.ID, Name: g.Name})
 				}
 			}
 			writeJSON(w, http.StatusOK, hits)
@@ -326,6 +329,38 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 			w.Header().Set("Location",
 				fmt.Sprintf("https://fake/admin/realms/r/groups/%s", id))
 			w.WriteHeader(http.StatusCreated)
+		case strings.HasPrefix(sub, "groups/") &&
+			strings.Count(sub, "/") == 1 &&
+			r.Method == http.MethodGet:
+			f.calls["GET /groups/{uuid}"]++
+			g, ok := f.groups[strings.TrimPrefix(sub, "groups/")]
+			if !ok {
+				http.Error(w, "no such group", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, g)
+		case strings.HasPrefix(sub, "groups/") &&
+			strings.Count(sub, "/") == 1 &&
+			r.Method == http.MethodPut:
+			f.calls["PUT /groups/{uuid}"]++
+			id := strings.TrimPrefix(sub, "groups/")
+			g, ok := f.groups[id]
+			if !ok {
+				http.Error(w, "no such group", http.StatusNotFound)
+				return
+			}
+			var in groupRep
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// Like Keycloak: a sent attribute map replaces the old one.
+			g.Name = in.Name
+			g.Description = in.Description
+			if in.Attributes != nil {
+				g.Attributes = in.Attributes
+			}
+			w.WriteHeader(http.StatusNoContent)
 		case sub == "users" && r.Method == http.MethodGet:
 			f.calls["GET /users"]++
 			username := r.URL.Query().Get("username")
@@ -464,10 +499,10 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		t.Errorf("MCPClientID = %q, want meho-mcp", res.MCPClientID)
 	}
 
-	// Each client has 5 mappers.
+	// Each client has 6 mappers.
 	for uuid, mappers := range fake.mappers {
-		if len(mappers) != 5 {
-			t.Errorf("client %s has %d mappers, want 5",
+		if len(mappers) != 6 {
+			t.Errorf("client %s has %d mappers, want 6",
 				uuid, len(mappers))
 		}
 		names := make(map[string]bool)
@@ -479,6 +514,7 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 			"meho-mcp-audience",
 			"tenant-id",
 			"tenant-role",
+			"approver",
 			"groups-claim",
 		} {
 			if !names[want] {
@@ -495,9 +531,9 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		}
 	}
 
-	// Group + user created and joined.
-	if len(fake.groups) != 1 {
-		t.Errorf("expected 1 group, got %d", len(fake.groups))
+	// Five role groups, one user, and the user is in MEHO-Admins only.
+	if len(fake.groups) != 5 {
+		t.Errorf("expected 5 groups, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 1 {
 		t.Errorf("expected 1 user, got %d", len(fake.users))
@@ -509,8 +545,11 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 	if got := fake.passwords[userID]; got != "deploypw" {
 		t.Errorf("user password = %q, want deploypw", got)
 	}
-	if !res.AdminGroupCreated {
-		t.Errorf("AdminGroupCreated = false, want true")
+	if got := fake.userGroupNames(userID); !slices.Equal(got, []string{"MEHO-Admins"}) {
+		t.Errorf("user groups = %v, want [MEHO-Admins]", got)
+	}
+	if res.AdminGroupUUID != fake.groupByName("MEHO-Admins").ID {
+		t.Errorf("AdminGroupUUID = %q, want the MEHO-Admins UUID", res.AdminGroupUUID)
 	}
 	if !res.AdminUserCreated {
 		t.Errorf("AdminUserCreated = false, want true")
@@ -546,13 +585,36 @@ func TestBootstrap_IdempotentReRunIsNoOp(t *testing.T) {
 		fake.calls["POST /groups"] +
 		fake.calls["POST /users"]
 
-	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+	firstUpdates := fake.calls["PUT /clients/{uuid}/protocol-mappers/models/{id}"] +
+		fake.calls["PUT /groups/{uuid}"] +
+		fake.calls["PUT /users/{uuid}/groups/{gid}"]
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
 		t.Fatalf("second Bootstrap: %v", err)
 	}
 	secondCreatePosts := fake.calls["POST /clients"] +
 		fake.calls["POST /clients/{uuid}/protocol-mappers/models"] +
 		fake.calls["POST /groups"] +
 		fake.calls["POST /users"]
+	// Mappers, groups and the group join must not be touched again.
+	secondUpdates := fake.calls["PUT /clients/{uuid}/protocol-mappers/models/{id}"] +
+		fake.calls["PUT /groups/{uuid}"] +
+		fake.calls["PUT /users/{uuid}/groups/{gid}"]
+	if secondUpdates != firstUpdates {
+		t.Errorf("re-run updated mappers, groups or memberships: first=%d second=%d",
+			firstUpdates, secondUpdates)
+	}
+	for _, line := range res.MapperEventsLog {
+		if strings.Contains(line, "mapper") || strings.Contains(line, "group") {
+			if !strings.HasPrefix(line, "[skip]") {
+				t.Errorf("re-run event %q, want [skip]", line)
+			}
+		}
+	}
+	if res.AdminUserCreated || res.AdminUserJoined {
+		t.Errorf("re-run created or re-joined the admin user: %+v", res)
+	}
 
 	if firstCreatePosts == 0 {
 		t.Fatalf("first run did not POST anything — test setup wrong")
@@ -611,7 +673,9 @@ func TestBootstrap_DryRunDoesNotCallKeycloak(t *testing.T) {
 	}
 }
 
-func TestBootstrap_SkipUserProvisioningOmitsGroupAndUser(t *testing.T) {
+// Skipping the user step still creates the five groups: they carry the
+// tenant and the role for people who come from a directory.
+func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 	opts := fullOpts()
 	opts.SkipUserProvisioning = true
 	opts.AdminUserUsername = ""
@@ -621,9 +685,9 @@ func TestBootstrap_SkipUserProvisioningOmitsGroupAndUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bootstrap with skip-user: %v", err)
 	}
-	if len(fake.groups) != 0 {
-		t.Errorf("expected 0 groups when skipped, got %d",
-			len(fake.groups))
+	if len(fake.groups) != 5 {
+		t.Errorf("expected the 5 role groups when the user step is "+
+			"skipped, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 0 {
 		t.Errorf("expected 0 users when skipped, got %d",
@@ -740,13 +804,37 @@ func TestBootstrap_MapperShapeMatchesReferenceScript(t *testing.T) {
 			mcp.Config["included.custom.audience"])
 	}
 
-	// tenant-id — hardcoded-claim.
-	tid := byName["tenant-id"]
-	if tid.ProtocolMapper != "oidc-hardcoded-claim-mapper" {
-		t.Errorf("tenant-id mapper type = %q", tid.ProtocolMapper)
-	}
-	if tid.Config["claim.name"] != "tenant_id" {
-		t.Errorf("tenant-id claim.name = %q", tid.Config["claim.name"])
+	// tenant-id / tenant-role / approver — stock User Attribute mappers
+	// that read the group attributes. No fixed value anywhere.
+	for _, tc := range []struct {
+		mapper, attr, jsonType string
+	}{
+		{"tenant-id", "tenant_id", "String"},
+		{"tenant-role", "tenant_role", "String"},
+		{"approver", "approver", "boolean"},
+	} {
+		m := byName[tc.mapper]
+		if m.ProtocolMapper != "oidc-usermodel-attribute-mapper" {
+			t.Errorf("%s mapper type = %q, want oidc-usermodel-attribute-mapper",
+				tc.mapper, m.ProtocolMapper)
+		}
+		want := map[string]string{
+			"user.attribute":     tc.attr,
+			"claim.name":         tc.attr,
+			"jsonType.label":     tc.jsonType,
+			"multivalued":        "false",
+			"aggregate.attrs":    "false",
+			"access.token.claim": "true",
+			"id.token.claim":     "false",
+		}
+		for k, v := range want {
+			if m.Config[k] != v {
+				t.Errorf("%s config %s = %q, want %q", tc.mapper, k, m.Config[k], v)
+			}
+		}
+		if _, ok := m.Config["claim.value"]; ok {
+			t.Errorf("%s carries a fixed claim.value", tc.mapper)
+		}
 	}
 
 	// groups-claim — group-membership.
@@ -1165,5 +1253,270 @@ func TestBootstrap_MCPClientOffersMCPScopes(t *testing.T) {
 	if got := fake.calls["POST /client-scopes"]; got != len(want) {
 		t.Errorf("POST /client-scopes called %d times across 2 runs; "+
 			"want %d (re-run must skip existing scopes)", got, len(want))
+	}
+}
+
+// groupByName returns the stored group with this exact name, or nil.
+func (f *fakeKeycloak) groupByName(name string) *groupRep {
+	for _, g := range f.groups {
+		if g.Name == name {
+			return g
+		}
+	}
+	return nil
+}
+
+// userGroupNames returns the sorted names of the groups the user is in.
+func (f *fakeKeycloak) userGroupNames(userUUID string) []string {
+	var names []string
+	for _, gid := range f.userGroups[userUUID] {
+		if g, ok := f.groups[gid]; ok {
+			names = append(names, g.Name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// clientMappers returns the mappers stored on the client with this
+// clientId, keyed by mapper name.
+func (f *fakeKeycloak) clientMappers(t *testing.T, clientID string) map[string]protocolMapperRep {
+	t.Helper()
+	for uuid, c := range f.clients {
+		if c.ClientID == clientID {
+			byName := map[string]protocolMapperRep{}
+			for _, m := range f.mappers[uuid] {
+				byName[m.Name] = m
+			}
+			return byName
+		}
+	}
+	t.Fatalf("client %s not found", clientID)
+	return nil
+}
+
+// The five groups carry the decided attributes: the tenant from
+// --tenant-id, the role per group, and approver=true only on
+// MEHO-Approvers.
+func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
+	fake := newFakeKeycloak()
+	opts := fullOpts()
+	if _, _, err := runBootstrapOnce(t, fake, opts); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	tenant := []string{opts.TenantID}
+	want := map[string]map[string][]string{
+		"MEHO-Readers":      {"tenant_id": tenant, "tenant_role": {"read_only"}},
+		"MEHO-Operators":    {"tenant_id": tenant, "tenant_role": {"operator"}},
+		"MEHO-SA-Operators": {"tenant_id": tenant, "tenant_role": {"operator"}},
+		"MEHO-Admins":       {"tenant_id": tenant, "tenant_role": {"tenant_admin"}},
+		"MEHO-Approvers": {
+			"tenant_id": tenant, "tenant_role": {"read_only"}, "approver": {"true"},
+		},
+	}
+	for name, attrs := range want {
+		g := fake.groupByName(name)
+		if g == nil {
+			t.Errorf("group %s not created", name)
+			continue
+		}
+		if len(g.Attributes) != len(attrs) {
+			t.Errorf("group %s attributes = %v, want %v", name, g.Attributes, attrs)
+			continue
+		}
+		for k, v := range attrs {
+			if !slices.Equal(g.Attributes[k], v) {
+				t.Errorf("group %s %s = %v, want %v", name, k, g.Attributes[k], v)
+			}
+		}
+	}
+}
+
+// A realm made by the older version of the command has fixed-value
+// tenant-id / tenant-role mappers on both clients and a `meho-admins`
+// group with the admin user in it. A run replaces the two fixed mappers
+// with User Attribute mappers, adds the approver mapper, creates the
+// five groups and puts the admin user in MEHO-Admins. Old groups are
+// left alone. A second run then changes nothing.
+func TestBootstrap_UpgradeReplacesFixedValueMappers(t *testing.T) {
+	fake := newFakeKeycloak()
+	opts := fullOpts().withDefaults()
+	oldFixed := func(name, claim, value string) protocolMapperRep {
+		return protocolMapperRep{
+			ID:             "mapper-old-" + name,
+			Name:           name,
+			Protocol:       "openid-connect",
+			ProtocolMapper: "oidc-hardcoded-claim-mapper",
+			Config: map[string]string{
+				"claim.name":           claim,
+				"claim.value":          value,
+				"jsonType.label":       "String",
+				"id.token.claim":       "false",
+				"access.token.claim":   "true",
+				"userinfo.token.claim": "false",
+			},
+		}
+	}
+	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredMCPClient()} {
+		c.ID = "uuid-old-" + c.ClientID
+		fake.clients[c.ID] = c
+		fake.mappers[c.ID] = []protocolMapperRep{
+			oldFixed("tenant-id", "tenant_id", opts.TenantID),
+			oldFixed("tenant-role", "tenant_role", "tenant_admin"),
+		}
+	}
+	fake.groups["uuid-old-group"] = &groupRep{ID: "uuid-old-group", Name: "meho-admins"}
+	fake.users["uuid-old-user"] = &userRep{ID: "uuid-old-user", Username: opts.AdminUserUsername}
+	fake.userGroups["uuid-old-user"] = []string{"uuid-old-group"}
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	for _, clientID := range []string{"meho-cli", "meho-mcp"} {
+		byName := fake.clientMappers(t, clientID)
+		if len(byName) != 6 {
+			t.Errorf("%s has %d mappers, want 6", clientID, len(byName))
+		}
+		for name, m := range byName {
+			if m.ProtocolMapper == "oidc-hardcoded-claim-mapper" {
+				t.Errorf("%s still has fixed-value mapper %s", clientID, name)
+			}
+		}
+		for _, name := range []string{"tenant-id", "tenant-role", "approver"} {
+			if got := byName[name].ProtocolMapper; got != "oidc-usermodel-attribute-mapper" {
+				t.Errorf("%s mapper %s type = %q", clientID, name, got)
+			}
+		}
+	}
+	replaced := 0
+	for _, line := range res.MapperEventsLog {
+		if strings.Contains(line, "replaced oidc-hardcoded-claim-mapper with oidc-usermodel-attribute-mapper") {
+			replaced++
+		}
+	}
+	if replaced != 4 {
+		t.Errorf("got %d mapper-replaced events, want 4 (2 mappers x 2 clients): %v",
+			replaced, res.MapperEventsLog)
+	}
+
+	if fake.groupByName("meho-admins") == nil {
+		t.Errorf("old meho-admins group was removed; old groups must stay")
+	}
+	if got := fake.userGroupNames("uuid-old-user"); !slices.Equal(got, []string{"MEHO-Admins", "meho-admins"}) {
+		t.Errorf("admin user groups = %v, want [MEHO-Admins meho-admins]", got)
+	}
+	if res.AdminUserCreated || !res.AdminUserJoined {
+		t.Errorf("want an existing user that joined MEHO-Admins, got %+v", res)
+	}
+	if n := fake.calls["PUT /users/{uuid}/reset-password"]; n != 0 {
+		t.Errorf("existing user's password reset %d times, want 0", n)
+	}
+
+	putsBefore := fake.calls["PUT /clients/{uuid}/protocol-mappers/models/{id}"] +
+		fake.calls["PUT /groups/{uuid}"] + fake.calls["POST /groups"] +
+		fake.calls["POST /clients/{uuid}/protocol-mappers/models"]
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	putsAfter := fake.calls["PUT /clients/{uuid}/protocol-mappers/models/{id}"] +
+		fake.calls["PUT /groups/{uuid}"] + fake.calls["POST /groups"] +
+		fake.calls["POST /clients/{uuid}/protocol-mappers/models"]
+	if putsAfter != putsBefore {
+		t.Errorf("second run after the upgrade changed mappers or groups: %d -> %d",
+			putsBefore, putsAfter)
+	}
+}
+
+// A role group whose attributes were changed by hand is set back. Only
+// the three keys the command owns change: other attributes stay, and
+// `approver` is removed from groups other than MEHO-Approvers.
+func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.groups["uuid-ops"] = &groupRep{
+		ID: "uuid-ops", Name: "MEHO-Operators",
+		Attributes: map[string][]string{
+			"tenant_id":   {"11111111-1111-1111-1111-111111111111"},
+			"tenant_role": {"tenant_admin"},
+			"note":        {"kept"},
+		},
+	}
+	fake.groups["uuid-readers"] = &groupRep{
+		ID: "uuid-readers", Name: "MEHO-Readers",
+		Attributes: map[string][]string{
+			"tenant_id":   {fullOpts().TenantID},
+			"tenant_role": {"read_only"},
+			"approver":    {"true"},
+		},
+	}
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	ops := fake.groups["uuid-ops"].Attributes
+	if !slices.Equal(ops["tenant_role"], []string{"operator"}) ||
+		!slices.Equal(ops["tenant_id"], []string{fullOpts().TenantID}) {
+		t.Errorf("MEHO-Operators attributes not fixed: %v", ops)
+	}
+	if !slices.Equal(ops["note"], []string{"kept"}) {
+		t.Errorf("MEHO-Operators lost an attribute the command does not own: %v", ops)
+	}
+	if _, ok := fake.groups["uuid-readers"].Attributes["approver"]; ok {
+		t.Errorf("MEHO-Readers still has approver: %v", fake.groups["uuid-readers"].Attributes)
+	}
+	if n := fake.calls["PUT /groups/{uuid}"]; n != 2 {
+		t.Errorf("PUT /groups/{uuid} called %d times, want 2", n)
+	}
+	if n := fake.calls["POST /groups"]; n != 3 {
+		t.Errorf("POST /groups called %d times, want 3 (the missing groups)", n)
+	}
+	for _, name := range []string{"MEHO-Operators", "MEHO-Readers"} {
+		found := false
+		for _, line := range res.MapperEventsLog {
+			if strings.HasPrefix(line, "[updated] group "+name+" ") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no [updated] event for %s: %v", name, res.MapperEventsLog)
+		}
+	}
+}
+
+// The dry run lists the five groups with their attributes.
+func TestBootstrap_DryRunListsRoleGroups(t *testing.T) {
+	opts := fullOpts()
+	opts.DryRun = true
+	_, stdout, err := runBootstrapOnce(t, newFakeKeycloak(), opts)
+	if err != nil {
+		t.Fatalf("Bootstrap dry-run: %v", err)
+	}
+	want := "MEHO-Approvers: tenant_id=" + opts.TenantID +
+		" tenant_role=read_only approver=true"
+	if !strings.Contains(stdout, want) {
+		t.Errorf("dry-run stdout missing %q; got:\n%s", want, stdout)
+	}
+}
+
+// --tenant-role and --admin-group-name are gone: the role comes from the
+// group, and the first admin always joins MEHO-Admins. A script that
+// still passes one stops before any Keycloak call.
+func TestBootstrapClientsCmd_RemovedFlagsStop(t *testing.T) {
+	for _, flag := range []string{"--tenant-role", "--admin-group-name"} {
+		t.Run(flag, func(t *testing.T) {
+			cmd := newBootstrapClientsCmd()
+			cmd.SetArgs([]string{
+				"--keycloak-base-url", "https://keycloak.example.com",
+				"--realm", "meho", flag, "x",
+			})
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), "unknown flag: "+flag) {
+				t.Errorf("err = %v, want unknown flag: %s", err, flag)
+			}
+		})
 	}
 }

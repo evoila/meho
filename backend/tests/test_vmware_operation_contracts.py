@@ -61,6 +61,7 @@ VMWARE_CONNECTORS: Final[frozenset[str]] = frozenset(
     {
         "vmware-rest",
         "nsx-rest",
+        "hcx-rest",
         "sddc-rest",
         "sddc-vcf5",
         "fleet-lcm",

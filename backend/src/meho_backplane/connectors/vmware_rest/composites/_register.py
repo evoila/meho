@@ -768,8 +768,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "8.0.x; resource_pool and datastore are required there. "
             "Partial-failure rollback: if any step after the create "
             "succeeds fails, the half-created VM is removed via "
-            "DELETE:/vcenter/vm/{vm} so the caller knows the VM did not "
-            "persist. Equivalent of 'govc vm.create' for operator-facing "
+            "DELETE:/vcenter/vm/{vm}. The result is then an error that "
+            "names the failed step and carries vCenter's message; its "
+            "rollback field says whether the VM was removed. Equivalent "
+            "of 'govc vm.create' for operator-facing "
             "dispatch."
         ),
         parameter_schema=VM_CREATE_PARAMETER_SCHEMA,

@@ -88,7 +88,6 @@ status enums are listed on each composite's ``response_schema`` in
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import re
 import secrets
 import time
@@ -1415,13 +1414,21 @@ def _rolled_back(
     steps: list[str],
     failed_step: str,
     reason: str,
+    rollback_note: str | None = None,
 ) -> dict[str, Any]:
     """Build the canonical rolled_back response envelope for :func:`vm_create_composite`.
 
-    A rollback means no VM was created, so the envelope carries an
+    A rollback means the create did not finish, so the envelope carries an
     ``error``-severity issue and the dispatcher records a failure (#3813).
+    *rollback_note* says what happened to a VM the run had created (#4057).
+    It comes before the cause, so a shortened error line still shows it.
     """
-    message = f"vm.create failed at step {failed_step!r}" + (f": {reason}" if reason else "")
+    if rollback_note is None:
+        message = f"vm.create failed at step {failed_step!r}" + (f": {reason}" if reason else "")
+    else:
+        message = f"vm.create failed at step {failed_step!r}; {rollback_note}" + (
+            f" Cause: {reason}" if reason else ""
+        )
     return {
         "status": "rolled_back",
         "vm_id": None,
@@ -1707,18 +1714,20 @@ async def _roll_back_created_vm(
 ) -> dict[str, Any]:
     """Remove a half-created VM with ``DELETE:/vcenter/vm/{vm}``; the ``rolled_back`` envelope.
 
-    Best-effort: rollback faults are swallowed -- the operator already knows
-    the create flow failed, and a denied/queued rollback sub-op or a
-    transport error must not mask the original failure. A gate result from
-    the seam is ignored here for the same reason (the rollback DELETE is a
-    cleanup, not an operator-requested action). The VM exists by now, so a
-    DELETE that waits for approval saves the rollback as its resume state
-    (#4217): approving it re-runs ``vm.create``, which then only runs this
-    rollback (:func:`_resumed_vm_create_rollback`) and creates no VM.
+    A failed, denied or waiting rollback DELETE does not replace the
+    original failure: the envelope is still ``rolled_back`` with the failed
+    step and its cause. The ``rollback`` field and the error message say
+    what happened to the VM (#4057): ``removed``, ``awaiting_approval``
+    (the VM still exists until someone approves the DELETE) or
+    ``not_removed`` (the operator must delete it by hand). The VM exists by
+    now, so a DELETE that waits for approval saves the rollback as its
+    resume state (#4217): approving it re-runs ``vm.create``, which then
+    only runs this rollback (:func:`_resumed_vm_create_rollback`) and
+    creates no VM.
     """
     rollback = {"vm_id": vm_id, "steps": steps, "failed_step": failed_step, "reason": reason}
-    with contextlib.suppress(httpx.HTTPError):
-        await _write_sub_op(
+    try:
+        gate, _ = await _write_sub_op(
             connector,
             target,
             operator,
@@ -1727,7 +1736,31 @@ async def _roll_back_created_vm(
             resume_state={"rollback": rollback},
             after_main_effect=True,
         )
-    return _rolled_back(steps=steps, failed_step=failed_step, reason=reason)
+    except httpx.HTTPError as exc:
+        outcome = "not_removed"
+        note = (
+            f"the rollback could not remove the VM it created ({vm_id}): "
+            f"{_vsphere_fault_detail(exc).rstrip('.')}. Delete the VM by hand."
+        )
+    else:
+        if gate is None:
+            outcome = "removed"
+            note = f"the rollback removed the VM it created ({vm_id})."
+        elif gate.status == "awaiting_approval":
+            outcome = "awaiting_approval"
+            note = (
+                f"removing the VM it created ({vm_id}) waits for approval. "
+                "The VM exists until then."
+            )
+        else:
+            outcome = "not_removed"
+            note = (
+                f"the rollback was not allowed to remove the VM it created ({vm_id}). "
+                "Delete the VM by hand."
+            )
+    envelope = _rolled_back(steps=steps, failed_step=failed_step, reason=reason, rollback_note=note)
+    envelope["rollback"] = {"vm_id": vm_id, "outcome": outcome}
+    return envelope
 
 
 def _resumed_vm_create_rollback() -> dict[str, Any] | None:
@@ -1789,7 +1822,7 @@ async def _enable_nested_hv(
             timeout_seconds=_VM_CREATE_VHV_TASK_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
-        return None, f"nested_hv reconfigure failed: {exc}"
+        return None, f"nested_hv reconfigure failed: {_vsphere_fault_detail(exc)}"
     if outcome.state == TASK_STATE_ERROR:
         return None, (
             f"nested_hv ReconfigVM_Task on vm {vm_id!r} faulted: "
@@ -2231,7 +2264,7 @@ async def _issue_vim_create(
             timeout_seconds=_VM_CREATE_TASK_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
-        return None, None, f"create via CreateVM_Task failed: {exc}"
+        return None, None, f"create via CreateVM_Task failed: {_vsphere_fault_detail(exc)}"
     if outcome.state == TASK_STATE_ERROR:
         return (
             None,
@@ -2277,7 +2310,7 @@ async def _power_on_created_vm(
             connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
         )
     except httpx.HTTPError as exc:
-        return None, f"power_on failed: {exc}"
+        return None, f"power_on failed: {_vsphere_fault_detail(exc)}"
     return gate, None
 
 
@@ -2623,7 +2656,9 @@ async def vm_create_composite(
         )
     except httpx.HTTPError as exc:
         # Create failed; nothing to roll back.
-        return _rolled_back(steps=steps, failed_step="create", reason=f"create failed: {exc}")
+        return _rolled_back(
+            steps=steps, failed_step="create", reason=f"create failed: {_vsphere_fault_detail(exc)}"
+        )
     if gate is not None:
         return gate
     vm_id = _unwrap_value(create_payload)
@@ -2661,7 +2696,10 @@ async def vm_create_composite(
                 vm_id=vm_id,
                 steps=steps,
                 failed_step="nic_attach",
-                reason=f"nic attach for network={nic.get('network')!r} failed: {exc}",
+                reason=(
+                    f"nic attach for network={nic.get('network')!r} failed: "
+                    f"{_vsphere_fault_detail(exc)}"
+                ),
             )
         if gate is not None:
             return gate

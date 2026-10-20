@@ -2377,6 +2377,24 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``null`` when ``status='created'``."
             ),
         },
+        "rollback": {
+            "type": "object",
+            "properties": {
+                "vm_id": {"type": "string"},
+                "outcome": {
+                    "type": "string",
+                    "enum": ["removed", "awaiting_approval", "not_removed"],
+                },
+            },
+            "description": (
+                "What happened to the VM this run created (#4057). Present only "
+                "when a step after the create failed. ``removed``: the rollback "
+                "deleted the VM. ``awaiting_approval``: the delete waits for "
+                "approval and the VM exists until then. ``not_removed``: the "
+                "delete failed or was not allowed; delete ``vm_id`` by hand. The "
+                "error issue says the same in words."
+            ),
+        },
         "nested_hv": {
             "type": "boolean",
             "description": (

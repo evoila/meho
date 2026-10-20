@@ -44,11 +44,9 @@ import yaml
 from cryptography.fernet import Fernet
 from httpx import ASGITransport
 
-import meho_backplane.audit as audit_middleware
-import meho_backplane.broadcast.publisher as broadcast_publisher
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast import reset_broadcast_client_for_testing
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -433,15 +431,13 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    # No broadcast store here: a closed port makes every publish fail fast,
+    # and a failed publish is a warning by contract. The audit rows are the
+    # record.
+    monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://127.0.0.1:9")
     get_settings.cache_clear()
     clear_jwks_cache()
-
-    async def no_broadcast(*_args: Any, **_kwargs: Any) -> None:
-        pass
-
-    # No broadcast store here; the audit rows are the record.
-    for module in (audit_module, audit_middleware, broadcast_publisher):
-        monkeypatch.setattr(module, "publish_event", no_broadcast)
+    reset_broadcast_client_for_testing()
     reset_dispatcher_caches()
     clear_registry()
     _WRITES.clear()
@@ -498,6 +494,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
     finally:
         reset_dispatcher_caches()
         clear_registry()
+        reset_broadcast_client_for_testing()
 
     assert len(_WRITES) == 1
     assert _WRITES[0]["params"]["data"]["password"] == _SENTINEL

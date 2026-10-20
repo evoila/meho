@@ -602,6 +602,70 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   failure). Set-shaped (JSONFlux-reduced when large), with `host_required`
   / `host_not_found` / `ambiguous_host` / `unsupported_host_target`
   covering the resolution refusals.
+- **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
+  handler `sso_admin_api_file_get`) — reads one SSO Admin API description
+  file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
+  download has the SSO Admin WSDL, so a running vCenter is the only place to
+  get it. `safe`, read-only, in its own group `vcenter-sso-admin-api-files`.
+  Registered through `VMWARE_TYPED_OPS`, so it is on both catalogs.
+
+  | Versions | Catalog |
+  |---|---|
+  | vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+  | vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+  - **Which paths it reads.** Only a path under `/sso-adminserver/` (the SSO
+    Admin service folder; the documented service address is
+    `/sso-adminserver/sdk/{domain}`). Allowed characters are letters,
+    digits and `. _ ~ / -`; no `..` or `//`; the query is empty or one of
+    `wsdl`, `xsd`, `xsd=<number>`. So a backslash, a `%` (an encoded dot or
+    slash), a scheme or a host is refused. The same rule is the `pattern` of
+    the `path` parameter, so the dispatcher refuses a bad path as
+    `invalid_params`, and the handler checks it again. A refused path sends
+    no request. Every SSO Admin call is a SOAP `POST`, so a `GET` in that
+    folder changes nothing. The exact file path of the WSDL is not documented
+    by the vendor yet; the read does not need it, and the lab pins it with
+    this read.
+  - **How it reads.** One `GET` on a new client from
+    `_ephemeral_http_client` (same SSRF and TLS settings, its own empty
+    cookie jar). No login header and no session cookie go out: the SSO Admin
+    service has its own login (a SAML token), and a WSDL holds no data. The
+    request goes through `httpx.AsyncClient.send(..., follow_redirects=False)`,
+    so a redirect is not followed (the pooled client class would follow a
+    same-origin redirect by itself). A `3xx` returns `redirect_path`; a
+    `401`, `403`, `404` or `5xx` returns its `status` with no text.
+  - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
+    `size` (bytes), `sha256` (of the file bytes), `imports`, `parts`,
+    `text_parts`, `version`, `build`, `version_error`. `imports` lists the
+    `location` / `schemaLocation` values of `wsdl:import`, `xsd:import` and
+    `xsd:include`, as written, parsed with `defusedxml`; a file that is not
+    XML gives `[]`. Only UTF-8 text comes back; other content is refused and
+    the error names its content type.
+  - **Version and build** come from `GET /api/appliance/system/version` on
+    the connector's normal login. If that read fails, the file still comes
+    back, `version` and `build` are `null`, and `version_error` says why.
+  - **How to rebuild the file.** `text_parts` is a list of
+    `{index, text}`, each at most 64 KiB of UTF-8, cut only between
+    characters. Join the `text` of all parts in `index` order and encode as
+    UTF-8; the SHA-256 of the result equals `sha256`. A part is a fixed byte
+    size, not a line, because a served file can be one long line. The answer
+    has two lists (`imports` and `text_parts`), so JSONFlux keeps a large
+    answer whole as a document record behind a result handle; the inline
+    summary keeps the scalar fields (`sha256`, `size`, `parts`, `build`, ...).
+    Read the parts with `result_query` and `query={"path": "/text_parts"}`,
+    paging with a small `limit` (one answer is at most 256 KiB), and the
+    imports with `path="/imports"`. A file that does not fit in one stored
+    result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
+    stored JSON) stops with an error that names its size; the read never
+    returns a cut file.
+  - **Tests.** `tests/test_connectors_vmware_rest_typed_sso_admin_api_file.py`
+    (respx: accepted and refused paths, no login on the `GET`, status and
+    redirect cases, large files, version failure, the result-handle round
+    trip) and the reconcile lane
+    `tests/test_connectors_vmware_rest_sso_admin_api_file_reconcile.py`
+    (the SSO Admin folder is a documentation path that the pinned 8.0 and
+    9.0 `vcenter.yaml` do not serve; both serve
+    `GET /appliance/system/version`).
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the

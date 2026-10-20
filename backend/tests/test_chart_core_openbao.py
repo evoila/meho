@@ -105,8 +105,14 @@ def _one(docs: list[dict[str, Any]], kind: str, name: str | None = None) -> dict
 
 
 def _container(docs: list[dict[str, Any]]) -> dict[str, Any]:
-    (container,) = _one(docs, "StatefulSet")["spec"]["template"]["spec"]["containers"]
-    result: dict[str, Any] = container
+    server, _unseal = _one(docs, "StatefulSet")["spec"]["template"]["spec"]["containers"]
+    result: dict[str, Any] = server
+    return result
+
+
+def _unseal_container(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    _server, unseal = _one(docs, "StatefulSet")["spec"]["template"]["spec"]["containers"]
+    result: dict[str, Any] = unseal
     return result
 
 
@@ -288,10 +294,101 @@ def test_on_runs_the_core_secrets_job() -> None:
         (["--set", "coreVault.persistence.size=big"], ("size",)),
         (["--set", "coreVault.authDelegator=yes"], ("authDelegator",)),
         (["--set", "coreVault.unknownKey=1"], ("unknownKey",)),
+        # The unseal mode is whether the Secret exists, never a value (#4046).
+        (["--set", "coreVault.unseal.mode=self"], ("mode",)),
     ],
-    ids=["bad-binary", "bad-digest", "bad-disk-size", "auth-delegator-not-bool", "unknown-key"],
+    ids=[
+        "bad-binary",
+        "bad-digest",
+        "bad-disk-size",
+        "auth-delegator-not-bool",
+        "unknown-key",
+        "no-unseal-mode",
+    ],
 )
 def test_bad_values_fail_at_render(extra: list[str], messages: tuple[str, ...]) -> None:
     result = _run(*_ON, *extra)
     assert result.returncode != 0
     assert any(m in result.stderr for m in messages), result.stderr
+
+
+def test_unseal_helper_reads_the_key_file_on_every_pass() -> None:
+    docs = _openbao_docs()
+    server, unseal = _container(docs), _unseal_container(docs)
+    assert unseal["name"] == "unseal"
+    assert unseal["image"] == server["image"]
+    assert unseal["securityContext"] == server["securityContext"]
+    assert {e["name"]: e["value"] for e in unseal["env"]} == {"BAO_ADDR": "http://127.0.0.1:8200"}
+    script = unseal["args"][0]
+    # `bao` reads the key from the file itself, and the call's output is
+    # thrown away: the key is never on a command line, in the shell or in a log.
+    assert "bao write sys/unseal key=@/unseal/key >/dev/null 2>&1" in script
+    assert "$(" not in script
+    assert "sleep 5" in script
+    assert unseal["volumeMounts"] == [{"name": "unseal", "mountPath": "/unseal", "readOnly": True}]
+    assert "unseal" not in {m["name"] for m in server["volumeMounts"]}
+    pod = _one(docs, "StatefulSet")["spec"]["template"]["spec"]
+    volumes = {v["name"]: v for v in pod["volumes"]}
+    # Optional and no subPath: the pod starts without the Secret, and the
+    # file goes away when the Secret is deleted.
+    assert volumes["unseal"]["secret"] == {"secretName": "test-core-vault-unseal", "optional": True}
+
+
+def test_unseal_helper_on_a_vault_image() -> None:
+    unseal = _unseal_container(_openbao_docs("--set", "coreVault.binary=vault"))
+    assert "vault write sys/unseal key=@/unseal/key" in unseal["args"][0]
+    assert {e["name"] for e in unseal["env"]} == {"VAULT_ADDR"}
+
+
+_NOTES_PROBE = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-probe
+data:
+  notes: {{ tpl (.Files.Get "notes-probe.txt") . | quote }}
+"""
+
+
+def test_notes_show_the_command_never_the_key(tmp_path: Path) -> None:
+    # `helm template` does not print NOTES.txt; render it through a probe.
+    chart = tmp_path / "meho"
+    shutil.copytree(_CHART_DIR, chart)
+    shutil.copy(chart / "templates" / "NOTES.txt", chart / "notes-probe.txt")
+    (chart / "templates" / "zz-notes-probe.yaml").write_text(_NOTES_PROBE, encoding="utf-8")
+
+    def notes(*extra: str) -> str:
+        result = subprocess.run(
+            [
+                "helm",
+                "template",
+                "test",
+                str(chart),
+                *_BASE_OVERRIDES,
+                "--namespace",
+                "meho",
+                "--show-only",
+                "templates/zz-notes-probe.yaml",
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        text: str = yaml.safe_load(result.stdout)["data"]["notes"]
+        return text
+
+    on = notes(*_ON)
+    assert (
+        "kubectl -n meho get secret test-core-vault-unseal -o jsonpath='{.data.key}' | base64 -d"
+        in on
+    )
+    assert (
+        "Copy this to your key store now; for a keyholder at every restart, "
+        "delete the Secret and restart OpenBao" in on
+    )
+    assert "kubectl -n meho rollout restart statefulset test-vault" in on
+    assert "OpenBao" not in notes()
+    # Helm stores the NOTES text in the release; a `lookup` there would print
+    # the key on every upgrade.
+    assert "lookup" not in (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")

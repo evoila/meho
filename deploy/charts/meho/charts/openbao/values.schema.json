@@ -138,6 +138,13 @@
         }
       }
     },
+    "unseal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resources": { "$ref": "#/properties/resources" }
+      }
+    },
     "service": {
       "type": "object",
       "additionalProperties": false,

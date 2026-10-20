@@ -54,6 +54,7 @@ _EXPECTED_POSTURE: dict[str, tuple[str, bool]] = {
     "installer.system.trusted-certificates.list": ("safe", False),
     "installer.system.trusted-certificates.add": ("caution", True),
     "installer.bundles.list": ("safe", False),
+    "installer.bundles.download-status": ("safe", False),
     "installer.bundles.download": ("caution", True),
 }
 

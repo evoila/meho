@@ -697,6 +697,68 @@ async def test_bundles_list_reads_inventory() -> None:
     await connector.aclose()
 
 
+_BUNDLE_DOWNLOAD_STATUS_PATH = "/v1/bundles/download-status"
+
+
+@pytest.mark.asyncio
+async def test_bundles_download_status_returns_failure_detail_for_one_bundle() -> None:
+    connector = _make_connector()
+    row = {
+        "bundleId": "bundle-1",
+        "componentType": "NSX_T_MANAGER",
+        "version": "9.1.0.0",
+        "downloadStatus": "FAILED",
+        "message": "Bundle file not found in depot",
+        "downloadedSize": 0,
+        "isDownloadable": False,
+        "downloadId": "task-1",
+        "downloadScheduledTime": 1,
+        "isDownloadCancellable": False,
+    }
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        route = mock.get(_BUNDLE_DOWNLOAD_STATUS_PATH).respond(200, json={"elements": [row]})
+        result = await connector.bundles_download_status(
+            _make_operator(), _TARGET, {"bundle_id": "bundle-1"}
+        )
+
+    assert dict(route.calls[0].request.url.params) == {"bundleId": "bundle-1"}
+    assert result["elements"][0] == row
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bundles_download_status_maps_every_filter_and_drops_absent_ones() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        route = mock.get(_BUNDLE_DOWNLOAD_STATUS_PATH).respond(200, json={"elements": []})
+        await connector.bundles_download_status(
+            _make_operator(), _TARGET, {"release_version": "9.1.0.0", "image_type": "INSTALL"}
+        )
+        await connector.bundles_download_status(_make_operator(), _TARGET, {})
+
+    assert dict(route.calls[0].request.url.params) == {
+        "releaseVersion": "9.1.0.0",
+        "imageType": "INSTALL",
+    }
+    assert dict(route.calls[1].request.url.params) == {}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bundles_download_status_propagates_401_for_session_recovery() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_BUNDLE_DOWNLOAD_STATUS_PATH).respond(401, json={"message": "token expired"})
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector.bundles_download_status(_make_operator(), _TARGET, {})
+
+    assert exc_info.value.response.status_code == 401
+    await connector.aclose()
+
+
 @pytest.mark.asyncio
 async def test_bundles_download_collects_partial_failures() -> None:
     connector = _make_connector()

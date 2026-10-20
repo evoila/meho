@@ -9,7 +9,7 @@
 #
 #   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
 #     python-lint       : ruff check + ruff format --check + mypy (once)
-#     python-unit-shard : the pytest unit sweep as a 3-way file-stride matrix
+#     python-unit-shard : the pytest unit sweep as a 4-way file-stride matrix
 #     python-unit-lane  : fan-in carrying the branch-protection required
 #                         context `Python (ruff + mypy + pytest)`
 #   go-lint-test      : golangci-lint + go build + go test on cli/
@@ -23,7 +23,7 @@
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the three
+# `.md`). On such a PR the heavy Python lanes — `python-lint`, the four
 # `python-unit-shard` legs, and `python-integration` — skip via their own
 # job-level `if:` (skipped-by-`if:` == Success per #2140), so a changelog
 # roll / guide edit / README fix finishes CI in minutes instead of paying the
@@ -244,9 +244,9 @@ jobs:
   #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
   #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
   #                       pool. Non-required check.
-  #   python-unit-shard — the pytest unit sweep as a 3-way stride matrix over
+  #   python-unit-shard — the pytest unit sweep as a 4-way stride matrix over
   #                       the sorted test-file list (heavy pool, in parallel).
-  #                       Non-required checks (`Python unit shard N/3`).
+  #                       Non-required checks (`Python unit shard N/4`).
   #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
   #                       context `Python (ruff + mypy + pytest)`; fails iff
   #                       python-lint or ANY shard did not pass. Branch
@@ -331,19 +331,20 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: Python unit shard ${{ matrix.shard }}/3
-    # Non-required checks (one per matrix leg: `Python unit shard 1/3`,
-    # `.../2/3`, `.../3/3`) — the required context is carried by the
-    # python-unit-lane fan-in below. This is the pytest half of the old
-    # required lane, split into a deterministic 3-way file-stride matrix
-    # (#3251) so its ~15-18-min serial wall runs as ~6-min parallel shards.
+    name: Python unit shard ${{ matrix.shard }}/4
+    # Non-required checks (one per matrix leg: `Python unit shard 1/4`,
+    # `.../2/4`, `.../3/4`, `.../4/4`) — the required context is carried by
+    # the python-unit-lane fan-in below. This is the pytest half of the old
+    # required lane, split into a deterministic 4-way file-stride matrix
+    # (#3251, 3 shards; #4655 raised it to 4 when the 3 shards reached the
+    # 660 s budget) so its serial wall runs as parallel shards.
     #
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
-    # starts on a fork PR. On a fork PR all three legs skip (→ reported
+    # starts on a fork PR. On a fork PR all four legs skip (→ reported
     # Success), which the fan-in's own fork guard mirrors. Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
-    # skips all three legs → the fan-in reports success-by-skip. `needs:
+    # skips all four legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
     # these legs and the fan-in fails the required context CLOSED.
     needs: changes
@@ -352,20 +353,21 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
     # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods) — #761.
-    # Three shards fit inside the 5-pod ceiling. Only the pytest sweep is
+    # Four shards fit inside the 5-pod ceiling. Only the pytest sweep is
     # CPU/memory-bound enough to want the extra cores; ruff/mypy stayed on the
     # light pool in python-lint.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 3 stride shards (#3251), sized off the pre-shard ~19-min lane so each
-      # shard lands ~6-8 min. fail-fast: false — one shard's red tests must NOT
+      # 4 stride shards (#3251 started with 3; #4655 raised it to 4 after the
+      # slowest shard reached the 660 s budget — measure, then add shards, do
+      # not raise the budget). fail-fast: false — one shard's red tests must NOT
       # cancel the others, so a broad breakage surfaces every failing shard in
       # one run (the fan-in still fails if ANY leg fails). To rebalance, change
       # the shard count in BOTH the matrix and the `TOTAL` in the pytest step,
       # in lockstep.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -611,7 +613,7 @@ jobs:
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
-        # same lockfile are near-instant, so the three shards share one
+        # same lockfile are near-instant, so the four shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
@@ -635,7 +637,7 @@ jobs:
         # pinned there, so a fastembed bump (which can remap the HF
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
-        # lock change still reuse the prior model blob. All three shards
+        # lock change still reuse the prior model blob. All four shards
         # share this one cache entry (same key), so steady-state only the
         # first cold run pays the download.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -722,7 +724,7 @@ jobs:
           sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
           php --version | head -1
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/3)
+      - name: Pytest (unit shard ${{ matrix.shard }}/4)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
@@ -776,7 +778,7 @@ jobs:
         # file-stride split (over a superset of these files) green.
         # Worker count is -n 3 (lowered -n 6 → -n 4 per #1901 for CPU starvation,
         # then -n 4 → -n 3 for MEMORY headroom when the whole-suite lane OOM-killed
-        # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/3 the
+        # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/4 the
         # tests so its base memory is well under the pod limit even without --cov,
         # and -n 3 stays inside the #1983 heartbeat-safe worker count on the
         # 6-core cap. History: -n auto was inconsistent on the shared 4-core pool
@@ -807,11 +809,11 @@ jobs:
           # TOTAL-th file to this shard. File-level split keeps conftest /
           # loadscope semantics identical to a full run; stride (vs
           # contiguous blocks) spreads the heavyweight suites across shards.
-          # The three shards partition the full set exactly (NR mod 3 hits
+          # The four shards partition the full set exactly (NR mod 4 hits
           # each residue once). tests/integration stays out (→ python-
           # integration) and tests/migrations stays out (→ python-migration-
           # tests), matching the pre-shard lane's `--ignore` of both.
-          TOTAL=3
+          TOTAL=4
           SHARD="${{ matrix.shard }}"
           mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
@@ -821,9 +823,10 @@ jobs:
           fi
           # Per-shard perf-budget guard — early warning for CI-perf creep (the
           # #898 / G3.6 timeout class), scaled from the pre-shard 1320 s
-          # whole-suite budget to a per-shard wall (~1/3 the suite). 660 s
-          # leaves generous headroom over the expected ~6-min (~360 s) shard
-          # wall + the heaviest stride slice, while still firing well below the
+          # whole-suite budget to a per-shard wall (then ~1/3 the suite). #4655
+          # kept 660 s when the shard count went 3 → 4: the 3 shards had
+          # reached 580-660 s; the #4655 measurement put the slowest of 4
+          # shards at ~470 s with the same budget. The budget still fires below the
           # 20-min job `timeout-minutes` hang backstop. This step measures the
           # pytest wall, always prints it (trend visibility), and FAILS at the
           # budget so a regression is caught at the PR that causes it.
@@ -927,7 +930,7 @@ jobs:
           shards='${{ needs.python-unit-shard.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 3 stride legs): ${shards}"
+          echo "python-unit-shard (aggregate of all 4 stride legs): ${shards}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -966,14 +969,14 @@ jobs:
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest stride shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/3' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest stride shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 3 pytest stride shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest stride shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 3 pytest stride shards passed."
+            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest stride shards passed."
           fi
 
   python-coverage:

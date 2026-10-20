@@ -87,10 +87,11 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, WithJsonSchema
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._contract import UnknownOperationError, build_operation_contract
 from meho_backplane.operations._errors import (
     result_ambiguous_target,
     result_no_target,
@@ -138,6 +139,7 @@ __all__ = [
     "PreviewOperationBody",
     "SearchOutcome",
     "UnknownConnectorError",
+    "UnknownOperationError",
     "call_operation",
     "call_operation_with_approval",
     "describe_descriptor",
@@ -324,11 +326,12 @@ class OperationGroupSummary(BaseModel):
 class OperationSearchHit(BaseModel):
     """One ranked hit from :func:`search_operations`.
 
-    Same per-signal observability shape as
-    :class:`~meho_backplane.retrieval.retriever.RetrievalHit` — callers
-    tuning operation description quality want to see whether the top
-    candidate scored well on BM25 (lexical match) or cosine (semantic
-    match) or both.
+    The three score fields are the same per-signal shape as
+    :class:`~meho_backplane.retrieval.retriever.RetrievalHit`. They help
+    people who tune operation descriptions see whether a hit matched on
+    words (BM25), on meaning (cosine), or both. They are not on the wire
+    by default (#3668): :func:`search_operations` drops them unless a
+    ``tenant_admin`` caller asks for them with ``include_scores``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -342,6 +345,11 @@ class OperationSearchHit(BaseModel):
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
+
+
+#: Ranking fields kept off a search hit unless a ``tenant_admin`` caller
+#: opts in with ``include_scores`` (#3668).
+_SCORE_FIELDS: Final[frozenset[str]] = frozenset({"fused_score", "bm25_score", "cosine_score"})
 
 
 class OperationDescriptor(BaseModel):
@@ -1054,14 +1062,35 @@ async def search_operations(
 ) -> dict[str, Any]:
     """Hybrid BM25 + cosine RRF retrieval over ``endpoint_descriptor``.
 
-    ``arguments`` shape: ``{"connector_id": str, "query": str,
-    "group": str | None, "limit": int = 10}``.
+    ``arguments`` shape: ``{"connector_id": str, "query"?: str,
+    "op_id"?: str, "group": str | None, "limit": int = 10,
+    "include_scores"?: bool}``. One of ``query`` / ``op_id`` is needed.
 
-    Returns ``{"hits": [...], "query_duration_ms": float, "outcome": str,
-    "advisory": str | None, "narrowing": [str]}``. Tenant boundary
-    enforced: every candidate query filters on the same
+    **Exact-op mode (#3668).** When ``op_id`` is set, there is no
+    ranking: the handler looks up that one operation and returns
+    ``{"operation": <OperationContract>}`` -- the stored
+    ``parameter_schema`` as-is, small examples, the target rule, the
+    result shape, the pagination hint and retry guidance (see
+    :mod:`meho_backplane.operations._contract`). ``query`` / ``group`` /
+    ``limit`` are ignored in this mode. An op that is not visible and
+    enabled raises :class:`UnknownOperationError`.
+
+    **Ranked mode.** Returns ``{"hits": [...], "query_duration_ms":
+    float, "outcome": str, "advisory": str | None, "narrowing":
+    [str]}``. Each hit carries ``op_id`` / ``summary`` / ``description``
+    / ``group_key`` / ``safety_level`` / ``requires_approval``. The
+    ranking scores are added only when ``include_scores`` is true and
+    the caller is ``tenant_admin``; anyone else gets the slim hit. Tenant
+    boundary enforced: every candidate query filters on the same
     :func:`~meho_backplane.operations._lookup.visible_scope_clause`
     dispatch uses, so a hit is always an op ``call_operation`` can run.
+
+    The handler embeds the query once, runs the BM25 + cosine candidate
+    queries against the indexed ``endpoint_descriptor`` table, fuses the
+    two ranked lists via RRF, and returns the top ``limit`` hits. Per-
+    signal scores + ranks are surfaced so the agent (and operator
+    debugging) can see whether a hit came from lexical match, semantic
+    match, or both -- behind the admin opt-in above.
 
     No-suitable-match taxonomy (#3670). Two cases are errors, raised by
     :func:`_require_dispatchable_connector`: an *unknown* ``connector_id``
@@ -1083,14 +1112,7 @@ async def search_operations(
     if rate_limited is not None:
         return rate_limited
     connector_id = arguments["connector_id"]
-    query = arguments["query"]
-    group_key: str | None = arguments.get("group")
-    limit = int(arguments.get("limit", 10))
-    if limit < 1:
-        limit = 1
-    if limit > SEARCH_LIMIT_MAX:
-        limit = SEARCH_LIMIT_MAX
-
+    op_id: str | None = arguments.get("op_id")
     product, version, impl_id = parse_connector_id(connector_id)
     await _require_dispatchable_connector(
         operator=operator,
@@ -1098,6 +1120,29 @@ async def search_operations(
         product=product,
         version=version,
         impl_id=impl_id,
+    )
+    if op_id is not None:
+        contract = await build_operation_contract(
+            tenant_id=operator.tenant_id,
+            connector_id=connector_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=op_id,
+        )
+        _log.info(
+            "search_operations_exact_op",
+            connector_id=connector_id,
+            op_id=op_id,
+            tenant_id=str(operator.tenant_id),
+        )
+        return {"operation": contract.model_dump(mode="json")}
+
+    query = arguments["query"]
+    group_key: str | None = arguments.get("group")
+    limit = min(max(int(arguments.get("limit", 10)), 1), SEARCH_LIMIT_MAX)
+    show_scores = (
+        bool(arguments.get("include_scores")) and operator.tenant_role == TenantRole.TENANT_ADMIN
     )
     started = time.monotonic()
     sessionmaker = get_sessionmaker()
@@ -1123,8 +1168,9 @@ async def search_operations(
         tenant_id=str(operator.tenant_id),
         duration_ms=duration_ms,
     )
+    exclude = None if show_scores else set(_SCORE_FIELDS)
     return {
-        "hits": [h.model_dump(mode="json") for h in hits],
+        "hits": [h.model_dump(mode="json", exclude=exclude) for h in hits],
         "query_duration_ms": duration_ms,
         "outcome": outcome,
         "advisory": advisory,

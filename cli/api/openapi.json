@@ -3918,7 +3918,7 @@
           "operations"
         ],
         "summary": "Get Search",
-        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list. Every ``200`` body carries the ``outcome`` /\n``advisory`` / ``narrowing`` fields that say why (#3670).\n\n``q`` is the canonical free-text query param across the kb / memory /\noperations-search list surfaces (#1854); ``query`` is its deprecated\nalias, kept working for back-compat. Exactly one of the two is\nrequired: supplying neither is a ``422`` (the search has nothing to\nmatch), and supplying both with different values is a ``422`` rather\nthan a silent pick.",
+        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list. Every ``200`` body carries the ``outcome`` /\n``advisory`` / ``narrowing`` fields that say why (#3670).\n\n``q`` is the canonical free-text query param across the kb / memory /\noperations-search list surfaces (#1854); ``query`` is its deprecated\nalias, kept working for back-compat. Exactly one of the two is\nrequired: supplying neither is a ``422`` (the search has nothing to\nmatch), and supplying both with different values is a ``422`` rather\nthan a silent pick.\n\nWith ``op_id`` (#3668) the route skips ranking and returns one\noperation's call contract; a known connector with no such op is a\n``404`` whose ``detail`` carries ``reason=\"unknown_op\"``.",
         "operationId": "get_search_api_v1_operations_search_get",
         "parameters": [
           {
@@ -3996,6 +3996,31 @@
               "default": 10,
               "title": "Limit"
             }
+          },
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "nullable": true,
+              "description": "Exact-op mode. Look up this one operation and return its call contract (`{operation: {...}}`: the parameter schema, examples, target rule, result shape and retry guidance) instead of ranked hits. `q`, `group` and `limit` are ignored when it is set. An unknown op_id is a 404 with `detail.reason=unknown_op`.",
+              "title": "Op Id"
+            },
+            "description": "Exact-op mode. Look up this one operation and return its call contract (`{operation: {...}}`: the parameter schema, examples, target rule, result shape and retry guidance) instead of ranked hits. `q`, `group` and `limit` are ignored when it is set. An unknown op_id is a 404 with `detail.reason=unknown_op`."
+          },
+          {
+            "name": "include_scores",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else.",
+              "default": false,
+              "title": "Include Scores"
+            },
+            "description": "Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else."
           },
           {
             "name": "authorization",

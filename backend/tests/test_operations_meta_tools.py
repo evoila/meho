@@ -60,6 +60,7 @@ from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
     OperationSearchHit,
     UnknownConnectorError,
+    UnknownOperationError,
     _classify_hits,
     _search_guidance,
     call_operation,
@@ -814,9 +815,51 @@ async def test_search_operations_ranks_lexical_match_first(
     # `vault.kv.read` is the obvious lexical match for "read secret".
     assert len(hits) >= 1
     assert hits[0]["op_id"] == "vault.kv.read"
-    # Score surfaces -- fused, per-signal.
-    assert hits[0]["fused_score"] > 0
-    assert hits[0]["bm25_score"] is not None
+    # #3668: a ranked hit is slim by default -- no ranking scores.
+    assert set(hits[0]) == {
+        "op_id",
+        "summary",
+        "description",
+        "group_key",
+        "safety_level",
+        "requires_approval",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "expect_scores"),
+    [(TenantRole.OPERATOR, False), (TenantRole.TENANT_ADMIN, True)],
+)
+async def test_search_operations_scores_only_under_admin_opt_in(
+    stub_embedding_service: AsyncMock,
+    role: TenantRole,
+    expect_scores: bool,
+) -> None:
+    """#3668: ``include_scores`` is honoured only for a tenant_admin caller."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler,
+        summary="Read a KV v2 secret from a path.",
+        description="Reads a secret stored in the KV v2 mount.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    result = await search_operations(
+        _make_operator(role=role),
+        {"connector_id": "vault-1.x", "query": "read secret", "include_scores": True},
+    )
+    hit = result["hits"][0]
+    assert ("fused_score" in hit) is expect_scores
+    assert ("bm25_score" in hit) is expect_scores
+    assert ("cosine_score" in hit) is expect_scores
+    if expect_scores:
+        assert hit["fused_score"] > 0
+        assert hit["bm25_score"] is not None
 
 
 @pytest.mark.asyncio
@@ -1194,9 +1237,11 @@ async def test_search_operations_outcome_taxonomy(
     assert entry is not None
     schema = entry[0].outputSchema
     assert schema is not None
-    assert schema["properties"]["outcome"]["enum"] == list(SEARCH_OUTCOMES)
-    assert schema["properties"]["narrowing"]["maxItems"] == SEARCH_NARROWING_MAX
-    assert "outcome" in schema["required"]
+    # #3668 made the outputSchema a ``oneOf``; the ranked shape comes first.
+    ranked = schema["oneOf"][0]
+    assert ranked["properties"]["outcome"]["enum"] == list(SEARCH_OUTCOMES)
+    assert ranked["properties"]["narrowing"]["maxItems"] == SEARCH_NARROWING_MAX
+    assert "outcome" in ranked["required"]
 
     group_id = await _seed_group(
         tenant_id=None,
@@ -1990,6 +2035,205 @@ async def test_call_operation_unknown_op_returns_structured_error(
 
 
 # ---------------------------------------------------------------------------
+# search_operations exact-op mode (#3668)
+# ---------------------------------------------------------------------------
+
+
+async def _connector_bound_handler(
+    operator: Operator,
+    connector: Any,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite-style handler that reaches its connector through the target."""
+    return {}
+
+
+#: A bundled schema shaped like an ingested one (#3095): a nested ``$ref``
+#: resolved inside the stored document, plus ``oneOf`` / ``enum`` /
+#: ``default`` / ``additionalProperties`` and per-property examples.
+_EXACT_OP_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "example": "secret/app"},
+        "version": {"type": "integer", "default": 0, "examples": [1, 2]},
+        "mode": {"type": "string", "enum": ["fast", "full"]},
+        "body": {"$ref": "#/components/schemas/Body"},
+        "big": {"type": "string", "example": "x" * 2000},
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+    "components": {
+        "schemas": {
+            "Body": {
+                "oneOf": [{"type": "string"}, {"type": "object"}],
+            },
+        },
+    },
+}
+
+
+async def _register_exact_op(
+    stub_embedding_service: AsyncMock,
+    *,
+    op_id: str = "vault.kv.read",
+    handler: Any = _module_handler,
+    safety_level: Any = "safe",
+    requires_approval: bool = False,
+    llm_instructions: dict[str, Any] | None = None,
+) -> None:
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=op_id,
+        handler=handler,
+        summary="Read a KV v2 secret from a path.",
+        description="Reads a secret stored in the KV v2 mount.",
+        parameter_schema=_EXACT_OP_SCHEMA,
+        when_to_use=None,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        llm_instructions=llm_instructions,
+        embedding_service=stub_embedding_service,
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_returns_contract(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """With ``op_id`` the handler returns one contract, not ranked hits."""
+    pagination_hint = {"style": "cursor", "param": "after"}
+    await _register_exact_op(
+        stub_embedding_service,
+        llm_instructions={
+            "pagination_hint": pagination_hint,
+            "examples": [{"path": "secret/demo"}],
+        },
+    )
+    stub_embedding_service.encode_one.reset_mock()
+
+    result = await search_operations(
+        _make_operator(),
+        {"connector_id": "vault-1.x", "op_id": "vault.kv.read", "query": "ignored"},
+    )
+
+    assert "hits" not in result
+    contract = result["operation"]
+    async with get_sessionmaker()() as s:
+        stored = (
+            await s.execute(
+                select(EndpointDescriptor.parameter_schema).where(
+                    EndpointDescriptor.op_id == "vault.kv.read"
+                )
+            )
+        ).scalar_one()
+    assert contract["parameter_schema"] == stored
+    assert contract["parameter_schema"] == _EXACT_OP_SCHEMA
+    assert contract["connector_id"] == "vault-1.x"
+    assert contract["op_id"] == "vault.kv.read"
+    assert contract["safety_level"] == "safe"
+    assert contract["requires_approval"] is False
+    # Bounded examples: schema + llm_instructions, the 2000-char one dropped.
+    values = [e["value"] for e in contract["examples"]]
+    assert values == ["secret/app", 1, 2, {"path": "secret/demo"}]
+    assert contract["examples"][0] == {
+        "source": "parameter_schema",
+        "param": "path",
+        "value": "secret/app",
+    }
+    # A module-level typed handler needs no target; the rule is by name.
+    assert contract["target"]["required"] is False
+    assert contract["target"]["resolves_by"] == "name"
+    assert "result_query" in contract["result_shape"]["guidance"]
+    assert "handle" in contract["result_shape"]["envelope_fields"]
+    assert contract["pagination_hint"] == pagination_hint
+    assert any("awaiting_approval" in rule for rule in contract["recovery"])
+    # Deterministic: no ranking, so no query embedding.
+    stub_embedding_service.encode_one.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_target_and_destructive_guidance(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A connector-bound destructive op needs a target and a preview first."""
+    await _register_exact_op(
+        stub_embedding_service,
+        op_id="vault.kv.destroy",
+        handler=_connector_bound_handler,
+        safety_level="destructive",
+        requires_approval=True,
+    )
+
+    contract = (
+        await search_operations(
+            _make_operator(),
+            {"connector_id": "vault-1.x", "op_id": "vault.kv.destroy"},
+        )
+    )["operation"]
+
+    assert contract["target"]["required"] is True
+    assert contract["requires_approval"] is True
+    assert "list_targets" in contract["target"]["guidance"]
+    assert contract["pagination_hint"] is None
+    assert any("preview_operation" in rule for rule in contract["recovery"])
+    assert any("target_required" in rule for rule in contract["recovery"])
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_unknown_op_raises_structured(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Unknown ``op_id`` on a known connector -> typed not-found, every time."""
+    await _register_exact_op(stub_embedding_service)
+    operator = _make_operator()
+
+    for _ in range(2):
+        with pytest.raises(UnknownOperationError) as excinfo:
+            await search_operations(
+                operator,
+                {"connector_id": "vault-1.x", "op_id": "vault.does.not.exist"},
+            )
+        assert excinfo.value.as_error_data()["reason"] == "unknown_op"
+        assert excinfo.value.as_error_data()["op_id"] == "vault.does.not.exist"
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_unknown_connector_raises(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The connector checks run first: an unknown connector keeps its error."""
+    with pytest.raises(UnknownConnectorError):
+        await search_operations(
+            _make_operator(),
+            {"connector_id": "ghost-9.9", "op_id": "ghost.op"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_operations_exact_op_disabled_op_is_not_found(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A disabled op cannot be called, so exact-op mode does not return it."""
+    await _register_exact_op(stub_embedding_service)
+    async with get_sessionmaker()() as s, s.begin():
+        row = (
+            await s.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.kv.read")
+            )
+        ).scalar_one()
+        row.is_enabled = False
+
+    with pytest.raises(UnknownOperationError):
+        await search_operations(
+            _make_operator(),
+            {"connector_id": "vault-1.x", "op_id": "vault.kv.read"},
+        )
+
+
+# ---------------------------------------------------------------------------
 # Search -> call end-to-end
 # ---------------------------------------------------------------------------
 
@@ -2209,10 +2453,11 @@ async def test_real_descriptor_embedding_path(
 
 def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -> None:
     """The ``call_operation`` outputSchema ``status`` enum lists the parked
-    outcome so a spec-compliant MCP client validating the structured result
-    accepts ``awaiting_approval`` (G11.7-T1 #1401 / MCP 2025-06-18 server
+    outcome and the rate-limit refusal, so a spec-compliant MCP client
+    validating the structured result accepts ``awaiting_approval``
+    (G11.7-T1 #1401) and ``rate_limited`` (#3500) (MCP 2025-06-18 server
     output contract). The enum stays bounded to statuses the dispatcher
-    actually emits — no ``pending``.
+    actually emits at this boundary — no ``pending``, no ``already_resumed``.
     """
     import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
     from meho_backplane.mcp.registry import get_tool
@@ -2222,4 +2467,4 @@ def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -
     defn, _ = entry
     assert defn.outputSchema is not None
     enum = defn.outputSchema["properties"]["status"]["enum"]
-    assert set(enum) == {"ok", "error", "denied", "awaiting_approval"}, enum
+    assert set(enum) == {"ok", "error", "denied", "awaiting_approval", "rate_limited"}, enum

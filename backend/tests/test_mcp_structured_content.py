@@ -39,6 +39,7 @@ import pytest
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.mcp import registry as mcp_registry
+from meho_backplane.mcp.handlers import _tool_result_is_error
 from meho_backplane.mcp.registry import ToolDefinition
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from tests.mcp_test_fixtures import (
@@ -245,3 +246,31 @@ def test_non_declaring_tool_result_has_no_structured_content(
     result = body["result"]
     assert result["isError"] is False
     assert "structuredContent" not in result
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "status", "expected"),
+    [
+        ("call_operation", "ok", False),
+        ("call_operation", "awaiting_approval", False),
+        ("call_operation", "error", True),
+        ("call_operation", "denied", True),
+        ("call_operation", "rate_limited", True),
+        ("preview_operation", "ok", False),
+        ("preview_operation", "unavailable", False),
+        ("preview_operation", "error", True),
+        ("meho_runbook_next", "error", False),
+    ],
+)
+def test_is_error_follows_operation_result_status(
+    tool_name: str, status: str, expected: bool
+) -> None:
+    """``isError`` is true only for a failed ``OperationResult`` envelope.
+
+    MCP 2025-06-18 §Tools/Error Handling reports a caught business or API
+    failure as ``isError: true``. A call that waits for approval is a
+    successful hand-off, so it stays ``false``. A tool that does not return
+    an ``OperationResult`` envelope keeps ``false`` even if its payload has
+    a ``status`` key.
+    """
+    assert _tool_result_is_error(tool_name, {"status": status}) is expected

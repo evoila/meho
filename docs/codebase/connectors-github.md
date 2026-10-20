@@ -301,6 +301,31 @@ canonical `unknown_op` envelope (via `result_unknown_op` in
 `operations/_errors.py`). T3 ships the catalog rows + their dispatcher
 wiring.
 
+### Pagination hint for ingested issue lists (#3676)
+
+`pagination_hints.py` holds `GH_ISSUE_LIST_PAGINATION_HINT`, a curated
+`PaginationHint` for the ingested op `GET:/repos/{owner}/{repo}/issues`
+(`GH_ISSUE_LIST_OP_ID`). GitHub returns one page per call (`per_page`
+default 30, max 100; `page` default 1) and names the next page only in
+the `Link` header. Ingested rows have no `llm_instructions`, so a
+reduced issue list would otherwise tell the agent nothing about paging.
+
+The hint is not applied automatically. An operator adds it to the
+deployment's ingested row through the operator-review `edit_op` path, as
+`llm_instructions["pagination_hint"]`. Result reduction then puts its
+`params` (`per_page`, `page`, `state`, `since`) and `example_next_call`
+into `fetch_more.native_pagination`. The hint only says how to ask for
+the next page. The stored handle keeps `source_coverage=unknown` (see
+[result-spill.md](result-spill.md)).
+
+The `example_next_call` is a template, not a ready call. It names every
+argument `call_operation` needs (`connector_id`, `op_id`, `params`) with
+placeholders for `connector_id`, `owner` and `repo`. Its `assumes` text
+says the example stands for a first call with `state=open` and
+`per_page=100`. The agent must repeat its own first call unchanged and
+add 1 to `page` only. Changing `per_page` or a filter between pages
+skips or repeats rows.
+
 ## Dependencies
 
 - **`HttpConnector`** (`connectors/adapters/http.py`) — pooled

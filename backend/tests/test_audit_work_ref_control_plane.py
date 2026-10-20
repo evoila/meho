@@ -39,7 +39,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import meho_backplane.api.v1.connectors_ingest as _ingest_route
-import meho_backplane.audit as _audit_module
 from meho_backplane.api.v1.connectors_ingest import set_llm_client_factory
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -92,16 +91,6 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     get_settings.cache_clear()
     clear_jwks_cache()
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence the broadcast publisher so the audit middleware never waits on Valkey."""
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)

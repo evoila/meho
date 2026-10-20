@@ -31,7 +31,6 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
-import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -49,14 +48,6 @@ _TENANT = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _KC_INTERNAL_ID = "cc000000-0000-0000-0000-0000000cafe0"
 _PATCH_TARGET = "meho_backplane.operations.addon_pairing.KeycloakAdminClient.from_settings"
 _CAPS_URL = "/api/v1/addons/pairings/automation/capabilities"
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)

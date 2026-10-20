@@ -165,7 +165,7 @@ _require_tenant_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 #: Canonical op_id every audit-query call (POST + 3 GET shortcuts) emits
 #: via the ``audit_op_id`` contextvar override honoured by
-#: :func:`~meho_backplane.audit._publish_broadcast_event`. The companion
+#: :func:`~meho_backplane.audit._resolve_op_id_and_class_override`. The companion
 #: ``op_class="audit_query"`` flips the broadcast event into aggregate-
 #: only mode.
 _AUDIT_QUERY_OP_ID: Final[str] = "meho.audit.query"

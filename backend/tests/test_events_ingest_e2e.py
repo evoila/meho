@@ -100,7 +100,6 @@ def _stub_ingest_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
     )
     monkeypatch.setattr("meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _no_op)
-    monkeypatch.setattr("meho_backplane.events.ingest.service.publish_event", _no_op)
     yield
 
 

@@ -49,6 +49,7 @@ from meho_backplane.broadcast.archive_cursor import (
 )
 from meho_backplane.broadcast.archive_reader import (
     AnnouncementFilter,
+    first_seq_since,
     read_announcement_history,
     watch_announcements,
 )
@@ -415,6 +416,28 @@ async def test_window_older_than_retention_is_not_called_complete(
     # Inside the retention window nothing could have been pruned.
     recent = await read_announcement_history(_reader(tenant_id), cursor=None, flt=_ALL, limit=10)
     assert recent["gap"] is None
+
+
+async def test_resume_point_before_retention_carries_the_gap() -> None:
+    """A time before the retention window resumes at the oldest kept row and says so."""
+    tenant_id = uuid4()
+    for _ in range(3):
+        await seed_announcement(tenant_id)
+    await _prune(tenant_id, up_to_seq=1)
+
+    after, gap = await first_seq_since(_reader(tenant_id), datetime.now(UTC) - timedelta(days=400))
+
+    assert after == 1
+    assert gap is not None
+    assert gap["reason"] == "retention_trimmed"
+    assert gap["missed_events"] is None
+
+    # Inside the retention window nothing could have been pruned.
+    recent_after, recent_gap = await first_seq_since(
+        _reader(tenant_id), datetime.now(UTC) - timedelta(minutes=5)
+    )
+    assert recent_after == 1
+    assert recent_gap is None
 
 
 async def test_checkpoint_ahead_of_the_archive_resets() -> None:

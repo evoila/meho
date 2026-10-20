@@ -288,6 +288,7 @@ def _seed_session_sync(
     operator_sub: str = "op-42",
     tenant_id: uuid.UUID | None = None,
     lifetime: timedelta = timedelta(hours=1),
+    access_token: str = "access-token-plaintext",
 ) -> uuid.UUID:
     """Create a ``web_session`` row directly and return its UUID.
 
@@ -305,13 +306,27 @@ def _seed_session_sync(
                 session,
                 operator_sub=operator_sub,
                 tenant_id=tenant,
-                access_token="access-token-plaintext",
+                access_token=access_token,
                 refresh_token="refresh-token-plaintext",
                 lifetime=lifetime,
             )
             return decrypted.id
 
     return asyncio.run(_do())
+
+
+def _seed_role_session(role: str) -> tuple[uuid.UUID, dict[str, Any]]:
+    """Seed a session whose signed access token carries *role*.
+
+    Returns the session id and the JWKS document the role lift needs;
+    the caller stubs it with :func:`_mock_oidc_metadata`. The token's
+    ``sub`` and tenant match the seeded row, so the lift's identity check
+    passes and the role on the token decides what the dashboard shows.
+    """
+    key = make_rsa_keypair("test-kid")
+    access_token = mint_token(key, tenant_role=role)
+    session_id = _seed_session_sync(access_token=access_token)
+    return session_id, public_jwks(key)
 
 
 # ---------------------------------------------------------------------------
@@ -471,9 +486,10 @@ def test_callback_creates_session_and_redirects_to_dashboard(
 
 
 def test_dashboard_authenticated_renders_console_html() -> None:
-    """``GET /ui/`` with a session 302s nothing -- renders the dashboard HTML."""
-    session_id = _seed_session_sync()
-    with respx.mock(assert_all_called=False):
+    """``GET /ui/`` with an operator session renders the dashboard HTML."""
+    session_id, jwks = _seed_role_session("operator")
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
         client = TestClient(_build_app(), follow_redirects=False)
         client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
         response = client.get("/ui/")
@@ -489,29 +505,16 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     # rebrand replaced DaisyUI's ``card``/``card-body`` shell).
     # Five surface cards + one deploy card = 6 card blocks.
     assert body.count("meho-card") >= 6
-    # HTMX SSE wiring on the recent-activity tray (G0.25 #1696). The
-    # tray subscribes to the session-gated bridge -- NOT the
-    # Bearer-only ``/api/v1/feed``, which a browser ``EventSource``
-    # can never authenticate against (no Authorization header
-    # support), so the old wiring 401-looped behind its
-    # "Connecting..." placeholder forever.
-    assert 'sse-connect="/ui/broadcast/stream"' in body
-    assert 'sse-swap="broadcast"' in body
-    assert 'sse-connect="/api/v1/feed"' not in body
-    # Frames are consumed via the hidden-sink + Alpine pattern (raw
-    # BroadcastEvent JSON must never be swapped into the DOM): the
-    # component wrapper, its head-level controller script (#1692
-    # ordering seam), and the pre-render placeholder all render
-    # server-side.
-    assert "dashboardFeedTray({" in body
-    assert '<script src="/ui/static/src/app/dashboard-feed.js" defer></script>' in body
-    assert "Connecting to live feed" in body
-    # The compact feed row shows the resolved ``principal_name`` already carried
-    # on the ``BroadcastEvent`` frame alongside the raw ``principal_sub``;
-    # without a name, the sub remains the label (#3301).
-    assert 'x-text="ev.principal_name || ev.principal_sub"' in body
-    assert 'x-show="ev.principal_name"' in body
-    assert "x-text=\"' (' + ev.principal_sub + ')'\"" in body
+    # Recent-operations tray (#3758): server-rendered from the audit log
+    # and refreshed by the shared external script. No Broadcast SSE
+    # subscription and no "live" label on the dashboard any more.
+    assert 'id="dashboard-recent-ops"' in body
+    assert 'data-refresh-url="/ui/dashboard/recent-operations"' in body
+    assert '<script src="/ui/static/src/app/recent-ops-refresh.js" defer></script>' in body
+    assert "No operations recorded yet." in body
+    assert "Updated" in body
+    assert "sse-connect=" not in body
+    assert "Connecting to live feed" not in body
     # Version footer renders the deployed-build label the chassis env
     # binds from CHART_VERSION / GIT_SHA (#1698). No hardcoded ``v``
     # prefix anymore -- the label carries its own when it is a release
@@ -523,6 +526,61 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     # CSRF cookie set on the response so subsequent state-changing
     # requests can echo it back.
     assert CSRF_COOKIE_NAME in response.cookies
+
+
+def test_dashboard_tray_shows_notice_for_read_only_role() -> None:
+    """A ``read_only`` session sees the dashboard, but no audit rows (#3758).
+
+    The tray needs the ``operator`` role, the audit API's minimum. The
+    page renders a notice without a refresh URL, and the fragment answers
+    403 with the same notice.
+    """
+    session_id, jwks = _seed_role_session("read_only")
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        page = client.get("/ui/")
+        fragment = client.get("/ui/dashboard/recent-operations")
+    assert page.status_code == 200
+    body = page.text
+    assert "<title>MEHO Operator Console" in body
+    assert 'id="dashboard-recent-ops"' in body
+    assert "data-recent-ops-forbidden" in body
+    assert 'data-refresh-url="/ui/dashboard/recent-operations"' not in body
+    assert "No operations recorded yet." not in body
+    assert fragment.status_code == 403
+    assert "data-recent-ops-forbidden" in fragment.text
+    assert "No operations recorded yet." not in fragment.text
+
+
+def test_dashboard_tray_renders_for_tenant_admin_role() -> None:
+    """A ``tenant_admin`` session is above the minimum and sees the tray."""
+    session_id, jwks = _seed_role_session("tenant_admin")
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        page = client.get("/ui/")
+        fragment = client.get("/ui/dashboard/recent-operations")
+    assert page.status_code == 200
+    assert 'data-refresh-url="/ui/dashboard/recent-operations"' in page.text
+    assert "data-recent-ops-forbidden" not in page.text
+    assert fragment.status_code == 200
+    assert "No operations recorded yet." in fragment.text
+
+
+def test_dashboard_tray_hidden_when_the_role_lift_fails() -> None:
+    """A session whose token cannot be verified is treated as below ``operator``."""
+    session_id = _seed_session_sync()
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        page = client.get("/ui/")
+        fragment = client.get("/ui/dashboard/recent-operations")
+    assert page.status_code == 200
+    assert "data-recent-ops-forbidden" in page.text
+    assert fragment.status_code == 403
 
 
 # ---------------------------------------------------------------------------

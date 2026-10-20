@@ -31,11 +31,10 @@ What this harness proves (issue #551 DoD)
 * Every registered Vault op dispatches through
   :func:`~meho_backplane.operations.dispatch`; each asserts the live
   response shape, that a synchronous ``audit_log`` row committed
-  (CLAUDE.md postulate 7), and that the broadcast event's
+  (CLAUDE.md postulate 7), and that the audit row's
   ``op_class`` is correct — ``credential_write`` for ``vault.kv.put``
   and ``vault.kv.patch`` (their KV-v2 secret rides in the request
-  params, so the broadcast collapses to aggregate-only per G11.7-T1
-  #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``,
+  params, per G11.7-T1 #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``,
   ``credential_read`` for ``vault.kv.read`` /
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
   the ``.list`` auth ops, and ``other`` for the two ``.read``
@@ -71,13 +70,14 @@ so the ``_build_client`` path resolves to the same container. This is
 the documented single-seam test approach the unit suites already use
 (``monkeypatch.setattr(vault_module, ...)``); the full connector code
 path (handler → hvac call → structural unwrap → dispatcher reduce →
-audit → broadcast) runs unchanged. Only the credential acquisition is
+audit) runs unchanged. Only the credential acquisition is
 swapped, exactly as a production OIDC login would have produced an
 authenticated client.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -91,8 +91,6 @@ import pytest
 from sqlalchemy import select
 
 import meho_backplane.auth.vault as _auth_vault
-import meho_backplane.operations._audit as _audit_module
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import (
     VaultConnector,
@@ -307,26 +305,8 @@ def _seed_vault(addr: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-test wiring: seam swap, broadcast capture, descriptor registration
+# Per-test wiring: seam swap, descriptor registration
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record every :func:`publish_event` the dispatcher emits.
-
-    Patches the imported reference inside
-    :mod:`meho_backplane.operations._audit` — the same target the
-    dispatcher unit suite uses — so no Valkey container is needed to
-    assert on ``op_class``.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(_audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -423,7 +403,7 @@ async def vault_e2e(
 
 
 # ---------------------------------------------------------------------------
-# Audit / broadcast assertion helper
+# Audit assertion helper
 # ---------------------------------------------------------------------------
 
 
@@ -432,14 +412,12 @@ async def _assert_audited(
     *,
     operator_sub: str,
     expected_op_class: str,
-    events: list[BroadcastEvent],
-) -> None:
-    """Assert exactly one ``audit_log`` row + one broadcast for *op_id*.
+) -> AuditLog:
+    """Assert exactly one ``audit_log`` row for *op_id* and return it.
 
     Reads the real Postgres audit row the dispatcher wrote
     synchronously (CLAUDE.md postulate 7: the op does not return
-    success unless the row committed) and cross-checks the broadcast
-    event's ``op_class``.
+    success unless the row committed) and checks its ``op_class``.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -466,15 +444,10 @@ async def _assert_audited(
     assert row.payload["source_kind"] == "typed"
     assert row.payload["result_status"] == "ok"
     assert "params_hash" in row.payload
-
-    matching = [e for e in events if e.op_id == op_id]
-    assert len(matching) == 1, f"expected one broadcast for {op_id}, got {len(matching)}"
-    event = matching[0]
-    assert event.op_class == expected_op_class, (
-        f"{op_id}: expected op_class={expected_op_class!r}, got {event.op_class!r}"
+    assert row.payload["op_class"] == expected_op_class, (
+        f"{op_id}: expected op_class={expected_op_class!r}, got {row.payload['op_class']!r}"
     )
-    assert event.result_status == "ok"
-    assert event.audit_id == row.id
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +458,6 @@ async def _assert_audited(
 @pytest.mark.asyncio
 async def test_kv_read_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.kv.read`` returns the seeded secret; audited; credential_read."""
     target, _ = vault_e2e
@@ -506,14 +478,12 @@ async def test_kv_read_against_dev_vault(
         "vault.kv.read",
         operator_sub="op-kv-read",
         expected_op_class="credential_read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_kv_list_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.kv.list`` over the > 50-key fixture returns every key inline.
 
@@ -542,36 +512,25 @@ async def test_kv_list_against_dev_vault(
         "vault.kv.list",
         operator_sub="op-kv-list",
         expected_op_class="credential_read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_kv_put_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.kv.put`` writes a new version; audited; op_class=credential_write.
 
     G11.7-T1 (#1401) reclassified ``vault.kv.put`` from plain ``write`` to
-    ``credential_write``: the KV-v2 secret rides in the *request params*, so
-    a plain-``write`` classification broadcast the written secret in full to
-    every operator on the feed. ``credential_write`` collapses the broadcast
-    to aggregate-only (``{op_class, result_status}``) — the team-coordination
-    signal "someone wrote a credential" without the secret material.
+    ``credential_write``: the KV-v2 secret rides in the *request params*.
 
-    This integration assertion strengthens the contract end-to-end: the
-    written secret value is seeded as a distinctive sentinel and the test
-    positively asserts it is **absent** from the *entire serialised
-    BroadcastEvent* (not just ``payload`` — a regression placing the secret
-    in a new top-level field would slip a payload-only check), mirroring
-    :func:`tests.test_broadcast_credential_write_dispatch
-    .test_credential_write_broadcast_is_aggregate_only`. The
+    The written secret value is seeded as a distinctive sentinel and the
+    test checks it is **absent** from the stored audit row. The
     :class:`~meho_backplane.connectors.schemas.OperationResult` and the
-    Vault read-back still carry the secret — only the broadcast is redacted.
+    Vault read-back still carry the secret.
     """
     target, addr = vault_e2e
-    # Distinctive value so any appearance in the serialised broadcast event
+    # Distinctive value so any appearance in the audit row
     # is an unambiguous leak (a short/common value like "v" could collide
     # with field names or framework strings and make absence unprovable).
     sentinel = "kvput-secret-sentinel-1401"
@@ -591,38 +550,27 @@ async def test_kv_put_against_dev_vault(
     assert result.status == "ok", result.error
     assert result.result == {"version": 1}
     # Read back through a fresh root client to prove the write landed — the
-    # secret is intact in Vault and in the caller's OperationResult; only the
-    # broadcast view is redacted.
+    # secret is intact in Vault and in the caller's OperationResult.
     readback = _root_client(addr).secrets.kv.v2.read_secret_version(
         path="app/written",
         mount_point=_KV_MOUNT,
         raise_on_deleted_version=False,
     )
     assert readback["data"]["data"] == {"k": sentinel}
-    await _assert_audited(
+    row = await _assert_audited(
         "vault.kv.put",
         operator_sub="op-kv-put",
         expected_op_class="credential_write",
-        events=captured_events,
     )
-    # Positive secret-absence assertion (AC4): the redacted broadcast carries
-    # only the aggregate view and the sentinel never reaches the feed.
-    put_event = next(e for e in captured_events if e.op_id == "vault.kv.put")
-    assert put_event.payload == {
-        "op_class": "credential_write",
-        "result_status": "ok",
-    }
-    serialised = put_event.model_dump_json()
-    assert sentinel not in serialised, (
-        f"credential_write leak: {sentinel!r} reached the broadcast event for "
-        f"vault.kv.put — serialised event: {serialised}"
+    # The secret must not reach the stored audit row.
+    assert sentinel not in json.dumps(row.payload, default=str), (
+        "secret leaked into the audit row for vault.kv.put"
     )
 
 
 @pytest.mark.asyncio
 async def test_kv_patch_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.kv.patch`` merges a field; audited; op_class=credential_write.
 
@@ -631,8 +579,7 @@ async def test_kv_patch_against_dev_vault(
     one), and the read-back shows the untouched key preserved alongside
     the merged fields — the distinguishing behaviour vs. ``vault.kv.put``
     (wholesale replace). The merged sentinel value must be absent from
-    the serialised broadcast event (``credential_write`` redaction,
-    same posture as ``vault.kv.put``).
+    the stored audit row (same as ``vault.kv.put``).
     """
     target, addr = vault_e2e
     sentinel = "kvpatch-secret-sentinel-1409"
@@ -667,28 +614,20 @@ async def test_kv_patch_against_dev_vault(
         "rotate": sentinel,
         "added": "new",
     }
-    await _assert_audited(
+    row = await _assert_audited(
         "vault.kv.patch",
         operator_sub="op-kv-patch",
         expected_op_class="credential_write",
-        events=captured_events,
     )
-    patch_event = next(e for e in captured_events if e.op_id == "vault.kv.patch")
-    assert patch_event.payload == {
-        "op_class": "credential_write",
-        "result_status": "ok",
-    }
-    serialised = patch_event.model_dump_json()
-    assert sentinel not in serialised, (
-        f"credential_write leak: {sentinel!r} reached the broadcast event for "
-        f"vault.kv.patch — serialised event: {serialised}"
+    # The secret must not reach the stored audit row.
+    assert sentinel not in json.dumps(row.payload, default=str), (
+        "secret leaked into the audit row for vault.kv.patch"
     )
 
 
 @pytest.mark.asyncio
 async def test_kv_versions_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.kv.versions`` returns metadata only; audited; op_class=read."""
     target, _ = vault_e2e
@@ -709,14 +648,12 @@ async def test_kv_versions_against_dev_vault(
         "vault.kv.versions",
         operator_sub="op-kv-versions",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_kv_delete_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.kv.delete`` soft-deletes a version; audited; op_class=write."""
     target, addr = vault_e2e
@@ -744,7 +681,6 @@ async def test_kv_delete_against_dev_vault(
         "vault.kv.delete",
         operator_sub="op-kv-delete",
         expected_op_class="write",
-        events=captured_events,
     )
 
 
@@ -756,7 +692,6 @@ async def test_kv_delete_against_dev_vault(
 @pytest.mark.asyncio
 async def test_sys_health_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.health`` over the unsealed dev Vault; op_class=read."""
     target, _ = vault_e2e
@@ -778,14 +713,12 @@ async def test_sys_health_against_dev_vault(
         "vault.sys.health",
         operator_sub="op-sys-health",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_sys_seal_status_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.seal_status`` — dev Vault is unsealed; op_class=read."""
     target, _ = vault_e2e
@@ -805,14 +738,12 @@ async def test_sys_seal_status_against_dev_vault(
         "vault.sys.seal_status",
         operator_sub="op-sys-seal",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_sys_mounts_list_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.mounts.list`` includes the dev KV-v2 ``secret/`` mount."""
     target, _ = vault_e2e
@@ -834,14 +765,12 @@ async def test_sys_mounts_list_against_dev_vault(
         "vault.sys.mounts.list",
         operator_sub="op-sys-mounts",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_sys_auth_list_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.auth.list`` includes the seeded userpass + approle."""
     target, _ = vault_e2e
@@ -862,14 +791,12 @@ async def test_sys_auth_list_against_dev_vault(
         "vault.sys.auth.list",
         operator_sub="op-sys-auth",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_sys_policy_read_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.policy.read`` returns the seeded ci-readonly body; op_class=read."""
     target, _ = vault_e2e
@@ -892,14 +819,12 @@ async def test_sys_policy_read_against_dev_vault(
         # policy name, so it broadcasts ``other`` (full params) like the
         # vault.auth.*.read ops.
         expected_op_class="other",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_sys_policy_list_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.policy.list`` includes the seeded policy + builtins; op_class=read."""
     target, _ = vault_e2e
@@ -920,7 +845,6 @@ async def test_sys_policy_list_against_dev_vault(
         "vault.sys.policy.list",
         operator_sub="op-policy-list",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
@@ -936,7 +860,6 @@ async def test_sys_policy_list_against_dev_vault(
 @pytest.mark.asyncio
 async def test_sys_auth_enable_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.auth.enable`` mounts a new auth method; op_class=other."""
     target, addr = vault_e2e
@@ -962,7 +885,6 @@ async def test_sys_auth_enable_against_dev_vault(
         "vault.sys.auth.enable",
         operator_sub="op-auth-enable",
         expected_op_class="other",
-        events=captured_events,
     )
 
 
@@ -993,7 +915,6 @@ async def test_sys_auth_enable_idempotent_on_existing_path(
 @pytest.mark.asyncio
 async def test_sys_mounts_enable_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.mounts.enable`` mounts a new secret engine; op_class=other."""
     target, addr = vault_e2e
@@ -1014,14 +935,12 @@ async def test_sys_mounts_enable_against_dev_vault(
         "vault.sys.mounts.enable",
         operator_sub="op-mount-enable",
         expected_op_class="other",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_sys_auth_tune_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.auth.tune`` reconfigures the seeded userpass mount; op_class=other."""
     target, addr = vault_e2e
@@ -1043,14 +962,12 @@ async def test_sys_auth_tune_against_dev_vault(
         "vault.sys.auth.tune",
         operator_sub="op-auth-tune",
         expected_op_class="other",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_sys_mounts_tune_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.sys.mounts.tune`` reconfigures the dev ``secret/`` mount; op_class=other."""
     target, addr = vault_e2e
@@ -1071,7 +988,6 @@ async def test_sys_mounts_tune_against_dev_vault(
         "vault.sys.mounts.tune",
         operator_sub="op-mount-tune",
         expected_op_class="other",
-        events=captured_events,
     )
 
 
@@ -1083,7 +999,6 @@ async def test_sys_mounts_tune_against_dev_vault(
 @pytest.mark.asyncio
 async def test_auth_userpass_list_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.auth.userpass.list`` returns the seeded user; op_class=read."""
     target, _ = vault_e2e
@@ -1102,14 +1017,12 @@ async def test_auth_userpass_list_against_dev_vault(
         "vault.auth.userpass.list",
         operator_sub="op-up-list",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_auth_userpass_read_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.auth.userpass.read`` returns the user's policies.
 
@@ -1138,14 +1051,12 @@ async def test_auth_userpass_read_against_dev_vault(
         "vault.auth.userpass.read",
         operator_sub="op-up-read",
         expected_op_class="other",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_auth_approle_list_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.auth.approle.list`` returns the seeded role; op_class=read."""
     target, _ = vault_e2e
@@ -1164,14 +1075,12 @@ async def test_auth_approle_list_against_dev_vault(
         "vault.auth.approle.list",
         operator_sub="op-ar-list",
         expected_op_class="read",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_auth_approle_read_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.auth.approle.read`` returns the role config.
 
@@ -1198,7 +1107,6 @@ async def test_auth_approle_read_against_dev_vault(
         "vault.auth.approle.read",
         operator_sub="op-ar-read",
         expected_op_class="other",
-        events=captured_events,
     )
 
 
@@ -1208,25 +1116,23 @@ async def test_auth_approle_read_against_dev_vault(
 # Every write op registers ``requires_approval=True``; an ordinary dispatch
 # would park it in the approval queue (G11.7-T1 #1401). These tests pass
 # ``_approved=True`` (the approvals-API resume flag) to drive the
-# authorized execution path — the same handler/audit/broadcast path that
-# runs once a human approves — against the live Vault. The redaction
-# assertions positively prove the password (request-side) and the minted
-# SecretID (response-side) never reach the serialised broadcast event.
+# authorized execution path — the same handler/audit path that
+# runs once a human approves — against the live Vault. The secret
+# checks prove the password (request-side) and the minted
+# SecretID (response-side) never reach the stored audit row.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_auth_userpass_write_redacts_password_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.auth.userpass.write`` creates a user; password absent from the broadcast.
+    """``vault.auth.userpass.write`` creates a user; password absent from the audit row.
 
     The password rides in the request params, so the op classifies
-    ``credential_write`` (G11.7-T1 #1401) and the broadcast collapses to
-    aggregate-only. A distinctive sentinel password is seeded and the
-    test positively asserts it is absent from the *entire serialised
-    BroadcastEvent*; the write still lands in Vault (the user logs in).
+    ``credential_write`` (G11.7-T1 #1401). A distinctive sentinel password
+    is seeded and the test checks it is absent from the stored audit row;
+    the write still lands in Vault (the user logs in).
     """
     target, addr = vault_e2e
     sentinel = "userpass-write-pw-sentinel-1411"
@@ -1247,26 +1153,22 @@ async def test_auth_userpass_write_redacts_password_against_dev_vault(
         username="minted-user", password=sentinel, mount_point="userpass"
     )
     assert login["auth"]["client_token"]
-    await _assert_audited(
+    row = await _assert_audited(
         "vault.auth.userpass.write",
         operator_sub="op-up-write",
         expected_op_class="credential_write",
-        events=captured_events,
     )
-    event = next(e for e in captured_events if e.op_id == "vault.auth.userpass.write")
-    assert event.payload == {"op_class": "credential_write", "result_status": "ok"}
-    serialised = event.model_dump_json()
-    assert sentinel not in serialised, (
-        f"credential_write leak: {sentinel!r} reached the broadcast event"
+    # The secret must not reach the stored audit row.
+    assert sentinel not in json.dumps(row.payload, default=str), (
+        "secret leaked into the audit row for vault.auth.userpass.write"
     )
 
 
 @pytest.mark.asyncio
 async def test_auth_userpass_update_password_redacts_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.auth.userpass.update_password`` rotates a password; redacted from broadcast."""
+    """``vault.auth.userpass.update_password`` rotates a password; absent from the audit row."""
     target, addr = vault_e2e
     # Seed a user to rotate so this test is independent of the create test.
     _root_client(addr).auth.userpass.create_or_update_user(
@@ -1292,21 +1194,20 @@ async def test_auth_userpass_update_password_redacts_against_dev_vault(
         username="rotate-user", password=sentinel, mount_point="userpass"
     )
     assert login["auth"]["client_token"]
-    await _assert_audited(
+    row = await _assert_audited(
         "vault.auth.userpass.update_password",
         operator_sub="op-up-rotate",
         expected_op_class="credential_write",
-        events=captured_events,
     )
-    event = next(e for e in captured_events if e.op_id == "vault.auth.userpass.update_password")
-    serialised = event.model_dump_json()
-    assert sentinel not in serialised, "rotated password leaked into broadcast event"
+    # The secret must not reach the stored audit row.
+    assert sentinel not in json.dumps(row.payload, default=str), (
+        "secret leaked into the audit row for vault.auth.userpass.update_password"
+    )
 
 
 @pytest.mark.asyncio
 async def test_auth_userpass_delete_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.auth.userpass.delete`` removes a user; op_class=write (no secret)."""
     target, addr = vault_e2e
@@ -1331,14 +1232,12 @@ async def test_auth_userpass_delete_against_dev_vault(
         "vault.auth.userpass.delete",
         operator_sub="op-up-delete",
         expected_op_class="write",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_auth_approle_write_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.auth.approle.write`` creates a role; op_class=write."""
     target, addr = vault_e2e
@@ -1359,14 +1258,12 @@ async def test_auth_approle_write_against_dev_vault(
         "vault.auth.approle.write",
         operator_sub="op-ar-write",
         expected_op_class="write",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_auth_approle_delete_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``vault.auth.approle.delete`` removes a role; op_class=write."""
     target, addr = vault_e2e
@@ -1390,22 +1287,19 @@ async def test_auth_approle_delete_against_dev_vault(
         "vault.auth.approle.delete",
         operator_sub="op-ar-delete",
         expected_op_class="write",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.auth.approle.generate_secret_id`` mints a SecretID; redacted from broadcast.
+    """``vault.auth.approle.generate_secret_id`` mints a SecretID; absent from the audit row.
 
     The minted SecretID lands in the *response*, so the op classifies
-    ``credential_mint`` and the broadcast collapses to aggregate-only. The
-    caller's OperationResult carries the SecretID (the point of minting),
-    but the test positively asserts that exact value is absent from the
-    entire serialised BroadcastEvent. Non-idempotent: a second call mints
+    ``credential_mint``. The caller's OperationResult carries the SecretID
+    (the point of minting), but the test checks that exact value is absent
+    from the stored audit row. Non-idempotent: a second call mints
     a distinct SecretID.
     """
     target, addr = vault_e2e
@@ -1425,17 +1319,14 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
     minted_secret_id = result.result["secret_id"]
     assert minted_secret_id, "the minted SecretID must reach the caller's OperationResult"
     assert result.result["role_name"] == "sid-role"
-    await _assert_audited(
+    row = await _assert_audited(
         "vault.auth.approle.generate_secret_id",
         operator_sub="op-ar-sid",
         expected_op_class="credential_mint",
-        events=captured_events,
     )
-    event = next(e for e in captured_events if e.op_id == "vault.auth.approle.generate_secret_id")
-    assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
-    serialised = event.model_dump_json()
-    assert minted_secret_id not in serialised, (
-        "credential_mint leak: the minted SecretID reached the broadcast event"
+    # The secret must not reach the stored audit row.
+    assert minted_secret_id not in json.dumps(row.payload, default=str), (
+        "secret leaked into the audit row for vault.auth.approle.generate_secret_id"
     )
     # Non-idempotent: a second mint yields a distinct SecretID.
     second = await dispatch(
@@ -1457,8 +1348,7 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
 # register requires_approval=True, so these tests pass ``_approved=True``
 # (the approvals-API resume flag) to drive the authorized execution path.
 # token.create's minted client token is response-side secret material;
-# the redaction test positively asserts that exact value is absent from
-# the serialised BroadcastEvent (credential_mint -> aggregate-only).
+# the test checks that exact value is absent from the stored audit row.
 # The identity/token core backends are always mounted on a dev Vault.
 # ---------------------------------------------------------------------------
 
@@ -1466,7 +1356,6 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
 @pytest.mark.asyncio
 async def test_identity_entity_write_and_read_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """entity.write creates an entity (op_class=write) and entity.read reads it back."""
     target, _addr = vault_e2e
@@ -1486,7 +1375,6 @@ async def test_identity_entity_write_and_read_against_dev_vault(
         "vault.identity.entity.write",
         operator_sub="op-ent-write",
         expected_op_class="write",
-        events=captured_events,
     )
 
     # Read it back — safe op, no approval needed.
@@ -1505,7 +1393,6 @@ async def test_identity_entity_write_and_read_against_dev_vault(
 @pytest.mark.asyncio
 async def test_identity_group_write_delete_list_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """group.write creates a group, list/read see it, group.delete removes it."""
     target, addr = vault_e2e
@@ -1523,7 +1410,6 @@ async def test_identity_group_write_delete_list_against_dev_vault(
         "vault.identity.group.write",
         operator_sub="op-grp-write",
         expected_op_class="write",
-        events=captured_events,
     )
 
     listing = await dispatch(
@@ -1539,7 +1425,6 @@ async def test_identity_group_write_delete_list_against_dev_vault(
         "vault.identity.list",
         operator_sub="op-grp-list",
         expected_op_class="read",
-        events=captured_events,
     )
 
     read = await dispatch(
@@ -1574,7 +1459,6 @@ async def test_identity_group_write_delete_list_against_dev_vault(
 @pytest.mark.asyncio
 async def test_identity_entity_alias_write_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """entity_alias.write links a userpass login to an entity (op_class=write)."""
     target, addr = vault_e2e
@@ -1611,22 +1495,19 @@ async def test_identity_entity_alias_write_against_dev_vault(
         "vault.identity.entity_alias.write",
         operator_sub="op-alias-write",
         expected_op_class="write",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_token_create_redacts_token_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """token.create mints a token in the response; redacted from the broadcast.
+    """token.create mints a token in the response; absent from the audit row.
 
     The minted client_token lands in the *response*, so the op classifies
-    ``credential_mint`` and the broadcast collapses to aggregate-only. The
-    caller's OperationResult carries the token (the point of minting), but
-    the test positively asserts that exact value is absent from the entire
-    serialised BroadcastEvent. Non-idempotent: a second call mints a
+    ``credential_mint``. The caller's OperationResult carries the token
+    (the point of minting), but the test checks that exact value is absent
+    from the stored audit row. Non-idempotent: a second call mints a
     distinct token.
     """
     target, addr = vault_e2e
@@ -1644,17 +1525,14 @@ async def test_token_create_redacts_token_against_dev_vault(
     assert result.result["accessor"]
     # The minted token actually works against the live Vault.
     assert _root_client(addr).sys.read_health_status(method="GET") is not None
-    await _assert_audited(
+    row = await _assert_audited(
         "vault.token.create",
         operator_sub="op-token-create",
         expected_op_class="credential_mint",
-        events=captured_events,
     )
-    event = next(e for e in captured_events if e.op_id == "vault.token.create")
-    assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
-    serialised = event.model_dump_json()
-    assert minted_token not in serialised, (
-        "credential_mint leak: the minted client token reached the broadcast event"
+    # The secret must not reach the stored audit row.
+    assert minted_token not in json.dumps(row.payload, default=str), (
+        "secret leaked into the audit row for vault.token.create"
     )
     # Non-idempotent: a second create yields a distinct token.
     second = await dispatch(
@@ -1672,7 +1550,6 @@ async def test_token_create_redacts_token_against_dev_vault(
 @pytest.mark.asyncio
 async def test_token_list_and_revoke_accessor_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """list_accessors enumerates accessors; lookup_accessor reads one token's
     metadata; revoke_accessor surgically revokes one."""

@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Audit row writing + broadcast publishing for the G0.6 dispatcher.
+"""Audit row writing for the G0.6 dispatcher.
 
 The dispatcher (T5, #396) writes one ``audit_log`` row per dispatch
-synchronously and publishes one :class:`BroadcastEvent` (fail-open per
-the :func:`publish_event` contract). This module owns:
+synchronously. It publishes no Broadcast event (#3758): the feed carries
+deliberate agent announcements only. This module owns:
 
 * :func:`write_audit_row` -- the row insert. Composes the payload from
   the descriptor + parent audit linkage (composite recursion contextvar)
   + result_status.
-* :func:`publish_broadcast` -- the broadcast emit with redacted payload.
-* :func:`audit_and_broadcast_safe` -- the dispatcher's "write + publish,
-  swallow internal failures" wrapper. The :class:`OperationResult` has
-  already been decided by the time this runs; audit/broadcast failures
-  log loudly but don't flip the outcome.
+* :func:`audit_safe` -- the dispatcher's "write, swallow internal
+  failures" wrapper. The :class:`OperationResult` has already been
+  decided by the time this runs; audit failures log loudly but don't
+  flip the outcome (unless ``require_audit`` is set).
 
 The audit-row contract uses ``method='DISPATCH'`` and
 ``path=descriptor.op_id`` so the chassis :class:`AuditLog` table shape
@@ -35,12 +34,7 @@ import structlog
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
-from meho_backplane.broadcast import (
-    BroadcastEvent,
-    publish_event,
-    redact_payload,
-)
-from meho_backplane.broadcast.events import resolve_op_class, scrub_broadcast_params
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
@@ -49,16 +43,13 @@ from meho_backplane.request_usage.collector import current_request_id
 
 __all__ = [
     "AgentRunAuditMeta",
-    "BroadcastLineage",
     "agent_run_audit_meta_var",
     "agent_session_id_var",
-    "audit_and_broadcast_safe",
     "audit_rejection_safe",
+    "audit_safe",
     "parent_audit_id_var",
     "policy_decision_var",
-    "publish_broadcast",
     "resolve_agent_session_id",
-    "resolve_broadcast_lineage",
     "reveal_secret_var",
     "run_id_var",
     "step_id_var",
@@ -257,43 +248,6 @@ def resolve_agent_session_id() -> uuid.UUID | None:
 
 
 @dataclass(frozen=True, slots=True)
-class BroadcastLineage:
-    """The publish-site lineage keys projected onto a broadcast event.
-
-    A single read of the three contextvars the sibling audit-row writer
-    (:func:`write_audit_row`) already consumes, packaged so every
-    :class:`~meho_backplane.broadcast.events.BroadcastEvent` construction
-    site projects the same actor / session / work_ref lineage the durable
-    ``audit_log`` row records for the same operation. Frozen so the value
-    handed to a construction site cannot drift between read and use.
-    """
-
-    actor_sub: str | None
-    agent_session_id: uuid.UUID | None
-    work_ref: str | None
-
-
-def resolve_broadcast_lineage() -> BroadcastLineage:
-    """Read the current task's lineage contextvars for a broadcast event.
-
-    Mirrors :func:`write_audit_row`'s three reads so the real-time
-    broadcast carries the same lineage the audit row does: the RFC 8693
-    actor (:func:`~meho_backplane.auth.delegation.resolve_actor_sub`), the
-    agent-run session (:data:`agent_session_id_var`), and the external
-    change-ticket reference (:data:`work_ref_var`). All three default to
-    ``None`` outside a delegated / agent-run / work-ref-bound context —
-    the correct value for a direct human request, which is why a
-    delegated agent's work now broadcasts under ``actor_sub`` = the agent
-    while ``principal_sub`` stays the human.
-    """
-    return BroadcastLineage(
-        actor_sub=resolve_actor_sub(),
-        agent_session_id=agent_session_id_var.get(),
-        work_ref=work_ref_var.get(),
-    )
-
-
-@dataclass(frozen=True, slots=True)
 class AgentRunAuditMeta:
     """Per-tool-call audit metadata sourced from the active agent run.
 
@@ -438,8 +392,7 @@ def _build_audit_payload(
     write, so success / denied / pending rows are unchanged. The envelope
     is already Tier-1-redacted + capped by the ``operations/_errors.py``
     builders, so persisting it to the durable ledger adds no leak surface;
-    it is threaded to the audit row **only**, never onto the params-only
-    broadcast frame (:func:`publish_broadcast`).
+    it is threaded to the audit row only.
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -562,7 +515,7 @@ def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
 class AuditCommitError(RuntimeError):
     """The DISPATCH audit row could not be committed.
 
-    Raised by :func:`audit_and_broadcast_safe` when ``require_audit`` is
+    Raised by :func:`audit_safe` when ``require_audit`` is
     set (every completed-handler success path) and
     :func:`write_audit_row` fails. Per CLAUDE.md postulate 7 / v0.1-spec
     §6 the durable audit row is a hard precondition of a successful
@@ -686,83 +639,13 @@ async def write_audit_row(
         await session.commit()
 
 
-async def publish_broadcast(
-    *,
-    audit_id: uuid.UUID,
-    operator: Operator,
-    descriptor: EndpointDescriptor,
-    target: Any,
-    params: dict[str, Any],
-    result_status: str,
-) -> None:
-    """Emit one :class:`BroadcastEvent` for the dispatch.
-
-    Fail-open per the :func:`publish_event` contract -- a publish
-    failure logs + bumps the error counter; the dispatcher's
-    :class:`OperationResult` is independent.
-
-    Fail-closed on content (meho-internal #151): ``classify_op`` alone
-    decided the payload detail here, so a secret-bearing write op
-    missing from the ``credential_*`` allowlists broadcast its raw
-    request params to every co-tenant feed subscriber. The params now
-    run through :func:`scrub_broadcast_params` -- a key-name scrub plus
-    the Tier-1 deterministic redactor -- **before** the payload is
-    built, and any secret detection collapses the broadcast to
-    aggregate-only regardless of ``op_class``. Decision #3's
-    full-detail default is preserved for params in which no secret
-    material is detected.
-    """
-    op_class = resolve_op_class(descriptor.op_id)
-    scrubbed_params, secret_detected = scrub_broadcast_params(params)
-    if secret_detected and op_class not in {
-        "credential_read",
-        "credential_mint",
-        "credential_write",
-        "audit_query",
-    }:
-        _log.info(
-            "broadcast_params_secret_detected",
-            op_id=descriptor.op_id,
-            op_class=op_class,
-        )
-    payload = redact_payload(
-        op_class,
-        {"params": scrubbed_params},
-        result_status,
-        detail="aggregate" if secret_detected else None,
-    )
-    raw_target_name = getattr(target, "name", None) if target is not None else None
-    target_name = raw_target_name if isinstance(raw_target_name, str) else None
-    lineage = resolve_broadcast_lineage()
-    event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime.now(UTC),
-        tenant_id=operator.tenant_id,
-        principal_sub=operator.sub,
-        principal_name=operator.name,
-        target_name=target_name,
-        op_id=descriptor.op_id,
-        op_class=op_class,
-        result_status=result_status,
-        audit_id=audit_id,
-        payload=payload,
-        actor_sub=lineage.actor_sub,
-        agent_session_id=lineage.agent_session_id,
-        work_ref=lineage.work_ref,
-    )
-    await publish_event(event)
-
-
-# code-quality-allow: was 107 lines on main before #3733; the required
-# event_class argument adds a few lines. Splitting it is out of scope here.
-async def audit_and_broadcast_safe(
+async def audit_safe(
     *,
     audit_id: uuid.UUID,
     event_class: AuditEventClass,
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
-    params: dict[str, Any],
     params_hash: str,
     result_status: str,
     duration_ms: float,
@@ -773,42 +656,33 @@ async def audit_and_broadcast_safe(
     error_extras: dict[str, Any] | None = None,
     require_audit: bool = False,
 ) -> uuid.UUID | None:
-    """Write the audit row + publish broadcast; return a committed receipt.
+    """Write the dispatch audit row; return a committed receipt.
 
-    Broadcast failures are always fail-open (per :func:`publish_event`'s
-    contract): they are recorded at error level and never flip the
-    :class:`OperationResult` status.
+    A dispatch publishes no Broadcast event (#3758): the feed carries
+    deliberate agent announcements only, and this row is the record.
 
     Audit-row failures are gated by *require_audit* (S07, #295):
 
     * ``require_audit=False`` (the default; the deny / error / announce
       callers) -- an audit-insert failure is
       recorded via ``dispatch_audit_failed`` and swallowed. The caller
-      keeps the outcome it already decided; the broadcast is skipped.
+      keeps the outcome it already decided.
     * ``require_audit=True`` (the success path of every completed
       handler, read or write) -- the durable DISPATCH row is a hard
       precondition of a successful return (CLAUDE.md postulate 7 /
-      v0.1-spec §6). An audit-insert failure is still logged, the
-      broadcast is still skipped, and then :exc:`AuditCommitError` is
-      raised so the caller fails the operation instead of reporting
-      ``status='ok'`` for a call with no governance-grade record.
+      v0.1-spec §6). An audit-insert failure is still logged, and then
+      :exc:`AuditCommitError` is raised so the caller fails the
+      operation instead of reporting ``status='ok'`` for a call with no
+      governance-grade record.
 
     *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
     the connector-boundary redaction artefacts (G11.4-T2 #1071);
-    forwarded to :func:`write_audit_row`. The broadcast event still
-    consumes *params* (request-side) rather than the response-side
-    raw payload: per :func:`publish_broadcast`'s
-    :func:`~meho_backplane.broadcast.events.redact_payload` step, the
-    broadcast surface ships params only -- the response goes nowhere
-    near the broadcast subscribers, who already see redacted outcomes
-    via the broadcast detail policy (G6.3).
+    forwarded to :func:`write_audit_row`.
 
     *error_extras* (#2680) is the built error result's structured
-    envelope. It is forwarded to :func:`write_audit_row` (landing under
-    ``payload["error"]`` on the durable row) and deliberately **not**
-    passed to :func:`publish_broadcast`: the broadcast frame stays
-    params-only, so the error detail rides the audit ledger alone.
-    ``None`` on every non-error write.
+    envelope. It is forwarded to :func:`write_audit_row` and lands under
+    ``payload["error"]`` on the durable row. ``None`` on every non-error
+    write.
 
     *event_class* (#3733) is forwarded to :func:`write_audit_row`; see
     there for which class each caller declares.
@@ -836,11 +710,6 @@ async def audit_and_broadcast_safe(
             result_status=result_status,
             operator_sub=operator.sub,
         )
-        # Skip the broadcast when audit failed -- the broadcast event
-        # references the audit_id by FK contract, so a phantom event
-        # would mislead subscribers about a row that doesn't exist. This
-        # holds whether we swallow or re-raise below, so no phantom event
-        # is emitted on either branch.
         if require_audit:
             # Completed-handler success path: the DISPATCH row is a hard
             # precondition of a successful return. Fail the operation so
@@ -850,22 +719,6 @@ async def audit_and_broadcast_safe(
                 f"DISPATCH audit row could not be committed for {descriptor.op_id}"
             ) from audit_exc
         return None
-    try:
-        await publish_broadcast(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            result_status=result_status,
-        )
-    except Exception:
-        _log.exception(
-            "dispatch_broadcast_failed",
-            op_id=descriptor.op_id,
-            result_status=result_status,
-            operator_sub=operator.sub,
-        )
     return audit_id
 
 

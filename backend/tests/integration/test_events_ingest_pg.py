@@ -44,7 +44,7 @@ _SECRET_REF = f"tenants/{_PINNED_TENANT}/event-sources/prod-am"
 
 @pytest.fixture(autouse=True)
 def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Stub the Vault read / rate limiter / broadcast (no external sockets)."""
+    """Stub the Vault read / rate limiter (no external sockets)."""
 
     async def _read_secret(_operator: object, _ref: str) -> SecretStr:
         return SecretStr("shared-hmac-key")
@@ -56,7 +56,6 @@ def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
     )
     monkeypatch.setattr("meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _no_op)
-    monkeypatch.setattr("meho_backplane.events.ingest.service.publish_event", _no_op)
     yield
 
 

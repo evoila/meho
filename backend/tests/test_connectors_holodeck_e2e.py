@@ -79,7 +79,6 @@ import pytest
 from sqlalchemy import select
 
 import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -318,7 +317,7 @@ async def fake_shell_server() -> AsyncIterator[types.SimpleNamespace]:
 
 
 # ---------------------------------------------------------------------------
-# Environment + DB + broadcast fixtures
+# Environment + DB fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -341,18 +340,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
     yield
     reset_dispatcher_caches()
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +452,6 @@ def _wire_seeded_connector(host: str, port: int) -> HolodeckConnector:
 @pytest.fixture
 async def holodeck_e2e(
     fake_shell_server: types.SimpleNamespace,
-    captured_events: list[Any],
 ) -> AsyncIterator[_HolodeckE2EBundle]:
     """Set up end-to-end Holodeck test state.
 
@@ -478,7 +464,6 @@ async def holodeck_e2e(
     background reader tasks do not leak into subsequent tests and block
     the fake-shell server teardown (``srv.wait_closed``).
     """
-    del captured_events  # autouse via parameter; reading drains the stub
     set_default_reducer(PassThroughReducer())
     await HolodeckConnector.register_operations()
 
@@ -598,10 +583,8 @@ def test_holodeck_ops_correct_group_keys() -> None:
 @pytest.mark.asyncio
 async def test_holodeck_e2e_about_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.about returns vendor/product/version via fake-shell."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -623,10 +606,8 @@ async def test_holodeck_e2e_about_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_config_show_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.config.show returns the full config dict via fake-shell."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -646,10 +627,8 @@ async def test_holodeck_e2e_config_show_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_pod_list_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.pod.list returns the {rows, total} envelope via fake-shell."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -669,10 +648,8 @@ async def test_holodeck_e2e_pod_list_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_pod_info_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.pod.info returns single-pod detail via fake-shell."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -692,10 +669,8 @@ async def test_holodeck_e2e_pod_info_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_service_list_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.service.list returns {rows, total} of Holo* services."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -716,7 +691,6 @@ async def test_holodeck_e2e_service_list_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_k8s_exec_parks_for_approval(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.k8s.exec forwards an operator-supplied kubectl command
     line, so it is approval-gated (safety_level='dangerous',
@@ -726,7 +700,6 @@ async def test_holodeck_e2e_k8s_exec_parks_for_approval(
     fake-shell (no fixture stdout leaks). Containment:
     evoila-bosnia/meho-internal#267.
     """
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -747,7 +720,6 @@ async def test_holodeck_e2e_k8s_exec_parks_for_approval(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_k8s_exec_metachar_rejected(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """E2E regression for the iter-2 shell-injection fix on T2 (#1005).
 
@@ -768,7 +740,6 @@ async def test_holodeck_e2e_k8s_exec_metachar_rejected(
     (no SSH round-trip happened), and (c) the error mentions
     "metacharacter".
     """
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -809,10 +780,8 @@ async def test_holodeck_e2e_k8s_exec_metachar_rejected(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_logs_tail_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.logs.tail returns the parsed file tail via fake-shell."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -833,10 +802,8 @@ async def test_holodeck_e2e_logs_tail_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_networking_show_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.networking.show composes the BGP + routes + DNS + DHCP envelope."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -863,10 +830,8 @@ async def test_holodeck_e2e_networking_show_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_disk_usage_dispatches_ok(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.disk.usage composes root-fs df + fixed growth-dir du (G3.18-T1 #2153)."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -900,7 +865,6 @@ async def test_holodeck_e2e_disk_usage_dispatches_ok(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_pod_list_jsonflux_handle(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """holodeck.pod.list with the real JsonFluxReducer produces a ResultHandle.
 
@@ -920,7 +884,6 @@ async def test_holodeck_e2e_pod_list_jsonflux_handle(
     Teardown restores :class:`PassThroughReducer` so a follow-on test
     in the same session sees the v0.2 default.
     """
-    del captured_events
     set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         result = await call_operation(
@@ -961,7 +924,6 @@ async def test_holodeck_e2e_pod_list_jsonflux_handle(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_dispatch_writes_audit_row(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """Each dispatch inserts an AuditLog row with op_id + target_id + params_hash.
 
@@ -972,7 +934,6 @@ async def test_holodeck_e2e_dispatch_writes_audit_row(
     * ``row.payload["op_id"]`` equals ``holodeck.about``.
     * ``row.payload["params_hash"]`` is a non-empty string.
     """
-    del captured_events
     op_id = "holodeck.about"
     sessionmaker = get_sessionmaker()
 
@@ -1028,14 +989,12 @@ async def test_holodeck_e2e_dispatch_writes_audit_row(
 @pytest.mark.asyncio
 async def test_holodeck_e2e_all_ops_write_audit_rows(
     holodeck_e2e: _HolodeckE2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """All 9 Holodeck ops each produce an audit row after dispatch.
 
     Dispatches every op in EXPECTED_OP_IDS and asserts that each one
     inserted at least one ``DISPATCH`` AuditLog row.
     """
-    del captured_events
     sessionmaker = get_sessionmaker()
 
     # Params each op needs (everything else is empty).

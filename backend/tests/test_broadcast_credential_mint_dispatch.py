@@ -4,10 +4,11 @@
 """G6 ``credential_mint`` classifier integration test (G3.5-T9 / #621, #147).
 
 Proves the load-bearing PII guarantee for ``harbor.robot.create``: the
-G6 broadcast feed must emit **aggregate-only** — the fact that a robot
-account was minted, never the minted secret credential — while the
+stored audit row records the fact that a robot account was minted, never
+the minted secret credential — while the
 :class:`~meho_backplane.connectors.schemas.OperationResult` returned to
-the caller still contains the secret.
+the caller still contains the secret. A dispatch publishes no Broadcast
+event (#3758), so the audit row is the record to check.
 
 Four-eyes gating (#147)
 -----------------------
@@ -18,8 +19,8 @@ registered ``requires_approval=True`` (#147): the non-agent policy gate
 verdict solely on ``requires_approval``, so a human ``tenant_admin``
 dispatching it **parks** at ``awaiting_approval`` instead of executing —
 closing the credential-mint arm of the four-eyes bypass #128. The
-redaction contract therefore can no longer be proven by a single lone
-dispatch (the op never executes). Every redaction assertion here now
+no-secret contract therefore can no longer be proven by a single lone
+dispatch (the op never executes). Every assertion here now
 drives the op through the real **approve → resume** flow:
 
 1. dispatch as a lone operator → assert ``awaiting_approval`` +
@@ -29,8 +30,8 @@ drives the op through the real **approve → resume** flow:
    rejects the requester — real four-eyes);
 3. the ``/decide`` route re-hydrates the stored target and re-dispatches
    with ``_approved=True`` (the committed approval is the authorization);
-4. assert ``dispatch_status == "ok"`` **and** the redacted broadcast on
-   the executed (post-approval) op.
+4. assert ``dispatch_status == "ok"`` **and** the secret-free audit row
+   of the executed (post-approval) op.
 
 Mirrors the approve→resume harness in
 :mod:`tests.test_secret_move_approval` (HTTP ``/decide`` with a minted
@@ -41,31 +42,22 @@ Mechanism (unchanged from #621)
 -------------------------------
 
 * :func:`~meho_backplane.broadcast.events.classify_op` returns
-  ``"credential_mint"`` for ``harbor.robot.create``.
-* :func:`~meho_backplane.broadcast.events.redact_payload` collapses
-  ``credential_mint`` to ``{op_class, result_status}`` — the same
-  aggregate branch used for ``credential_read``.
-* The broadcast publisher is swapped for a recording stub so the emitted
-  :class:`~meho_backplane.broadcast.events.BroadcastEvent` can be
-  inspected without a Valkey container.
+  ``"credential_mint"`` for ``harbor.robot.create``, and the dispatch
+  audit row records that class.
 * The Harbor HTTP client is intercepted by respx so the real handler runs
   against a mock endpoint; the test does not need a live Harbor instance.
 * The connector's Vault-backed credentials loader is replaced with a stub
   so no Vault address is reached.
 
-Why assert by exclusion on the *serialised* event: the redacted
-``payload`` collapses to ``{op_class, result_status}``, but the enclosing
-:class:`BroadcastEvent` always carries ``op_id`` and ``target_name``. The
-leak surface is the whole serialised event, not just ``payload`` — a
-regression that placed the secret in a new top-level field would pass a
-``payload``-only assertion.
+Why assert by exclusion on the *whole* row payload: a regression that
+placed the secret under a new key would pass a key-by-key assertion.
 
-Runs unconditionally: the recording-stub publisher means no real Valkey
-socket is opened, so — like :mod:`tests.test_broadcast_credential_write_dispatch`
-— there is no ``BROADCAST_REDIS_URL`` skip guard. The prior guard (#621)
-skipped the whole suite locally, so the redaction contract was only ever
-exercised in CI; the approve→resume rework closes that gap by executing
-the op deterministically in the sandbox (AC2 of #147).
+Runs unconditionally: no Valkey socket is needed, so — like
+:mod:`tests.test_broadcast_credential_write_dispatch` — there is no
+``BROADCAST_REDIS_URL`` skip guard. The prior guard (#621) skipped the
+whole suite locally, so the contract was only ever exercised in CI; the
+approve→resume rework closes that gap by executing the op
+deterministically in the sandbox (AC2 of #147).
 """
 
 from __future__ import annotations
@@ -81,10 +73,8 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.harbor import HarborConnector
 from meho_backplane.connectors.harbor.ops import register_harbor_robot_operations
 from meho_backplane.connectors.harbor.session import HarborTargetLike
@@ -106,13 +96,13 @@ from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_
 # ---------------------------------------------------------------------------
 
 #: Distinctive robot-credential token — unusual enough that any appearance
-#: in a serialised BroadcastEvent is an unambiguous secret-material leak.
+#: in a stored audit row is an unambiguous secret-material leak.
 _SENTINEL_SECRET = "sntlrobotcred0zzz"
 
 #: Every substring that MUST NOT appear anywhere in a ``credential_mint``
-#: broadcast event. The secret is the only forbidden sentinel here —
-#: the broadcast is *permitted* to carry ``op_id``, ``target_name``,
-#: and ``result_status`` (the allowed aggregate per decision #3).
+#: audit row. The secret is the only forbidden sentinel here — the row
+#: is *permitted* to carry ``op_id``, ``target_name``, and
+#: ``result_status`` (the allowed aggregate per decision #3).
 _FORBIDDEN_SUBSTRINGS: tuple[str, ...] = (_SENTINEL_SECRET,)
 
 #: Tenant every principal in this module belongs to.
@@ -231,24 +221,12 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with an in-memory recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 class _HarborDispatchTarget:
     """Request-time target stub the *requester* dispatches against.
 
     The dispatcher reads ``product`` / ``fingerprint.version`` /
     ``preferred_impl_id`` (connector resolution), ``tenant_id`` / ``id``
-    (pooled-HTTP-client cache key + audit row), and ``name`` (broadcast
+    (pooled-HTTP-client cache key + audit row), and ``name`` (audit
     ``target_name``). ``tenant_id`` / ``id`` match the persisted row so
     the parked ``ApprovalRequest.target_id`` re-hydrates the real
     :class:`Target` on resume.
@@ -285,29 +263,29 @@ def _make_operator(sub: str = "op-credential-mint-requester") -> Operator:
 # ---------------------------------------------------------------------------
 
 
-def _assert_credential_mint_aggregate(event: BroadcastEvent, op_id: str) -> None:
-    """Assert *event* is the aggregate shape for a ``credential_mint`` op.
+def _assert_credential_mint_row_has_no_secret(row: AuditLog, op_id: str) -> None:
+    """Assert *row* is the executed ``credential_mint`` audit row without the secret.
 
-    The redacted ``payload`` is exactly ``{op_class, result_status}``.
-    The full serialised event must contain none of the forbidden
+    The row's payload carries the class and the result status. The
+    whole serialised payload must contain none of the forbidden
     secret-shaped sentinels.
     """
-    assert event.op_id == op_id
-    assert event.op_class == "credential_mint"
-    assert event.result_status == "ok"
-    assert event.payload == {
-        "op_class": "credential_mint",
-        "result_status": "ok",
-    }
+    assert row.payload["op_id"] == op_id
+    assert row.payload["op_class"] == "credential_mint"
+    assert row.payload["result_status"] == "ok"
 
-    serialised = event.model_dump_json()
-    assert json.loads(serialised)["op_class"] == "credential_mint"
-
+    serialised = json.dumps(row.payload, default=str)
     for forbidden in _FORBIDDEN_SUBSTRINGS:
         assert forbidden not in serialised, (
-            f"credential_mint leak: {forbidden!r} reached the broadcast "
-            f"event for {op_id} — serialised event: {serialised}"
+            f"credential_mint leak: {forbidden!r} reached the audit row "
+            f"for {op_id} — payload: {serialised}"
         )
+
+
+def _no_secret_in_any_row(rows: list[AuditLog]) -> None:
+    """Assert the sentinel secret appears in none of *rows*."""
+    for row in rows:
+        assert _SENTINEL_SECRET not in json.dumps(row.payload, default=str)
 
 
 def _mock_robot_create(mock: respx.MockRouter) -> None:
@@ -439,7 +417,6 @@ async def _fetch_audit_rows(op_id: str) -> list[AuditLog]:
 @pytest.mark.asyncio
 async def test_robot_create_parks_and_audits_needs_approval(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     _persisted_harbor_target: UUID,
 ) -> None:
     """Dispatching ``harbor.robot.create`` as a human parks — not executes (#147).
@@ -447,7 +424,7 @@ async def test_robot_create_parks_and_audits_needs_approval(
     AC1: the op returns ``awaiting_approval`` (four-eyes gate) with an
     ``approval_request_id``, and the parked "request" audit row carries
     ``policy_decision = "needs-approval"`` (the column landed in #130 /
-    migration 0051). No broadcast carries the (never-minted) secret.
+    migration 0051). No audit row carries the (never-minted) secret.
     """
     requester = _make_operator()
     request_id = await _park_robot_create(stub_embedding_service, requester=requester)
@@ -458,116 +435,113 @@ async def test_robot_create_parks_and_audits_needs_approval(
     assert len(request_rows) == 1
     assert request_rows[0].policy_decision == "needs-approval"
 
-    # The op never executed, so no secret can have reached any broadcast.
-    for event in captured_events:
-        assert _SENTINEL_SECRET not in event.model_dump_json()
+    # The op never executed, so no secret can have reached any audit row.
+    _no_secret_in_any_row(rows)
 
     assert request_id  # a pending row exists to decide
 
 
 # ---------------------------------------------------------------------------
-# (AC2) credential_mint aggregate-only contract through approve → resume
+# (AC2) credential_mint audit-row contract through approve → resume
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_robot_create_broadcast_is_aggregate_only(
+async def test_robot_create_secret_not_in_audit_row(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     _persisted_harbor_target: UUID,
 ) -> None:
-    """``harbor.robot.create`` broadcasts only ``{op_class, result_status}``.
+    """``harbor.robot.create`` is audited as ``credential_mint`` without the secret.
 
-    DoD (AC3 of #621, AC2 of #147) — the redaction runs against the
+    DoD (AC3 of #621, AC2 of #147) — the check runs against the
     **executed** op. The requester parks the mint; a second operator
     approves via ``/decide``; the re-dispatch mints the credential and
-    produces an aggregate-only broadcast: the minted secret never appears
-    in the serialised BroadcastEvent, while the dispatch response still
-    carries it (proves the exclusion is real, not vacuous).
+    writes its audit row: the minted secret never appears in the stored
+    row, while the dispatch response still carries it (proves the
+    exclusion is real, not vacuous).
     """
     requester = _make_operator(sub="op-requester")
 
     with respx.mock() as mock:
         _mock_robot_create(mock)
         request_id = await _park_robot_create(stub_embedding_service, requester=requester)
-        # Parking must not have emitted the (never-minted) secret.
-        assert not any(_SENTINEL_SECRET in e.model_dump_json() for e in captured_events)
+        # Parking must not have recorded the (never-minted) secret.
+        _no_secret_in_any_row(await _fetch_audit_rows("harbor.robot.create"))
 
         body = _approve_via_decide(request_id, mock, approver_sub="op-approver")
 
     assert body["dispatch_status"] == "ok", body
     # The re-dispatch response carries the minted secret to the caller —
-    # proves the broadcast exclusion below is a real one.
+    # proves the audit-row exclusion below is a real one.
     assert body["dispatch_result"]["secret"] == _SENTINEL_SECRET
 
-    mint_events = [e for e in captured_events if e.op_id == "harbor.robot.create"]
-    # Exactly one *executed* credential_mint broadcast (the resume run).
-    executed = [e for e in mint_events if e.result_status == "ok"]
+    mint_rows = await _fetch_audit_rows("harbor.robot.create")
+    # Exactly one *executed* credential_mint row (the resume run).
+    executed = [r for r in mint_rows if r.payload.get("result_status") == "ok"]
     assert len(executed) == 1
-    _assert_credential_mint_aggregate(executed[0], "harbor.robot.create")
+    _assert_credential_mint_row_has_no_secret(executed[0], "harbor.robot.create")
 
 
 # ---------------------------------------------------------------------------
-# (AC2) harbor.robot.delete stays full-detail (write) — governed, executes on resume
+# (AC2) harbor.robot.delete is a plain write — governed, executes on resume
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_robot_delete_broadcast_is_full_detail(
+async def test_robot_delete_is_audited_as_write(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     _persisted_harbor_target: UUID,
 ) -> None:
-    """``harbor.robot.delete`` broadcasts full detail (``write`` class).
+    """``harbor.robot.delete`` is audited with class ``write``.
 
     Contrast test: ``harbor.robot.delete`` classifies ``write``, not
-    ``credential_mint``, so its broadcast carries the full ``params`` block.
-    The divergent *redaction* is solely due to :func:`classify_op`.
+    ``credential_mint``. The divergent class is solely due to
+    :func:`classify_op`.
 
     Since #3288 the op is ``safety_level=destructive`` + ``requires_approval``,
     so the write no longer executes on a lone dispatch — it runs on the
     approve→resume path (preview-bound park → second-operator approval →
-    audited resume). The broadcast redaction is asserted against the
-    **executed** (post-approval) op, exactly as the credential_mint side is.
+    audited resume). The class is asserted against the **executed**
+    (post-approval) op, exactly as the credential_mint side is.
     """
     requester = _make_operator(sub="op-requester")
 
     with respx.mock() as mock:
         mock.delete(_ROBOT_7_URL).mock(return_value=respx.MockResponse(200))
         request_id = await _park_robot_delete(stub_embedding_service, requester=requester)
-        # Parking must not have broadcast a write event (nothing executed yet).
-        assert not any(e.op_id == "harbor.robot.delete" for e in captured_events)
+        # Parking must not have written an executed row (nothing ran yet).
+        parked = await _fetch_audit_rows("harbor.robot.delete")
+        assert not any(r.payload.get("result_status") == "ok" for r in parked)
 
         body = _approve_via_decide(request_id, mock, approver_sub="op-approver")
 
     assert body["dispatch_status"] == "ok", body
 
-    delete_events = [
-        e for e in captured_events if e.op_id == "harbor.robot.delete" and e.result_status == "ok"
+    delete_rows = [
+        r
+        for r in await _fetch_audit_rows("harbor.robot.delete")
+        if r.payload.get("result_status") == "ok"
     ]
-    assert len(delete_events) == 1
-    event = delete_events[0]
-    assert event.op_class == "write"
-    # Full-detail broadcast — params block is present.
-    assert "params" in event.payload
-    assert event.op_class != "credential_mint"
+    assert len(delete_rows) == 1
+    row = delete_rows[0]
+    assert row.payload["op_class"] == "write"
+    assert row.payload["op_class"] != "credential_mint"
 
 
 @pytest.mark.asyncio
 async def test_credential_mint_and_write_diverge_on_same_dispatch_path(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     _persisted_harbor_target: UUID,
 ) -> None:
-    """Create is aggregate-only; delete is full-detail — both post-approval.
+    """Create is ``credential_mint``; delete is ``write`` — both post-approval.
 
-    Both ops flow through the identical dispatch + broadcast + approve→resume
+    Both ops flow through the identical dispatch + audit + approve→resume
     infrastructure against the same target. The only variable is the op-id:
-    create classifies ``credential_mint`` (aggregate-only broadcast), delete
-    classifies ``write`` (full-detail). Since #3288 both are approval-gated
-    (create ``credential_mint``/#147, delete ``destructive``/#3288), so the
-    divergent redaction on the executed ops proves :func:`classify_op` drives
-    the behaviour, not the handler, target, or gate.
+    create classifies ``credential_mint``, delete classifies ``write``.
+    Since #3288 both are approval-gated (create ``credential_mint``/#147,
+    delete ``destructive``/#3288), so the divergent class on the executed
+    ops proves :func:`classify_op` drives the behaviour, not the handler,
+    target, or gate.
     """
     requester = _make_operator(sub="op-requester")
     await register_harbor_robot_operations(embedding_service=stub_embedding_service)
@@ -586,18 +560,21 @@ async def test_credential_mint_and_write_diverge_on_same_dispatch_path(
         create_body = _approve_via_decide(create_request_id, mock, approver_sub="op-approver")
         assert create_body["dispatch_status"] == "ok", create_body
 
-    create_event = next(
-        e for e in captured_events if e.op_id == "harbor.robot.create" and e.result_status == "ok"
+    create_row = next(
+        r
+        for r in await _fetch_audit_rows("harbor.robot.create")
+        if r.payload.get("result_status") == "ok"
     )
-    delete_event = next(
-        e for e in captured_events if e.op_id == "harbor.robot.delete" and e.result_status == "ok"
+    delete_row = next(
+        r
+        for r in await _fetch_audit_rows("harbor.robot.delete")
+        if r.payload.get("result_status") == "ok"
     )
 
-    # Same path, opposite redaction — classifier-driven by construction.
-    assert create_event.op_class == "credential_mint"
-    assert delete_event.op_class == "write"
-    _assert_credential_mint_aggregate(create_event, "harbor.robot.create")
-    assert "params" in delete_event.payload
+    # Same path, different class — classifier-driven by construction.
+    assert create_row.payload["op_class"] == "credential_mint"
+    assert delete_row.payload["op_class"] == "write"
+    _assert_credential_mint_row_has_no_secret(create_row, "harbor.robot.create")
 
 
 # ---------------------------------------------------------------------------

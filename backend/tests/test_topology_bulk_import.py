@@ -6,12 +6,12 @@
 Coverage matrix (Task #600 acceptance criteria):
 
 * **Happy-path batch** — a 3-row file lands all 3 edges in one
-  transaction; one audit row per edge; one broadcast event per edge.
+  transaction; one audit row per edge.
 * **Idempotency** — re-running the same batch is a per-row no-op
   (row count unchanged, no new edge ids, ``update`` action).
-* **Dry-run** — no edge row is created, no audit row is written, no
-  broadcast event is published; the per-row plan still surfaces
-  create / update / conflict classifications.
+* **Dry-run** — no edge row is created, no audit row is written; the
+  per-row plan still surfaces create / update / conflict
+  classifications.
 * **Validation failure (kind)** — one bad ``kind`` rejects the
   entire batch (no partial apply); the error envelope carries every
   row's failure.
@@ -32,7 +32,6 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -47,8 +46,6 @@ from meho_backplane.topology import (
     NodeRef,
     bulk_import_edges,
 )
-
-_PUBLISH = "meho_backplane.topology.bulk_import._publish"
 
 
 @pytest.fixture(autouse=True)
@@ -161,7 +158,7 @@ def _operator(tenant_id: uuid.UUID, sub: str = "op-bulk") -> Operator:
 
 @pytest.mark.asyncio
 async def test_bulk_import_creates_all_rows_in_one_transaction() -> None:
-    """A 3-row batch creates 3 edges + 3 audit rows + 3 broadcast events."""
+    """A 3-row batch creates 3 edges + 3 audit rows."""
     tenant_id = await _seed_tenant()
     await _seed_node(tenant_id, kind="principal", name="sa-a")
     await _seed_node(tenant_id, kind="vault-role", name="vr-a")
@@ -191,10 +188,8 @@ async def test_bulk_import_creates_all_rows_in_one_transaction() -> None:
     ]
 
     sessionmaker = get_sessionmaker()
-    publish = AsyncMock()
-    with patch(_PUBLISH, new=publish):
-        async with sessionmaker() as session:
-            result = await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        result = await bulk_import_edges(session, _operator(tenant_id), rows)
 
     assert result.dry_run is False
     assert result.created == 3
@@ -219,8 +214,6 @@ async def test_bulk_import_creates_all_rows_in_one_transaction() -> None:
     assert {e.source for e in edges} == {"curated"}
     assert len(audits) == 3
     assert {a.path for a in audits} == {"topology.annotate"}
-    # One broadcast event per row.
-    assert publish.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -246,11 +239,10 @@ async def test_bulk_import_is_idempotent() -> None:
     ]
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            first = await bulk_import_edges(session, _operator(tenant_id), rows)
-        async with sessionmaker() as session:
-            second = await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        first = await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        second = await bulk_import_edges(session, _operator(tenant_id), rows)
 
     assert first.created == 2
     assert second.created == 0
@@ -291,10 +283,8 @@ async def test_bulk_import_dry_run_writes_nothing() -> None:
     ]
 
     sessionmaker = get_sessionmaker()
-    publish = AsyncMock()
-    with patch(_PUBLISH, new=publish):
-        async with sessionmaker() as session:
-            result = await bulk_import_edges(session, _operator(tenant_id), rows, dry_run=True)
+    async with sessionmaker() as session:
+        result = await bulk_import_edges(session, _operator(tenant_id), rows, dry_run=True)
 
     assert result.dry_run is True
     assert result.created == 1
@@ -314,7 +304,6 @@ async def test_bulk_import_dry_run_writes_nothing() -> None:
         )
     assert edges == []
     assert audits == []
-    publish.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -349,10 +338,9 @@ async def test_bulk_import_rejects_whole_batch_on_invalid_kind() -> None:
     ]
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(BulkImportValidationError) as exc_info:
-                await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        with pytest.raises(BulkImportValidationError) as exc_info:
+            await bulk_import_edges(session, _operator(tenant_id), rows)
 
     assert len(exc_info.value.errors) == 1
     err = exc_info.value.errors[0]
@@ -385,10 +373,9 @@ async def test_bulk_import_rejects_missing_endpoint() -> None:
     ]
 
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(BulkImportValidationError) as exc_info:
-                await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        with pytest.raises(BulkImportValidationError) as exc_info:
+            await bulk_import_edges(session, _operator(tenant_id), rows)
 
     err = exc_info.value.errors[0]
     assert err.error == "node_not_found"
@@ -415,10 +402,9 @@ async def test_bulk_import_collects_every_row_failure() -> None:
         ),
     ]
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(BulkImportValidationError) as exc_info:
-                await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        with pytest.raises(BulkImportValidationError) as exc_info:
+            await bulk_import_edges(session, _operator(tenant_id), rows)
     # Both rows surface in the error envelope.
     assert {e.index for e in exc_info.value.errors} == {0, 1}
 
@@ -428,9 +414,8 @@ async def test_bulk_import_empty_rows_is_noop() -> None:
     """An empty rows list returns a zero-row result; no error."""
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await bulk_import_edges(session, _operator(tenant_id), [])
+    async with sessionmaker() as session:
+        result = await bulk_import_edges(session, _operator(tenant_id), [])
     assert result.created == 0
     assert result.rows == []
 
@@ -465,9 +450,8 @@ async def test_bulk_import_flags_supersede_as_conflict() -> None:
         ),
     ]
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        result = await bulk_import_edges(session, _operator(tenant_id), rows)
 
     assert result.rows[0].action == "conflict"
     assert str(auto_edge_id) in result.rows[0].superseded
@@ -498,9 +482,8 @@ async def test_bulk_import_flags_incompatible_kind_as_conflict_in_dry_run() -> N
         ),
     ]
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            plan = await bulk_import_edges(session, _operator(tenant_id), rows, dry_run=True)
+    async with sessionmaker() as session:
+        plan = await bulk_import_edges(session, _operator(tenant_id), rows, dry_run=True)
 
     assert plan.dry_run is True
     assert plan.conflicts == 1
@@ -529,9 +512,8 @@ async def test_bulk_import_flags_incompatible_kind_as_conflict_on_apply() -> Non
         ),
     ]
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        result = await bulk_import_edges(session, _operator(tenant_id), rows)
 
     assert result.dry_run is False
     assert result.conflicts == 1
@@ -578,9 +560,8 @@ async def test_bulk_import_intra_batch_duplicate_counts_match_db_state() -> None
         ),
     ]
     sessionmaker = get_sessionmaker()
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await bulk_import_edges(session, _operator(tenant_id), rows)
+    async with sessionmaker() as session:
+        result = await bulk_import_edges(session, _operator(tenant_id), rows)
 
     # Exactly one edge was committed — the second row was an in-batch
     # merge onto the first.

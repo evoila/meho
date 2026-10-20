@@ -884,8 +884,8 @@ async def consult_and_record_grant(
     caller then clears the gate to ``AUTO_EXECUTE``), or ``None`` when no
     grant matches (the caller parks the op). On a hit it writes the
     grant-use audit row (``approval.decision`` shape) in its own committed
-    transaction and publishes a fail-open broadcast — same visibility as a
-    human approval decision — before returning.
+    transaction before returning. The audit row is the record; no
+    Broadcast event is published (#3758).
 
     A ``destructive``-tier op (#3183) is refused here **before** any grant
     lookup: the tier is non-grantable, so even a stale grant row that
@@ -929,14 +929,13 @@ async def consult_and_record_grant(
     matched_by_selector = grant.target_id is None and (
         grant.target_product is not None or grant.target_name_pattern is not None
     )
-    audit_id = await _record_grant_use(
+    await _record_grant_use(
         operator=operator,
         grant=grant,
         connector_id=connector_id,
         target_id=target_id,
         matched_by_selector=matched_by_selector,
     )
-    await _publish_grant_use_event(operator=operator, grant=grant, audit_id=audit_id)
     _log.info(
         "service_grant_auto_approved",
         grant_id=str(grant.id),
@@ -1028,52 +1027,3 @@ async def _record_grant_use(
         session.add(row)
         await session.commit()
     return audit_id
-
-
-async def _publish_grant_use_event(
-    *,
-    operator: Operator,
-    grant: ServicePrincipalGrant,
-    audit_id: uuid.UUID,
-) -> None:
-    """Publish a fail-open ``approval.auto_approved`` broadcast for the grant use.
-
-    Parity with a human decision (which broadcasts ``approval.approved``).
-    Fail-open: a broadcast outage never blocks the durable grant use — the
-    audit row is the source of truth.
-    """
-    try:
-        from meho_backplane.broadcast.events import BroadcastEvent, classify_op
-        from meho_backplane.broadcast.publisher import publish_event
-        from meho_backplane.operations._audit import resolve_broadcast_lineage
-
-        op_id = "approval.auto_approved"
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=operator.tenant_id,
-            principal_sub=operator.sub,
-            op_id=op_id,
-            op_class=classify_op(op_id),
-            result_status="ok",
-            audit_id=audit_id,
-            payload={
-                "op_class": classify_op(op_id),
-                "result_status": "ok",
-                "decision": "auto-approved",
-                "grant_id": str(grant.id),
-                "connector_id": grant.connector_id,
-                "approval_op_id": grant.op_id,
-            },
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
-        )
-        await publish_event(event)
-    except Exception:
-        _log.exception(
-            "service_grant_broadcast_failed",
-            grant_id=str(grant.id),
-            op_id=grant.op_id,
-        )

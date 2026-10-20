@@ -2206,6 +2206,57 @@ a separate kwarg on `resolve_shallow_ref`; `parse_openapi` threads
 all four dicts uniformly so the full pipeline never trips the
 opt-out branch.
 
+### Group text check on the review payload (#3671)
+
+An LLM writes each group's `when_to_use` text at ingest. The operator
+reads it before enabling the group. The review payload now checks that
+text against the ops in the group, so the operator does not have to
+trust it blindly.
+
+Each `ConnectorReviewGroup` carries `advisory`
+(`ConnectorReviewGroupAdvisory`):
+
+* `distribution` (`GroupSafetyDistribution`) — counts of the **enabled**
+  ops per `safety_level` (`safe` / `caution` / `dangerous` /
+  `destructive`), how many of them need approval
+  (`requires_approval_count`), and the enabled total
+  (`enabled_op_count`). Disabled ops are not counted.
+* `flags` — short, plain notes, at most five, without repeats:
+  * the text makes a safety claim the ops break: "read-only" (or "no
+    side effects", "does not modify") while an op is not `safe` or needs
+    approval; "non-destructive" while an op is `destructive`; "all ...
+    dangerous/destructive" while an op is at another level, higher or
+    lower; "all ... require approval" while an op does not;
+  * the text shares no word with the op ids and summaries.
+
+A `staged` group has no enabled op until the operator enables it. Then
+the flags check every op in the group (the ops enabling would turn on)
+and each flag says so. The counts still cover enabled ops only.
+
+`operations/ingest/group_truth.py` builds this from the ops the payload
+already loaded, so it adds no database query. The check is a simple word
+match, not a language parser.
+
+This is advice only. It never blocks dispatch, ingest, or the move from
+`staged` to `enabled`. Dispatch keeps using each op's own `safety_level`,
+`requires_approval`, and policy. The group label and its text are never
+part of that decision, and the agent-facing `list_operation_groups`
+result does not carry these fields. `--json` on `meho connector review`,
+`GET /api/v1/connectors/{id}/review`, and the MCP `meho_connector_review`
+tool carry them.
+
+**Re-ingest keeps operator edits.** A re-ingest of the same spec never
+writes `custom_description`, `custom_notes`, `is_enabled`, the group's
+`review_status`, or an edited `when_to_use` (the upsert's existing-row
+branches in `_upsert.py` skip those fields, the grouping pass skips ops
+that already have a group, and typed registration does not write its
+`when_to_use` over an existing group row). A breaking change ships as a
+new connector `version` with its own rows next to the old ones. The same
+`(product, version, impl_id, op_id)` from a different spec raises
+`OpIdCollision`. `test_operations_ingest_review.py` pins all of this
+(`-k override_preserved_on_reingest`,
+`-k breaking_change_new_version_identity`).
+
 ### T2 control flow
 
 ```text

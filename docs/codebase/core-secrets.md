@@ -94,9 +94,10 @@ keys. While `coreKeycloak.enabled` is on,
 `corePostgres.existingSecrets.keycloak`,
 `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
 `checkRunner.clientSecret.secretName` must stay empty or name the
-`<release>-core-…` Secret. A custom name there makes the Keycloak pod wait
-forever for a Secret that is never created. The render-time check for this
-lands with #4591. To use your own value for one of these Secrets, create it
+`<release>-core-…` Secret. A custom name there would make the Keycloak pod
+wait forever for a Secret that is never created, so `helm install` and
+`helm upgrade` stop with one sentence that names the key and the expected
+Secret (#4591). To use your own value for one of these Secrets, create it
 with the `<release>-core-…` name before the install: the Job keeps a Secret
 that exists. Only `coreKeycloak.existingSecrets.bootstrap` may name another
 Secret, because the Keycloak subchart reads that key too.

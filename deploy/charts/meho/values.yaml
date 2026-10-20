@@ -395,6 +395,9 @@ resources:
 # Required fields are placeholders; the chart fails-closed when they're left
 # empty (the backplane raises at startup, which surfaces as a CrashLoopBackOff).
 config:
+  # -- Bring-your-own Keycloak only: the issuer and the token audience.
+  # Leave both empty with the built-in Keycloak (`coreKeycloak.enabled`),
+  # which sets them.
   keycloakIssuerUrl: ""
   keycloakAudience: ""
   # -- Public OAuth client_id the CLI uses to drive the RFC 8628
@@ -899,7 +902,9 @@ checkRunner:
     secretKey: client_secret
 
 keycloak:
-  # -- Keycloak issuer URL — MUST be set; empty fails the schema. The JWT
+  # -- Keycloak issuer URL — MUST be set for a bring-your-own Keycloak;
+  # empty fails the schema. Leave it empty with the built-in Keycloak
+  # (`coreKeycloak.enabled`), which sets the issuer itself. The JWT
   # validator uses this as the `iss` claim expectation and to discover JWKS.
   issuer: ""
   # -- Keycloak audience (= the client ID in Keycloak that fronts the
@@ -1160,9 +1165,19 @@ coreKeycloak:
   # While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`,
   # `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
   # `checkRunner.clientSecret.secretName` must stay empty or name the
-  # `<release>-core-…` Secret. A custom name there makes the Keycloak pod
-  # wait forever for a Secret that is never created. The render-time check
-  # for this lands with #4591.
+  # `<release>-core-…` Secret, because Keycloak reads only that name; the
+  # render stops otherwise.
+  #
+  # When on, the chart also sets the backplane's Keycloak settings itself:
+  # the issuer `https://<hostname>/auth/realms/meho`, the Service address
+  # for discovery and token calls (`KEYCLOAK_DISCOVERY_URL`), the audience
+  # `meho-backplane`, the client ids `meho-cli` and `meho-web`, and
+  # `KEYCLOAK_ADMIN_*` for the `meho-admin` client. Leave
+  # `config.keycloakIssuerUrl` and `keycloak.issuer` empty (the render
+  # stops otherwise); `config.keycloakAudience`, `config.keycloakCliClientId`,
+  # `config.uiKeycloakClientId` and `keycloakAdmin.url` / `clientId` are
+  # not used. Pods call Keycloak over plain HTTP inside the namespace (see
+  # docs/codebase/devops.md, "How the backplane uses it").
   enabled: false
   # -- MEHO's public DNS name. Set the same value as `ingress.host`.
   hostname: ""

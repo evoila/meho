@@ -259,7 +259,10 @@ egress rules to:
 
 - Postgres — `tcp/5432` to `networkPolicy.postgresCIDR`
 - Vault — `tcp/8200` to `networkPolicy.vaultCIDR`
-- Keycloak — `tcp/443` to `networkPolicy.keycloakCIDR`
+- Keycloak — `tcp/443` to `networkPolicy.keycloakCIDR`; with the built-in
+  Keycloak (`coreKeycloak.enabled`) instead `tcp/8080` to a `podSelector`
+  matching its pod (`app.kubernetes.io/name: keycloak` and the release),
+  and `keycloakCIDR` is not used (#4591)
 - Broadcast subchart — `tcp/<broadcast.service.port>` (default 6379) to a
   `podSelector` matching the in-cluster broadcast subchart's selector
   labels (`app.kubernetes.io/name: broadcast`); the rule is conditional
@@ -687,8 +690,9 @@ While the built-in Keycloak is on, leave
 `checkRunner.clientSecret.secretName` empty (or set them to the core name):
 the subchart cannot read these parent keys, so with another name the
 secrets Job would check that Secret, not make the core one, and the
-Keycloak pod would wait for it forever. The render-time check for this
-lands with #4591. The pod does not start until all five exist.
+Keycloak pod would wait for it forever. The render stops with one sentence
+that names the key and the expected Secret (#4591). The pod does not start
+until all five exist.
 
 **What it renders.**
 
@@ -793,13 +797,67 @@ built-in client scopes (`basic`, `profile`, `roles`, …) even though the
 file lists its own `mcp:*` scopes; this attribute needs Keycloak 26.6 or
 newer.
 
+#### How the backplane uses it (#4591)
+
+With `coreKeycloak.enabled` on, the chart sets every Keycloak setting of the
+backplane itself (helper `meho.keycloakSettings` in
+`templates/_core-keycloak.tpl`). The values come from the subchart and the
+realm file, not from `config.*` or `keycloakAdmin.*`:
+
+| Setting | Value |
+| --- | --- |
+| `KEYCLOAK_ISSUER_URL` | `https://<coreKeycloak.hostname>/auth/realms/meho`, the `iss` of every token |
+| `KEYCLOAK_DISCOVERY_URL` | `http://<release>-keycloak:8080/auth/realms/meho`, the Service |
+| `KEYCLOAK_AUDIENCE` | `meho-backplane` |
+| `KEYCLOAK_CLI_CLIENT_ID` | `meho-cli` |
+| `UI_KEYCLOAK_CLIENT_ID` | `meho-web` |
+| `KEYCLOAK_ADMIN_URL` | `http://<release>-keycloak:8080/auth/admin/realms/meho` |
+| `KEYCLOAK_ADMIN_CLIENT_ID` | `meho-admin` |
+| `KEYCLOAK_ADMIN_CLIENT_SECRET` | Secret `<release>-core-keycloak-admin`, key `client_secret` |
+
+The `KEYCLOAK_ADMIN_*` settings render whether or not
+`keycloakAdmin.enabled` is set. `KEYCLOAK_DISCOVERY_URL` is the realm base
+URL for the backplane's own calls: the discovery document (keys, readiness
+probe, web console endpoints) and the token endpoint (admin client, check
+runner, agent runs). The discovery document fetched there names the public
+issuer and authorization endpoint and Service-URL keys and token endpoints,
+so tokens keep the public `iss`, browsers keep the public login pages, and
+no pod calls the public address. The issuer check, `/api/v1/auth-config`
+and `/.well-known/oauth-protected-resource` keep the public issuer. With
+the built-in Keycloak off, none of this renders: `KEYCLOAK_DISCOVERY_URL`
+is absent and every other setting comes from values as before, so a
+bring-your-own render is byte for byte the same
+(`backend/tests/test_chart_bring_your_own_render.py`).
+
+The render fails with one sentence when the values contradict the built-in
+Keycloak:
+
+- `config.keycloakIssuerUrl` or `keycloak.issuer` is set (the chart sets
+  the issuer);
+- `corePostgres.existingSecrets.keycloak`,
+  `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
+  `checkRunner.clientSecret.secretName` names a Secret other than the
+  matching `<release>-core-…` one, for example
+  `uiConsole.secretName must be empty or "meho-core-ui-auth" while
+  coreKeycloak.enabled is on: the built-in Keycloak reads only that
+  Secret.`
+
+The schema needs `keycloak.issuer`, `config.keycloakIssuerUrl` and
+`config.keycloakAudience` only while the built-in Keycloak is off.
+
+**HTTPS inside the cluster.** The realm keeps `sslRequired: external`, and
+pods still call the Service over plain HTTP. That works for every pod
+address: Keycloak's check (`TokenEndpoint.checkSsl`, Keycloak 26.8.1) looks
+at the scheme of the frontend address, which `KC_HOSTNAME=https://<host>/auth`
+fixes to https. Without `KC_HOSTNAME` the request's own scheme and source
+address decide, and a plain HTTP call from a non-private address would get
+"HTTPS required". Both cases are tested against a real Keycloak in
+`backend/tests/integration/test_core_keycloak_realm_import.py`
+(`sslRequired: all` still passes with the fixed address and fails without
+it). Browsers and the CLI come through the ingress, which ends TLS.
+
 **Known limits.**
 
-- The backplane still fetches the discovery document from
-  `KEYCLOAK_ISSUER_URL` (the public URL). Pointing it at the Service URL
-  needs the `KEYCLOAK_DISCOVERY_URL` setting, which comes with #4591. The
-  readiness probe code is green against the
-  Service URL (checked on kind).
 - The admin console does not work through `kubectl port-forward`: its
   login page uses the public address, and `/auth/realms/master` is not
   routed unless `exposeAdmin` is true. The Admin REST API works through
@@ -906,10 +964,10 @@ values overlay:
 | `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true |
 | `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production) |
 | `vault.address` | Per-environment Vault endpoint. Required only when `config.credentialBackend: vault` (the default) — a `gsm` install leaves it blank (#2231) |
-| `keycloak.issuer` | Per-environment Keycloak issuer URL |
+| `keycloak.issuer` | Per-environment Keycloak issuer URL. Not set with the built-in Keycloak (`coreKeycloak.enabled`): the chart derives the issuer and the render fails if one is set |
 | `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract). `config.vaultAddr` is required-when-`credentialBackend: vault`, like `vault.address` |
 | `config.backplaneUrl` / `config.mcpResourceUri` | G0.8-T4 (#633). Blank by design: for the common ingress-fronted deploy the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` via the `meho.backplaneUrl` / `meho.mcpResourceUri` helpers, so the `/mcp` audience resolves without operator action. Set explicitly only when the public URL differs from the Ingress host, or for a non-default MCP mount. When neither resolves (no ingress / empty host, nothing set) the chart `fail`s at `helm template` / `helm install` time with an actionable message naming `config.backplaneUrl` / `config.mcpResourceUri` / `ingress.host` (#2394, in `templates/configmap.yaml`) instead of rendering an empty audience and letting the pod crash-loop at startup on `audience_not_configured` (`_assert_mcp_resource_uri_configured` in `main.py`, still the runtime backstop). There is no `allowNoMcpResourceUri` escape hatch — for a deliberate MCP-less bring-up before ingress/DNS exists, set a placeholder `config.backplaneUrl`; `/mcp` stays per-request fail-closed regardless. The operator must still add a matching Keycloak `oidc-audience-mapper` — see `docs/cross-repo/mcp-client-setup.md` Step 1 |
-| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled |
+| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled. `keycloakCIDR` is not used with the built-in Keycloak |
 
 A blank field falls into the typed-schema contract immediately — `helm
 install` fails before a single Kubernetes resource is created. The
@@ -937,16 +995,16 @@ them).
 | `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
 | `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
 | `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. Required only when `config.credentialBackend: vault` (the default); a `gsm` install leaves it blank (#2231). |
-| `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
-| `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
-| `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
+| `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). Must stay empty with the built-in Keycloak, which sets it. |
+| `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. Must stay empty with the built-in Keycloak. |
+| `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. Not needed with the built-in Keycloak (`meho-backplane`). |
 | `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. Required-when-`credentialBackend: vault`, like `vault.address`. |
 | `config.credentialBackend` | enum `vault` \| `gsm` | Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (#2227). Default `vault` (rendered `CREDENTIAL_BACKEND`). `vault` requires `vault.address` + `config.vaultAddr`; `gsm` requires `gsm.enabled: true` + `gsm.project` (root-level `allOf` conditional). |
 | `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend (#2227). Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys render as `GSM_WIF_*` (#2642 — inert stubs before that); a non-empty `audience` switches credential reads onto the calling operator's identity, which makes *background* dispatch (Sensors, the topology-refresh scheduler, runbook verify dispatch — the callers that dispatch with no operator JWT at all) need an identity of its own — an ambient pod identity or `checkRunner.*`. Connector `probe()` / `fingerprint()` are **not** covered by either: they carry a non-empty placeholder JWT, so they take the WIF branch and fail the exchange regardless. See `docs/deploying.md` § GSM / Vault-free, `deploy/values-examples/values-gsm-example.yaml` (SA-direct), and `deploy/values-examples/values-gsm-wif-example.yaml` (per-operator WIF). |
 | `checkRunner.enabled` / `.clientId` / `.clientSecret.*` | boolean / string / object | In-process check-runner service principal (#2642). `enabled: true` requires a non-empty `clientId` + `clientSecret.secretName`, and wires `CHECK_RUNNER_CLIENT_ID` (plain env) + `CHECK_RUNNER_CLIENT_SECRET` (`secretKeyRef` only). Default `false` renders nothing: background dispatch carries no bearer token and a Sensor whose target needs an operator-context credential read evaluates `unknown`. |
 | `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
 | `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
-| `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |
+| `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same, but not used (and not required) with the built-in Keycloak, which the backplane reaches by podSelector. |
 
 **Common operator overrides** (safe defaults provided; tune as needed):
 

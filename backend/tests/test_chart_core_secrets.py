@@ -54,7 +54,12 @@ _BASE_OVERRIDES = [
 
 # The Keycloak subchart (#4040) needs its host name and first tenant id
 # whenever coreKeycloak is on, and the schema needs corePostgres with it.
+# The chart then derives the issuer, so the hand-set one is cleared (#4591).
 _CORE_ON = [
+    "--set",
+    "keycloak.issuer=",
+    "--set",
+    "config.keycloakIssuerUrl=",
     "--set",
     "corePostgres.enabled=true",
     "--set",
@@ -166,7 +171,7 @@ def test_job_pod_is_outside_the_backplane_network_policy() -> None:
 
 
 def test_role_grants_exactly_the_designed_rights() -> None:
-    docs = _render(*_CORE_ON, "--set", "uiConsole.secretName=my-ui")
+    docs = _render(*_CORE_ON, "--set", "approvalHandoff.secretName=my-handoff")
     rules = _core_objects(docs)["Role"]["rules"]
 
     by_verbs = {tuple(rule["verbs"]): rule for rule in rules}
@@ -176,7 +181,7 @@ def test_role_grants_exactly_the_designed_rights() -> None:
         assert rule["resources"] == ["secrets"]
     assert "resourceNames" not in by_verbs[("create",)]
     assert by_verbs[("get", "patch")]["resourceNames"] == _CORE_NAMES
-    assert by_verbs[("get",)]["resourceNames"] == ["meho-postgres", "my-ui"]
+    assert by_verbs[("get",)]["resourceNames"] == ["meho-postgres", "my-handoff"]
     assert by_verbs[("delete",)]["resourceNames"] == [f"{_RELEASE}-core-vault-init"]
     assert not any(
         kind in {"ClusterRole", "ClusterRoleBinding"} for kind in [d["kind"] for d in docs]
@@ -243,10 +248,6 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
             "--set",
             "coreKeycloak.existingSecrets.bootstrap=my-boot",
             "--set",
-            "uiConsole.secretName=my-ui",
-            "--set",
-            "uiConsole.clientSecretKey=cs",
-            "--set",
             "approvalHandoff.secretName=my-handoff",
             "--set",
             "broadcast.auth.existingSecret=my-valkey",
@@ -257,13 +258,12 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
         "my-su": ("corePostgres.existingSecrets.superuser", ("password",)),
         "meho-postgres": ("postgres.credentialsSecret", ("password", "url")),
         "my-boot": ("coreKeycloak.existingSecrets.bootstrap", ("client_id", "client_secret")),
-        "my-ui": ("uiConsole.secretName", ("cs", "session_encryption_key")),
         "my-handoff": ("approvalHandoff.secretName", ("approval_handoff_encryption_key",)),
         "my-valkey": ("broadcast.auth.existingSecret", ("requirepass",)),
     }
     made = set(_made(plan).values())
     assert made.isdisjoint({"postgres-superuser", "postgres-meho", "keycloak-bootstrap"})
-    assert made.isdisjoint({"ui-auth", "approval-handoff", "broadcast-auth", "tls"})
+    assert made.isdisjoint({"approval-handoff", "broadcast-auth", "tls"})
 
 
 def test_tls_secret_is_made_only_when_the_core_name_is_used() -> None:

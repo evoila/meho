@@ -1674,12 +1674,14 @@ VM_DISK_GROW_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": "Managed-object ID of the VM owning the disk (e.g. 'vm-42').",
         },
         "disk": {
-            "type": "string",
+            "type": ["string", "integer"],
             "minLength": 1,
+            "minimum": 0,
             "description": (
                 "Virtual disk identifier — the REST "
-                "``com.vmware.vcenter.vm.hardware.Disk`` id, which is the "
-                "string form of the vim ``VirtualDevice.key`` (e.g. '2000'). "
+                "``com.vmware.vcenter.vm.hardware.Disk`` id (a string, e.g. '2000') "
+                "or the vim ``VirtualDevice.key`` it is the string form of "
+                "(an integer, e.g. 2000). Both forms are accepted. "
                 "The handler matches it against the VM's "
                 "``config.hardware.device`` list to select the VirtualDisk to edit."
             ),

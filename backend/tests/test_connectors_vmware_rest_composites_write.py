@@ -89,8 +89,10 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     FOLDER_CREATE_PARAMETER_SCHEMA,
     VM_CREATE_RESPONSE_SCHEMA,
+    VM_DISK_GROW_PARAMETER_SCHEMA,
     VM_NIC_REPOINT_PARAMETER_SCHEMA,
 )
+from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.composite import (
     CompositeResumeState,
     composite_resume_scope_var,
@@ -6148,6 +6150,36 @@ async def test_vm_disk_grow_happy_path_edits_capacity_and_polls(gate: _GateRecor
     assert change["device"]["_typeName"] == "VirtualDisk"
     # The backing (fully-specified device) is carried through unchanged.
     assert change["device"]["backing"]["fileName"] == "[datastore1] web-01/web-01.vmdk"
+
+
+async def test_vm_disk_grow_accepts_the_int_device_key(gate: _GateRecorder) -> None:
+    """``disk`` given as the int vim device key selects the same disk (#3789)."""
+    conn = _DiskGrowConnector(devices=[_virtual_disk(key=2000, capacity_bytes=_TEN_GIB)])
+    out = await vm_disk_grow_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "disk": 2000, "capacity_bytes": _TWENTY_GIB},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "grown"
+    assert out["disk"] == "2000"
+    assert gate.calls[0]["params"]["disk"] == "2000"
+    assert conn.reconfig_bodies[0]["spec"]["deviceChange"][0]["device"]["key"] == 2000
+
+
+@pytest.mark.parametrize("disk", ["2000", 2000])
+def test_vm_disk_grow_schema_accepts_disk_as_string_or_int(disk: object) -> None:
+    """The REST disk id (string) and the vim device key (int) both pass (#3789)."""
+    params = {"vm": "vm-1", "disk": disk, "capacity_bytes": _TWENTY_GIB}
+    assert validate_params(VM_DISK_GROW_PARAMETER_SCHEMA, params) == []
+
+
+@pytest.mark.parametrize("disk", ["", -1, True, 2000.5, None])
+def test_vm_disk_grow_schema_refuses_a_bad_disk(disk: object) -> None:
+    """An empty id, a negative key, a bool, a float or null is refused."""
+    params = {"vm": "vm-1", "disk": disk, "capacity_bytes": _TWENTY_GIB}
+    assert validate_params(VM_DISK_GROW_PARAMETER_SCHEMA, params) != []
 
 
 async def test_vm_disk_grow_refuses_shrink_before_any_write(gate: _GateRecorder) -> None:

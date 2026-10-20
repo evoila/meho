@@ -6498,7 +6498,8 @@ async def vm_disk_grow_composite(
        returns ``status="timeout"`` with the task id for the operator.
     """
     vm_moid = params["vm"]
-    disk_id = params["disk"]
+    # The REST disk id is a string, the vim device key an int (#3789).
+    disk_id = str(params["disk"])
     requested = int(params["capacity_bytes"])
 
     devices_result = await connector._post_vmomi_json(

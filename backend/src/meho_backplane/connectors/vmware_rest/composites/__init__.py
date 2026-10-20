@@ -135,6 +135,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 )
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
+    register_vmware_composite_operations_8_0,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     storage_policy_create_composite,
@@ -188,6 +189,9 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # ``_eager_import_connectors`` so every connector subpackage has self-
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
+# The same composites on the ``vmware-rest-8.0`` catalog (#3789), so the
+# catalog the resolver picks for an 8.0.x target carries them too.
+register_typed_op_registrar(register_vmware_composite_operations_8_0)
 
 # Side-effect import: registers the 24 write composites' park-time
 # ``proposed_effect`` preview builders (#1608, destructive-tier
@@ -236,6 +240,7 @@ __all__ = [
     "network_portgroup_vlan_set_composite",
     "performance_summary_composite",
     "register_vmware_composite_operations",
+    "register_vmware_composite_operations_8_0",
     "service_control_composite",
     "storage_policy_create_composite",
     "storage_policy_delete_composite",

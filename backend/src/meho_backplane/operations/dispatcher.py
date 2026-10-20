@@ -386,6 +386,7 @@ __all__ = [
     "DispatchChild",
     "Dispatcher",
     "compute_params_hash",
+    "descriptor_requires_target",
     "dispatch",
     "import_handler",
     "parent_audit_id_var",
@@ -475,6 +476,23 @@ def _handler_requires_target(handler_ref: str) -> bool:
     if param_names and param_names[0] == "self":
         return True
     return "connector" in param_names
+
+
+def descriptor_requires_target(descriptor: EndpointDescriptor) -> bool:
+    """True when dispatching *descriptor* needs a ``target``.
+
+    An ``ingested`` op always reaches its vendor API through the target's
+    connector, so it always needs one. A ``typed`` / ``composite`` op
+    needs one only when its handler binds to a connector instance (see
+    :func:`_handler_requires_target`). Mirrors the checks in
+    :func:`_resolve_connector_instance`; the exact-op contract of
+    ``search_operations`` uses it to tell the caller up front.
+    """
+    if descriptor.source_kind == "ingested":
+        return True
+    if descriptor.source_kind in ("typed", "composite"):
+        return _handler_requires_target(descriptor.handler_ref or "")
+    return False
 
 
 async def _resolve_connector_instance(

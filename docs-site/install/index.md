@@ -138,9 +138,12 @@ backplane can be logged into, the realm needs:
    `meho login` uses;
 3. a **public `meho-mcp`** client with authorization-code + PKCE —
    what browser-capable MCP clients use;
-4. five **protocol mappers** and four **default client scopes** on the
+4. six **protocol mappers** and four **default client scopes** on the
    public clients, so issued tokens carry the claims MEHO validates;
-5. at least one **user** in the `meho-admins` group.
+5. five **groups** (`MEHO-Readers`, `MEHO-Operators`,
+   `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers`) that give each
+   person their tenant and role;
+6. at least one **user** in the `MEHO-Admins` group.
 
 **Follow [Keycloak realm setup](keycloak-realm.md) now** — it is the
 step-by-step recipe, including the non-obvious Keycloak 25+ `basic`

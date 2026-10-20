@@ -612,12 +612,15 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.event.tail",
         handler=event_tail_composite,
-        summary="Tail recent vCenter events via EventManager.QueryEvents.",
+        summary="Read vCenter events via EventManager.QueryEvents, with optional filters.",
         description=(
             "Calls EventManager.QueryEvents (vi-json) against the "
-            "EventManager singleton, optionally narrowed by a per-call "
-            "moId override, and caps the returned array client-side. "
-            "Equivalent of 'govc events' for the operator-facing "
+            "EventManager singleton with an EventFilterSpec. Optional "
+            "filters: a time window (begin_time / end_time), event types "
+            "(event_type_ids) and one managed entity (entity). max_count "
+            "limits the result on the server. Each event comes back as a "
+            "short row: createdTime, eventTypeId, fullFormattedMessage, "
+            "entity. Equivalent of 'govc events' for the operator-facing "
             "workflow. Read-only -- never mutates the event store."
         ),
         parameter_schema=EVENT_TAIL_PARAMETER_SCHEMA,

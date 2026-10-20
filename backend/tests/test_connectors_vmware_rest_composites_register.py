@@ -464,7 +464,7 @@ async def test_response_schema_persists_for_every_composite(
 
     event_resp: dict[str, Any] = dict(by_op["vmware.composite.event.tail"].response_schema)
     event_props = dict(event_resp["properties"])
-    assert {"events", "count", "moId", "max_events_applied"} <= set(event_props)
+    assert {"events", "count", "moId", "max_count_applied"} <= set(event_props)
 
     perf_resp: dict[str, Any] = dict(by_op["vmware.composite.performance.summary"].response_schema)
     perf_props = dict(perf_resp["properties"])

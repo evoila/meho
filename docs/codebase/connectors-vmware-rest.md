@@ -1756,7 +1756,13 @@ and a mandatory blast-radius block. Two things are connector-specific:
   version) issues the synchronous REST `DELETE:/vcenter/vm/{vm}`. The vim
   arm's `Destroy_Task` + the preview's snapshot `RetrievePropertiesEx` are
   declared in `_write._VIM_SUB_OPS_VM_DESTROY` and reconciled against the
-  pinned `vi-json.yaml` (the same lane as disk-grow).
+  pinned `vi-json.yaml` (the same lane as disk-grow). The REST arm's
+  `GET:/vcenter/vm/{vm}` read + `DELETE:/vcenter/vm/{vm}` are declared in
+  `_write._SUB_OPS_VM_DESTROY` and reconciled against the pinned
+  `vcenter.yaml`. The governed-subop discovery surface
+  (`GET /api/v1/operations/governed-subops?op_id=vmware.composite.vm.destroy`)
+  joins both lists, so an operator sees the delete step of either arm, and
+  the REST delete is flagged un-grantable (delete-shaped).
 
 The blast-radius preview builder (`_write_preview._vm_destroy_preview`)
 live-reads `Vm.Info` for object identity (moid / name / power state) plus

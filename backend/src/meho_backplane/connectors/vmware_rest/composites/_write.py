@@ -1184,6 +1184,12 @@ _SUB_OPS_VM_RESIZE: tuple[str, ...] = (
     _OP_UPDATE_VM_CPU,
     _OP_UPDATE_VM_MEMORY,
 )
+#: vm.destroy's 9.0+ REST arm (#3198): the fail-closed power-state read plus
+#: the synchronous delete. The pre-9.0 vim arm is ``_VIM_SUB_OPS_VM_DESTROY``.
+_SUB_OPS_VM_DESTROY: tuple[str, ...] = (
+    _OP_GET_VM,
+    _OP_DELETE_VM,
+)
 _SUB_OPS_VM_NIC_REPOINT: tuple[str, ...] = (
     _OP_GET_VM_NIC,
     _OP_LIST_NETWORK,

@@ -168,6 +168,10 @@ installer-rest:
     - response_schema
     - llm_instructions
     - examples
+  installer.sddc.list:
+    - summary
+    - llm_instructions
+    - examples
   installer.sddc.spec.validate:
     - summary
     - response_schema
@@ -187,6 +191,10 @@ installer-rest:
   installer.system.depot.set:
     - summary
     - response_schema
+    - llm_instructions
+    - examples
+  installer.system.depot.sync-status:
+    - summary
     - llm_instructions
     - examples
   installer.system.trusted-certificates.add:
@@ -561,6 +569,7 @@ vmware-rest:
     - llm_instructions
     - examples
   vmware.composite.event.tail:
+    - summary
     - llm_instructions
     - examples
   vmware.composite.folder.create:

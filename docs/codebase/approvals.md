@@ -1550,7 +1550,11 @@ same as an ordinary policy denial. They share one writer,
 multi-step operation the row is written by the sub-op gate and carries the
 parent operation's audit id in `parent_audit_id`. This matters because the
 parent returns the step's result as is, and the dispatcher writes no audit
-row for a result a handler returns. Before #3542 the verdict was only a
+row for a result a handler returns. Every row the step gate writes (this
+`denied` row and the `approval.request` row of a step that waits) carries
+the step's own policy result in `policy_decision`, `needs-approval`, not
+the parent's (#4646). The gate binds the step's result for its own call
+only, so the parent operation's own audit row keeps the parent's result. Before #3542 the verdict was only a
 warning and the op parked anyway; rows parked then still carry
 `write_capability_warning`, which the console modal shows as a banner.
 

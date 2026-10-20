@@ -83,11 +83,53 @@ def test_catalog_lists_expected_patterns() -> None:
     assert list(PATTERN_NAMES) == sorted(_EXPECTED_NAMES)
 
 
+_BIND_KEY_SECRET_ONLY_POLICY = RedactionPolicy(
+    id="test-bind-key-secret",
+    version=1,
+    rules=(
+        RedactionRule(
+            name="strip-bind-key-secret",
+            pattern="bind_key_secret",
+            action="redact",
+            reason="BIND key secret",
+        ),
+    ),
+)
+
+
 def test_bind_key_secret_keeps_the_keyword() -> None:
-    """Only the quoted value is the match, so the file stays readable (#4617)."""
+    """Only the quoted value is replaced, so the file stays readable (#4617)."""
     line = 'key "rndc-key" { algorithm hmac-sha256; ' + _BIND_KEY_SECRET_FIXTURE_POS + " };"
-    redacted = get_pattern("bind_key_secret").sub("[R]", line)
-    assert redacted == 'key "rndc-key" { algorithm hmac-sha256; secret [R]; };'
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        'key "rndc-key" { algorithm hmac-sha256; secret [REDACTED:bind_key_secret]; };'
+    )
+    # The manifest span points at the quoted value, not at the keyword.
+    start, end = result.manifest[0].span
+    assert line[start:end] == '"exampleTsigValue=="'
+
+
+@pytest.mark.parametrize(
+    "separator",
+    [
+        " /* rotation note */ ",
+        " // rotated last week\n    ",
+        " # note\n    ",
+        " /* first\n   line */ // second\n    ",
+        "",
+    ],
+    ids=["block-comment", "line-comment", "hash-comment", "mixed-comments", "no-space"],
+)
+def test_bind_key_secret_skips_comments_before_the_value(separator: str) -> None:
+    """BIND allows comments between ``secret`` and the value (#4620 review).
+
+    The keyword and the comments stay in the output; only the quoted
+    value is replaced, and no fragment of the value survives.
+    """
+    line = "secret" + separator + '"' + "exampleTsig" + 'Value==";'
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == "secret" + separator + "[REDACTED:bind_key_secret];"
+    assert "exampleTsig" not in result.redacted
 
 
 def test_get_pattern_returns_compiled_regex() -> None:

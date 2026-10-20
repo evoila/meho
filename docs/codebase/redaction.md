@@ -122,7 +122,7 @@ production traffic cannot reach that branch.
 | `jwt` | `ey<base64url>.<base64url>.<base64url>` three-segment tokens |
 | `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
-| `bind_key_secret` | The quoted value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys); the keyword stays so the file stays readable (#4617) |
+| `bind_key_secret` | The quoted value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys), also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable (#4617) |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
 | `ipv6` | Full + compressed RFC 5952 forms |
@@ -137,6 +137,14 @@ the first punctuation byte, so a value like `P@ssw0rd!withMore` was
 matched only partially (tail leaked) or not at all (whole value
 leaked). The labelled-context requirement, not the value alphabet, is
 what keeps opaque IDs (Git SHAs, build hashes) from false-positiving.
+
+The engine replaces the whole match (group 0) of a pattern. One
+exception: a pattern that must look past variable-width context before
+the secret names the secret part `value` (a Python look-behind cannot
+skip variable-width text). The engine then replaces only that group,
+keeps the rest of the match in the output, and reports the span of the
+group in the manifest. `bind_key_secret` uses this so the `secret`
+keyword and any BIND comments before the value stay readable.
 
 Calibration notes (over-match vs under-match) are inline in
 `patterns.py`. The Tier-1 posture deliberately leans toward

@@ -33,7 +33,10 @@ the engine then redacts the full match span (group 0). Patterns capture
 the *value* shape, not the surrounding context, except for
 ``authorization_header`` where the redacted span is the whole
 ``Authorization: ...`` line because the header name itself is the
-operator-facing signal.
+operator-facing signal. A pattern that must look past variable-width
+context (which a Python look-behind cannot do) names the secret part
+``value``: the engine then replaces only that group and keeps the rest
+of the match in the output (``bind_key_secret``).
 
 **False-positive posture.** Tier-1 is the cheap layer. It will
 *occasionally* over-redact a benign UUID-shaped or FQDN-shaped string,
@@ -173,12 +176,16 @@ _KUBECONFIG = re.compile(
 # BIND key secrets (#4617). A ``named.conf`` ``key`` block carries the
 # shared secret of a TSIG or rndc key as ``secret "<base64>";``. The
 # keyword is followed by whitespace, not ``=`` / ``:``, so ``api_key``
-# does not see it. The fixed-width lookbehind keeps the ``secret``
-# keyword out of the match: the file stays readable and only the
-# quoted value is replaced. Anything between the quotes is the value
-# (base64 may be split across whitespace in BIND syntax).
+# does not see it. BIND also allows comments (``/* */``, ``//``, ``#``)
+# between the keyword and the value. A look-behind cannot skip them
+# (it must be fixed-width), so the match covers the keyword, any
+# comments, and the quoted value, and the ``value`` group marks the
+# part the engine replaces. The keyword and the comments stay in the
+# output, so the file stays readable. Anything between the quotes is
+# the value (base64 may be split across whitespace in BIND syntax).
+_BIND_COMMENT = r"(?:/\*[^*]*(?:\*(?!/)[^*]*)*\*/|//[^\n]*|#[^\n]*)"
 _BIND_KEY_SECRET = re.compile(
-    r'(?<=\bsecret\s)\s*"[^"]{1,' + str(_VALUE_MAX) + r'}"',
+    r"\bsecret(?:\s|" + _BIND_COMMENT + r')*(?P<value>"[^"]{1,' + str(_VALUE_MAX) + r'}")',
     re.IGNORECASE,
 )
 

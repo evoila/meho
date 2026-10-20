@@ -2,8 +2,8 @@
 
 ## Overview
 
-When a built-in part of the core is on (`corePostgres.enabled` or
-`coreKeycloak.enabled`; later also `coreVault.enabled`), the Helm chart runs a
+When a built-in part of the core is on (`corePostgres.enabled`,
+`coreKeycloak.enabled` or `coreVault.enabled`), the Helm chart runs a
 `secrets` Job before every install and every upgrade. The Job makes each
 password and key the core needs, as a Kubernetes Secret named
 `<release>-core-…`, **if the Secret is missing**. Nobody creates these

@@ -1,0 +1,110 @@
+# Default values for the built-in OpenBao subchart (the password safe of the
+# MEHO core, ADR 0008). Operators set these under the parent chart's
+# `coreVault:` block; the parent maps that block here through a dependency
+# `alias`. MEHO's names stay `vault` (`<release>-vault`, `coreVault`): they
+# name the job, not the product.
+#
+# What the subchart renders when `enabled: true`:
+# - a StatefulSet `<release>-vault` with one OpenBao server, raft storage on
+#   its own disk, started from our own config file (a ConfigMap);
+# - two Services, both reaching a locked ("sealed") pod: `<release>-vault`
+#   on port 8200 (plain HTTP inside the namespace) and the headless
+#   `<release>-vault-internal` for the pod's own DNS name;
+# - a NetworkPolicy, off by default;
+# - a ClusterRoleBinding to `system:auth-delegator`, only with
+#   `authDelegator: true`.
+#
+# The setup Job (`vault-init-<hash>`) of the parent chart starts OpenBao the
+# first time and sets it up. Without it the server stays empty and locked.
+
+# -- Turns the subchart on. The parent's dependency entry uses
+# `condition: coreVault.enabled`. Off by default: the chart then renders
+# exactly what it rendered before the subchart existed.
+enabled: false
+
+image:
+  # -- Official OpenBao image, UBI variant: it runs as user 100 and also
+  # with any user id in group 0 (OpenShift).
+  repository: quay.io/openbao/openbao-ubi
+  # -- Human-readable tag of the pinned image.
+  tag: "2.7.1"
+  # -- Manifest digest. When set it wins over `tag` in the rendered image
+  # reference (`repository@digest`): quay tags can be moved, digests cannot.
+  digest: "sha256:33c4c3a7aeb8b812d570939bd7275f829901031e0a6b3e655207d8f0945bd248"
+  pullPolicy: IfNotPresent
+
+# -- The program in the image: `bao` for OpenBao, `vault` for a HashiCorp
+# Vault image (for tests only; set `image` to match). The chart picks the
+# command, the address variable (`BAO_ADDR` or `VAULT_ADDR`) and the config
+# keys that differ between the two from it.
+binary: bao
+
+# -- Bind OpenBao's service account to the cluster role
+# `system:auth-delegator` (a ClusterRoleBinding, the chart's only
+# cluster-wide object). Default false: MEHO does not need it, because its
+# setup Job logs in with keys it copies from the cluster. Turn it on only
+# for a Kubernetes login method that asks the cluster to check tokens.
+authDelegator: false
+
+persistence:
+  # -- Size of the data disk (raft storage). The StatefulSet cannot change
+  # it after the first install; grow the PVC by hand if the storage class
+  # allows it.
+  size: 10Gi
+  # -- Storage class of the data disk. Empty = the cluster default.
+  storageClass: ""
+
+# -- Pod security context. User 100 and group 1000 are the `openbao` user of
+# the image; `fsGroup` makes the data disk writable for it. With
+# `global.openshift: true` the chart leaves out `runAsUser`, `runAsGroup`
+# and `fsGroup`, so OpenShift can pick them.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Container resources. Audit lines go to the container log, so the log
+# counts against `ephemeral-storage`; the kubelet rotates it.
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+    ephemeral-storage: 256Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+    ephemeral-storage: 64Mi
+
+service:
+  # -- Service port. Pods reach OpenBao at `http://<release>-vault:<port>`.
+  port: 8200
+
+# -- The subchart's own ingress NetworkPolicy. Off by default. It selects the
+# OpenBao pod and admits port 8200 only from the backplane pods, the parent
+# chart's setup Jobs and the peers in `extraFrom`.
+networkPolicy:
+  enabled: false
+  # -- Labels of the backplane pods (the parent chart's selector labels).
+  # The release's `app.kubernetes.io/instance` label is added.
+  backplanePodLabels:
+    app.kubernetes.io/name: meho
+  # -- More allowed peers, written as NetworkPolicy `from` entries.
+  extraFrom: []
+
+# -- Node selector.
+nodeSelector: {}
+# -- Tolerations.
+tolerations: []
+# -- Affinity rules.
+affinity: {}

@@ -2920,6 +2920,29 @@ class VmwareRestConnector(HttpConnector):
 
         return await tasks_recent_impl(self, operator, target, params)
 
+    async def tasks_history(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.tasks.history`` -- vCenter tasks in a past time window (#3701).
+
+        A ``source_kind="typed"`` op, the time-window sibling of
+        :meth:`tasks_recent`. Creates a ``TaskHistoryCollector``, pages it,
+        and destroys it before returning, all in this one call.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_tasks_history.tasks_history_impl`
+        (imported lazily, like the other typed ops). Returns
+        ``{"tasks": [...], "truncated", "scanned", "collector_destroyed"}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_tasks_history import (
+            tasks_history_impl,
+        )
+
+        return await tasks_history_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

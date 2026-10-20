@@ -560,6 +560,44 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     state (`queued`/`running`/`success`/`error`), progress, cancelled
     flag, the queue/start/complete timestamps, and the localized error
     message when a task faulted.
+  - **`vmware.tasks.history`** (`typed_ops_tasks_history.py`, handler
+    `tasks_history`, `#3701`) — vCenter tasks in a past time window.
+    Use it when a task has already left the recent list.
+    - **Recent vs history.** `tasks.recent` reads
+      `TaskManager.recentTask`, which keeps only the last few minutes.
+      Classic vim tasks (an OVF deploy from a content library, a clone, a
+      relocate) are not CIS task providers, so `/cis/tasks` cannot see
+      them. `tasks.history` is the read for those older tasks.
+    - **One dispatch, no lasting server state.** The op calls
+      `TaskManager.CreateCollectorForTasks` with a `TaskFilterSpec`, pages
+      the new `TaskHistoryCollector` with `ReadNextTasks` (100 rows per
+      page, oldest first), and calls `DestroyCollector` in a `finally`.
+      So the destroy runs on the success path and on the error path. A
+      failed destroy is logged (`vmware_tasks_history_destroy_failed`)
+      and reported as `collector_destroyed: false`; it never hides the
+      rows or the read error. vCenter also drops a collector when its
+      client session ends.
+    - **Params.** `since` (required) and `until` filter on the task's
+      queued time (ISO-8601; a time without a zone is UTC). `entity` +
+      `entity_type` filter on the object the task ran on;
+      `include_children` widens that to child objects. `description_ids`
+      keeps only some operations (for example `ResourcePool.ImportVApp`).
+      `TaskFilterSpec` has no operation filter, so MEHO applies this one
+      after the read. `max_tasks` caps the rows (default 200, at most
+      1,000).
+    - **Output.** `{tasks, truncated, scanned, collector_destroyed}`.
+      Rows have the same shape as `tasks.recent` (one shared parser).
+      A long list goes through the normal JSONFlux result handle.
+    - **Limits.** vCenter caps how many collectors one session may hold
+      (create fails with `InvalidState` above the cap) and keeps task
+      history only as long as its own settings allow. A wide window can
+      hit `max_tasks` or the 50-page scan budget; then `truncated` is
+      `true` and the caller should narrow the window. vCenter only: a
+      standalone ESXi host does not serve the collector.
+    - **Safety level `safe`.** The collector is a temporary,
+      session-scoped read cursor that the op removes before it returns. It
+      changes no inventory or configuration, and vCenter needs only the
+      `System.View` privilege to create it.
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input

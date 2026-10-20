@@ -142,6 +142,11 @@ installer-rest:
     - response_schema
     - llm_instructions
     - examples
+  installer.bundles.download-status:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
   installer.bundles.list:
     - summary
     - response_schema

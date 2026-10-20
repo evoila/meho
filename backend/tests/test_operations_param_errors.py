@@ -88,6 +88,30 @@ def test_undeclared_key_that_looks_like_a_secret_is_redacted() -> None:
     assert "[REDACTED:" in entry["expected"]
 
 
+def test_path_under_a_dynamic_key_is_redacted() -> None:
+    schema = {"type": "object", "additionalProperties": {"type": "integer"}}
+    (entry,) = validate_params(schema, {_BAD: "not an int"})
+    assert _SECRET not in json.dumps(entry)
+    assert entry["path"].startswith("$[")
+    assert "[REDACTED:" in entry["path"]
+
+
+def test_path_under_a_nested_dynamic_key_is_redacted() -> None:
+    tags = {"type": "object", "patternProperties": {".*": {"type": "integer"}}}
+    schema = {"type": "object", "properties": {"tags": tags}}
+    (entry,) = validate_params(schema, {"tags": {_BAD: "not an int"}})
+    assert _SECRET not in json.dumps(entry)
+    assert entry["path"].startswith("$.tags[")
+    assert "[REDACTED:" in entry["path"]
+
+
+def test_path_under_an_oversized_key_is_capped() -> None:
+    schema = {"type": "object", "additionalProperties": {"type": "integer"}}
+    (entry,) = validate_params(schema, {"k" * 10_000: "not an int"})
+    assert len(entry["path"]) < 300
+    assert entry["path"].endswith("...<truncated>")
+
+
 def test_dependent_required_names_the_missing_partner() -> None:
     schema = {"type": "object", "dependentRequired": {"user": ["password"]}}
     (entry,) = validate_params(schema, {"user": "u"})

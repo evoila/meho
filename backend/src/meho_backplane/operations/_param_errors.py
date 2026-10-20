@@ -169,7 +169,8 @@ def describe_violation(err: ValidationError) -> dict[str, Any]:
     Keys: ``path`` (JSON path of the bad spot), ``validator`` (the schema
     keyword that failed), ``expected`` (what the schema wants there) and
     ``remediation`` (a short, fixed hint). No field carries the rejected
-    value.
+    value. The path is sanitized too: under ``additionalProperties`` or
+    ``patternProperties`` it holds a caller-supplied key name.
     """
     validator = str(err.validator)
     describer = _DESCRIBERS.get(validator)
@@ -179,7 +180,7 @@ def describe_violation(err: ValidationError) -> dict[str, Any]:
     else:
         expected, remediation = describer(err)
     return {
-        "path": err.json_path,
+        "path": _sanitize_free_text(err.json_path),
         "validator": validator,
         "expected": _sanitize_free_text(expected),
         "remediation": _sanitize_free_text(remediation),

@@ -140,10 +140,12 @@ class Settings(BaseModel):
     Attributes
     ----------
     keycloak_issuer_url:
-        The Keycloak realm's issuer URL — typically
-        ``https://<host>/realms/<realm>``. Must match the ``iss`` claim
-        of every accepted JWT exactly. Required (no default); the
-        backplane refuses to start without it.
+        The OIDC issuer URL — for Keycloak typically
+        ``https://<host>/realms/<realm>``, for authentik
+        ``https://<host>/application/o/<slug>/``. The ``iss`` claim of
+        every accepted JWT must equal this value, with or without a
+        trailing slash; any other issuer is rejected. Required (no
+        default); the backplane refuses to start without it.
     keycloak_audience:
         The OIDC ``aud`` claim every accepted JWT must carry. The
         backplane is registered as a Keycloak client (e.g.

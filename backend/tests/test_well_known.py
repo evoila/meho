@@ -8,8 +8,8 @@ Covers G0.5-T2 (#247) acceptance criteria for the discovery surface:
 * The metadata document is unauthenticated (no Bearer required).
 * The ``resource`` field matches the canonical MCP URI derived from
   ``MCP_RESOURCE_URI`` or, falling back, from ``BACKPLANE_URL``.
-* ``authorization_servers`` contains the configured Keycloak issuer
-  with no trailing slash.
+* ``authorization_servers`` contains the configured issuer exactly as
+  set, trailing slash included when the operator set one.
 * ``scopes_supported`` advertises the v0.2 scope namespace.
 * ``bearer_methods_supported`` advertises only ``["header"]`` per the
   MCP transport spec's ban on URI-query tokens.
@@ -131,35 +131,30 @@ def test_well_known_strips_trailing_slash_on_backplane_url(
         get_settings.cache_clear()
 
 
-def test_well_known_keycloak_issuer_url_has_no_trailing_slash(
+def test_well_known_keeps_issuer_trailing_slash_as_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``authorization_servers`` entries strip trailing slashes.
+    """``authorization_servers`` carries the issuer exactly as configured.
 
-    Pydantic's ``HttpUrl`` appends a trailing slash to URLs without a
-    path component; the metadata document strips it so downstream
-    clients can use the value verbatim as the issuer identifier when
-    constructing AS-metadata URLs per RFC 8414.
-
-    The env var is deliberately set **with** a trailing slash so the
-    test actually exercises the strip — a previous version of this
-    test set the value without a trailing slash, which made the
-    ``not server.endswith("/")`` assertion pass trivially regardless
-    of whether the strip logic ran.
+    RFC 8414 §3.3 makes a client compare the ``issuer`` from the
+    authorization server's discovery document byte-for-byte with the
+    value it was given. Providers such as authentik publish their
+    issuer with a trailing slash (#4273), so stripping it here would
+    make a strict MCP client reject the login server. The env var is
+    set **with** the slash so the test proves the value passes through
+    untouched rather than passing trivially.
     """
     monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
     monkeypatch.setenv("MCP_RESOURCE_URI", "")
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho/")
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://authentik.test/application/o/meho/")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
     try:
         client = TestClient(app)
         body = client.get("/.well-known/oauth-protected-resource").json()
-        # Exact equality, not just "doesn't end with /" — pins the
-        # canonical form against future regressions.
         assert body["authorization_servers"] == [
-            "https://keycloak.test/realms/meho",
+            "https://authentik.test/application/o/meho/",
         ]
     finally:
         get_settings.cache_clear()

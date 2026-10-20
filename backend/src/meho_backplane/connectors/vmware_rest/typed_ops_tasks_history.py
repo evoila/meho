@@ -74,9 +74,10 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-# The TaskManager is a singleton whose moId is 'TaskManager'.
+# The TaskManager is a singleton whose moId is 'TaskManager'. The collector
+# paths below keep the literal type name so the VI-JSON spec check can read
+# the method from the source.
 _CREATE_COLLECTOR_PATH = "/TaskManager/TaskManager/CreateCollectorForTasks"
-_COLLECTOR_MO_TYPE = "TaskHistoryCollector"
 
 #: Rows asked for per ``ReadNextTasks`` call.
 _PAGE_SIZE = 100
@@ -213,7 +214,7 @@ async def _destroy_collector(
     collector_moid: str,
 ) -> bool:
     """Call ``DestroyCollector`` up to ``_DESTROY_ATTEMPTS`` times."""
-    path = f"/{_COLLECTOR_MO_TYPE}/{collector_moid}/DestroyCollector"
+    path = f"/TaskHistoryCollector/{collector_moid}/DestroyCollector"
     for attempt in range(1, _DESTROY_ATTEMPTS + 1):
         try:
             await connector._post_vmomi_json(target, path, operator=operator)
@@ -298,7 +299,7 @@ async def tasks_history_impl(
             connector,
             operator,
             target,
-            f"/{_COLLECTOR_MO_TYPE}/{collector_moid}/ReadNextTasks",
+            f"/TaskHistoryCollector/{collector_moid}/ReadNextTasks",
             max_tasks=max_tasks,
             description_ids=description_ids,
         )

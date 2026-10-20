@@ -73,6 +73,46 @@ def test_classify_flags_delete_shaped() -> None:
     assert "delete-shaped" in (delete_leg.ungrantable_reason or "")
 
 
+def test_classify_flags_vendor_delete_action_names() -> None:
+    """A VI-JSON delete is a POST; its action name makes it un-grantable (#4632)."""
+    destroy = classify_subop_grantability("POST:/VirtualMachine/{moId}/Destroy_Task")
+    assert destroy.grantable is False
+    assert "vendor action name 'Destroy_Task'" in (destroy.ungrantable_reason or "")
+    assert classify_subop_grantability("POST:/VirtualMachine/{moId}/Reset_Task").grantable is True
+
+
+def test_classify_vendor_delete_action_name_ignores_pattern_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The action-name sign holds when SERVICE_GRANT_DELETE_SHAPED_PATTERNS is changed."""
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "acme.custom.nuke")
+    get_settings.cache_clear()
+    assert (
+        classify_subop_grantability("POST:/VirtualMachine/{moId}/Destroy_Task").grantable is False
+    )
+
+
+def test_vm_destroy_children_flag_the_vim_destroy_step() -> None:
+    """vm.destroy's governed steps: the VIM destroy is un-grantable, the read stays grantable."""
+    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+        register_vmware_governed_subops,
+    )
+
+    register_vmware_governed_subops()
+    vm_destroy = governed_subops_for("vmware.composite.vm.destroy")
+    assert vm_destroy is not None
+    by_op = {c: classify_subop_grantability(c) for c in vm_destroy.sub_op_ids}
+
+    destroy = by_op["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    assert destroy.grantable is False
+    assert destroy.ungrantable_reason is not None
+    assert "Destroy_Task" in destroy.ungrantable_reason
+
+    read = by_op["POST:/PropertyCollector/{moId}/RetrievePropertiesEx"]
+    assert read.grantable is True
+    assert read.ungrantable_reason is None
+
+
 def test_vmware_wiring_is_derived_from_manifests() -> None:
     """register_vmware_governed_subops populates the write composites from manifests.
 

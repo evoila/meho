@@ -224,8 +224,10 @@ zsh.)
 
 The rules:
 
-- **Exactly one group.** A person in two of the five groups gets one
-  of the two roles, and you cannot tell which one.
+- **Exactly one group.** A person in two of the five groups is
+  refused: the backplane answers `401 multiple_role_groups` and names
+  the groups (#4594). Without that check, Keycloak would copy the role
+  of whichever group it finds first.
 - **No group, no access.** A person in none of the five groups gets no
   `tenant_id`, and the backplane answers `401 missing_tenant_claim`.
 - **Leave the person's own `tenant_id` / `tenant_role` / `approver`
@@ -416,7 +418,8 @@ Practical consequences for an operator standing up a v0.2 deploy:
 | `401 missing_tenant_claim` for one person only | The person is in none of the five groups | Put the person in one group ([Step 3](#step-3--put-each-person-in-one-group)) |
 | `401 malformed_tenant_claim` | The `tenant_id` mapper has **Aggregate attribute values** or **Multivalued** on (emits a JSON array instead of a single string), or **Claim JSON Type** `int` / `JSON` instead of `String` | Set both toggles off and the type to `String`, then log in again |
 | `401 unknown_tenant_role` | The group's `tenant_role` attribute is not exactly `tenant_admin` / `operator` / `read_only` (for example `read-only` with a hyphen), or a leftover **User Realm Role** mapper forwards realm-role names like `meho-operator` | Fix the group attribute ([Step 1](#step-1--create-the-five-groups)); delete the User Realm Role mapper |
-| A person gets the wrong role, or a different role from one login to the next | The person is in two of the five groups, or has their own `tenant_role` attribute (which wins over the group) | Keep the person in exactly one group; clear the person's own `tenant_id` / `tenant_role` / `approver` attributes |
+| `401 multiple_role_groups` for one person only | The person is in two or more of the five groups (the message names them) | Keep the person in exactly one group, then log in again |
+| A person gets the wrong role, or a different role from one login to the next | The person has their own `tenant_role` attribute (which wins over the group) | Clear the person's own `tenant_id` / `tenant_role` / `approver` attributes |
 | Every person gets the same role, whatever their group | A **Hardcoded claim** mapper for `tenant_role` or `tenant_id` is still on the client or one of its client scopes | Delete it, or re-run `meho admin keycloak bootstrap-clients` ([upgrading](#upgrading-a-realm-that-still-has-fixed-values)) |
 | `403 Forbidden` on a route that worked before | The person's `tenant_role` is now below what the route requires (for example they moved to `MEHO-Readers`) | Move the person to the right group. Tokens already issued keep the old role until they expire (or the person runs `meho login` again). |
 | Claims appear on userinfo but not on the access token | Mapper has **Add to userinfo: on** but **Add to access token: off** | Toggle both on |

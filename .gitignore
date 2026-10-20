@@ -109,4 +109,5 @@ cli/*.out
 *.pid
 *.sock
 data/
+!backend/tests/data/
 postgres-data/

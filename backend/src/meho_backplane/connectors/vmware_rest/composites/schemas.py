@@ -1674,12 +1674,14 @@ VM_DISK_GROW_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": "Managed-object ID of the VM owning the disk (e.g. 'vm-42').",
         },
         "disk": {
-            "type": "string",
+            "type": ["string", "integer"],
             "minLength": 1,
+            "minimum": 0,
             "description": (
                 "Virtual disk identifier — the REST "
-                "``com.vmware.vcenter.vm.hardware.Disk`` id, which is the "
-                "string form of the vim ``VirtualDevice.key`` (e.g. '2000'). "
+                "``com.vmware.vcenter.vm.hardware.Disk`` id (a string, e.g. '2000') "
+                "or the vim ``VirtualDevice.key`` it is the string form of "
+                "(an integer, e.g. 2000). Both forms are accepted. "
                 "The handler matches it against the VM's "
                 "``config.hardware.device`` list to select the VirtualDisk to edit."
             ),
@@ -2336,14 +2338,18 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "enum": ["created", "rolled_back"],
             "description": (
                 "``'created'`` after every step succeeded; "
-                "``'rolled_back'`` when a post-create step failed and "
-                "the handler issued ``DELETE:/vcenter/vm/{vm}``."
+                "``'rolled_back'`` when a step failed. If a VM was "
+                "already created, the handler tried "
+                "``DELETE:/vcenter/vm/{vm}`` and ``rollback.outcome`` "
+                "says what happened."
             ),
         },
         "vm_id": {
             "type": ["string", "null"],
             "description": (
-                "Newly-created VM moid. ``null`` on rollback (the VM no longer exists)."
+                "Newly-created VM moid. ``null`` when "
+                "``status='rolled_back'``; read ``rollback`` to see "
+                "whether a VM this run created still exists."
             ),
         },
         "steps_succeeded": {
@@ -2375,6 +2381,24 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Human-readable explanation of the rollback trigger; "
                 "``null`` when ``status='created'``."
+            ),
+        },
+        "rollback": {
+            "type": "object",
+            "properties": {
+                "vm_id": {"type": "string"},
+                "outcome": {
+                    "type": "string",
+                    "enum": ["removed", "awaiting_approval", "not_removed"],
+                },
+            },
+            "description": (
+                "What happened to the VM this run created (#4057). Present only "
+                "when a step after the create failed. ``removed``: the rollback "
+                "deleted the VM. ``awaiting_approval``: the delete waits for "
+                "approval and the VM exists until then. ``not_removed``: the "
+                "delete failed or was not allowed; delete ``vm_id`` by hand. The "
+                "error issue says the same in words."
             ),
         },
         "nested_hv": {

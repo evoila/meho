@@ -39,12 +39,23 @@ Delete-shaped guardrail
 
 A grant is the *floor* of what runs unattended, never a bypass of a
 modeled destructive gate, so :meth:`ServicePrincipalGrantService.create`
-refuses delete-shaped ops: op ids matching a configured pattern set
-(``Settings.service_grant_delete_shaped_patterns`` — at minimum
-``DELETE:*`` raw ops plus ``*.delete`` / ``*.destroy`` / ``*.remove`` /
-``*.purge`` typed ops) and, best-effort when a descriptor resolves,
-anything whose descriptor carries ``method='DELETE'`` or a ``destructive``
-tag.
+refuses delete-shaped ops. Three signs on the op id or its stored row:
+
+* a configured pattern (``Settings.service_grant_delete_shaped_patterns``
+  — at minimum ``DELETE:*`` raw ops plus ``*.delete`` / ``*.destroy`` /
+  ``*.remove`` / ``*.purge`` typed ops);
+* a vendor action name that means delete (``Destroy``, ``Delete``,
+  ``Remove``, ``Unregister`` — the word list the ingest parser uses, in
+  :mod:`meho_backplane.delete_names`). VI-JSON exposes a VM destroy as
+  ``POST:/VirtualMachine/{moId}/Destroy_Task``, so neither the HTTP method
+  nor a pattern sees it. This sign does not depend on the pattern setting
+  (#4632);
+* best-effort when a descriptor resolves, the ``destructive`` safety tier,
+  ``method='DELETE'`` or a ``destructive`` tag.
+
+The action-name sign and the descriptor signs are checked again when a
+grant is consulted at dispatch (:func:`consult_and_record_grant`), so a
+grant row that already exists for such an op never lets it run.
 """
 
 from __future__ import annotations
@@ -72,6 +83,7 @@ from meho_backplane.db.models import (
     ServicePrincipalGrant,
     Target,
 )
+from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 
 __all__ = [
@@ -194,16 +206,39 @@ def _validate_expires_at(expires_at: datetime | None) -> None:
 
 
 def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
-    """Public alias for the pattern-based delete-shaped classifier (#3349).
+    """Return why *op_id* is delete-shaped by its id alone, or ``None`` (#3349).
 
-    The governed-subop discovery surface
+    Two signs need no stored row: a configured pattern and a vendor action
+    name that means delete (#4632). The governed-subop discovery surface
     (:func:`meho_backplane.operations.governed_subops.classify_subop_grantability`)
     flags a child op un-grantable through this single-sourced rule — the same
     one :meth:`ServicePrincipalGrantService.create` refuses on — so a rollback
     / delete leg is flagged on discovery exactly as it would be refused at
     grant-create time.
     """
-    return _delete_shaped_reason_by_pattern(op_id, patterns)
+    pattern_reason = _delete_shaped_reason_by_pattern(op_id, patterns)
+    if pattern_reason is not None:
+        return pattern_reason
+    return _delete_shaped_reason_by_action_name(op_id)
+
+
+def _delete_shaped_reason_by_action_name(op_id: str) -> str | None:
+    """Return a refusal reason if the op id ends in a vendor delete action name.
+
+    ``POST:/VirtualMachine/{moId}/Destroy_Task`` is a delete even though its
+    method is ``POST`` and no pattern names it. The rule and the word list
+    are the ingest parser's (:mod:`meho_backplane.delete_names`), so the
+    grant checks and the parser cannot drift. Independent of
+    ``Settings.service_grant_delete_shaped_patterns``.
+    """
+    action_name = destructive_action_name_in_op_id(op_id)
+    if action_name is None:
+        return None
+    return (
+        f"op {op_id!r} is a delete (vendor action name {action_name!r}); "
+        "delete operations are never grantable — a standing grant is the floor "
+        "of what runs unattended, not a bypass of a destructive gate"
+    )
 
 
 def _delete_shaped_reason_by_pattern(op_id: str, patterns: tuple[str, ...]) -> str | None:
@@ -413,11 +448,11 @@ class ServicePrincipalGrantService:
         _reject_wildcards(payload)
         _validate_expires_at(payload.expires_at)
 
-        pattern_reason = _delete_shaped_reason_by_pattern(
+        op_id_reason = delete_shaped_refusal_reason(
             payload.op_id, get_settings().service_grant_delete_shaped_patterns
         )
-        if pattern_reason is not None:
-            raise GrantValidationError(pattern_reason)
+        if op_id_reason is not None:
+            raise GrantValidationError(op_id_reason)
         descriptor = await _resolve_descriptor_for_classification(
             tenant_id, payload.connector_id, payload.op_id
         )
@@ -894,8 +929,15 @@ async def consult_and_record_grant(
     :func:`_delete_shaped_reason_by_descriptor`; together they make
     "a standing grant can never satisfy a destructive op" hold whether the
     grant is being created or consulted.
+
+    An op id whose vendor action name means delete (#4632) is refused the
+    same way. A composite's inner step arrives as an in-memory record with
+    its declared level only — no method, no tags — so for it the op id is
+    the only sign.
     """
-    destructive_reason = _delete_shaped_reason_by_descriptor(descriptor)
+    destructive_reason = _delete_shaped_reason_by_action_name(
+        descriptor.op_id
+    ) or _delete_shaped_reason_by_descriptor(descriptor)
     if destructive_reason is not None:
         _log.info(
             "service_grant_refused_delete_shaped",

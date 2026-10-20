@@ -30,6 +30,7 @@ Exit code ``0`` on success, ``1`` on any failure, with the reason on stderr as
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import secrets
@@ -58,6 +59,7 @@ __all__ = [
     "build_data",
     "load_plan",
     "main",
+    "new_password",
     "reconcile",
 ]
 
@@ -166,7 +168,8 @@ class SecretStore(Protocol):
         ...
 
 
-def _new_password() -> str:
+def new_password() -> str:
+    """Return a fresh 32-character password from the one alphabet."""
     return "".join(secrets.choice(_ALPHABET) for _ in range(_PASSWORD_LENGTH))
 
 
@@ -179,21 +182,21 @@ def build_data(entry: MakeEntry) -> dict[str, str]:
     host = entry.host or ""
     match entry.kind:
         case "postgres-superuser" | "postgres-keycloak":
-            return {"password": _new_password()}
+            return {"password": new_password()}
         case "postgres-meho":
-            password = _new_password()
+            password = new_password()
             url = f"postgresql+asyncpg://meho:{quote(password, safe='')}@{host}:5432/meho"
             return {"password": password, "url": url}
         case "keycloak-bootstrap":
-            return {"client_id": _new_password(), "client_secret": _new_password()}
+            return {"client_id": new_password(), "client_secret": new_password()}
         case "keycloak-admin" | "check-runner":
-            return {"client_secret": _new_password()}
+            return {"client_secret": new_password()}
         case "ui-auth":
-            return {"session_encryption_key": _new_fernet_key(), "client_secret": _new_password()}
+            return {"session_encryption_key": _new_fernet_key(), "client_secret": new_password()}
         case "approval-handoff":
             return {"approval_handoff_encryption_key": _new_fernet_key()}
         case "broadcast-auth":
-            return {"requirepass": _new_password()}
+            return {"requirepass": new_password()}
         case "tls":
             return self_signed_tls(host)
         case _:
@@ -264,7 +267,7 @@ class KubernetesSecretStore:
         self._api = api
         self._namespace = namespace
 
-    async def read_keys(self, name: str) -> frozenset[str] | None:
+    async def _read(self, name: str) -> Mapping[str, str] | None:
         try:
             secret = await self._api.read_namespaced_secret(
                 name, self._namespace, _request_timeout=_API_TIMEOUT_S
@@ -273,7 +276,23 @@ class KubernetesSecretStore:
             if exc.status == 404:
                 return None
             raise CoreSecretsError(f'cannot read Secret "{name}": {_describe(exc)}') from None
-        return frozenset(secret.data or {})
+        data: Mapping[str, str] = secret.data or {}
+        return data
+
+    async def read_keys(self, name: str) -> frozenset[str] | None:
+        data = await self._read(name)
+        return None if data is None else frozenset(data)
+
+    async def read_data(self, name: str) -> dict[str, str] | None:
+        """Return the Secret's decoded values, or ``None`` if it does not exist.
+
+        The realm stage of the ``bootstrap`` Job reads the values it stored
+        on an earlier run (docs/codebase/core-bootstrap.md).
+        """
+        data = await self._read(name)
+        if data is None:
+            return None
+        return {key: base64.b64decode(value).decode("utf-8") for key, value in data.items()}
 
     async def create(self, name: str, data: Mapping[str, str], secret_type: str) -> bool:
         body = client.V1Secret(

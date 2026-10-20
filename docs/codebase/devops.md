@@ -83,6 +83,8 @@ deploy/charts/meho/
 │   ├── _core-secrets.tpl   # built-in core: hook account name, core Secret names, the secrets Job's plan
 │   ├── core-secrets-rbac.yaml # built-in core: hook ServiceAccount + Role + RoleBinding (weight -40)
 │   ├── core-secrets-job.yaml  # built-in core: makes missing <release>-core-* Secrets (weight -30)
+│   ├── _core-bootstrap.tpl    # built-in core: the bootstrap Job's realm-stage plan
+│   ├── core-bootstrap-job.yaml # built-in core: finishes the Keycloak realm after install/upgrade (weight 10)
 │   ├── _core-postgres-helpers.tpl # shared core helpers: image triple, OpenShift-aware pod security context
 │   ├── tests/test-pgvector.yaml   # helm test pod on the chart's PostgreSQL image
 │   ├── _core-keycloak.tpl  # /auth paths for the Ingress + the hostname check (coreKeycloak.enabled only)

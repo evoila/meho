@@ -133,6 +133,24 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 
+#: Tools whose handler returns an ``OperationResult`` envelope. For these
+#: the tool boundary reports ``isError`` from the envelope ``status``
+#: (MCP 2025-06-18 §Tools/Error Handling: a caught business or API failure
+#: is a tool execution error, ``isError: true``). Every other tool keeps
+#: ``isError: false``.
+_OPERATION_RESULT_TOOLS: Final[frozenset[str]] = frozenset({"call_operation", "preview_operation"})
+
+#: Envelope statuses that are tool execution errors. ``awaiting_approval``
+#: is not in the set: a call that waits for approval is a successful,
+#: audited hand-off, not a failure, and must not be retried.
+_ERROR_STATUSES: Final[frozenset[str]] = frozenset({"error", "denied", "rate_limited"})
+
+
+def _tool_result_is_error(name: str, result: dict[str, Any]) -> bool:
+    """Return the MCP ``isError`` flag for a handler's result."""
+    return name in _OPERATION_RESULT_TOOLS and result.get("status") in _ERROR_STATUSES
+
+
 #: MCP-defined error code for "Resource not found" per spec
 #: §Resources/Error Handling. Distinct from the generic JSON-RPC
 #: ``METHOD_NOT_FOUND`` because ``resources/read`` is the method that
@@ -483,7 +501,7 @@ async def handle_tools_call(
         # the spec's backwards-compatibility recommendation.
         response: dict[str, Any] = {
             "content": [{"type": "text", "text": tool_result_text(result)}],
-            "isError": False,
+            "isError": _tool_result_is_error(name, result),
         }
         if defn.outputSchema is not None:
             response["structuredContent"] = result

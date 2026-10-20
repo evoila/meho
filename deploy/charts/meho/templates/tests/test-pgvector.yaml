@@ -8,9 +8,11 @@
   ``helm.sh/hook: test`` so it's NOT part of the release manifest --
   ``helm uninstall`` cleans it up implicitly.
 
-  Pod runs the bitnami ``postgres-client`` image (psql only, ~50 MB)
-  and connects through the same DATABASE_URL Secret the backplane
-  Deployment + migration Job consume. Two assertions:
+  Pod runs the chart's own PostgreSQL image (``corePostgres.image``,
+  pinned by digest; it ships ``psql``) and connects through the same
+  DATABASE_URL Secret the backplane Deployment + migration Job consume.
+  One image for the server and the test keeps the offline image list
+  short and needs no Bitnami image (#4039). Two assertions:
 
   1. ``SELECT extversion FROM pg_extension WHERE extname='vector'`` --
      must return a row. If the chassis Postgres image is missing
@@ -44,13 +46,14 @@ metadata:
 spec:
   restartPolicy: Never
   serviceAccountName: {{ include "meho.serviceAccountName" . }}
+  # The PostgreSQL image has no USER, so name its `postgres` user (999)
+  # here; `global.openshift: true` leaves the ids to OpenShift.
+  securityContext:
+    {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.corePostgres.podSecurityContext "global" .Values.global) | nindent 4 }}
   containers:
     - name: pgvector-check
-      # Bitnami postgres-client: minimal psql-only image, ~50 MB.
-      # Matches the PostgreSQL major version the migration was
-      # written against (PG 16 per migration 0003 / pgvector/pgvector:pg16).
-      image: bitnami/postgresql:16
-      imagePullPolicy: IfNotPresent
+      image: {{ include "meho.core.image" .Values.corePostgres.image | quote }}
+      imagePullPolicy: {{ .Values.corePostgres.image.pullPolicy }}
       env:
         - name: PGURL
           valueFrom:
@@ -59,12 +62,9 @@ spec:
               key: url
       command:
         # ``bash`` rather than ``sh`` because the script uses
-        # ``set -o pipefail`` which is bash-only. The base image's
-        # ``/bin/sh`` is ``dash`` (no pipefail support). bitnami
-        # postgres-client images bundle bash at ``/bin/bash`` for
-        # exactly this case (Bitnami's library scripts also rely
-        # on it). Bash also keeps ``set -eu`` semantics matching
-        # what the script below expects.
+        # ``set -o pipefail`` which is bash-only. The image's
+        # ``/bin/sh`` is ``dash`` (no pipefail support); the Debian
+        # base ships ``/bin/bash``.
         - bash
         - -c
         - |
@@ -93,9 +93,9 @@ spec:
           if [ -z "$extversion" ]; then
             echo "FAIL: pgvector extension is NOT enabled on the target Postgres."
             echo "      Expected migration 0003 to have run CREATE EXTENSION vector."
-            echo "      Check the chassis Postgres image: must be"
-            echo "      pgvector/pgvector:pg16 (or equivalent managed-PG offering"
-            echo "      with the vector extension available)."
+            echo "      Check the Postgres image: it must ship pgvector"
+            echo "      (the chart's corePostgres image, or an equivalent"
+            echo "      managed-PG offering with the vector extension)."
             exit 1
           fi
           echo "OK: pgvector extension enabled (version $extversion)"

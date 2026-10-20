@@ -158,6 +158,12 @@ Set it up in three steps:
      secretKey: approval_handoff_encryption_key
    ```
 
+With a built-in part of the core on (`corePostgres.enabled` or
+`coreKeycloak.enabled`), the install makes this key itself, in the Secret
+`<release>-core-approval-handoff` (key `approval_handoff_encryption_key`).
+Skip steps 1 and 2 and set `approvalHandoff.secretName` to that name. See
+[core-secrets.md](core-secrets.md).
+
 The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
 creating a new Fernet key in the referenced Secret and restarting all
 backplane pods together. Existing unexecuted credential-write approvals were
@@ -2204,6 +2210,26 @@ service`), leaving the human `USER` path unchanged:
   during an unattended run auto-approve instead. Each use writes an
   `approval.decision` / `auto-approved` audit row (this section's shape),
   carrying `grant_id` — same ledger visibility as a human decision.
+- **Lineage ids on the auto-approval row** (#3695): the grant-use row is
+  written at decision time with the same ids the parked path keeps, so an
+  auto-approval links to the call it cleared:
+  - `request_id` — the request's correlation id. The call's `DISPATCH` row
+    now carries the same `request_id` (it was always NULL before), so you
+    can find the call an auto-approval cleared, and its flight-recorder
+    trace, by matching `request_id`. In a multi-step operation all child
+    rows share the request id; use `parent_audit_id` to tell them apart.
+  - `agent_session_id` — the agent-run or MCP session
+    (`resolve_agent_session_id()`). NULL for a plain REST call, which has
+    no session.
+  - `parent_audit_id` — the multi-step parent's audit id
+    (`parent_audit_id_var`) when the cleared call is a child step. NULL for
+    a top-level call.
+
+  There is still no row while a call runs; a call only gets its `DISPATCH`
+  row when it ends. For long calls use async mode (`async: true` on REST
+  `/call` or on MCP `call_operation`): the `operation_run` row shows the
+  call as `running` with `started_at` for its whole run. See
+  [`async-governed-dispatch.md`](async-governed-dispatch.md).
 
 Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*

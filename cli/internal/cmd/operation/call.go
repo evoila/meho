@@ -62,7 +62,7 @@ type CallResult struct {
 // for the structured-failure case — dispatcher errors come back in
 // the `error` / `extras` envelope, not as transport failures):
 //   - 0   operation invoked + status == "ok"
-//   - 1   operation invoked but status == "error" or status == "denied"
+//   - 1   operation invoked but status == "error", "denied" or "rate_limited"
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected response shape (incl. unknown / missing status)
@@ -186,7 +186,8 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	// Classify status BEFORE rendering. The backend
 	// `Connector.execute` contract (see
 	// `backend/src/meho_backplane/connectors/schemas.py`) defines
-	// "ok" / "error" / "denied" (awaiting_approval is handled above).
+	// "ok" / "error" / "denied" / "rate_limited" (awaiting_approval is
+	// handled above).
 	// Anything else is a status this CLI does not know — most likely
 	// the backplane is newer — so surface it as unexpected_response
 	// (exit 4) with a message that names the version gap, without
@@ -196,7 +197,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	// and (b) produced two JSON objects on stdout in --json mode,
 	// breaking pipe-into-jq usage.
 	switch result.Status {
-	case "ok", "error", "denied":
+	case "ok", "error", "denied", dispatch.StatusRateLimited:
 		// fall through to rendering + exit-code branching below.
 	default:
 		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(result.Status), opts.JSONOut)
@@ -208,7 +209,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	} else {
 		printCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
 	}
-	// "ok" → success (exit 0). "error" / "denied" → exit 1 via
+	// "ok" → success (exit 0). "error" / "denied" / "rate_limited" → exit 1 via
 	// errOpError so shell pipelines see the gate-failed signal.
 	if result.Status == "ok" {
 		return nil
@@ -217,8 +218,8 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 }
 
 // errOpError is the sentinel returned when the dispatcher reported
-// a structured-failure result (status == "error" or status ==
-// "denied"). main translates non-nil RunE errors into a non-zero
+// a structured-failure result (status == "error", "denied" or
+// "rate_limited"). main translates non-nil RunE errors into a non-zero
 // exit; cobra's SilenceErrors is true on the command so the error
 // string isn't double-printed. Same shape as retrieval/eval.go's
 // errEvalGate.

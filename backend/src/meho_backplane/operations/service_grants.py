@@ -971,8 +971,21 @@ async def _record_grant_use(
     so the auto-approval is visibly distinct on the ledger from a
     concrete-target / targetless match (the operator can see the op ran on a
     runtime-created target the selector authorised, not a pre-existing one).
+
+    Lineage (#3695): the row carries the same ids the parked path stamps, so
+    an auto-approval links to the call it cleared. ``request_id`` is the
+    request's correlation id (the dispatch's ``DISPATCH`` row carries the
+    same value), ``agent_session_id`` is the agent-run or MCP session (NULL
+    for a plain REST call), and ``parent_audit_id`` is the composite parent's
+    audit id when a composite child is the call being cleared (NULL for a
+    top-level call).
     """
-    from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
+    from meho_backplane.operations._audit import (
+        parent_audit_id_var,
+        resolve_agent_session_id,
+        work_ref_var,
+    )
+    from meho_backplane.request_usage.collector import current_request_id
 
     audit_id = uuid.uuid4()
     reason = f"auto-granted by standing grant {grant.id}"
@@ -1001,11 +1014,12 @@ async def _record_grant_use(
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
             target_id=target_id,
+            parent_audit_id=parent_audit_id_var.get(),
             agent_session_id=resolve_agent_session_id(),
             method=_GRANT_USE_METHOD,
             path=_GRANT_USE_PATH,
             status_code=_GRANT_USE_STATUS_CODE,
-            request_id=None,
+            request_id=current_request_id(),
             duration_ms=Decimal("0.00"),
             payload=payload,
             work_ref=work_ref_var.get(),

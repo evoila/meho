@@ -3750,12 +3750,47 @@ type ConnectorReviewDeleteOp struct {
 // review queue; “op_count“ is the cheap precomputed length for
 // the CLI's “meho connector review“ summary view (T5).
 type ConnectorReviewGroup struct {
-	GroupKey     string              `json:"group_key"`
-	Name         string              `json:"name"`
-	OpCount      int                 `json:"op_count"`
-	Ops          []ConnectorReviewOp `json:"ops"`
-	ReviewStatus string              `json:"review_status"`
-	WhenToUse    string              `json:"when_to_use"`
+	// Advisory Advice for the operator who reviews one group (#3671).
+	//
+	// ``distribution`` is what the group's enabled ops really do.
+	// ``flags`` lists short, plain notes where the group's ``when_to_use``
+	// text does not match those ops (for example the text says
+	// "read-only" but some ops need approval). Empty when nothing looks
+	// wrong.
+	//
+	// This is advice only. It never blocks a dispatch, an ingest, or the
+	// move from ``staged`` to ``enabled``. Dispatch keeps using each op's
+	// own ``safety_level``, ``requires_approval``, and policy; the group
+	// label and its text are never part of that decision.
+	Advisory     *ConnectorReviewGroupAdvisory `json:"advisory,omitempty"`
+	GroupKey     string                        `json:"group_key"`
+	Name         string                        `json:"name"`
+	OpCount      int                           `json:"op_count"`
+	Ops          []ConnectorReviewOp           `json:"ops"`
+	ReviewStatus string                        `json:"review_status"`
+	WhenToUse    string                        `json:"when_to_use"`
+}
+
+// ConnectorReviewGroupAdvisory Advice for the operator who reviews one group (#3671).
+//
+// “distribution“ is what the group's enabled ops really do.
+// “flags“ lists short, plain notes where the group's “when_to_use“
+// text does not match those ops (for example the text says
+// "read-only" but some ops need approval). Empty when nothing looks
+// wrong.
+//
+// This is advice only. It never blocks a dispatch, an ingest, or the
+// move from “staged“ to “enabled“. Dispatch keeps using each op's
+// own “safety_level“, “requires_approval“, and policy; the group
+// label and its text are never part of that decision.
+type ConnectorReviewGroupAdvisory struct {
+	// Distribution Risk levels of the enabled ops in one group (#3671).
+	//
+	// Counts only ops with ``is_enabled=True``. One count per value of the
+	// closed ``safety_level`` set, plus how many of those ops need approval
+	// and how many ops are enabled in total. Disabled ops are not counted.
+	Distribution *GroupSafetyDistribution `json:"distribution,omitempty"`
+	Flags        *[]string                `json:"flags,omitempty"`
 }
 
 // ConnectorReviewOp One operation within a group, as rendered in the review payload.
@@ -5548,6 +5583,20 @@ type GovernedSubopsResponse struct {
 // The field is optional on the create surfaces and defaults to
 // :attr:`AGENT`, so every existing caller is unaffected.
 type GrantPrincipalKind string
+
+// GroupSafetyDistribution Risk levels of the enabled ops in one group (#3671).
+//
+// Counts only ops with “is_enabled=True“. One count per value of the
+// closed “safety_level“ set, plus how many of those ops need approval
+// and how many ops are enabled in total. Disabled ops are not counted.
+type GroupSafetyDistribution struct {
+	Caution               *int `json:"caution,omitempty"`
+	Dangerous             *int `json:"dangerous,omitempty"`
+	Destructive           *int `json:"destructive,omitempty"`
+	EnabledOpCount        *int `json:"enabled_op_count,omitempty"`
+	RequiresApprovalCount *int `json:"requires_approval_count,omitempty"`
+	Safe                  *int `json:"safe,omitempty"`
+}
 
 // GroupSummaryModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
@@ -10875,9 +10924,15 @@ type GetSearchApiV1OperationsSearchGetParams struct {
 	Q *string `form:"q,omitempty" json:"q,omitempty"`
 
 	// Query Deprecated alias for `q`; still honoured.
-	Query         *string `form:"query,omitempty" json:"query,omitempty"`
-	Group         *string `form:"group,omitempty" json:"group,omitempty"`
-	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Query *string `form:"query,omitempty" json:"query,omitempty"`
+	Group *string `form:"group,omitempty" json:"group,omitempty"`
+	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// OpId Exact-op mode. Look up this one operation and return its call contract (`{operation: {...}}`: the parameter schema, examples, target rule, result shape and retry guidance) instead of ranked hits. `q`, `group` and `limit` are ignored when it is set. An unknown op_id is a 404 with `detail.reason=unknown_op`.
+	OpId *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+
+	// IncludeScores Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else.
+	IncludeScores *bool   `form:"include_scores,omitempty" json:"include_scores,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -29156,6 +29211,38 @@ func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearc
 		if params.Limit != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.OpId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeScores != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_scores", runtime.ParamLocationQuery, *params.IncludeScores); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

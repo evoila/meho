@@ -285,6 +285,12 @@ carries `matched_by="selector"` and the selector predicate under
 the selector authorised (a concrete / targetless match records
 `matched_by="target"`).
 
+The row also carries lineage ids (#3695): `request_id` (the same value the
+call's `DISPATCH` row carries), `agent_session_id` (agent-run or MCP
+session; NULL for a plain REST call) and `parent_audit_id` (the multi-step
+parent's audit id when a child step was cleared). Details:
+[`approvals.md`](approvals.md#service-principal-standing-grants--safety_level-gate-3151--3152).
+
 ## Governed-subop discovery (#3349)
 
 A composite fans out to child ops, and child gating consults the grant plane
@@ -321,6 +327,12 @@ so discovery and create-time refusal cannot drift.
 Role: **`operator`** (not `tenant_admin`) — a standing grant is the
 persistent form of the approve decision an operator already makes on the
 approval queue.
+
+Create and revoke need a person. A token of an agent, a service principal
+or a runner gets 403 `human_principal_required` (the same check
+`require_human_principal` in `auth/rbac.py` that the approval decision
+routes and the agent-grant create / elevate routes use, #4616). List and
+show keep the role check alone.
 
 | Verb | Path | Purpose |
 |---|---|---|

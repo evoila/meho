@@ -286,7 +286,8 @@ def ensure_human_principal(operator: Operator) -> None:
 
     Transport-independent guard for the verbs that are a **human**
     decision (v0.1-spec §7): the approval decisions (approve / reject /
-    decide), agent-grant create / elevate, and agent-principal register. A
+    decide), agent-grant create / elevate, standing-grant create / revoke
+    for service principals (#4616), and agent-principal register. A
     machine principal — ``principal_kind`` in
     :data:`~meho_backplane.auth.operator.MACHINE_PRINCIPAL_KINDS` (agent /
     service / runner) — is refused with HTTP 403 and a remediation naming

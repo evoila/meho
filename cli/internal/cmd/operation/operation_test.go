@@ -106,12 +106,20 @@ func TestPrintSearchTableHumanFormat(t *testing.T) {
 		QueryDurationMs: 42.7,
 	}
 	var buf bytes.Buffer
-	printSearchTable(&buf, "vault-1.x", "kv read", r)
+	printSearchTable(&buf, "vault-1.x", "kv read", r, false)
 	out := buf.String()
-	for _, want := range []string{"vault.kv.read", "vault.kv.list", "Read a Vault KV secret", "2 hit(s)", "0.987"} {
+	for _, want := range []string{"vault.kv.read", "vault.kv.list", "Read a Vault KV secret", "2 hit(s)", "safety"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printSearchTable missing %q in output:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "0.987") || strings.Contains(out, "score") {
+		t.Errorf("printSearchTable without --scores should not show scores:\n%s", out)
+	}
+	buf.Reset()
+	printSearchTable(&buf, "vault-1.x", "kv read", r, true)
+	if out := buf.String(); !strings.Contains(out, "0.987") {
+		t.Errorf("printSearchTable with --scores should show the score:\n%s", out)
 	}
 }
 
@@ -120,7 +128,7 @@ func TestPrintSearchTableHumanFormat(t *testing.T) {
 func TestPrintSearchTableEmpty(t *testing.T) {
 	r := &SearchResponse{Hits: nil, QueryDurationMs: 12.0}
 	var buf bytes.Buffer
-	printSearchTable(&buf, "vault-1.x", "nonexistent", r)
+	printSearchTable(&buf, "vault-1.x", "nonexistent", r, false)
 	out := buf.String()
 	if !strings.Contains(out, "0 hit(s)") {
 		t.Errorf("empty search should announce 0 hits; got:\n%s", out)
@@ -576,5 +584,21 @@ func TestPrintResultQueryResultTruncated(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "capped at 40 of 100") {
 		t.Errorf("truncated render should flag the spill cap; got:\n%s", out)
+	}
+}
+
+// TestSearchNeedsQueryOrOpID — with neither a query nor --op-id the
+// verb fails before it contacts the backplane (#3668).
+func TestSearchNeedsQueryOrOpID(t *testing.T) {
+	cmd := newSearchCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vault-1.x"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error when neither a query nor --op-id is given")
+	}
+	if !strings.Contains(stderr.String(), "--op-id") {
+		t.Errorf("error should name --op-id; got %q", stderr.String())
 	}
 }

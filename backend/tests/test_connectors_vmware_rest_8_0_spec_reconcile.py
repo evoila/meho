@@ -14,8 +14,8 @@ this lane loudly. Runs unconditionally in the required unit sweep (no DB /
 embeddings / containers), the same shape as the ``sddc-vcf5`` manifest-pin lane
 for a hand-coded surface whose full vendor OpenAPI is not committed here.
 
-**Shelf-gated strengthening (armed, skips until provisioned).** When the pinned
-8.0 U3 vendor ``vcenter.yaml`` lands on the private spec shelf
+**Shelf-gated strengthening (runs in CI).** When the pinned
+8.0 U3 vendor ``vcenter.yaml`` is on the private spec shelf
 (``vcenter-8.0/vcenter.yaml`` under ``MEHO_CONSUMER_DOCS_ROOT``, the same
 convention as ``vcenter-9.0/``), the shipped minimal's inventory-read op_ids must
 be a subset of the vendor-served set -- proving the ops MEHO surfaces really
@@ -35,12 +35,10 @@ fixture of the flat shape through the real parser plus the correction and pins
 the result; the shelf-gated half does the same against the pinned vendor
 8.0 U3 ``vcenter.yaml``.
 
-The pinned vendor 8.0 U3 catalog artifact is not yet acquired (the public
-``vmware/vcf-api-specs`` repo is tagged 9.0/9.1 only, and the Broadcom Developer
-Portal / appliance-served specs need authenticated retrieval); see the
-``vsphere-8.x`` artifact evidence gap in
-``docs/compatibility/vcf-api-contract-manifest.yaml``. The shelf-gated half arms
-automatically the day that artifact is pinned to ``vcenter-8.0/``.
+The 8.0 U3 ``vcenter.yaml`` is pinned on the shelf (provenance: the
+``vsphere-8.x`` artifact in ``docs/compatibility/vcf-api-contract-manifest.yaml``),
+and CI checks out ``vcenter-8.0/`` and requires the file, so the shelf-gated half
+runs in CI (``docs/decisions/vendor-spec-ci-provisioning.md``).
 """
 
 from __future__ import annotations

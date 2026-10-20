@@ -1,0 +1,29 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "coreKeycloak.fullname" . }}
+  labels:
+    {{- include "coreKeycloak.labels" . | nindent 4 }}
+spec:
+  # Selects the Keycloak pod and admits the Keycloak port only from the
+  # backplane pods of this release and the peers in `extraFrom`. Egress is
+  # not limited here.
+  podSelector:
+    matchLabels:
+      {{- include "coreKeycloak.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.backplanePodLabels | nindent 14 }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- with .Values.networkPolicy.extraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+          protocol: TCP
+{{- end }}

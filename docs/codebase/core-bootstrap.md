@@ -29,7 +29,8 @@ What is true after the Job ran:
   browser. Keycloak asks for a new password first. The token then carries
   the first tenant's id, the role `tenant_admin` and `platform_admin`.
 - The second person is in `MEHO-SA-Operators`, the group that may approve
-  changes that wait for a second person.
+  changes that wait for a second person. The first admin cannot approve
+  their own request.
 - A second run with the same values changes nothing.
 - The Job's output names objects and says `created`, `kept` or `removed`. It
   never holds a password or a secret.

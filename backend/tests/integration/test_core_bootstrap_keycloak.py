@@ -16,7 +16,11 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
    Keycloak holds, and a login through ``meho-cli`` gives a token the
    backplane accepts as a ``tenant_admin`` of the first tenant with
    ``platform_admin``. The second person is an ``operator``.
-3. The second run logs in as ``meho-admin`` and changes nothing: the realm
+3. With the two logins, the first admin asks for a credential write through
+   the backplane's REST API. It waits for approval, the first admin cannot
+   approve it alone, and the second person approves it through the
+   approvals API, which runs the write.
+4. The second run logs in as ``meho-admin`` and changes nothing: the realm
    and the Secrets are the same, and the output holds no secret.
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
@@ -32,13 +36,22 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 import yaml
+from cryptography.fernet import Fernet
+from httpx import ASGITransport
 
+import meho_backplane.audit as audit_middleware
+import meho_backplane.broadcast.publisher as broadcast_publisher
+import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.core.keycloak import (
     ADMIN_SECRET_ENV,
     BOOTSTRAP_ID_ENV,
@@ -46,6 +59,10 @@ from meho_backplane.core.keycloak import (
     HttpAdmin,
     Plan,
     finish_realm,
+)
+from meho_backplane.operations import (
+    register_typed_operation,
+    reset_dispatcher_caches,
 )
 from meho_backplane.settings import get_settings
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
@@ -322,6 +339,169 @@ async def test_second_person_is_an_operator(
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.OPERATOR
     assert operator.platform_admin is False
+
+
+def test_a_create_with_an_unknown_group_makes_no_user(keycloak: _Keycloak) -> None:
+    """The stage relies on this: a person and their groups are one request."""
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    headers = _admin_headers(keycloak)
+    resp = httpx.post(
+        f"{admin}/users",
+        headers=headers,
+        json={"username": "half-made", "enabled": True, "groups": ["/MEHO-Admins", "/No-Such"]},
+    )
+    assert resp.status_code >= 400, resp.text
+    found = httpx.get(
+        f"{admin}/users", headers=headers, params={"username": "half-made", "exact": "true"}
+    ).json()
+    assert found == []
+
+
+# --- The admin's credential write and the second person's approval ----------
+
+_WRITE_OP = "k8s.secret.create"  # classified credential_write by the backplane
+_SENTINEL = "s3cret-sentinel-value"
+
+
+class _WriteConnector(Connector):
+    product = "credwrite"
+    version = "1.x"
+    impl_id = "credwrite"
+    priority = 10
+
+    async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+        return FingerprintResult(
+            probe=ProbeResult(reachable=True, probe_method="none"),
+            product="credwrite",
+            version="1.x",
+        )
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> Any:
+        raise NotImplementedError
+
+
+#: What the write handler saw: one entry per run (the dispatcher wants a
+#: module-level handler, so this cannot be a closure).
+_WRITES: list[dict[str, Any]] = []
+
+
+async def _write_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    _WRITES.append({"by": operator.sub, "params": params})
+    return {"written": True}
+
+
+async def _register_write_op() -> None:
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.1] * 384
+    embedding.encode.return_value = [[0.1] * 384]
+    embedding.dimension = 384
+    register_connector_v2(product="credwrite", version="", impl_id="", cls=_WriteConnector)
+    await register_typed_operation(
+        product="credwrite",
+        version="1.x",
+        impl_id="credwrite",
+        op_id=_WRITE_OP,
+        handler=_write_handler,
+        summary="A write whose params carry a secret.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=embedding,
+    )
+
+
+async def test_the_second_person_approves_the_first_admins_credential_write(
+    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The acceptance path with the two people the Job made, over the REST API."""
+    from meho_backplane.main import app
+
+    first_login = keycloak.first_login
+    admin_token = _password_login(keycloak, "admin", first_login["admin_password"]).json()[
+        "access_token"
+    ]
+    approver_token = _password_login(keycloak, "approver", first_login["approver_password"]).json()[
+        "access_token"
+    ]
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    clear_jwks_cache()
+
+    async def no_broadcast(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    # No broadcast store here; the audit rows are the record.
+    for module in (audit_module, audit_middleware, broadcast_publisher):
+        monkeypatch.setattr(module, "publish_event", no_broadcast)
+    reset_dispatcher_caches()
+    clear_registry()
+    _WRITES.clear()
+    try:
+        await _register_write_op()
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://backplane.test"
+        ) as api:
+            as_admin = {"Authorization": f"Bearer {admin_token}"}
+            as_approver = {"Authorization": f"Bearer {approver_token}"}
+
+            # The first admin asks for the write; it waits for a second person.
+            asked = await api.post(
+                "/api/v1/operations/call",
+                headers=as_admin,
+                json={
+                    "connector_id": "credwrite-1.x",
+                    "op_id": _WRITE_OP,
+                    "params": {"name": "db", "data": {"password": _SENTINEL}},
+                },
+            )
+            assert asked.status_code == 200, asked.text
+            assert asked.json()["status"] == "awaiting_approval", asked.json()
+            request_id = asked.json()["extras"]["approval_request_id"]
+            assert _WRITES == []
+
+            # The first admin cannot approve their own request.
+            own = await api.post(
+                f"/api/v1/approvals/{request_id}/decide",
+                headers=as_admin,
+                json={"decision": "approved"},
+            )
+            assert own.status_code == 403, own.text
+            assert _WRITES == []
+
+            # The second person approves it, and the write runs.
+            decided = await api.post(
+                f"/api/v1/approvals/{request_id}/decide",
+                headers=as_approver,
+                json={"decision": "approved"},
+            )
+            assert decided.status_code == 200, decided.text
+            body = decided.json()
+            assert body["decision"] == "approved"
+            assert body["decided_by_name"] == "Test approver"
+            assert body["dispatch_status"] == "ok", body
+            assert body["dispatch_result"] == {"written": True}
+
+            shown = await api.get(f"/api/v1/approvals/{request_id}", headers=as_approver)
+            assert shown.status_code == 200, shown.text
+            assert shown.json()["status"] == "approved"
+            assert shown.json()["principal_name"] == "Test admin"
+            assert shown.json()["principal_sub"] != body["decided_by"], "two people"
+    finally:
+        reset_dispatcher_caches()
+        clear_registry()
+
+    assert len(_WRITES) == 1
+    assert _WRITES[0]["params"]["data"]["password"] == _SENTINEL
+    assert _WRITES[0]["by"] == body["decided_by"], "the approved write runs under the approver"
 
 
 async def test_second_run_logs_in_as_meho_admin_and_changes_nothing(

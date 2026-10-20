@@ -304,7 +304,7 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
                 "orgName": _ORG_NAME,
                 "isShared": _field("boolean", "Whether the catalog is shared."),
                 "isPublished": _field("boolean", "Whether the catalog is published to other orgs."),
-                "numberOfVAppTemplates": _field("integer", "How many vApp templates it holds."),
+                "numberOfTemplates": _field("integer", "How many vApp templates it holds."),
                 "numberOfMedia": _field("integer", "How many media files (ISO) it holds."),
             },
         ),

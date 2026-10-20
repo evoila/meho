@@ -111,7 +111,7 @@ _CATALOG_LIST_INSTRUCTIONS: dict[str, object] = {
     "output_shape": (
         "Query-service record envelope {record: [AdminCatalogRecord, ...], "
         "total, page, pageSize}. Each record carries name, orgName, isShared / "
-        "isPublished, and numberOfVAppTemplates / numberOfMedia."
+        "isPublished, and numberOfTemplates / numberOfMedia."
     ),
     "next_step": (
         "Flag isPublished / isShared catalogs as cross-tenant dependencies for "

@@ -53,3 +53,8 @@ rules:
     pattern: kubeconfig
     action: redact
     reason: "kubeconfig blob in payload"
+
+  - name: strip-bind-key-secret
+    pattern: bind_key_secret
+    action: redact
+    reason: "TSIG / rndc key secret in a BIND config file"

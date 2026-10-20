@@ -571,6 +571,17 @@ same raise-only update for existing rows. The overlay is keyed on the
 catalog `(product, version)`, like `op_allowlist`. Operator guide:
 `docs/cross-repo/connector-catalog.md`, "Safety overlay".
 
+An ingested read whose answer holds credentials gets two guards, the same
+as its hand-written twin (#4617): a `safety_overlay` rule on its catalog
+row (`caution`, with approval) and an entry in `_CREDENTIAL_READ_OPS` in
+`broadcast/events.py`, so the dispatcher replaces every secret field in
+the answer with `[REDACTED:param_name]`. That list stays the only list of
+secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
+the `/v1/credentials` reads, the depot, backup and proxy settings, host
+prechecks, VASA providers, the management-component task spec, users and
+identity providers. Stored rows change at the next ingest (see "Applying
+corrected floors to existing rows" below).
+
 #### Applying corrected floors to existing rows
 
 Deploying a corrected connector floor or catalog safety overlay does not rewrite rows that were already

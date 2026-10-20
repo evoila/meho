@@ -36,6 +36,7 @@ _EXPECTED_NAMES = {
     "jwt",
     "api_key",
     "kubeconfig",
+    "bind_key_secret",
     "uuid",
     "ipv4",
     "ipv6",
@@ -68,6 +69,9 @@ _PRIVATE_KEY_FIXTURE_POS = "private_key" + ": " + "MIIEvQIBADA" + "NBgkq"
 _PUNCT_QUOTED_FIXTURE = "password" + ": " + "'s3cr3tValue" + "!'"
 _PUNCT_LEADING_AT_FIXTURE = "password" + "=" + "P@ssw0rd" + "!withMore"
 _PUNCT_DOLLAR_HASH_FIXTURE = "password" + ": " + "hunter2" + "$plus#tail"
+# BIND key block (#4617): ``secret "<base64>";`` inside a ``key`` statement.
+_BIND_KEY_SECRET_FIXTURE_POS = 'secret "' + "exampleTsig" + 'Value==";'
+_BIND_KEY_SECRET_FIXTURE_NEG = 'the secret is in the vault; key "rndc-key" { algorithm hmac-md5; };'
 
 
 def test_catalog_lists_expected_patterns() -> None:
@@ -77,6 +81,13 @@ def test_catalog_lists_expected_patterns() -> None:
     # PATTERN_NAMES is sorted; downstream policy error messages rely
     # on the deterministic order.
     assert list(PATTERN_NAMES) == sorted(_EXPECTED_NAMES)
+
+
+def test_bind_key_secret_keeps_the_keyword() -> None:
+    """Only the quoted value is the match, so the file stays readable (#4617)."""
+    line = 'key "rndc-key" { algorithm hmac-sha256; ' + _BIND_KEY_SECRET_FIXTURE_POS + " };"
+    redacted = get_pattern("bind_key_secret").sub("[R]", line)
+    assert redacted == 'key "rndc-key" { algorithm hmac-sha256; secret [R]; };'
 
 
 def test_get_pattern_returns_compiled_regex() -> None:
@@ -227,6 +238,17 @@ def test_get_pattern_unknown_raises() -> None:
             ("apiVersion: v1\nkind: Pod\nmetadata:\n  name: nginx\n"),
             False,
         ),
+        # bind_key_secret: the quoted value after the ``secret`` keyword
+        (
+            "bind_key_secret",
+            _BIND_KEY_SECRET_FIXTURE_POS,
+            True,
+        ),
+        (
+            "bind_key_secret",
+            _BIND_KEY_SECRET_FIXTURE_NEG,
+            False,
+        ),
         # uuid: RFC 4122 canonical hex form
         (
             "uuid",
@@ -338,6 +360,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("api_key", "the token machine is broken", False),
     ("kubeconfig", "apiVersion: v1\nkind: Config\n", True),
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
+    ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_POS, True),
+    ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),
     ("uuid", "build_hash=abcdef0123456789", False),
     ("ipv4", "192.168.1.42", True),

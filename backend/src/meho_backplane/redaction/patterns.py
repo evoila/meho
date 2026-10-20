@@ -170,6 +170,18 @@ _KUBECONFIG = re.compile(
     re.IGNORECASE,
 )
 
+# BIND key secrets (#4617). A ``named.conf`` ``key`` block carries the
+# shared secret of a TSIG or rndc key as ``secret "<base64>";``. The
+# keyword is followed by whitespace, not ``=`` / ``:``, so ``api_key``
+# does not see it. The fixed-width lookbehind keeps the ``secret``
+# keyword out of the match: the file stays readable and only the
+# quoted value is replaced. Anything between the quotes is the value
+# (base64 may be split across whitespace in BIND syntax).
+_BIND_KEY_SECRET = re.compile(
+    r'(?<=\bsecret\s)\s*"[^"]{1,' + str(_VALUE_MAX) + r'}"',
+    re.IGNORECASE,
+)
+
 # UUIDs (RFC 4122 canonical 8-4-4-4-12 hex). UUIDs in operator-facing
 # payloads are often resource identifiers (tenant id, agent run id) --
 # arguably non-sensitive -- but they are stable per-tenant correlators
@@ -234,6 +246,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     "jwt": _JWT,
     "api_key": _API_KEY,
     "kubeconfig": _KUBECONFIG,
+    "bind_key_secret": _BIND_KEY_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,

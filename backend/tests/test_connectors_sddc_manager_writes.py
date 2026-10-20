@@ -243,7 +243,7 @@ def test_write_ops_registration_shape() -> None:
         assert op.requires_approval is approval, op_id
         assert op.group_key == "sddc-lifecycle", op_id
         assert "write" in op.tags, op_id
-        assert op.llm_instructions and op.llm_instructions["when_to_use"], op_id
+        assert op.llm_instructions and op.llm_instructions["when_to_call"], op_id
 
 
 def test_write_op_handlers_resolve_to_connector_bound_methods() -> None:

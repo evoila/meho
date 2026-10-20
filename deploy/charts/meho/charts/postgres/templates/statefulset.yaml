@@ -1,0 +1,204 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "corePostgres.statefulSetName" . }}
+  labels:
+    {{- include "corePostgres.labels" . | nindent 4 }}
+spec:
+  # One replica: copies of the database on other nodes (HA) are out of
+  # scope for the single-node core.
+  replicas: 1
+  serviceName: {{ include "corePostgres.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "corePostgres.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # The scripts are read at start. A changed ConfigMap restarts the
+        # pod on upgrade.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "corePostgres.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      # No `<SERVICE>_PORT` variables from other Services in the namespace
+      # in the PostgreSQL environment.
+      enableServiceLinks: false
+      securityContext:
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
+      containers:
+        - name: postgres
+          image: {{ include "meho.core.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # A sub-directory of the mount, not the mount itself: initdb
+            # needs an empty directory it owns, whatever the volume root
+            # holds (lost+found) and whatever user id the pod runs as.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # Read once by initdb, on an empty disk only. Nothing uses the
+            # superuser password over the network.
+            - name: POSTGRES_PASSWORD_FILE
+              value: /etc/core-postgres/secrets/superuser/password
+            # TCP logins from inside the pod (127.0.0.1, for example through
+            # `kubectl port-forward`) need a password too. The local socket
+            # keeps initdb's `trust` line; the reconcile sidecar uses it.
+            - name: POSTGRES_INITDB_ARGS
+              value: "--auth-host=scram-sha-256"
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          # All probes use TCP, not the socket: the temporary server that
+          # runs the initdb script listens on the socket only, so a socket
+          # probe would pass while the first setup still runs. The startup
+          # probe gives a first setup on a slow disk 5 minutes before the
+          # liveness probe may restart the container.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: config
+              mountPath: /etc/core-postgres/config
+              readOnly: true
+            - name: superuser
+              mountPath: /etc/core-postgres/secrets/superuser
+              readOnly: true
+            - name: meho
+              mountPath: /etc/core-postgres/secrets/meho
+              readOnly: true
+            - name: keycloak
+              mountPath: /etc/core-postgres/secrets/keycloak
+              readOnly: true
+        # Re-applies core.sql over the shared socket directory whenever a
+        # mounted password changes (see reconcile.sh in the ConfigMap). It
+        # has no access to the superuser Secret.
+        - name: reconcile
+          image: {{ include "meho.core.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/etc/core-postgres/config/reconcile.sh"]
+          resources:
+            {{- toYaml .Values.reconcile.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/core-postgres/config
+              readOnly: true
+            - name: meho
+              mountPath: /etc/core-postgres/secrets/meho
+              readOnly: true
+            - name: keycloak
+              mountPath: /etc/core-postgres/secrets/keycloak
+              readOnly: true
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+        - name: config
+          configMap:
+            name: {{ include "corePostgres.fullname" . }}-config
+            defaultMode: 0555
+        # Only apply.sh goes into the initdb directory: the entrypoint would
+        # also run core.sql on its own, without the password variables.
+        - name: initdb
+          configMap:
+            name: {{ include "corePostgres.fullname" . }}-config
+            defaultMode: 0555
+            items:
+              - key: apply.sh
+                path: 10-core.sh
+        - name: superuser
+          secret:
+            secretName: {{ include "corePostgres.superuserSecretName" . }}
+            defaultMode: 0440
+            items:
+              - key: password
+                path: password
+        - name: meho
+          secret:
+            secretName: {{ include "corePostgres.mehoSecretName" . }}
+            defaultMode: 0440
+            items:
+              - key: password
+                path: password
+        - name: keycloak
+          secret:
+            secretName: {{ include "corePostgres.keycloakSecretName" . }}
+            defaultMode: 0440
+            items:
+              - key: password
+                path: password
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  # The disk outlives `helm uninstall` on purpose (the default Retain
+  # policy). Delete the PVC and the generated Secrets together, or neither.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "corePostgres.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}

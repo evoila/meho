@@ -397,3 +397,93 @@ async def test_small_two_list_task_passes_through_even_with_digest_hint() -> Non
     assert handle is None, "an under-threshold task must not materialize"
     assert reduced is payload, "pass-through must return the exact vendor object"
     assert "status_counts" not in reduced, "no digest when nothing reduced"
+
+
+# ---------------------------------------------------------------------------
+# Bundle download status — bundles.download-status (#3410)
+# ---------------------------------------------------------------------------
+
+
+async def test_release_wide_download_status_reduces_with_status_counts() -> None:
+    """A release-wide ``PageOfBundleDownloadStatusInfo`` reduces with a digest.
+
+    Per-``downloadStatus`` counts and the IN_PROGRESS bundle ids ride inline.
+    FAILED rows are not kept whole inline (a depot outage fails every row), so
+    the digest carries no ``failed`` list; callers drill in per bundle.
+    """
+    op_id = "installer.bundles.download-status"
+    statuses = ["SUCCESSFUL"] * 170 + ["IN_PROGRESS"] * 2 + ["FAILED"] * 8
+    payload = {
+        "elements": [
+            {
+                "bundleId": f"bundle-{i}",
+                "componentType": "ESX_HOST",
+                "version": "9.1.0.0",
+                "downloadStatus": status,
+                "downloadScheduledTime": 1,
+                "isDownloadCancellable": False,
+            }
+            for i, status in enumerate(statuses)
+        ],
+        "pageMetadata": {"totalElements": len(statuses)},
+    }
+    reducer = _reducer(sample_size=5, sample_byte_budget=4096)
+
+    reduced, handle = await reducer.reduce(payload, None, _registered_reducer_context(op_id))
+
+    assert handle is not None
+    assert handle.total_rows == 180
+    assert reduced["source_key"] == "elements"
+    assert reduced["status_counts"] == {"SUCCESSFUL": 170, "IN_PROGRESS": 2, "FAILED": 8}
+    assert reduced["in_progress"] == ["bundle-170", "bundle-171"]
+    assert "failed" not in reduced
+
+
+# ---------------------------------------------------------------------------
+# SddcTask list — installer.sddc.list (#3418)
+# ---------------------------------------------------------------------------
+
+
+def _sddc_list(task_count: int) -> dict[str, Any]:
+    """The ``installer.sddc.list`` result: one summary row per bring-up task."""
+    return {
+        "elements": [
+            {
+                "id": f"sddc-{i}",
+                "name": f"bring-up {i}",
+                "status": "IN_PROGRESS" if i == task_count - 1 else "COMPLETED_WITH_FAILURE",
+                "deploymentType": "VCF",
+                "vcfInstanceName": "vcf-mgmt-01",
+                "creationTimestamp": "2026-10-01T08:00:00.000Z",
+            }
+            for i in range(task_count)
+        ],
+        "pageMetadata": {"pageNumber": 0, "totalElements": task_count},
+    }
+
+
+async def test_short_sddc_list_passes_through_with_every_id_inline() -> None:
+    """A normal appliance has a few bring-up tasks: ids and status stay inline."""
+    reducer = _reducer()
+    payload = _sddc_list(3)
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "installer.sddc.list"})
+
+    assert handle is None
+    assert [task["id"] for task in reduced["elements"]] == ["sddc-0", "sddc-1", "sddc-2"]
+
+
+async def test_long_sddc_list_reduces_to_a_handle_with_ids_in_the_sample() -> None:
+    """A long task list returns a handle; the inline sample rows still carry ids."""
+    reducer = _reducer(sample_size=5, sample_byte_budget=4096)
+    payload = _sddc_list(60)
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "installer.sddc.list"})
+
+    assert handle is not None, "60 tasks must materialize a handle"
+    assert handle.total_rows == 60
+    assert handle.fetch_more is not None
+    assert reduced["source_key"] == "elements"
+    assert "elements" not in reduced
+    assert handle.sample_rows, "summary rows are small, so the sample must not be empty"
+    assert all(row["id"].startswith("sddc-") and row["status"] for row in handle.sample_rows)

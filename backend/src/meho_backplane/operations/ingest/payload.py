@@ -21,15 +21,17 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
 __all__ = [
     "ConnectorReviewGroup",
+    "ConnectorReviewGroupAdvisory",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
     "ConnectorReviewProvenance",
+    "GroupSafetyDistribution",
 ]
 
 
@@ -127,6 +129,45 @@ class ConnectorReviewDeleteOp(BaseModel):
     reason: str
 
 
+class GroupSafetyDistribution(BaseModel):
+    """Risk levels of the enabled ops in one group (#3671).
+
+    Counts only ops with ``is_enabled=True``. One count per value of the
+    closed ``safety_level`` set, plus how many of those ops need approval
+    and how many ops are enabled in total. Disabled ops are not counted.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled_op_count: int = 0
+    safe: int = 0
+    caution: int = 0
+    dangerous: int = 0
+    destructive: int = 0
+    requires_approval_count: int = 0
+
+
+class ConnectorReviewGroupAdvisory(BaseModel):
+    """Advice for the operator who reviews one group (#3671).
+
+    ``distribution`` is what the group's enabled ops really do.
+    ``flags`` lists short, plain notes where the group's ``when_to_use``
+    text does not match those ops (for example the text says
+    "read-only" but some ops need approval). Empty when nothing looks
+    wrong.
+
+    This is advice only. It never blocks a dispatch, an ingest, or the
+    move from ``staged`` to ``enabled``. Dispatch keeps using each op's
+    own ``safety_level``, ``requires_approval``, and policy; the group
+    label and its text are never part of that decision.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    distribution: GroupSafetyDistribution = Field(default_factory=GroupSafetyDistribution)
+    flags: list[str] = Field(default_factory=list)
+
+
 class ConnectorReviewGroup(BaseModel):
     """One group within the review payload.
 
@@ -146,6 +187,10 @@ class ConnectorReviewGroup(BaseModel):
     review_status: str
     op_count: int
     ops: list[ConnectorReviewOp]
+    # #3671: advice that compares ``when_to_use`` with the enabled ops.
+    # Additive with a default so existing construction call sites keep
+    # working; the service always sets it.
+    advisory: ConnectorReviewGroupAdvisory = Field(default_factory=ConnectorReviewGroupAdvisory)
 
 
 class ConnectorReviewPayload(BaseModel):

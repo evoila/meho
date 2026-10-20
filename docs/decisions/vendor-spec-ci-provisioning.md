@@ -578,6 +578,57 @@ missing and the Python jobs fail** — the intended fail-closed behaviour (a
 layout/pin regression must fail CI, not silently skip the lane); the entry is
 **not** removed to force green.
 
+### Extension: vcenter-8.0, vcf-installer-9.1, esxi-9.0 and vks-9.0 (#4330)
+
+This change checks out four more shelf folders. Two reconcile lanes now run
+in CI instead of skipping. The other two folders have no lane yet, but the
+verify step requires their main file, so a shelf layout change fails CI
+today and not only when the first lane arrives. The same secret-gated
+checkout and the same rules apply (read-only, the runner is deleted when the
+job ends, never committed, never in artifacts or logs, no secret for fork PRs
+or Dependabot).
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcenter-8.0` | `vcenter-8.0/vcenter.yaml` | `backend/tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` |
+| `vcf-installer-9.1` | `vcf-installer-9.1/vcf-installer-openapi.json` | `backend/tests/test_connectors_vcf_installer_spec_reconcile.py` |
+| `esxi-9.0` | `esxi-9.0/wsdl/vim/vim.wsdl` | none yet |
+| `vks-9.0` | `vks-9.0/vks-paths-from-vcenter.txt` | none yet |
+
+- **`vcenter-8.0`** (~5 MB). The vSphere 8.0 U3 `vcenter.yaml`, made from a
+  vCenter's own API metadata and pinned on the shelf (provenance and sha256:
+  the `vsphere-8.x` entry of `docs/compatibility/vcf-api-contract-manifest.yaml`
+  and the shelf's `vcenter-8.0/MANIFEST.md`). This is a vendor-served file, so
+  the wave-3 blanket determination in the NSX section above covers it. No new
+  attestation is needed.
+- **`vcf-installer-9.1`** (~0.4 MB). The VCF Installer OpenAPI 3.0.1 file from
+  the **public, Apache-2.0** [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs)
+  repo (pinned at `3949fc33`). Provenance note of record: the shelf's
+  `vcf-installer-9.1/MANIFEST.md`. No attestation is needed.
+- **`esxi-9.0`** (~13 MB). ESXi has no OpenAPI spec. Its API contract is the
+  set of SOAP WSDL files, mirrored from the **public, Apache-2.0**
+  [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+  (`specifications/vsphere/wsdl/`, pinned at `85151f6b`). The verify step
+  requires `wsdl/vim/vim.wsdl`, the main VIM service file. Provenance note of
+  record: the shelf's `esxi-9.0/MANIFEST.md`. No attestation is needed.
+- **`vks-9.0`** (~0.4 MB). Two files are path and tag lists derived from the
+  `vcenter-9.0/vcenter.yaml` already on the shelf (same Apache-2.0 source,
+  same `85151f6b` pin). The verify step requires one of them,
+  `vks-paths-from-vcenter.txt`. The other files are nine vendor documentation
+  pages saved as markdown. Those pages have no explicit open licence, so this
+  extension records a reference to the **wave-3 blanket determination** in
+  the NSX section above, the same way the Hetzner Robot extension does.
+  Provenance note of record: the shelf's `vks-9.0/MANIFEST.md`.
+
+No test reads `esxi-9.0` or `vks-9.0` yet. The Task that adds the first lane
+for one of these folders only has to add the lane: the folder is already in
+both Python jobs' checkout list, and its main file is already in the verify
+step. If that lane reads a different file, add that file to the verify step
+in the same pull request.
+
+Both lanes passed against the pinned files before this change was merged
+(9 tests, none skipped). There are no known gaps.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

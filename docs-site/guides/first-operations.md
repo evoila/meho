@@ -248,6 +248,12 @@ waiting. You poll the handle for progress, or cancel it, and the
 completed result is persisted on the run so it survives a dropped
 response.
 
+An agent on MCP gets the same mode from the `call_operation` tool. Pass
+`async: true` and you get `status="pending"` and a `run_id` at once. Then
+call `call_operation` again with the same `connector_id`, `op_id` and that
+`run_id` to check it. While it runs you see `running` and the start time;
+when it is done you get the normal result.
+
 Synchronous mode stays the default and is byte-for-byte identical to
 the path without `async` — nothing changes unless you ask for it.
 

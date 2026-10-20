@@ -69,8 +69,9 @@ keep the running DSN least-privilege** (Option A).
   the migration Job on **every** `helm upgrade`. Option A confines
   superuser use to a single, out-of-band, pre-install action by whoever
   already administers the database; nothing superuser-capable is
-  persisted in MEHO's Secret set. Least privilege favours the documented
-  prerequisite.
+  persisted in MEHO's Secret set (one exception for the built-in
+  PostgreSQL, see the amendment below). Least privilege favours the
+  documented prerequisite.
 
 - **Splitting migrations across two DSNs is fragile.** Alembic applies a
   linear revision chain against one connection. Running one revision
@@ -109,6 +110,26 @@ keep the running DSN least-privilege** (Option A).
   (`backend/tests/migrations/test_alembic_probe.py`) stay green.
 - No new chart value, Secret, schema conditional, or migration-runner
   branching is introduced.
+
+## Amendment — the built-in PostgreSQL (2026-10-19, #4039)
+
+The decision stays: MEHO's migrations never get a superuser connection
+string. The chart now has an optional built-in PostgreSQL
+(`corePostgres.enabled: true`, `deploy/charts/meho/charts/postgres/`).
+For it, there is one exception to the sentence "nothing superuser-capable
+is persisted in MEHO's Secret set":
+
+- The image superuser password exists in a namespace Secret
+  (`<release>-core-postgres-superuser`) mounted by the PostgreSQL pod
+  alone. No MEHO component and no Job uses it. initdb reads it once, on an
+  empty disk.
+- The PostgreSQL pod creates the `vector` extension itself, as the image
+  superuser, over the local socket inside the pod. So with the built-in
+  PostgreSQL the pre-create step above is not needed, and migration
+  `0003`'s `CREATE EXTENSION IF NOT EXISTS vector` is a no-op for the
+  `meho` role, which is not a superuser.
+- The pre-create prerequisite still applies to every bring-your-own
+  PostgreSQL.
 
 ## Revisit criteria
 

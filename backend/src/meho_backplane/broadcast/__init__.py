@@ -52,8 +52,6 @@ from meho_backplane.broadcast.events import (
 from meho_backplane.broadcast.history import (
     DEFAULT_WINDOW_MINUTES,
     OP_CLASS_ENUM,
-    InvalidSinceError,
-    list_recent_events_fail_soft,
 )
 from meho_backplane.broadcast.overrides import (
     compute_effective_broadcast_detail,
@@ -64,12 +62,10 @@ from meho_backplane.broadcast.overrides import (
 from meho_backplane.broadcast.probe import broadcast_readiness_probe
 from meho_backplane.broadcast.publisher import (
     BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL,
-    BROADCAST_EVENTS_PUBLISHED_TOTAL,
     BROADCAST_MAXLEN,
     BROADCAST_PUBLISH_ERRORS_TOTAL,
     AnnouncementPublishResult,
     publish_agent_announcement,
-    publish_event,
 )
 from meho_backplane.broadcast.rate_limit import (
     ANNOUNCE_RATE_LIMIT_WINDOW_SECONDS,
@@ -84,7 +80,6 @@ __all__ = [
     "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
     "BROADCAST_ANNOUNCE_RATE_LIMITED_TOTAL",
     "BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS",
-    "BROADCAST_EVENTS_PUBLISHED_TOTAL",
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
     "DEFAULT_WINDOW_MINUTES",
@@ -104,7 +99,6 @@ __all__ = [
     "AnnouncementPublishResult",
     "BroadcastEvent",
     "InvalidArchiveCursorError",
-    "InvalidSinceError",
     "PlannedOpClass",
     "broadcast_readiness_probe",
     "build_trusted_announcement",
@@ -117,9 +111,7 @@ __all__ = [
     "get_broadcast_blocking_client",
     "get_broadcast_client",
     "invalidate_tenant_cache",
-    "list_recent_events_fail_soft",
     "publish_agent_announcement",
-    "publish_event",
     "read_announcement_history",
     "read_request_override",
     "redact_payload",

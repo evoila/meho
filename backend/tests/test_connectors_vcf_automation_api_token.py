@@ -6,7 +6,7 @@
 ``vcfa.provider.api_token.create`` mints an org user's refresh token and
 writes it straight to Vault. The load-bearing assertions here are that
 the token value never reaches any audit-facing surface: the op result,
-the durable audit row, the broadcast event, the park-time
+the durable audit row, the park-time
 ``proposed_effect``, or a flight-recorder body. Also covers the flow
 (user session → OAuth register → jwt-bearer grant), idempotency on the
 token name, the System-org path, Vault patch→put fallback, revoke-on-
@@ -126,19 +126,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-@pytest.fixture
-def events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr("meho_backplane.operations._audit.publish_event", _capture)
-    return captured
-
-
 @pytest.fixture(autouse=True)
-def _reset_state(monkeypatch: pytest.MonkeyPatch, events: list[Any]) -> Iterator[None]:
+def _reset_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(
         "meho_backplane.operations.typed_register.encode_endpoint_text",
         AsyncMock(return_value=[0.1] * 384),
@@ -277,10 +266,9 @@ async def test_create_mints_as_the_user_and_stores_in_vault(
     assert not routes["delete"].called
 
 
-async def test_token_never_reaches_result_audit_or_broadcast(
+async def test_token_never_reaches_result_or_audit(
     vcfa: VcfAutomationConnector,
     vault_writes: list[tuple[str, dict[str, Any]]],
-    events: list[Any],
 ) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         _mount_user_flow(mock)
@@ -298,13 +286,8 @@ async def test_token_never_reaches_result_audit_or_broadcast(
     assert rows, "the approved dispatch must write an audit row"
     for row in rows:
         assert MINTED_TOKEN not in json.dumps(row.payload, default=str)
-    # Broadcast: credential_mint collapses to aggregate-only.
+    # The op is classed as a credential mint.
     assert classify_op("vcfa.provider.api_token.create") == "credential_mint"
-    mint_events = [e for e in events if e.op_id == "vcfa.provider.api_token.create"]
-    assert mint_events
-    for event in mint_events:
-        assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
-        assert MINTED_TOKEN not in event.model_dump_json()
 
 
 @pytest.mark.parametrize(

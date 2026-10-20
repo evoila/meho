@@ -6,10 +6,10 @@
 Three surfaces land here:
 
 * ``meho_topology_annotate`` — tenant_admin-only write meta-tool.
-  Calls :func:`annotate_edge` (#595) directly; one audit row + one
-  broadcast event per call (the service primitive owns both — the
-  dispatcher's own audit row at ``/mcp/tools/call/...`` is a second,
-  per-call row on a different ``method`` axis).
+  Calls :func:`annotate_edge` (#595) directly; one audit row per call
+  (the service primitive owns it — the dispatcher's own audit row at
+  ``/mcp/tools/call/...`` is a second, per-call row on a different
+  ``method`` axis).
 * ``meho_topology_unannotate`` — tenant_admin-only write meta-tool.
   Same direct-substrate shape; refuses an `source='auto'` row with a
   structured -32602 (the auto-vs-curated rule).
@@ -25,7 +25,7 @@ Coverage maps to the issue acceptance criteria:
   ``tools/list``; a direct ``tools/call`` from a non-admin returns
   -32602 with a ``forbidden``-prefixed message.
 * ``tools/call meho_topology_annotate {...}`` creates a curated edge
-  (idempotent on repeat) and emits one audit row + one broadcast event.
+  (idempotent on repeat) and emits one audit row.
 * ``query_topology {kind: edges, source: curated}`` returns only the
   tenant's curated edges; ``conflicts: true`` narrows to conflicted
   ones; no separate ``list_edges`` tool was registered.
@@ -75,7 +75,6 @@ from tests.mcp_test_fixtures import (
 # name is the patchable reference.
 _LIST_EDGES_PATCH = "meho_backplane.mcp.tools.topology.list_edges"
 _QUERY_HISTORY_PATCH = "meho_backplane.mcp.tools.topology.query_history"
-_PUBLISH_PATCH = "meho_backplane.topology.annotate.publish_event"
 
 
 # ---------------------------------------------------------------------------
@@ -386,39 +385,38 @@ def test_admin_tool_call_from_non_admin_is_forbidden(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
+async def test_annotate_creates_curated_edge_and_emits_audit(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     _seeded_tenant: None,
 ) -> None:
-    """tools/call meho_topology_annotate {...} → curated row + 1 audit + 1 broadcast.
+    """tools/call meho_topology_annotate {...} → curated row + 1 audit.
 
     Three audit axes since #2537: the MCP dispatcher writes its row at
     ``/mcp/tools/call/meho_topology_annotate`` (the per-MCP-call axis),
     the operations dispatcher writes a ``method='DISPATCH'`` row keyed
     ``path='topology.annotate'`` (the policy-gated dispatch axis, new
     in #2537), and ``annotate_edge`` writes the service-level row
-    (``method='ANNOTATE'``, same path). The issue's "one audit row +
-    one broadcast event" applies to the service emission — verified
-    here per ``(path, method)`` pair.
+    (``method='ANNOTATE'``, same path). The issue's "one audit row"
+    applies to the service emission — verified here per
+    ``(path, method)`` pair.
     """
     client, _op = client_with_operator
     await _seed_node(kind="principal", name="k8s-sa-foo")
     await _seed_node(kind="vault-role", name="vault-role-bar")
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()) as publish_mock:
-        response = _annotate_call(
-            client,
-            10,
-            {
-                "from_name": "k8s-sa-foo",
-                "from_node_kind": "principal",
-                "kind": "authenticates-via",
-                "to_name": "vault-role-bar",
-                "to_node_kind": "vault-role",
-                "note": "canonical k8s SA → Vault role",
-                "evidence_url": "https://example.test/inventory#L42",
-            },
-        )
+    response = _annotate_call(
+        client,
+        10,
+        {
+            "from_name": "k8s-sa-foo",
+            "from_node_kind": "principal",
+            "kind": "authenticates-via",
+            "to_name": "vault-role-bar",
+            "to_node_kind": "vault-role",
+            "note": "canonical k8s SA → Vault role",
+            "evidence_url": "https://example.test/inventory#L42",
+        },
+    )
 
     body = response.json()
     assert body["result"]["isError"] is False
@@ -470,9 +468,6 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
     assert len(gate_rows) == 1
     assert len(dispatcher_rows) == 1
 
-    # Exactly one broadcast event (the service-level emission).
-    assert publish_mock.await_count == 1
-
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_annotate_return_superseded_matches_audit_payload(
@@ -485,7 +480,7 @@ async def test_annotate_return_superseded_matches_audit_payload(
     curated edge over the same ``from`` + same ``kind`` to a *different*
     endpoint (A depends-on C). The §6 same-kind/different-endpoint scan
     stamps ``superseded_by`` on the auto edge and records its id on the
-    shared audit / broadcast payload. The tool return now surfaces that
+    audit payload. The tool return now surfaces that
     same list — the acceptance criterion asserts they are equal.
     """
     client, _op = client_with_operator
@@ -494,12 +489,11 @@ async def test_annotate_return_superseded_matches_audit_payload(
     await _seed_node(kind="database", name="db-c")
     auto_edge_id = await _seed_auto_edge(from_id=a_id, to_id=b_id, kind="depends-on")
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()):
-        response = _annotate_call(
-            client,
-            60,
-            {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-c"},
-        )
+    response = _annotate_call(
+        client,
+        60,
+        {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-c"},
+    )
 
     body = response.json()
     assert body["result"]["isError"] is False, body
@@ -540,31 +534,30 @@ async def test_annotate_is_idempotent_on_repeat(
     tid = await _seed_node(kind="pod", name="db-y")
     assert fid is not None and tid is not None
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()):
-        first = _annotate_call(
-            client,
-            20,
-            {
-                "from_name": "svc-x",
-                "from_node_kind": "service",
-                "kind": "depends-on",
-                "to_name": "db-y",
-                "to_node_kind": "pod",
-                "note": "first",
-            },
-        )
-        second = _annotate_call(
-            client,
-            21,
-            {
-                "from_name": "svc-x",
-                "from_node_kind": "service",
-                "kind": "depends-on",
-                "to_name": "db-y",
-                "to_node_kind": "pod",
-                "note": "second",
-            },
-        )
+    first = _annotate_call(
+        client,
+        20,
+        {
+            "from_name": "svc-x",
+            "from_node_kind": "service",
+            "kind": "depends-on",
+            "to_name": "db-y",
+            "to_node_kind": "pod",
+            "note": "first",
+        },
+    )
+    second = _annotate_call(
+        client,
+        21,
+        {
+            "from_name": "svc-x",
+            "from_node_kind": "service",
+            "kind": "depends-on",
+            "to_name": "db-y",
+            "to_node_kind": "pod",
+            "note": "second",
+        },
+    )
 
     assert first.json().get("result"), f"first failed: {first.json()}"
     assert second.json().get("result"), f"second failed: {second.json()}"
@@ -623,16 +616,15 @@ async def test_annotate_accepts_novel_kind(
     await _seed_node(kind="dns-record", name="www.example.com")
     await _seed_node(kind="service", name="frontend")
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()):
-        response = _annotate_call(
-            client,
-            33,
-            {
-                "from_name": "www.example.com",
-                "kind": "resolves-to",
-                "to_name": "frontend",
-            },
-        )
+    response = _annotate_call(
+        client,
+        33,
+        {
+            "from_name": "www.example.com",
+            "kind": "resolves-to",
+            "to_name": "frontend",
+        },
+    )
 
     body = response.json()
     assert body["result"]["isError"] is False
@@ -702,30 +694,29 @@ async def test_unannotate_curated_edge_via_triple(
     await _seed_node(kind="service", name="svc-x")
     await _seed_node(kind="pod", name="db-y")
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()):
-        created = _annotate_call(
-            client,
-            50,
-            {
-                "from_name": "svc-x",
-                "from_node_kind": "service",
-                "kind": "depends-on",
-                "to_name": "db-y",
-                "to_node_kind": "pod",
-            },
-        )
-        edge_id = json.loads(created.json()["result"]["content"][0]["text"])["edge_id"]
-        removed = _unannotate_call(
-            client,
-            51,
-            {
-                "from_name": "svc-x",
-                "from_node_kind": "service",
-                "kind": "depends-on",
-                "to_name": "db-y",
-                "to_node_kind": "pod",
-            },
-        )
+    created = _annotate_call(
+        client,
+        50,
+        {
+            "from_name": "svc-x",
+            "from_node_kind": "service",
+            "kind": "depends-on",
+            "to_name": "db-y",
+            "to_node_kind": "pod",
+        },
+    )
+    edge_id = json.loads(created.json()["result"]["content"][0]["text"])["edge_id"]
+    removed = _unannotate_call(
+        client,
+        51,
+        {
+            "from_name": "svc-x",
+            "from_node_kind": "service",
+            "kind": "depends-on",
+            "to_name": "db-y",
+            "to_node_kind": "pod",
+        },
+    )
 
     body = removed.json()
     assert body["result"]["isError"] is False
@@ -1135,7 +1126,7 @@ def test_annotate_description_matches_actual_response_shape() -> None:
     Since #2539 the handler returns ``edge_id / from / to / kind /
     source / conflicts / superseded`` — ``superseded`` is now an additive
     return key surfacing the auto edges the assertion displaced (the ids
-    already computed on the audit/broadcast payload; MCP authoring parity
+    already computed on the audit payload; MCP authoring parity
     with the REST/CLI fronts). Description-vs-impl drift here is
     load-bearing for an LLM agent reading the description as the API
     contract.

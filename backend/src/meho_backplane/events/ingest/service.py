@@ -20,7 +20,9 @@ order the issue fixes:
    spec's "no success without a committed audit row" invariant (CLAUDE.md
    postulate 7). A ``dedupe_key`` collision is mapped to an idempotent
    acknowledgement, never a second outbox row.
-6. Publish a fail-open broadcast event after the transaction commits.
+
+No Broadcast event is published (#3758): the feed carries deliberate agent
+announcements only. The audit row and the outbox row are the record.
 
 The ``__ingest__`` audit identity
 =================================
@@ -65,8 +67,6 @@ from sqlalchemy.exc import IntegrityError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.runner_identity import check_runner_jwt
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.broadcast.events import BroadcastEvent
-from meho_backplane.broadcast.publisher import publish_event
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EventOutbox
 from meho_backplane.event_source.schemas import EventSourceAuthStrategy
@@ -76,7 +76,6 @@ from meho_backplane.events.ingest.config import IngestConfig
 from meho_backplane.events.ingest.rate_limit import enforce_ingest_rate_limit
 from meho_backplane.events.normalizers import normalize_event
 from meho_backplane.events.outbox import publish
-from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -101,11 +100,6 @@ INGEST_OPERATOR_SUB: str = "__ingest__"
 #: ``path``-is-op-id convention the internal-audit writer documents).
 INGEST_AUDIT_METHOD: str = "INGEST"
 INGEST_AUDIT_PATH: str = "events.ingest"
-
-#: Broadcast op metadata. ``other`` is a valid ``op_class`` (avoids touching
-#: the classifier); ``events.ingest`` mirrors the audit op-id.
-_INGEST_OP_ID: str = "events.ingest"
-_INGEST_OP_CLASS: str = "other"
 
 #: Defensive cap on a sender-supplied delivery id used as the dedupe basis,
 #: so an attacker cannot bloat the ``dedupe_key`` column with a huge header.
@@ -290,42 +284,6 @@ async def _lookup_existing_event_id(tenant_id: uuid.UUID, dedupe_key: str) -> in
         return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def _publish_ingest_broadcast(
-    *, audit_id: uuid.UUID, source: ResolvedSource, event_id: int, event_kind: str, now: datetime
-) -> None:
-    """Emit the per-ingest broadcast event. Fail-open by contract.
-
-    Aggregate/attribution metadata only -- no external body content -- so the
-    read-class default holds without a redactor pass.
-    """
-    lineage = resolve_broadcast_lineage()
-    event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=now,
-        tenant_id=source.tenant_id,
-        principal_sub=INGEST_OPERATOR_SUB,
-        principal_name=None,
-        target_name=source.slug,
-        op_id=_INGEST_OP_ID,
-        op_class=_INGEST_OP_CLASS,
-        result_status="ok",
-        audit_id=audit_id,
-        actor_sub=lineage.actor_sub,
-        agent_session_id=lineage.agent_session_id,
-        work_ref=lineage.work_ref,
-        payload={
-            "op_class": _INGEST_OP_CLASS,
-            "result_status": "ok",
-            "origin": str(source.id),
-            "source_slug": source.slug,
-            "source_kind": source.kind,
-            "event_kind": event_kind,
-            "event_id": event_id,
-        },
-    )
-    await publish_event(event)
-
-
 def _resolve_rate_limit(source: ResolvedSource, config: IngestConfig) -> int:
     """Per-source override wins over the global default cap."""
     if config.rate_per_minute_override is not None:
@@ -367,35 +325,15 @@ async def accept_ingest_event(
     parsed_body = _parse_json_or_fail(raw_body)
     event_kind, envelope = _normalise(source, parsed_body, now)
 
-    audit_id = uuid.uuid4()
-    outcome = await _publish_with_audit(
+    return await _publish_with_audit(
         source=source,
         event_kind=event_kind,
         envelope=envelope,
         dedupe_key=dedupe_key,
-        audit_id=audit_id,
+        audit_id=uuid.uuid4(),
         started=started,
         now=now,
     )
-    if outcome.deduplicated:
-        return outcome
-
-    assert outcome.event_id is not None  # non-dedup path always has an id
-    # Fail-open broadcast: the audit row has already committed (the canonical
-    # record of the accepted delivery), so a broadcast failure must never turn
-    # a successful ingest into an error. publish_event is itself fail-open;
-    # this guard makes that contract local and explicit at the ingest boundary.
-    try:
-        await _publish_ingest_broadcast(
-            audit_id=audit_id,
-            source=source,
-            event_id=outcome.event_id,
-            event_kind=event_kind,
-            now=now,
-        )
-    except Exception as exc:
-        _log.warning("ingest_broadcast_failed", slug=source.slug, error_class=type(exc).__name__)
-    return outcome
 
 
 async def _publish_with_audit(

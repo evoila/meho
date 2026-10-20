@@ -1010,24 +1010,3 @@ async def test_initialize_issued_session_id_round_trips_to_audit_row(
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 1
     assert mcp_rows[0].agent_session_id == session_uuid
-
-
-# ---------------------------------------------------------------------------
-# #1481: broadcast classification of the corrected post-gate status
-# ---------------------------------------------------------------------------
-
-
-def test_classify_mcp_status_403_is_denied_not_error() -> None:
-    """#1481: the 403 a post-gate rejection now records classifies "denied".
-
-    Locks the broadcast half of the fix — once the audit ``status_code``
-    is corrected from the init 500 to 403, ``_classify_mcp_status`` maps
-    it to ``"denied"`` (not ``"error"``), so the live feed event
-    reflects a policy rejection rather than a fake server crash. 500
-    stays ``"error"`` so a genuine handler fault is still surfaced.
-    """
-    from meho_backplane.mcp.handlers import _classify_mcp_status
-
-    assert _classify_mcp_status(403) == "denied"
-    assert _classify_mcp_status(500) == "error"
-    assert _classify_mcp_status(200) == "ok"

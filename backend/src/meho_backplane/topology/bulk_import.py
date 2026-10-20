@@ -39,10 +39,8 @@ block. Acceptance criterion: ``--dry-run`` produces the per-edge plan
 and performs zero writes (asserted: row count unchanged, no audit
 rows).
 
-**Broadcast.** Per the annotate convention, one event per row, fired
-after the batch commits. The fail-open semantics live in the
-:func:`annotate._publish` helper — a broken broadcaster never rolls
-back a successful batch.
+**Broadcast.** None. Topology writes publish no Broadcast event
+(#3758); the per-row audit rows are the record.
 """
 
 from __future__ import annotations
@@ -55,12 +53,10 @@ from sqlalchemy import select
 
 from meho_backplane.db.models import GraphEdge, GraphEdgeKind
 from meho_backplane.topology.annotate import (
-    _ANNOTATE_OP_ID,
     AnnotatePlan,
     InvalidEdgeKindError,
     NodeRef,
     _find_existing_edge,
-    _publish,
     _validate_kind,
     annotate_edge_in_txn,
 )
@@ -349,18 +345,6 @@ async def bulk_import_edges(
                 evidence_url=row.evidence_url,
             )
             plans.append(plan)
-
-    # Publish one broadcast event per row after commit. The helper is
-    # fail-open per the refresh pattern — a broken broadcaster never
-    # rolls back the successful batch.
-    for plan in plans:
-        await _publish(
-            audit_id=plan.audit_id,
-            operator=operator,
-            op_id=_ANNOTATE_OP_ID,
-            target_name=plan.target_name,
-            payload=plan.audit_payload,
-        )
 
     # Re-build the row list with post-commit edge ids so the response
     # can carry the actually-applied row state (the validation-pass

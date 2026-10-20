@@ -550,14 +550,26 @@ stays vendor-neutral, so a connector can register a correction in
 parsed proto, and returns the same proto or a fixed copy. It runs just before
 the safety floor, on both the register path and the dry-run path.
 
+A connector can also register a batch correction
+(`register_ingest_batch_correction`). It gets the catalog `version` and every
+proto of one spec, for a fix that must compare operations with each other.
+`apply_spec_corrections` runs the per-operation correction on each proto and
+then the batch correction; both ingest paths call it.
+
 A correction may also set `llm_instructions`. Registration stores it on a new
 row. On re-ingest it fills `llm_instructions` only when the row has none, so
 an operator's own edit is never replaced.
 
-VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`.
-Today there is one: on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
-`{filter_spec, result_spec}` body (see
-[connectors-vmware-rest.md](connectors-vmware-rest.md)).
+VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
+
+- on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
+  `{filter_spec, result_spec}` body;
+- an operation with no summary gets the first sentence of its description
+  (at most 120 characters);
+- a VI-JSON operation whose summary another operation of the same spec shares
+  gets its managed object type in front.
+
+See [connectors-vmware-rest.md](connectors-vmware-rest.md).
 
 #### Catalog safety overlay (#3340)
 
@@ -1777,6 +1789,39 @@ modal's Write-scope select (`global`/`tenant` discriminator; the BFF
 derives the UUID from the authenticated operator, never from the
 client).
 
+**Platform-admin ingest into another tenant (#3800).** One exception
+to the "any other UUID is rejected" rule. An operator whose token
+carries `platform_admin` may name another tenant's UUID in
+`tenant_id` (CLI: `--tenant-id`). This lets a platform operator seed
+a tenant-scoped connector row for a new tenant that has no usable
+admin seat yet. The rules:
+
+- It only applies when the tenant id is given. An omitted or `null`
+  `tenant_id` still means the built-in scope, for every operator.
+- Without `platform_admin`, a foreign UUID is still rejected (REST
+  403, MCP `-32602`), exactly as before. The route's `tenant_admin`
+  floor still applies too.
+- Before any row is written, `ingest()` commits one
+  `meho_connector_ingest_cross_tenant` (`OP_CROSS_TENANT_INGEST`)
+  audit row. The row is attributed to the acting operator
+  (`operator_sub` and the operator's own `tenant_id`); the payload
+  names the `connector_id` and the `target_tenant_id`. The row also
+  carries the agent session (`agent_session_id`), read through
+  `resolve_agent_session_id` like every row `write_audit_row` builds,
+  so a session search finds it whether or not
+  `AUDIT_WRAPPER_ROWS_RETIRED` is on. The async MCP path keeps the
+  session too: the background task copies the tool call's context.
+  If that write fails, the ingest stops with nothing written. A dry
+  run writes no audit row.
+- The `--auth-scheme` profile stamp follows the same allowance:
+  `ReviewService.record_profile_stamp` passes
+  `allow_platform_admin_cross_tenant=True` to `_resolve_scope`. No
+  other `ReviewService` path sets it, so review, enable and delete
+  stay strict.
+- A `platform_admin` may poll an ingest job in another tenant
+  (`IngestJobRegistry.get(..., is_platform_admin=...)`), and the REST
+  async job's "is it dispatchable" check probes the target tenant.
+
 **Shared scope resolution (`get_review_payload` + `enable_reads`,
 G0.13-T5 #1135 / G0.26-T1 #1801).** Every read/enable-reads path
 applies the same "operator's-tenant rows + built-ins (`tenant_id IS
@@ -2172,6 +2217,57 @@ vendor specs; not yet used in the v0.x catalogue). Each opts in via
 a separate kwarg on `resolve_shallow_ref`; `parse_openapi` threads
 all four dicts uniformly so the full pipeline never trips the
 opt-out branch.
+
+### Group text check on the review payload (#3671)
+
+An LLM writes each group's `when_to_use` text at ingest. The operator
+reads it before enabling the group. The review payload now checks that
+text against the ops in the group, so the operator does not have to
+trust it blindly.
+
+Each `ConnectorReviewGroup` carries `advisory`
+(`ConnectorReviewGroupAdvisory`):
+
+* `distribution` (`GroupSafetyDistribution`) — counts of the **enabled**
+  ops per `safety_level` (`safe` / `caution` / `dangerous` /
+  `destructive`), how many of them need approval
+  (`requires_approval_count`), and the enabled total
+  (`enabled_op_count`). Disabled ops are not counted.
+* `flags` — short, plain notes, at most five, without repeats:
+  * the text makes a safety claim the ops break: "read-only" (or "no
+    side effects", "does not modify") while an op is not `safe` or needs
+    approval; "non-destructive" while an op is `destructive`; "all ...
+    dangerous/destructive" while an op is at another level, higher or
+    lower; "all ... require approval" while an op does not;
+  * the text shares no word with the op ids and summaries.
+
+A `staged` group has no enabled op until the operator enables it. Then
+the flags check every op in the group (the ops enabling would turn on)
+and each flag says so. The counts still cover enabled ops only.
+
+`operations/ingest/group_truth.py` builds this from the ops the payload
+already loaded, so it adds no database query. The check is a simple word
+match, not a language parser.
+
+This is advice only. It never blocks dispatch, ingest, or the move from
+`staged` to `enabled`. Dispatch keeps using each op's own `safety_level`,
+`requires_approval`, and policy. The group label and its text are never
+part of that decision, and the agent-facing `list_operation_groups`
+result does not carry these fields. `--json` on `meho connector review`,
+`GET /api/v1/connectors/{id}/review`, and the MCP `meho_connector_review`
+tool carry them.
+
+**Re-ingest keeps operator edits.** A re-ingest of the same spec never
+writes `custom_description`, `custom_notes`, `is_enabled`, the group's
+`review_status`, or an edited `when_to_use` (the upsert's existing-row
+branches in `_upsert.py` skip those fields, the grouping pass skips ops
+that already have a group, and typed registration does not write its
+`when_to_use` over an existing group row). A breaking change ships as a
+new connector `version` with its own rows next to the old ones. The same
+`(product, version, impl_id, op_id)` from a different spec raises
+`OpIdCollision`. `test_operations_ingest_review.py` pins all of this
+(`-k override_preserved_on_reingest`,
+`-k breaking_change_new_version_identity`).
 
 ### T2 control flow
 

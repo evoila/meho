@@ -25,7 +25,32 @@ dispatches on a fresh boot with **zero catalog ingest** (avoiding the
 (`GET /policy/api/v1/infra/segments`) passes the vendor
 `{results, result_count}` envelope through unmodified so the operator can
 read each segment's `subnets[].gateway_address` (subnet/CIDR occupancy)
-before carving a new segment. `nsx.transport_node.list`
+before carving a new segment. `nsx.cluster.status`
+(`GET /api/v1/cluster/status`) returns the vendor `ClusterStatus` body
+unchanged and adds four flat fields so cluster health is one read (#3674).
+`_augment_cluster_health` in `typed_reads.py` adds them in place, in the
+same shape as the Prometheus `_augment_numeric_samples`:
+
+- `health_overall` -- the vendor `overall_status`, else
+  `detailed_cluster_status.overall_status` (`STABLE` / `DEGRADED` /
+  `UNAVAILABLE`). These are the non-deprecated fields, so read this first.
+- `health_mgmt` -- `mgmt_cluster_status.status` (deprecated by NSX;
+  `INITIALIZING` / `UNSTABLE` / `DEGRADED` / `STABLE` / `UNKNOWN`).
+- `health_control` -- `control_cluster_status.status` (deprecated by NSX;
+  `NO_CONTROLLERS` / `UNSTABLE` / `DEGRADED` / `STABLE` / `UNKNOWN`).
+- `group_status_counts` -- how many `detailed_cluster_status.groups[]`
+  entries have each `group_status` (`STABLE` / `DEGRADED` / `UNSTABLE` /
+  `UNAVAILABLE`). A missing value, or one outside that list, counts as
+  `unknown`. So the map has at most five keys and never copies the
+  groups list.
+
+A missing source gives the lowercase literal `unknown` (never null, never
+left out), so a missing field is never read as healthy. A vendor uppercase
+`UNKNOWN` is passed through as is. The helper checks every type and never
+raises; a body that is not a JSON object is returned unchanged. The enum
+lists come from the NSX 9.0 REST API schema; that schema has no
+per-member `detail` list, so counts come from the cluster groups only.
+`nsx.transport_node.list`
 (`GET /api/v1/transport-nodes`) carries no live health -- state lives on
 the separate `.../state` sub-resource -- so `nsx.transport_node.state`
 (`GET /api/v1/transport-nodes/{id}/state`) reads one node's realization +

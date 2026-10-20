@@ -40,7 +40,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.nsx import (
@@ -126,23 +125,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire.
-
-    Required for the same reason as every other DB-backed dispatcher
-    test: the real broadcast bus tries to write to a Redis stream that
-    doesn't exist in the unit-test environment.
-    """
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 # ---------------------------------------------------------------------------
 # Setup helper
 # ---------------------------------------------------------------------------
@@ -200,7 +182,7 @@ class _NsxE2EBundle:
 
 
 @pytest.fixture
-async def nsx_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_NsxE2EBundle]:
+async def nsx_e2e_canary() -> AsyncIterator[_NsxE2EBundle]:
     """Dispatcher-ready NSX setup over a respx-mocked manager (standard happy-path).
 
     Lifecycle:
@@ -249,9 +231,7 @@ class _Nsx401RetryBundle:
 
 
 @pytest.fixture
-async def nsx_e2e_401_canary(
-    captured_events: list[Any],
-) -> AsyncIterator[_Nsx401RetryBundle]:
+async def nsx_e2e_401_canary() -> AsyncIterator[_Nsx401RetryBundle]:
     """NSX setup with a respx mock that simulates a 401 on the first node GET.
 
     The session-create route answers twice (initial establish + post-401

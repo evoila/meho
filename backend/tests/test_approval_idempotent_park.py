@@ -39,7 +39,6 @@ import respx
 from httpx import ASGITransport
 from sqlalchemy import func, select
 
-import meho_backplane.audit as _audit_module
 import meho_backplane.operations.approval_queue as approval_queue_module
 import meho_backplane.operations.meta_tools as meta_tools_module
 from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
@@ -92,11 +91,6 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
     monkeypatch.setenv("KEYCLOAK_JWT_LEEWAY_SECONDS", "30")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
     get_settings.cache_clear()
     clear_jwks_cache()
     yield
@@ -365,7 +359,7 @@ async def test_overdue_pending_request_is_expired_and_a_new_one_parks(
 
 
 @pytest.mark.asyncio
-async def test_call_after_the_deadline_parks_again_and_announces_the_expiry(
+async def test_call_after_the_deadline_parks_again_and_records_the_expiry(
     embedding: list[float], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Through ``call_operation``: a late retry gets a new id, not a stuck one."""
@@ -373,12 +367,12 @@ async def test_call_after_the_deadline_parks_again_and_announces_the_expiry(
     register_preview_builder(_OP_ID, _blast_radius_builder)
     await _seed_target(name="gh-prod")
     await _insert_destructive_descriptor(embedding=embedding)
-    published: list[tuple[str, uuid.UUID, str]] = []
+    recorded: list[tuple[str, uuid.UUID]] = []
 
     async def _record(**kwargs: Any) -> None:
-        published.append((kwargs["decision"], kwargs["request"].id, kwargs["principal_sub"]))
+        recorded.append((kwargs["decision"], kwargs["request"].id))
 
-    monkeypatch.setattr(approval_queue_module, "publish_approval_event", _record)
+    monkeypatch.setattr(approval_queue_module, "record_approval_step_event", _record)
 
     requester = _operator(sub="op-requester")
     args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
@@ -398,10 +392,10 @@ async def test_call_after_the_deadline_parks_again_and_announces_the_expiry(
     second_id = uuid.UUID(second["extras"]["approval_request_id"])
     assert second_id != first_id
     assert "approval_request_reused" not in second["extras"]
-    assert published == [
-        ("pending", first_id, "op-requester"),
-        ("expired", first_id, approval_queue_module.EXPIRY_OPERATOR_SUB),
-        ("pending", second_id, "op-requester"),
+    assert recorded == [
+        ("pending", first_id),
+        ("expired", first_id),
+        ("pending", second_id),
     ]
 
 

@@ -60,18 +60,17 @@ from uuid import UUID
 
 import pytest
 import respx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
@@ -153,18 +152,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events so the audit/broadcast leg is asserted."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -251,7 +238,6 @@ async def _seed_descriptor(session: AsyncSession, embedding: list[float]) -> Non
 async def test_dispatch_executes_full_credread_chain_returns_ok(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The full dispatch→loader→vCenter chain returns status="ok" with no injected loader."""
@@ -302,15 +288,18 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     # Basic auth carried the Vault-read creds (header present, opaque).
     sent_auth = session_route.calls[0].request.headers.get("authorization")
     assert sent_auth is not None and sent_auth.startswith("Basic ")
-    # One audit + one broadcast for the dispatched op.
-    assert len(captured_events) == 1
+    # One audit row for the dispatched op.
+    async with get_sessionmaker()() as fresh:
+        audit_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == _OP_ID))).scalars().all()
+        )
+    assert len(audit_rows) == 1
 
 
 @pytest.mark.asyncio
 async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No credential value appears in the OperationResult or any captured log event."""
@@ -347,15 +336,17 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     assert _CANARY_USERNAME not in result_blob
 
     # The credential never rides any structlog event (loader, connector,
-    # dispatcher, audit, broadcast).
+    # dispatcher, audit).
     log_blob = repr(captured)
     assert _CANARY_PASSWORD not in log_blob
     assert _CANARY_USERNAME not in log_blob
 
-    # The credential never rides the broadcast event payload either.
-    events_blob = repr(captured_events)
-    assert _CANARY_PASSWORD not in events_blob
-    assert _CANARY_USERNAME not in events_blob
+    # The credential never rides the stored audit rows either.
+    async with get_sessionmaker()() as fresh:
+        audit_rows = (await fresh.execute(select(AuditLog))).scalars().all()
+    audit_blob = repr([row.payload for row in audit_rows])
+    assert _CANARY_PASSWORD not in audit_blob
+    assert _CANARY_USERNAME not in audit_blob
 
 
 @pytest.mark.asyncio

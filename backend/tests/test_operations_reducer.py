@@ -23,6 +23,9 @@ Coverage matrix (G0.6-T6 / Task #397 acceptance criteria):
 * The dispatcher's pass-through path leaves :attr:`OperationResult.handle`
   ``None``; a swapped-in reducer that emits a handle propagates it onto
   the returned :class:`OperationResult`.
+* A ``prometheus.targets`` body over the threshold reduces on its derived
+  ``target_health`` rows, so ``result_query`` can count targets grouped by
+  ``health`` (#3673).
 
 The dispatcher-integration assertions stand up the same in-memory wiring
 :mod:`test_operations_dispatcher` uses, but only exercise the reducer
@@ -40,13 +43,15 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.prometheus.ops import _TARGETS_OP
+from meho_backplane.connectors.prometheus.ops_read import _augment_target_health
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.jsonflux.query.contract import ResultQuerySpec
 from meho_backplane.operations import (
     PassThroughReducer,
     Reducer,
@@ -55,6 +60,8 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
     set_default_reducer,
 )
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.result_query import _query_pipeline_sync, _WorkerGuard
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -94,26 +101,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub.
-
-    Mirrors the dispatcher-test fixture: the audit helper invokes
-    ``publish_event`` via the imported reference inside
-    :mod:`meho_backplane.operations._audit`; patching the module's
-    attribute is sufficient -- no need to swap the broadcast package's
-    bind. Tests need this to be present so the dispatcher's broadcast
-    leg doesn't fail open against a missing Valkey broker.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +422,6 @@ def test_operation_result_with_handle_round_trips_through_json() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_default_reducer_leaves_handle_none(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """v0.2 default path: dispatch returns ``handle=None``."""
     register_connector_v2(
@@ -472,7 +458,6 @@ async def test_dispatch_default_reducer_leaves_handle_none(
 @pytest.mark.asyncio
 async def test_dispatch_propagates_reducer_handle_onto_operation_result(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Mock 'would-reduce' reducer: the produced handle lands on the result.
 
@@ -542,7 +527,6 @@ async def test_dispatch_propagates_reducer_handle_onto_operation_result(
 @pytest.mark.asyncio
 async def test_dispatch_passes_context_to_reducer(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The reducer sees ``op_id`` / ``operator_sub`` / ``target_id`` in context.
 
@@ -610,7 +594,6 @@ async def test_dispatch_passes_context_to_reducer(
 @pytest.mark.asyncio
 async def test_dispatch_returns_unavailable_delivery_when_reducer_raises(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A completed handler stays successful when only reduction fails."""
 
@@ -669,8 +652,6 @@ async def test_dispatch_returns_unavailable_delivery_when_reducer_raises(
         exception_class="RuntimeError",
     )
     assert "simulated reducer explosion" not in str(mock_log.warning.call_args)
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -760,3 +741,82 @@ def test_result_handle_round_trips_after_freezing() -> None:
     assert dict(revived.schema_) == {"type": "array", "items": {"type": "object"}}
     assert revived.sample_rows is not None
     assert [dict(r) for r in revived.sample_rows] == [{"k": 1}, {"k": 2}]
+
+
+# ---------------------------------------------------------------------------
+# prometheus.targets derived health rows through result reduction (#3673)
+# ---------------------------------------------------------------------------
+
+
+class _MemoryValkey:
+    """Minimal async Valkey shape the result store writes to and reads from."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+def _prometheus_targets_body(up: int, down: int, unknown: int) -> dict[str, Any]:
+    healths = ["up"] * up + ["down"] * down + [""] * unknown
+    return {
+        "status": "success",
+        "data": {
+            "activeTargets": [
+                {
+                    "labels": {"job": f"job-{index % 3}", "instance": f"node-{index}:9100"},
+                    "scrapePool": f"job-{index % 3}",
+                    "scrapeUrl": f"http://node-{index}:9100/metrics",
+                    "lastError": "" if health == "up" else "connection refused",
+                    "lastScrape": "2026-01-01T00:00:00Z",
+                    "health": health,
+                }
+                for index, health in enumerate(healths)
+            ],
+            "droppedTargets": [],
+        },
+    }
+
+
+async def test_prometheus_targets_health_totals_answered_by_result_query() -> None:
+    """The derived ``target_health`` rows are the reduced collection.
+
+    The raw ``activeTargets`` list is nested under ``data``, where result
+    reduction does not look. The derived top-level rows make the payload
+    reduce to a handle, and a ``result_query`` COUNT grouped by ``health``
+    returns the up/down/unknown totals. The totals map also stays inline.
+    """
+    payload = _augment_target_health(_prometheus_targets_body(up=40, down=15, unknown=5))
+    tenant_id = uuid4()
+    store = ResultHandleStore(_MemoryValkey())
+    assert _TARGETS_OP.llm_instructions is not None
+    reduced, handle = await JsonFluxReducer(store=store).reduce(
+        payload,
+        None,
+        context={
+            "op_id": "prometheus.targets",
+            "tenant_id": str(tenant_id),
+            "operator_sub": "oper-1",
+            "result_objects": _TARGETS_OP.llm_instructions["result_objects"],
+        },
+    )
+
+    assert handle is not None
+    assert handle.total_rows == 60
+    assert reduced["target_health_totals"] == {"up": 40, "down": 15, "unknown": 5}
+    row_set = await store.fetch_rows(
+        tenant_id=tenant_id, operator_sub="oper-1", handle_id=handle.handle_id
+    )
+    assert row_set is not None
+    rows, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
+        row_set.rows,
+        ResultQuerySpec(group_by=["health"], aggregate=[{"func": "COUNT"}]),
+        100,
+    )
+    assert {row["health"]: row["count"] for row in rows} == {"up": 40, "down": 15, "unknown": 5}

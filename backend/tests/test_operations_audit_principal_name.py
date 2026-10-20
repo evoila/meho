@@ -28,10 +28,8 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -64,14 +62,6 @@ def _reset_module_state() -> Iterator[None]:
     yield
     reset_dispatcher_caches()
     clear_registry()
-
-
-@pytest.fixture(autouse=True)
-def _no_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _drop(event: BroadcastEvent) -> None:
-        return None
-
-    monkeypatch.setattr(audit_module, "publish_event", _drop)
 
 
 @pytest.fixture

@@ -89,7 +89,8 @@ _VM_LIST_INSTRUCTIONS: dict[str, object] = {
     "output_shape": (
         "Query-service record envelope {record: [AdminVMRecord, ...], total, "
         "page, pageSize}. Each record carries name, containerName (the vApp), "
-        "vdc, org, status, numberOfCpus, memoryMB, and guestOs. A large "
+        "vdc and org (references or ids, not names), vdcName, status, "
+        "numberOfCpus, memoryMB, and guestOs. A large "
         "inventory is reduced to a JSONFlux handle; page it with "
         "result_query(handle_id, offset, limit) and read memoryMB / org per row."
     ),
@@ -129,11 +130,12 @@ _EDGE_GATEWAY_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Query-service record envelope {record: [EdgeGatewayRecord, ...], total, "
-        "page, pageSize}. Each record carries name, vdc, orgName, "
-        "numberOfExtNetworks, and numberOfOrgNetworks."
+        "page, pageSize}. Each record carries name, vdc (a reference or id, "
+        "not the name), orgVdcName, orgName, numberOfExtNetworks, and "
+        "numberOfOrgNetworks."
     ),
     "next_step": (
-        "Map each edge gateway's vdc back to vcd.vdc.list to associate network "
+        "Match each edge gateway's orgVdcName to a name in vcd.vdc.list to associate network "
         "boundaries with compute allocations, so the target-side network design "
         "covers every VDC's egress."
     ),

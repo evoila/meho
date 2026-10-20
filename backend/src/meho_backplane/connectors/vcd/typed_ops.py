@@ -154,6 +154,7 @@ _ORG_NAME = _field("string", "The name of the organization that owns it.")
 _ORG_REF = _field(
     "string", "The organization that owns it, as a reference or id. It is not the name."
 )
+_VDC_REF = _field("string", "The VDC it lives in, as a reference or id. It is not the name.")
 
 _READ_TAGS = ("read-only", "vcd", "vcloud-director")
 
@@ -264,8 +265,8 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         summary="List the virtual machines across the estate.",
         description=(
             "Lists every VM with the query service (type=adminVM): the main migration inventory. "
-            "Each row has name, containerName (the vApp), vdc, org, status, numberOfCpus, memoryMB"
-            " and guestOs. Read-only."
+            "Each row has name, containerName (the vApp), vdc and org (references or ids, not "
+            "names), vdcName, status, numberOfCpus, memoryMB and guestOs. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
         response_schema=_record_envelope(
@@ -273,8 +274,9 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
             {
                 "name": _NAME,
                 "containerName": _field("string", "The vApp the VM belongs to."),
-                "vdc": _field("string", "The VDC the VM lives in."),
-                "org": _field("string", "The organization that owns the VM."),
+                "vdc": _VDC_REF,
+                "vdcName": _field("string", "The name of the VDC the VM lives in."),
+                "org": _ORG_REF,
                 "status": _field("string", "The VM state, for example POWERED_ON."),
                 "numberOfCpus": _field("integer", "How many virtual CPUs the VM has."),
                 "memoryMB": _field("integer", "The VM memory in MB."),
@@ -321,15 +323,19 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         summary="List the edge gateways (org-VDC network edges).",
         description=(
             "Lists the edge gateways with the query service (type=edgeGateway): the network edge "
-            "(NAT, firewall, VPN) of each org VDC. Each row has name, vdc, orgName and the network"
-            " counts. Read-only."
+            "(NAT, firewall, VPN) of each org VDC. Each row has name, vdc (a reference or id, not "
+            "the name), orgVdcName, orgName and the network counts. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
         response_schema=_record_envelope(
             "EdgeGatewayRecord",
             {
                 "name": _NAME,
-                "vdc": _field("string", "The VDC the edge gateway serves."),
+                "vdc": _field(
+                    "string",
+                    "The VDC the edge gateway serves, as a reference or id. It is not the name.",
+                ),
+                "orgVdcName": _field("string", "The name of the VDC the edge gateway serves."),
                 "orgName": _ORG_NAME,
                 "numberOfExtNetworks": _field("integer", "How many external networks it uses."),
                 "numberOfOrgNetworks": _field("integer", "How many org networks it serves."),

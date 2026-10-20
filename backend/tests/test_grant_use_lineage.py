@@ -27,7 +27,6 @@ import pytest
 import structlog
 from sqlalchemy import select
 
-import meho_backplane.broadcast.publisher as _publisher
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -60,14 +59,6 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_publisher, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)

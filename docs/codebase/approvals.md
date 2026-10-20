@@ -896,7 +896,10 @@ What the run row holds:
   `payload.error` with the `error_code` and the safe details (#2680).
 - `payload.approval_request_id` names the request it ran for.
 - `parent_audit_id` points at the request's `approval.request` row, next to
-  the decision row (#2086). The agent-run resume uses the same shape.
+  the decision row (#2086). The agent-run resume sets `parent_audit_id` the
+  same way, but its run row has no `payload.approval_request_id` (follow
+  `parent_audit_id` to the request), and its `operator_sub` is the agent
+  that made the call, not the approver.
 - `operator_sub` is the approver, who ran it.
 
 The approve response (`dispatch_status`, `dispatch_error`) and the stored

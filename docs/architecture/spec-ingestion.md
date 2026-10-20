@@ -68,7 +68,7 @@ One `EndpointDescriptorProto` per `(method, path)` entry under `paths`:
 | `tags` | OpenAPI `tags[]` + `spec:<source>` | Spec tags plus the per-spec marker. |
 | `parameter_schema` | Merged path + query + header + body | Flattened JSON Schema 2020-12; properties carry an `x-meho-param-loc` extension (`"path"` / `"query"` / `"header"` / `"body"`) the dispatcher reads to split incoming `params` into four buckets. |
 | `response_schema` | Success-response schema | Picks `200 > 201 > 202 > ... > 2XX`. |
-| `safety_level` | HTTP-verb heuristic | `safe` for GET/HEAD/OPTIONS; `caution` for POST/PUT/PATCH; `dangerous` with `requires_approval=true` for DELETE (#3827). A connector floor can raise an op to `destructive` when it ships the preview builder that tier needs (the vCenter tagging removals). Operator overrides at review time. |
+| `safety_level` | HTTP-verb heuristic | `safe` for GET/HEAD/OPTIONS; `caution` for POST/PUT/PATCH; `dangerous` with `requires_approval=true` for DELETE (#3827). A connector floor can raise an op to `destructive` when it ships the preview builder that tier needs (the vCenter tagging removals and the content-library item delete). Operator overrides at review time. |
 | `requires_approval` | `True` for every `DELETE` and for destructive action hints; `False` otherwise (#3827) | Operator flips for other known-destructive ops via `edit-op`. |
 
 ### `$ref` resolution — intentionally shallow

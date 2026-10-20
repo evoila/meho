@@ -62,26 +62,25 @@ func renderUsageError(c *cobra.Command, err error, args []string) error {
 }
 
 // wantsJSON reports whether c has a --json flag and the command line
-// turns it on.
+// turns it on. It reads the whole command line up to "--" and keeps
+// the last --json setting, as normal flag parsing does. The parsed
+// flag value alone is not enough: cobra stops at an unknown flag, so
+// a --json after it is found only in args.
 func wantsJSON(c *cobra.Command, args []string) bool {
-	f := c.Flags().Lookup("json")
-	if f == nil {
+	if c.Flags().Lookup("json") == nil {
 		return false
 	}
-	if f.Changed {
-		return f.Value.String() == "true"
-	}
+	on := false
 	for _, a := range args {
 		if a == "--" {
 			break
 		}
 		if a == "--json" {
-			return true
-		}
-		if v, ok := strings.CutPrefix(a, "--json="); ok {
-			on, perr := strconv.ParseBool(v)
-			return perr == nil && on
+			on = true
+		} else if v, ok := strings.CutPrefix(a, "--json="); ok {
+			b, err := strconv.ParseBool(v)
+			on = err == nil && b
 		}
 	}
-	return false
+	return on
 }

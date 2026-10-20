@@ -803,7 +803,9 @@ meho: usage_error: unknown flag: --bogus (run 'meho targets list --help' for usa
 ```
 
 With `--json` on a command that has that flag, the same error uses the
-JSON envelope. `usage_errors_test.go` walks every command and checks
+JSON envelope. cobra stops parsing at an unknown flag, so the usage
+error reads the raw command line up to `--` and the last `--json`
+setting wins, as it does for a parsed flag. `usage_errors_test.go` walks every command and checks
 that an unknown flag prints a message that names the flag. Missing
 required flags (`MarkFlagRequired`) are not covered by this path yet.
 

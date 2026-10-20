@@ -137,12 +137,37 @@ func TestUsageErrorsPlainAndJSON(t *testing.T) {
 	}
 }
 
-// TestUsageErrorJSONFlagBeforeBadFlag covers a --json that cobra did
-// parse before it stopped at the unknown flag.
-func TestUsageErrorJSONFlagBeforeBadFlag(t *testing.T) {
-	_, stderr, _ := runCLI(t, "operation", "search", "conn", "query", "--json", "--no-such-flag")
-	if !strings.HasPrefix(stderr, `{"error":"usage_error"`) {
-		t.Errorf("stderr = %q, want the JSON error shape", stderr)
+// TestUsageErrorJSONLastSettingWins: the last --json setting on the
+// command line decides the format, as it does for a parsed flag. This
+// holds whether the settings sit before the bad flag (cobra parsed
+// them) or after it (only the raw command line has them).
+func TestUsageErrorJSONLastSettingWins(t *testing.T) {
+	cases := []struct {
+		name     string
+		argv     []string
+		wantJSON bool
+	}{
+		{"json before bad flag", []string{"operation", "search", "conn", "query", "--json", "--no-such-flag"}, true},
+		{"off then bad flag then on", []string{"operation", "search", "conn", "query", "--json=false", "--no-such-flag", "--json"}, true},
+		{"on then bad flag then off", []string{"operation", "search", "conn", "query", "--json", "--no-such-flag", "--json=false"}, false},
+		{"on then off, both parsed", []string{"operation", "search", "conn", "query", "--json", "--json=false", "--no-such-flag"}, false},
+		{"off then on, both parsed", []string{"operation", "search", "conn", "query", "--json=false", "--json", "--no-such-flag"}, true},
+		{"json after -- does not count", []string{"operation", "search", "conn", "query", "--no-such-flag", "--", "--json"}, false},
+		{"wrong argument count, off then on", []string{"operation", "search", "onlyonearg", "--json=false", "--json"}, true},
+		{"wrong argument count, on then off", []string{"operation", "search", "onlyonearg", "--json", "--json=false"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, exit := runCLI(t, tc.argv...)
+			if exit != output.ExitUsage {
+				t.Errorf("exit = %d, want %d", exit, output.ExitUsage)
+			}
+			gotJSON := strings.HasPrefix(stderr, `{"error":"usage_error"`)
+			gotPlain := strings.HasPrefix(stderr, "meho: usage_error: ")
+			if gotJSON != tc.wantJSON || gotPlain == tc.wantJSON {
+				t.Errorf("stderr = %q, want JSON=%v", stderr, tc.wantJSON)
+			}
+		})
 	}
 }
 

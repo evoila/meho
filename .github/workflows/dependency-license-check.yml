@@ -112,6 +112,7 @@ jobs:
           # base sha is `main` as of when the PR was opened. Once `main`
           # moves, a diff against it also lists other PRs' files (#4657).
           changed="$(git diff --name-only HEAD^1 HEAD)"
+          printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
           if printf '%s\n' "${changed}" | grep -qE '(^|/)(pyproject\.toml|package\.json|package-lock\.json)$|^\.github/workflows/dependency-license-check\.yml$'; then
             echo "manifest change detected -> manifests=true"
             echo "manifests=true" >> "$GITHUB_OUTPUT"

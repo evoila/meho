@@ -206,6 +206,7 @@ jobs:
             # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
             echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           else
+            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
             # --- migration classification (#2140, unchanged) ---
             # Files that make the migration suite meaningful to run: the
             # alembic tree, the relocated migration test suite, the db

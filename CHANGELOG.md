@@ -167,6 +167,12 @@ connector-related release-notes line.
   - The realm file holds no secret.
   - It needs the built-in PostgreSQL and the Secrets that the
     install's secrets Job makes.
+- CI now checks that the Helm chart installs with the rights of a
+  namespace admin. The chart check fails when any render makes an object
+  outside its namespace, and names the object and its template file. The
+  kind install runs `helm install` and `helm test` as a namespace admin.
+  `docs/deploying.md` has a new section, "Rights the installer needs"
+  (#4099).
 
 - The Helm chart has a new setting, `networkPolicy.extraEgress`, for
   extra outgoing network rules (#3516). Before, with network rules on

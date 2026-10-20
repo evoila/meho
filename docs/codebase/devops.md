@@ -1181,6 +1181,20 @@ a `v*` tag annotating a non-chart commit. Releases always publish; the
 cost of an occasional chart re-publish on a non-chart main push is
 negligible.
 
+### Namespace-only install check (#4099)
+
+The chart must install with the rights of a namespace admin (install
+form 3). Two checks keep it that way:
+
+- `validate` renders the chart with the default values and with every file
+  in `deploy/values-examples/`, and pipes each render into
+  `scripts/ci/check_chart_namespace_scope.py`. It fails on any object whose
+  kind is not in the script's `NAMESPACED_KINDS` allow-list, and on any
+  object in another namespace. A new namespaced kind is added to that list.
+- `helm-test` binds the user `meho-installer` to the built-in `admin` role
+  in `meho-test` only, then runs `helm install` and `helm test` with
+  `--kube-as-user meho-installer`.
+
 ### Version stamping
 
 Inline Python (with the standard-library + PyYAML on the runner) reads

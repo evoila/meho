@@ -89,8 +89,8 @@ func TestUsageErrorsPlainAndJSON(t *testing.T) {
 		},
 		{
 			name: "wrong argument count",
-			argv: []string{"operation", "search", "onlyonearg"},
-			want: "accepts 2 arg(s), received 1 (run 'meho operation search --help' for usage)",
+			argv: []string{"operation", "call", "onlyonearg"},
+			want: "accepts 2 arg(s), received 1 (run 'meho operation call --help' for usage)",
 		},
 		{
 			name: "wrong argument count with a custom check",
@@ -153,8 +153,8 @@ func TestUsageErrorJSONLastSettingWins(t *testing.T) {
 		{"on then off, both parsed", []string{"operation", "search", "conn", "query", "--json", "--json=false", "--no-such-flag"}, false},
 		{"off then on, both parsed", []string{"operation", "search", "conn", "query", "--json=false", "--json", "--no-such-flag"}, true},
 		{"json after -- does not count", []string{"operation", "search", "conn", "query", "--no-such-flag", "--", "--json"}, false},
-		{"wrong argument count, off then on", []string{"operation", "search", "onlyonearg", "--json=false", "--json"}, true},
-		{"wrong argument count, on then off", []string{"operation", "search", "onlyonearg", "--json", "--json=false"}, false},
+		{"wrong argument count, off then on", []string{"operation", "call", "onlyonearg", "--json=false", "--json"}, true},
+		{"wrong argument count, on then off", []string{"operation", "call", "onlyonearg", "--json", "--json=false"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,8 +224,8 @@ func TestUsageErrorNoJSONWithoutJSONFlag(t *testing.T) {
 
 // TestUsageErrorsKeepHelpWorking: --help still prints help and exits 0.
 func TestUsageErrorsKeepHelpWorking(t *testing.T) {
-	stdout, stderr, exit := runCLI(t, "operation", "search", "--help")
-	if exit != 0 || stderr != "" || !strings.Contains(stdout, "search <connector_id> <query>") {
+	stdout, stderr, exit := runCLI(t, "operation", "call", "--help")
+	if exit != 0 || stderr != "" || !strings.Contains(stdout, "call <connector_id> <op_id>") {
 		t.Errorf("--help: exit=%d stderr=%q stdout=%q", exit, stderr, stdout)
 	}
 }

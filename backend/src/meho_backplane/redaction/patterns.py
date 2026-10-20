@@ -181,11 +181,22 @@ _KUBECONFIG = re.compile(
 # (it must be fixed-width), so the match covers the keyword, any
 # comments, and the quoted value, and the ``value`` group marks the
 # part the engine replaces. The keyword and the comments stay in the
-# output, so the file stays readable. Anything between the quotes is
-# the value (base64 may be split across whitespace in BIND syntax).
+# output, so the file stays readable.
+#
+# Two guards keep a key *name* that ends in ``secret`` (``key
+# "transfer-secret"``, ``key "secret"``, ``key "my secret"``) from
+# matching the wrong pair of quotes: the keyword may not sit directly
+# after a quote, a hyphen, or another word character, and the value
+# must be base64 (BIND lets whitespace split it). The text from a
+# name's closing quote to the real value's opening quote holds ``{``
+# and ``;``, so it never passes as a value.
 _BIND_COMMENT = r"(?:/\*[^*]*(?:\*(?!/)[^*]*)*\*/|//[^\n]*|#[^\n]*)"
 _BIND_KEY_SECRET = re.compile(
-    r"\bsecret(?:\s|" + _BIND_COMMENT + r')*(?P<value>"[^"]{1,' + str(_VALUE_MAX) + r'}")',
+    r"(?<![\w\"'-])secret(?:\s|"
+    + _BIND_COMMENT
+    + r')*(?P<value>"[A-Za-z0-9+/=\s]{1,'
+    + str(_VALUE_MAX)
+    + r'}")',
     re.IGNORECASE,
 )
 

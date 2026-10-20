@@ -132,6 +132,36 @@ def test_bind_key_secret_skips_comments_before_the_value(separator: str) -> None
     assert "exampleTsig" not in result.redacted
 
 
+@pytest.mark.parametrize(
+    "key_name",
+    ["transfer-secret", "secret", "my secret", "SECRET"],
+    ids=["hyphen-tail", "bare", "space-tail", "upper"],
+)
+def test_bind_key_secret_ignores_a_key_name_that_ends_in_secret(key_name: str) -> None:
+    """A quoted key name ending in ``secret`` is not the directive (#4620 review).
+
+    Without the guard the rule paired the name's closing quote with the
+    value's opening quote and left the real value in the output.
+    """
+    block = (
+        'key "' + key_name + '" {\n'
+        "    algorithm hmac-sha256;\n"
+        '    secret "' + "exampleTsig" + 'Value==";\n'
+        "};"
+    )
+    result = redact(block, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        'key "' + key_name + '" {\n'
+        "    algorithm hmac-sha256;\n"
+        "    secret [REDACTED:bind_key_secret];\n"
+        "};"
+    )
+    assert "exampleTsig" not in result.redacted
+    assert len(result.manifest) == 1
+    start, end = result.manifest[0].span
+    assert block[start:end] == '"exampleTsigValue=="'
+
+
 def test_get_pattern_returns_compiled_regex() -> None:
     """get_pattern is the runtime accessor the engine uses."""
     pat = get_pattern("uuid")

@@ -52,8 +52,8 @@ phases the parent Initiative names:
    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
    installed at startup; the import-time default is the
    :class:`~meho_backplane.operations.reducer.PassThroughReducer` shim).
-9. Write the audit row synchronously + publish a broadcast event
-   (:func:`~meho_backplane.operations._audit.audit_and_broadcast_safe`).
+9. Write the audit row synchronously (no Broadcast event, #3758)
+   (:func:`~meho_backplane.operations._audit.audit_safe`).
    The audit row carries the raw payload, the redaction manifest, and
    the resolved policy id.
 10. Return the :class:`OperationResult`.
@@ -225,7 +225,7 @@ Returning a structured :class:`OperationResult` for every operator-
 visible failure mode keeps the contract uniform across the three call
 sites; genuine programming bugs (DB connection drops, audit insert
 failures) are caught + logged via
-:func:`~meho_backplane.operations._audit.audit_and_broadcast_safe`'s
+:func:`~meho_backplane.operations._audit.audit_safe`'s
 exception swallow, never crashing the dispatcher.
 
 References
@@ -274,8 +274,8 @@ from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
     AuditCommitError,
-    audit_and_broadcast_safe,
     audit_rejection_safe,
+    audit_safe,
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
@@ -386,6 +386,7 @@ __all__ = [
     "DispatchChild",
     "Dispatcher",
     "compute_params_hash",
+    "descriptor_requires_target",
     "dispatch",
     "import_handler",
     "parent_audit_id_var",
@@ -475,6 +476,23 @@ def _handler_requires_target(handler_ref: str) -> bool:
     if param_names and param_names[0] == "self":
         return True
     return "connector" in param_names
+
+
+def descriptor_requires_target(descriptor: EndpointDescriptor) -> bool:
+    """True when dispatching *descriptor* needs a ``target``.
+
+    An ``ingested`` op always reaches its vendor API through the target's
+    connector, so it always needs one. A ``typed`` / ``composite`` op
+    needs one only when its handler binds to a connector instance (see
+    :func:`_handler_requires_target`). Mirrors the checks in
+    :func:`_resolve_connector_instance`; the exact-op contract of
+    ``search_operations`` uses it to tell the caller up front.
+    """
+    if descriptor.source_kind == "ingested":
+        return True
+    if descriptor.source_kind in ("typed", "composite"):
+        return _handler_requires_target(descriptor.handler_ref or "")
+    return False
 
 
 async def _resolve_connector_instance(
@@ -1183,13 +1201,12 @@ async def _reduce_and_audit_success(
     summary, handle = reduced
     duration_ms = _elapsed_ms(started)
     try:
-        receipt = await audit_and_broadcast_safe(
+        receipt = await audit_safe(
             audit_id=audit_id,
             event_class=AuditEventClass.OPERATION_EXECUTION,
             operator=operator,
             descriptor=descriptor,
             target=target,
-            params=params,
             params_hash=params_hash,
             result_status="ok",
             duration_ms=duration_ms,
@@ -1205,7 +1222,6 @@ async def _reduce_and_audit_success(
         # agent_session_id -- did not commit. That row is a precondition of
         # a successful return for every op, read or write (postulate 7 /
         # v0.1-spec §6). The outcome is uncertain and must not be retried.
-        # No broadcast was emitted (audit_and_broadcast_safe skips it).
         return result_audit_commit_failed(op_id, duration_ms)
     activity_advisory = await build_target_activity_advisory(
         operator,
@@ -1743,7 +1759,7 @@ async def _audit_error_and_return(
     #2680: inverts the legacy audit-then-build ordering. Every error arm now
     builds its structured :class:`OperationResult` **first** so the envelope
     is in scope for the audit write; this helper threads that envelope
-    (:func:`_error_extras_for_audit`) into ``audit_and_broadcast_safe`` ->
+    (:func:`_error_extras_for_audit`) into ``audit_safe`` ->
     ``write_audit_row`` -> ``_build_audit_payload`` so the durable DISPATCH
     row records the same ``error_code`` / ``http_status`` / ``upstream_message``
     detail the caller received, not merely ``result_status='error'``. The
@@ -1754,7 +1770,7 @@ async def _audit_error_and_return(
     *raw_payload* / *redaction_manifest* / *redaction_policy_id* are available
     to error arms that already hold connector-boundary redaction artefacts;
     pre-response error arms pass ``None``. Fail-open on the audit write is
-    preserved: ``audit_and_broadcast_safe`` swallows its own internal failures,
+    preserved: ``audit_safe`` swallows its own internal failures,
     so the never-raises contract holds and the built ``result`` is always
     returned.
 
@@ -1766,13 +1782,12 @@ async def _audit_error_and_return(
     the same receipt the success path returns. So an approver, and the stored
     result of an approved run, can point at the row that records the failure.
     """
-    receipt = await audit_and_broadcast_safe(
+    receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,
         operator=operator,
         descriptor=descriptor,
         target=target,
-        params=params,
         params_hash=params_hash,
         result_status="error",
         duration_ms=duration_ms,
@@ -2291,13 +2306,12 @@ async def _unavailable_delivery_result(
     :func:`result_audit_commit_failed` instead of ``status="ok"``.
     """
     try:
-        receipt = await audit_and_broadcast_safe(
+        receipt = await audit_safe(
             audit_id=audit_id,
             event_class=AuditEventClass.OPERATION_EXECUTION,
             operator=operator,
             descriptor=descriptor,
             target=target,
-            params=params,
             params_hash=params_hash,
             result_status="ok",
             duration_ms=duration_ms,
@@ -2764,13 +2778,12 @@ async def _audit_denied_and_return(
     through without an audit write, so without this row a refused step would
     leave no record at all.
     """
-    await audit_and_broadcast_safe(
+    await audit_safe(
         audit_id=uuid.uuid4(),
         event_class=AuditEventClass.POLICY_DECISION,
         operator=operator,
         descriptor=descriptor,
         target=target,
-        params=params,
         params_hash=params_hash,
         result_status="denied",
         duration_ms=duration_ms,
@@ -2796,7 +2809,7 @@ async def _handle_needs_approval(
 
     G11.2-T4 (#817). Called when :func:`policy_gate` returns
     ``"needs_approval"``. Opens its own DB session (same pattern as
-    :func:`audit_and_broadcast_safe`) so the pending row + request audit
+    :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
 
     When the op's park-time permission preflight says the write will be
@@ -2831,10 +2844,9 @@ async def _handle_needs_approval(
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_handoff import ApprovalHandoffKeyError
     from meho_backplane.operations.approval_queue import (
-        EXPIRY_OPERATOR_SUB,
         IdempotencyKeyConflictError,
         create_pending_request,
-        publish_approval_event,
+        record_approval_step_event,
     )
 
     run_id = current_agent_run_id_var.get()
@@ -2920,23 +2932,20 @@ async def _handle_needs_approval(
             await session.commit()
         if getattr(request, "_reused", False):
             return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
-        # Publish AFTER commit so a phantom event cannot outlive a failed
-        # transaction (the helper is fail-open: a broadcast outage does
-        # not block the durable decision).
+        # Record the add-on step events AFTER commit so a phantom event
+        # cannot outlive a failed transaction (the helper is fail-open).
         expired_request = getattr(request, "_expired_request", None)
         if expired_request is not None:
-            await publish_approval_event(
+            await record_approval_step_event(
                 tenant_id=operator.tenant_id,
                 request=expired_request,
                 decision="expired",
-                principal_sub=EXPIRY_OPERATOR_SUB,
                 audit_id=expired_request._audit_id,
             )
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision="pending",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
         return result_awaiting_approval(op_id, request.id, duration_ms)
@@ -3217,13 +3226,12 @@ async def dispatch(
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
-                await audit_and_broadcast_safe(
+                await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
-                    params=params,
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
@@ -3254,13 +3262,12 @@ async def dispatch(
                 # to execution. Any unexpected verdict (a future enum member, a
                 # bug in the resolver) denies rather than silently executing.
                 duration_ms = _elapsed_ms(started)
-                await audit_and_broadcast_safe(
+                await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
-                    params=params,
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
@@ -3288,13 +3295,12 @@ async def dispatch(
             )
             if announce_block is not None:
                 duration_ms = _elapsed_ms(started)
-                await audit_and_broadcast_safe(
+                await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
-                    params=params,
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,

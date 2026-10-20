@@ -127,6 +127,7 @@ from meho_backplane.operations.ingest.exceptions import (
     ConnectorScopeCandidate,
     InvalidStateTransitionError,
 )
+from meho_backplane.operations.ingest.group_truth import build_group_advisory
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.payload import (
     ConnectorReviewGroup,
@@ -190,35 +191,30 @@ def _authoring_kind_for_payload(
 
 
 def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGroup]:
-    """Pack *ops* under their group rows for the review payload."""
+    """Pack *ops* under their group rows for the review payload.
+
+    Each group also gets its review advice (#3671), built from the ops
+    already loaded here, so it costs no extra query.
+    """
     ops_by_group: dict[UUID, list[Any]] = {group.id: [] for group in groups}
     for op in ops:
         if op.group_id is not None and op.group_id in ops_by_group:
             ops_by_group[op.group_id].append(op)
-    return [
-        ConnectorReviewGroup(
-            group_key=group.group_key,
-            name=group.name,
-            when_to_use=group.when_to_use,
-            review_status=group.review_status,
-            op_count=len(ops_by_group[group.id]),
-            ops=[
-                ConnectorReviewOp(
-                    op_id=op.op_id,
-                    summary=op.summary,
-                    description=op.description,
-                    custom_description=op.custom_description,
-                    safety_level=op.safety_level,
-                    requires_approval=op.requires_approval,
-                    is_enabled=op.is_enabled,
-                    tags=list(op.tags),
-                    needs_reingest=op.needs_reingest,
-                )
-                for op in ops_by_group[group.id]
-            ],
+    rendered: list[ConnectorReviewGroup] = []
+    for group in groups:
+        group_ops = [_review_op(op) for op in ops_by_group[group.id]]
+        rendered.append(
+            ConnectorReviewGroup(
+                group_key=group.group_key,
+                name=group.name,
+                when_to_use=group.when_to_use,
+                review_status=group.review_status,
+                op_count=len(group_ops),
+                ops=group_ops,
+                advisory=build_group_advisory(group.when_to_use, group_ops),
+            )
         )
-        for group in groups
-    ]
+    return rendered
 
 
 class ReviewService:

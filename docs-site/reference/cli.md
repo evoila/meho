@@ -3476,16 +3476,18 @@ meho operation result-query <handle_id> [flags]
 
 ### `meho operation search`
 
-Hybrid BM25 + cosine RRF search across enabled operations
+Search a connector's operations, or show one operation's call contract
 
 ```
-meho operation search <connector_id> <query> [flags]
+meho operation search <connector_id> [query] [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group` — narrow the search to one group_key within the connector
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
+- `--op-id` — show this one operation's call contract instead of ranked hits
+- `--scores` — add ranking scores to each hit (honoured for tenant_admin only)
 
 ## `meho pfsense`
 

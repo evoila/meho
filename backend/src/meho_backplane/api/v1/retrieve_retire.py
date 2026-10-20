@@ -156,7 +156,7 @@ def _bind_request_audit_context(
     payload. The two override keys (``audit_op_id`` /
     ``audit_op_class``) are honoured by the chassis broadcast
     publisher per
-    :func:`meho_backplane.audit._publish_broadcast_event`;
+    :func:`meho_backplane.audit._resolve_op_id_and_class_override`;
     ``audit_tenant_scope`` distinguishes own-tenant inspection from
     genuine cross-tenant audit-trail queries.
     """

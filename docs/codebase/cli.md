@@ -252,7 +252,7 @@ cli/
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
     │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
-    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams.
+    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams. A 200 with the backplane's `status: "rate_limited"` envelope is rendered as unexpected_response (exit 4) with the wait, in both ranked and `--op-id` mode.
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
@@ -780,7 +780,7 @@ that branch on them:
 | Code | Meaning                                                         |
 | ---- | --------------------------------------------------------------- |
 | 0    | Success                                                         |
-| 1    | Generic failure (cobra usage error, panic recovery, etc.)       |
+| 1    | Generic failure; also `usage_error` (unknown flag, wrong number of arguments) |
 | 2    | `auth_expired`                                                  |
 | 3    | `unreachable`                                                   |
 | 4    | `unexpected_response`                                           |
@@ -790,6 +790,26 @@ The propagation path is `output.RenderError` → `silentError` →
 default error printer is bypassed via `SilenceErrors=true` on the
 status subcommand so the JSON envelope doesn't double-render
 alongside the text rendering of `.Error()`.
+
+Most subcommands set `SilenceErrors=true`. cobra checks flags and the
+argument count before `RunE` runs, so without help those errors would
+print nothing. `internal/cmd/usage_errors.go` covers this for the whole
+tree in one place: the root's flag error function (every child inherits
+it) and a wrapper around every command's `Args` check both print a
+`usage_error` through `output.RenderError`, exit code 1:
+
+```text
+meho: usage_error: unknown flag: --bogus (run 'meho targets list --help' for usage)
+```
+
+With `--json` on a command that has that flag, the same error uses the
+JSON envelope. cobra stops parsing at an unknown flag, so the usage
+error reads the raw command line up to `--` and the last `--json`
+setting wins, as it does for a parsed flag. A word that is the value of
+another flag of the command (`--query --json`) is skipped, so it does
+not count as a setting. `usage_errors_test.go` walks every command and
+checks that an unknown flag prints a message that names the flag. Missing
+required flags (`MarkFlagRequired`) are not covered by this path yet.
 
 ### Sensitive-data discipline
 
@@ -1241,11 +1261,15 @@ narrow-waist contract.
   per group + a `when_to_use` blurb the agent consults to pick a group
   to search within. Unknown `connector_id` returns an empty `groups`
   list (operationally meaningful, never 404).
-- `meho operation search <connector_id> <query> [--group K] [--limit N]`
+- `meho operation search <connector_id> <query> [--group K] [--limit N] [--scores]`
   — calls `GET /api/v1/operations/search`. Runs hybrid BM25 + cosine
   RRF over `endpoint_descriptor` rows scoped to the connector
   (optionally narrowed to one `group_key`) and renders the top hits
-  with `fused_score`. `--limit` is clamped by the API at 50.
+  with their `safety_level`. `--limit` is clamped by the API at 50.
+  `--scores` shows the ranking score; the backplane sends it only to a
+  `tenant_admin` (#3668). With `--op-id <op_id>` (no query needed) it
+  prints that one operation's call contract instead: parameter
+  schema, examples, target rule, result shape and retry rules.
 - `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
@@ -1353,11 +1377,12 @@ scenarios.
 ### Exit codes
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
-- `1` — `call` only: dispatcher returned `status == "error"` or
-  `status == "denied"` (connector raised, schema validation rejected,
-  or policy denied — the three structured-failure envelopes the
-  backend `Connector.execute` contract defines). Surfaced via the
-  `errOpError` sentinel.
+- `1` — `call` only: dispatcher returned `status == "error"`,
+  `status == "denied"` or `status == "rate_limited"` (connector raised,
+  schema validation rejected, policy denied, or the caller is over its
+  rate or concurrency limit). The envelope is printed first; a
+  `rate_limited` one shows `extras.retry_after_seconds`. Surfaced via
+  the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
 - `4` — `unexpected_response` (parse error, malformed JSON, or an
@@ -1642,8 +1667,8 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `gcloud`, `bind9`, `k8s`, `sddc-manager`, `vcf-automation`, `vcf-fleet`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
-`httpError` trios. Exit codes: `0` status=ok, `1` status=error/denied
-(via the `errOpError` sentinel re-exported from
+`httpError` trios. Exit codes: `0` status=ok, `1`
+status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
 

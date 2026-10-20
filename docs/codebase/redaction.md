@@ -764,8 +764,16 @@ signed-URL/client-identity header is absent by construction:
 | `content-type`, `content-length`, `content-encoding`, `content-language`, `content-range` | `authorization`, `proxy-authorization`, `www-authenticate`, `proxy-authenticate` |
 | `accept*`, `connection`, `transfer-encoding`, `host`, `user-agent`, `server`, `via`, `allow` | `cookie`, `set-cookie` |
 | `cache-control`, `date`, `age`, `expires`, `etag`, `vary`, `if-*`, `range`, `retry-after` | every `x-*-token`, `x-api-key`, `x-csrf-token`, `x-xsrf-token`, `x-vault-token`, `x-amz-security-token` |
-| `x-request-id`, `x-correlation-id`, `traceparent`, `tracestate`, `x-ratelimit-*` | `location`, `content-location`, `referer` (signed URLs / tokens) |
+| `x-request-id`, `x-correlation-id`, `traceparent`, `tracestate`, `x-ratelimit-*`, `audit-id` (Kubernetes request id), `warning` (RFC 7234; Kubernetes deprecation and admission notices) | `location`, `content-location`, `referer` (signed URLs / tokens) |
 | `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `content-security-policy` | `forwarded`, `x-forwarded-*`, `x-real-ip` (client identity / PII) |
+
+**Query strings** (`query.py`, #3841). The vendor-call seam drops the
+query from a recorded URL. A transport that needs the query on the span
+(Kubernetes: `dryRun`, `fieldManager`) passes it to `redact_query(params,
+safe_names)`. Every parameter name is kept. A value is kept only when its
+name is on the caller's safe list, and it still gets the credential-shape
+scrub. Every other value becomes `[redacted]` without being read. A query
+shape the engine cannot walk records nothing and is uncertain.
 
 As defense-in-depth the value of every *surviving* header is still run
 through the credential-shape net (`_content.py`), so a `Bearer …` pasted
@@ -892,7 +900,7 @@ new structure, matched to that connector's payload contract.
 | --- | --- | --- |
 | keycloak | `connectors/keycloak/redaction.py` | `ClientRepresentation.secret`, `UserRepresentation.credentials`, and the generic credential key names, recursively (#1394). |
 | rabbitmq | `connectors/rabbitmq/redact.py` | `amqp://user:pass@` URI userinfo + any `*password*` / `*secret*` key (#2233). |
-| kubernetes | `connectors/kubernetes/redaction.py` | Every `data` / `stringData` value of a `kind: Secret` object — replaced with a fixed placeholder + a `sha256:` digest, key names kept — in single-object, list, and dynamic `k8s.cr.*` reads (#3501). |
+| kubernetes | `connectors/kubernetes/redaction.py` | Every `data` / `stringData` value of a `kind: Secret` object — replaced with a fixed placeholder + a `sha256:` digest, key names kept — in single-object, list, and dynamic `k8s.cr.*` reads (#3501). Also the kind-less items of a `SecretList` envelope and the `kubectl.kubernetes.io/last-applied-configuration` annotation of a Secret, which repeats its values (#3841). |
 | argocd | `connectors/argocd/redaction.py` | Repository credential fields (`password` / `sshPrivateKey` / `tlsClientCertKey` / `bearerToken` / `githubAppPrivateKey`) on `argocd.repo.list` (#3501). ArgoCD destination-cluster creds are dropped separately by `argocd.cluster.list`'s whole-`config` strip (#2855). |
 
 The kubernetes redactor is deliberately **structural, not pattern-based**:
@@ -902,6 +910,21 @@ so a read still answers "which keys does this Secret carry?" without ever
 returning the bytes. It leaves `k8s.secret.read_to_ref` (#3496) untouched
 — that op returns only a Vault `secret_ref` + a SHA-256, never a `data`
 map, so there is nothing for the walk to match.
+
+The flight recorder reuses the same walk (#3841). The Kubernetes transport
+hook (`connectors/kubernetes/_wire_span.py`) parses every JSON request and
+response body and runs `redact_kubernetes_payload` over it before the body
+reaches the shared F2 redaction path. The F2 engine on its own keys on
+labelled shapes and would keep an opaque base64 Secret value, and ops such
+as `k8s.apply` or `k8s.cr.info` are not secret-bearing families, so the
+structural pass is what masks a Secret manifest or a Secret read on the
+`vendor_call` span. The span's `response_object` summary is then built from
+the redacted body, never from the raw response. A response body over the
+64 KiB span cap is not handed to the F2 path at all: the hook passes an
+explicit omission reason (`record_sdk_vendor_call(response_body_omitted=...)`),
+the span stores `BODY_OMITTED_MARKER`, and the trace is marked uncertain.
+This closes the case where the F2 cap cuts only a trailing newline, the cut
+body still parses, and an unmasked Secret value would otherwise be kept.
 
 ## References
 

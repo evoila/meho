@@ -40,7 +40,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -324,17 +323,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
 
 
-@pytest.fixture
-def _captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 async def _seed_target() -> Any:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -377,9 +365,8 @@ class _Bundle:
 
 
 @pytest.fixture
-async def vrli_typed_canary(_captured_events: list[Any]) -> AsyncIterator[_Bundle]:
+async def vrli_typed_canary() -> AsyncIterator[_Bundle]:
     """Dispatcher-ready setup: descriptors (incl. the typed events row) + respx vRLI."""
-    del _captured_events
     await _insert_vrli_descriptors()
     seeded_target = await _seed_target()
     instance = _resolve_connector()
@@ -460,7 +447,7 @@ async def test_no_ingested_events_query_row_exists(vrli_typed_canary: _Bundle) -
     )
 
 
-async def test_event_query_limit_flows_to_the_wire(_captured_events: list[Any]) -> None:
+async def test_event_query_limit_flows_to_the_wire() -> None:
     """A ``limit`` param reaches the appliance as a query param on the events GET.
 
     Standalone setup (own respx) so the captured events route is the one the
@@ -468,7 +455,6 @@ async def test_event_query_limit_flows_to_the_wire(_captured_events: list[Any]) 
     happy-path fixture would route the request to the fixture's uncaptured
     events route instead.
     """
-    del _captured_events
     await _insert_vrli_descriptors()
     await _seed_target()
     instance = _resolve_connector()
@@ -501,16 +487,13 @@ async def test_event_query_limit_flows_to_the_wire(_captured_events: list[Any]) 
     assert dict(events_route.calls.last.request.url.params) == {"limit": "5"}
 
 
-async def test_event_query_reserved_constraint_keeps_slash_literal_on_wire(
-    _captured_events: list[Any],
-) -> None:
+async def test_event_query_reserved_constraint_keeps_slash_literal_on_wire() -> None:
     """The typed path renders a reserved constraint with literal slashes (#2003).
 
     The overlay existed partly because the ingested ``{+path}`` render was
     broken; the typed handler builds the sub-path itself. A ``%2F``-mangled URL
     would miss the literal-slash respx route and 404 against the catch-all.
     """
-    del _captured_events
     await _insert_vrli_descriptors()
     await _seed_target()
     instance = _resolve_connector()
@@ -548,16 +531,13 @@ async def test_event_query_reserved_constraint_keeps_slash_literal_on_wire(
     )
 
 
-async def test_event_query_440_recovers_on_the_typed_path(
-    _captured_events: list[Any],
-) -> None:
+async def test_event_query_440_recovers_on_the_typed_path() -> None:
     """AC #2: a 440 mid-session recovers via one re-login + retry on the typed path.
 
     The soak-famous #1135 / #1139 scenario, pinned at the dispatch level: the
     typed handler routes through ``_get_json_with_session_retry``, so a 440 on
     the events GET invalidates the cached token, re-logs in, and retries once.
     """
-    del _captured_events
     await _insert_vrli_descriptors()
     target = await _seed_target()
     instance = _resolve_connector()

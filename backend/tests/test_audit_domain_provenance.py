@@ -27,7 +27,6 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
@@ -402,15 +401,14 @@ async def test_topology_history_anchors_on_the_domain_row() -> None:
         await s.commit()
 
     operator = _operator(sub="op-topology")
-    with patch("meho_backplane.topology.annotate.publish_event", new=AsyncMock()):
-        async with get_sessionmaker()() as s:
-            await annotate_edge(
-                s,
-                operator,
-                NodeRef(name="vm-a", kind="vm"),
-                "authenticates-via",
-                NodeRef(name="ds-1", kind="datastore"),
-            )
+    async with get_sessionmaker()() as s:
+        await annotate_edge(
+            s,
+            operator,
+            NodeRef(name="vm-a", kind="vm"),
+            "authenticates-via",
+            NodeRef(name="ds-1", kind="datastore"),
+        )
 
     async with get_sessionmaker()() as s:
         history = list(

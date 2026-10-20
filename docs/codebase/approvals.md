@@ -27,15 +27,11 @@ truth:
   "decision" row on approve/reject/expire).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
   (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
-  `meho approvals {list,show,approve,reject}` CLI verbs. T5 also adds
-  the broadcast notifications: each `create_pending_request` /
-  `approve_request` / `reject_request` publishes an
-  `approval.{pending,approved,rejected}` event via
-  `broadcast.publisher.publish_event`. These events go to the live SSE
-  feed (`/api/v1/feed`, `/ui/broadcast/stream`) until #3758 moves them,
-  and the audit log (`query_audit`) records them. Since #3748 the MCP and
-  REST `recent` / `watch` reads return agent announcements only, so an
-  operator session does not see approval events there.
+  `meho approvals {list,show,approve,reject}` CLI verbs. Since #3758 no
+  approval step is published to Broadcast. `record_approval_step_event`
+  records `approval.{pending,approved,rejected,expired}` only for the
+  paired add-on that asked (#3027); the audit log records every step; the
+  agent waiter, the bell badge and the console read the stored row.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
@@ -761,8 +757,8 @@ Two changes close that gap, scoped to the **direct**-op path:
 **The `run_id` gate (no double-execution / agent-run regression
 guard).** `/decide` re-dispatches **only when
 `run_id IS NULL`** — i.e. a direct operator op. An **agent-run** request
-(`run_id` set) is still resumed in-process by the agent runtime off the
-`approval.approved` broadcast (the must-not-regress path); re-dispatching
+(`run_id` set) is still resumed in-process by the agent runtime once it
+reads the approved row (the must-not-regress path); re-dispatching
 it from `/decide` too would execute the op twice. So the agent-run
 resume path is untouched: it keeps its in-memory params, ignores the new
 column, and remains the sole re-dispatcher for `run_id`-bearing requests.
@@ -2214,6 +2210,26 @@ service`), leaving the human `USER` path unchanged:
   during an unattended run auto-approve instead. Each use writes an
   `approval.decision` / `auto-approved` audit row (this section's shape),
   carrying `grant_id` — same ledger visibility as a human decision.
+- **Lineage ids on the auto-approval row** (#3695): the grant-use row is
+  written at decision time with the same ids the parked path keeps, so an
+  auto-approval links to the call it cleared:
+  - `request_id` — the request's correlation id. The call's `DISPATCH` row
+    now carries the same `request_id` (it was always NULL before), so you
+    can find the call an auto-approval cleared, and its flight-recorder
+    trace, by matching `request_id`. In a multi-step operation all child
+    rows share the request id; use `parent_audit_id` to tell them apart.
+  - `agent_session_id` — the agent-run or MCP session
+    (`resolve_agent_session_id()`). NULL for a plain REST call, which has
+    no session.
+  - `parent_audit_id` — the multi-step parent's audit id
+    (`parent_audit_id_var`) when the cleared call is a child step. NULL for
+    a top-level call.
+
+  There is still no row while a call runs; a call only gets its `DISPATCH`
+  row when it ends. For long calls use async mode (`async: true` on REST
+  `/call` or on MCP `call_operation`): the `operation_run` row shows the
+  call as `running` with `started_at` for its whole run. See
+  [`async-governed-dispatch.md`](async-governed-dispatch.md).
 
 Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*

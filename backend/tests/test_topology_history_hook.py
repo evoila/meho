@@ -45,7 +45,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import delete, select
@@ -69,9 +69,6 @@ from meho_backplane.operations._handler_resolve import reset_connector_instance_
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.annotate import NodeRef, annotate_edge, unannotate_edge
 from meho_backplane.topology.refresh import refresh_target_topology
-
-_PUBLISH_REFRESH = "meho_backplane.topology.refresh.publish_event"
-_PUBLISH_ANNOTATE = "meho_backplane.topology.annotate.publish_event"
 
 
 @pytest.fixture(autouse=True)
@@ -309,8 +306,7 @@ async def test_refresh_3n2e_emits_5_history_rows_sharing_audit_id() -> None:
     tenant_id, target = await _seed_tenant_and_target()
     _FakeConnector.hints = _hints_3n2e()
 
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
 
     node_history = await _all_node_history(tenant_id)
     edge_history = await _all_edge_history(tenant_id)
@@ -364,8 +360,7 @@ async def test_annotate_one_edge_emits_one_edge_history_row_with_shared_audit_id
         ),
     )
 
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
 
     # Reset history -- focus this assertion on the annotate's emission.
     sessionmaker = get_sessionmaker()
@@ -376,15 +371,14 @@ async def test_annotate_one_edge_emits_one_edge_history_row_with_shared_audit_id
 
     operator = _operator(tenant_id)
     async with sessionmaker() as session:
-        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-            await annotate_edge(
-                session,
-                operator,
-                NodeRef(name="sa-foo", kind="principal"),
-                "authenticates-via",
-                NodeRef(name="role-bar", kind="vault-role"),
-                note="rdc-vault hashicorp policy v3",
-            )
+        await annotate_edge(
+            session,
+            operator,
+            NodeRef(name="sa-foo", kind="principal"),
+            "authenticates-via",
+            NodeRef(name="role-bar", kind="vault-role"),
+            note="rdc-vault hashicorp policy v3",
+        )
 
     edge_history = await _all_edge_history(tenant_id)
     audits = await _all_audit_log(tenant_id)
@@ -420,15 +414,13 @@ async def test_refresh_dropping_node_emits_removed_history_with_new_audit_id() -
     tenant_id, target = await _seed_tenant_and_target()
 
     _FakeConnector.hints = _hints_3n2e()
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
     first_audits = await _all_audit_log(tenant_id)
     assert len(first_audits) == 1
     first_audit_id = first_audits[0].id
 
     _FakeConnector.hints = _hints_2n1e_dropping_vm_b()
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
 
     audits = await _all_audit_log(tenant_id)
     assert len(audits) == 2, "second refresh should add a second audit row"
@@ -489,9 +481,8 @@ async def test_refresh_failure_rolls_back_both_live_and_history_rows() -> None:
         raise RuntimeError("simulated mid-reconcile failure")
 
     with (
-        patch(_PUBLISH_REFRESH, new=AsyncMock()),
         patch(
-            "meho_backplane.topology.refresh._write_audit_and_broadcast",
+            "meho_backplane.topology.refresh._write_audit",
             new=_broken,
         ),
         pytest.raises(RuntimeError, match="simulated mid-reconcile failure"),
@@ -582,20 +573,18 @@ async def test_unannotate_emits_removed_history_and_clears_marker_history() -> N
         ),
     )
     operator = _operator(tenant_id)
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, operator)
+    await refresh_target_topology(target, operator)
 
     sessionmaker = get_sessionmaker()
     # Annotate vm-a runs-on host-new -- supersedes the auto edge.
     async with sessionmaker() as session:
-        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-            curated = await annotate_edge(
-                session,
-                operator,
-                NodeRef(name="vm-a", kind="vm"),
-                "runs-on",
-                NodeRef(name="host-new", kind="host"),
-            )
+        curated = await annotate_edge(
+            session,
+            operator,
+            NodeRef(name="vm-a", kind="vm"),
+            "runs-on",
+            NodeRef(name="host-new", kind="host"),
+        )
         curated_id = curated.id
 
     # Clear history baseline so we can scope assertions to the unannotate.
@@ -604,8 +593,7 @@ async def test_unannotate_emits_removed_history_and_clears_marker_history() -> N
         await session.execute(delete(AuditLog))
 
     async with sessionmaker() as session:
-        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-            await unannotate_edge(session, operator, edge_id=curated_id)
+        await unannotate_edge(session, operator, edge_id=curated_id)
 
     edge_history = await _all_edge_history(tenant_id)
     audits = await _all_audit_log(tenant_id)
@@ -689,8 +677,7 @@ async def test_annotate_supersedes_auto_emits_two_history_rows() -> None:
         ),
     )
     operator = _operator(tenant_id)
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, operator)
+    await refresh_target_topology(target, operator)
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
@@ -698,14 +685,13 @@ async def test_annotate_supersedes_auto_emits_two_history_rows() -> None:
         await session.execute(delete(AuditLog))
 
     async with sessionmaker() as session:
-        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-            await annotate_edge(
-                session,
-                operator,
-                NodeRef(name="vm-a", kind="vm"),
-                "runs-on",
-                NodeRef(name="host-new", kind="host"),
-            )
+        await annotate_edge(
+            session,
+            operator,
+            NodeRef(name="vm-a", kind="vm"),
+            "runs-on",
+            NodeRef(name="host-new", kind="host"),
+        )
 
     audits = await _all_audit_log(tenant_id)
     edge_history = await _all_edge_history(tenant_id)
@@ -745,15 +731,13 @@ async def test_unchanged_refresh_emits_no_history_rows() -> None:
     _register_fake()
     tenant_id, target = await _seed_tenant_and_target()
     _FakeConnector.hints = _hints_3n2e()
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
 
     before_node = await _all_node_history(tenant_id)
     before_edge = await _all_edge_history(tenant_id)
 
     # Re-run with identical hints.
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator(tenant_id))
+    await refresh_target_topology(target, _operator(tenant_id))
 
     after_node = await _all_node_history(tenant_id)
     after_edge = await _all_edge_history(tenant_id)
@@ -809,22 +793,20 @@ async def test_idempotent_annotate_emits_no_history_rows() -> None:
         ),
     )
     operator = _operator(tenant_id)
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target, operator)
+    await refresh_target_topology(target, operator)
 
     sessionmaker = get_sessionmaker()
     # First annotate -- creates curated edge, stamps superseded_by on
     # the auto edge. Both history rows are expected.
     async with sessionmaker() as session:
-        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-            await annotate_edge(
-                session,
-                operator,
-                NodeRef(name="vm-a", kind="vm"),
-                "runs-on",
-                NodeRef(name="host-new", kind="host"),
-                note="initial",
-            )
+        await annotate_edge(
+            session,
+            operator,
+            NodeRef(name="vm-a", kind="vm"),
+            "runs-on",
+            NodeRef(name="host-new", kind="host"),
+            note="initial",
+        )
 
     history_after_first = await _all_edge_history(tenant_id)
     audits_after_first = await _all_audit_log(tenant_id)
@@ -833,15 +815,14 @@ async def test_idempotent_annotate_emits_no_history_rows() -> None:
     # for the diff-on-write hook: zero new history rows on either the
     # curated edge or the previously-superseded auto edge.
     async with sessionmaker() as session:
-        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-            await annotate_edge(
-                session,
-                operator,
-                NodeRef(name="vm-a", kind="vm"),
-                "runs-on",
-                NodeRef(name="host-new", kind="host"),
-                note="initial",
-            )
+        await annotate_edge(
+            session,
+            operator,
+            NodeRef(name="vm-a", kind="vm"),
+            "runs-on",
+            NodeRef(name="host-new", kind="host"),
+            note="initial",
+        )
 
     history_after_second = await _all_edge_history(tenant_id)
     audits_after_second = await _all_audit_log(tenant_id)
@@ -872,8 +853,7 @@ async def test_history_rows_scoped_to_tenant() -> None:
     tenant_b_id, _target_b = await _seed_tenant_and_target(slug="tenant-b")
 
     _FakeConnector.hints = _hints_3n2e()
-    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
-        await refresh_target_topology(target_a, _operator(tenant_a_id))
+    await refresh_target_topology(target_a, _operator(tenant_a_id))
 
     history_a = await _all_node_history(tenant_a_id)
     history_b = await _all_node_history(tenant_b_id)

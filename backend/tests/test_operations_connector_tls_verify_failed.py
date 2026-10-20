@@ -20,9 +20,9 @@ Initiative #1774 T3 (#1782) acceptance criteria:
   mislabelled as a TLS fault.
 * The ``CERTIFICATE_VERIFY_FAILED`` substring fallback classifies a
   TLS-verify failure even when the ``__cause__`` chain is empty.
-* The new arm calls :func:`audit_and_broadcast_safe` with
+* The new arm calls :func:`audit_safe` with
   ``result_status='error'`` before returning (always-audit + never-raises
-  contract): an audit row + broadcast event land.
+  contract): an audit row lands.
 * #1649's 403/422 ``HTTPStatusError`` arm is not regressed (a
   ``ConnectError`` and an ``HTTPStatusError`` are disjoint).
 
@@ -48,9 +48,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -105,18 +103,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -445,9 +431,8 @@ def test_result_connector_tls_verify_failed_missing_host_degrades_gracefully() -
 async def test_dispatch_tls_verify_failure_to_connector_tls_verify_failed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """TLS-verify dispatch -> structured result + audit row + event.
+    """TLS-verify dispatch -> structured result + audit row.
 
     The dispatcher catches the connector's chained
     :exc:`httpx.ConnectError` (cause = :exc:`ssl.SSLCertVerificationError`)
@@ -503,15 +488,11 @@ async def test_dispatch_tls_verify_failure_to_connector_tls_verify_failed(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_non_ssl_connect_error_preserves_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A non-SSL ConnectError retains its established generic envelope.
 
@@ -553,9 +534,6 @@ async def test_dispatch_non_ssl_connect_error_preserves_connector_error(
     assert "host" not in result.extras
     assert "remediation_secure" not in result.extras
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -574,9 +552,8 @@ async def test_dispatch_transport_fault_returns_timeout_envelope_and_audits(
     configured_timeout: float | None,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """Cover routing plus the established audit and broadcast error contract."""
+    """Cover routing plus the established audit error contract."""
     register_connector_v2(
         product="vcfops",
         version="9",
@@ -617,8 +594,6 @@ async def test_dispatch_transport_fault_returns_timeout_envelope_and_audits(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
     assert rows[0].payload["error"]["error_code"] == "connector_timeout"
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
 
 
 def test_substring_fallback_classifies_when_cause_chain_empty() -> None:

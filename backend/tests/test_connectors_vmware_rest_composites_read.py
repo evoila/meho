@@ -426,105 +426,263 @@ async def test_cluster_drs_recommendations_propagates_load_bearing_error() -> No
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_event_tail_reads_query_events_with_default_mo_id() -> None:
-    """Default ``moId='EventManager'`` rides the path; ``max_events=100`` applied."""
-    events_payload = [{"id": f"evt-{n}", "summary": f"event {n}"} for n in range(5)]
-    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": events_payload})
-    out = await event_tail_composite(
+_QUERY_EVENTS_PATH = "/api/EventManager/EventManager/QueryEvents"
+
+
+async def _run_event_tail(conn: _RecordingConnector, params: dict[str, Any]) -> dict[str, Any]:
+    return await event_tail_composite(
         operator=_make_operator(),
         target=object(),
-        params={},
+        params=params,
         connector=conn,  # type: ignore[arg-type]
     )
+
+
+@pytest.mark.asyncio
+async def test_event_tail_unfiltered_sends_a_tagged_filter_spec_body() -> None:
+    """No params still sends a non-empty ``EventFilterSpec`` (8.0.x 500s on an empty body)."""
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: []})
+    out = await _run_event_tail(conn, {})
     assert len(conn.calls) == 1
     only = conn.calls[0]
     assert only["method"] == "POST"
-    assert only["path"] == "/api/EventManager/EventManager/QueryEvents"
-    # QueryEvents carries no method-arg body (parity: the pre-migration
-    # dispatch passed only the moId path param).
-    assert only["body"] is None
-    assert out["events"] == events_payload
-    assert out["count"] == 5
-    assert out["moId"] == "EventManager"
-    assert out["max_events_applied"] == 100
+    assert only["vmomi"] is True
+    assert only["path"] == _QUERY_EVENTS_PATH
+    assert only["body"] == {
+        "filter": {
+            "_typeName": "EventFilterSpec",
+            "disableFullMessage": False,
+            "maxCount": 100,
+        }
+    }
+    assert out == {"events": [], "count": 0, "moId": "EventManager", "max_count_applied": 100}
 
 
 @pytest.mark.asyncio
-async def test_event_tail_caps_results_to_max_events() -> None:
-    """The handler caps client-side to ``max_events``."""
-    events_payload = [{"id": f"evt-{n}"} for n in range(200)]
-    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": events_payload})
-    out = await event_tail_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"max_events": 7},
-        connector=conn,  # type: ignore[arg-type]
+async def test_event_tail_maps_every_filter_param_onto_the_filter_spec() -> None:
+    """``begin_time`` / ``end_time`` / ``event_type_ids`` / ``entity`` / ``max_count`` land."""
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: []})
+    await _run_event_tail(
+        conn,
+        {
+            "begin_time": "2026-10-19T08:00:00Z",
+            "end_time": "2026-10-19T09:30:00+02:00",
+            "event_type_ids": ["esx.problem.storage.apd.start", "NASDatastoreEvent"],
+            "entity": {"moId": "datastore-12", "type": "Datastore", "recursion": "self"},
+            "max_count": 250,
+        },
     )
+    assert conn.calls[0]["body"] == {
+        "filter": {
+            "_typeName": "EventFilterSpec",
+            "entity": {
+                "_typeName": "EventFilterSpecByEntity",
+                "entity": vim_moref("Datastore", "datastore-12"),
+                "recursion": "self",
+            },
+            "time": {
+                "_typeName": "EventFilterSpecByTime",
+                "beginTime": "2026-10-19T08:00:00Z",
+                "endTime": "2026-10-19T09:30:00+02:00",
+            },
+            "disableFullMessage": False,
+            "eventTypeId": ["esx.problem.storage.apd.start", "NASDatastoreEvent"],
+            "maxCount": 250,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_event_tail_entity_recursion_defaults_to_all_and_time_may_be_one_sided() -> None:
+    """``recursion`` defaults to ``all``; a lone ``begin_time`` sends only ``beginTime``."""
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: []})
+    await _run_event_tail(
+        conn,
+        {
+            "begin_time": "2026-10-19T08:00:00Z",
+            "entity": {"moId": "domain-c8", "type": "ClusterComputeResource"},
+        },
+    )
+    spec = conn.calls[0]["body"]["filter"]
+    assert spec["entity"]["recursion"] == "all"
+    assert spec["time"] == {
+        "_typeName": "EventFilterSpecByTime",
+        "beginTime": "2026-10-19T08:00:00Z",
+    }
+    assert "eventTypeId" not in spec
+
+
+@pytest.mark.asyncio
+async def test_event_tail_reduces_each_event_to_a_short_row() -> None:
+    """Classic, ``EventEx`` and ``ExtendedEvent`` events project to the four-key row."""
+    events_payload = [
+        {
+            "_typeName": "VmPoweredOnEvent",
+            "key": 101,
+            "createdTime": "2026-10-19T08:01:00Z",
+            "fullFormattedMessage": "web-01 on esx-1 is powered on",
+            "host": {
+                "_typeName": "HostEventArgument",
+                "name": "esx-1",
+                "host": vim_moref("HostSystem", "host-9"),
+            },
+            "vm": {
+                "_typeName": "VmEventArgument",
+                "name": "web-01",
+                "vm": vim_moref("VirtualMachine", "vm-42"),
+            },
+        },
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T08:02:00Z",
+            "eventTypeId": "esx.problem.storage.apd.start",
+            "fullFormattedMessage": "Device entered the all paths down state.",
+            "objectId": "datastore-12",
+            "objectType": "Datastore",
+            "objectName": "nfs-01",
+        },
+        {
+            "_typeName": "ExtendedEvent",
+            "createdTime": "2026-10-19T08:03:00Z",
+            "eventTypeId": "com.example.extension.event",
+            "managedObject": vim_moref("HostSystem", "host-9"),
+        },
+        {"_typeName": "GeneralUserEvent", "createdTime": "2026-10-19T08:04:00Z"},
+    ]
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: events_payload})
+    out = await _run_event_tail(conn, {})
+    assert out["count"] == 4
+    assert out["events"] == [
+        {
+            "createdTime": "2026-10-19T08:01:00Z",
+            "eventTypeId": "VmPoweredOnEvent",
+            "fullFormattedMessage": "web-01 on esx-1 is powered on",
+            "entity": {"type": "VirtualMachine", "moId": "vm-42", "name": "web-01"},
+        },
+        {
+            "createdTime": "2026-10-19T08:02:00Z",
+            "eventTypeId": "esx.problem.storage.apd.start",
+            "fullFormattedMessage": "Device entered the all paths down state.",
+            "entity": {"type": "Datastore", "moId": "datastore-12", "name": "nfs-01"},
+        },
+        {
+            "createdTime": "2026-10-19T08:03:00Z",
+            "eventTypeId": "com.example.extension.event",
+            "fullFormattedMessage": None,
+            "entity": {"type": "HostSystem", "moId": "host-9", "name": None},
+        },
+        {
+            "createdTime": "2026-10-19T08:04:00Z",
+            "eventTypeId": "GeneralUserEvent",
+            "fullFormattedMessage": None,
+            "entity": None,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_event_tail_prefers_the_event_own_object_over_its_context() -> None:
+    """``objectId`` / ``managedObject`` win over inherited ``Event`` context members.
+
+    Both ``EventEx`` and ``ExtendedEvent`` inherit ``datacenter`` / ``host`` /
+    ``ds`` / ... from ``Event``. A row must name the object the event is about,
+    not the surrounding datacenter or host.
+    """
+    events_payload = [
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T09:01:00Z",
+            "eventTypeId": "esx.problem.storage.apd.start",
+            "datacenter": {
+                "_typeName": "DatacenterEventArgument",
+                "name": "dc-01",
+                "datacenter": vim_moref("Datacenter", "datacenter-2"),
+            },
+            "ds": {
+                "_typeName": "DatastoreEventArgument",
+                "name": "nfs-01",
+                "datastore": vim_moref("Datastore", "datastore-12"),
+            },
+            "objectId": "datastore-12",
+            "objectType": "Datastore",
+            "objectName": "nfs-01",
+        },
+        {
+            "_typeName": "ExtendedEvent",
+            "createdTime": "2026-10-19T09:02:00Z",
+            "eventTypeId": "com.example.extension.event",
+            "host": {
+                "_typeName": "HostEventArgument",
+                "name": "esx-1",
+                "host": vim_moref("HostSystem", "host-9"),
+            },
+            "managedObject": vim_moref("VirtualMachine", "vm-42"),
+        },
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T09:03:00Z",
+            "eventTypeId": "com.example.no.object",
+            "datacenter": {
+                "_typeName": "DatacenterEventArgument",
+                "name": "dc-01",
+                "datacenter": vim_moref("Datacenter", "datacenter-2"),
+            },
+        },
+    ]
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: events_payload})
+    out = await _run_event_tail(conn, {})
+    assert [row["entity"] for row in out["events"]] == [
+        {"type": "Datastore", "moId": "datastore-12", "name": "nfs-01"},
+        {"type": "VirtualMachine", "moId": "vm-42", "name": None},
+        {"type": "Datacenter", "moId": "datacenter-2", "name": "dc-01"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_event_tail_cuts_to_max_count_when_the_server_ignores_it() -> None:
+    """A server that returns more than ``maxCount`` is cut to ``max_count`` rows."""
+    events_payload = [{"_typeName": "Event", "key": n} for n in range(200)]
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: events_payload})
+    out = await _run_event_tail(conn, {"max_count": 7})
+    assert conn.calls[0]["body"]["filter"]["maxCount"] == 7
     assert len(out["events"]) == 7
     assert out["count"] == 7
-    assert out["max_events_applied"] == 7
+    assert out["max_count_applied"] == 7
 
 
 @pytest.mark.asyncio
 async def test_event_tail_custom_mo_id_rides_the_path() -> None:
     """A per-call ``moId`` override lands in the mounted path segment."""
     conn = _RecordingConnector({"/api/EventManager/em-2/QueryEvents": []})
-    await event_tail_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"moId": "em-2"},
-        connector=conn,  # type: ignore[arg-type]
-    )
+    await _run_event_tail(conn, {"moId": "em-2"})
     assert conn.calls[0]["path"] == "/api/EventManager/em-2/QueryEvents"
 
 
 @pytest.mark.asyncio
-async def test_event_tail_tolerates_legacy_value_envelope() -> None:
-    """A ``{"value": [...]}`` envelope on the sub-op response unwraps cleanly."""
-    conn = _RecordingConnector(
-        {
-            "/api/EventManager/EventManager/QueryEvents": {
-                "value": [{"id": "evt-1"}, {"id": "evt-2"}]
-            }
-        }
-    )
-    out = await event_tail_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={},
-        connector=conn,  # type: ignore[arg-type]
-    )
+async def test_event_tail_tolerates_legacy_value_envelope_and_null() -> None:
+    """A ``{"value": [...]}`` envelope unwraps; a ``null`` answer is no events."""
+    conn = _RecordingConnector([{"value": [{"_typeName": "Event"}, {"_typeName": "Event"}]}, None])
+    out = await _run_event_tail(conn, {})
     assert out["count"] == 2
-    assert out["events"] == [{"id": "evt-1"}, {"id": "evt-2"}]
+    out = await _run_event_tail(conn, {})
+    assert out["count"] == 0
+    assert out["events"] == []
 
 
 @pytest.mark.asyncio
 async def test_event_tail_raises_on_non_list_payload() -> None:
     """Non-list payload from QueryEvents raises ``RuntimeError`` (audit-visible)."""
-    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": {"not": "a list"}})
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: {"not": "a list"}})
     with pytest.raises(RuntimeError, match="expected list"):
-        await event_tail_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={},
-            connector=conn,  # type: ignore[arg-type]
-        )
+        await _run_event_tail(conn, {})
 
 
 @pytest.mark.asyncio
 async def test_event_tail_propagates_load_bearing_error() -> None:
     """QueryEvents transport failure propagates (no aggregation)."""
-    conn = _RecordingConnector(
-        [_http_error(400, "https://vc/api/EventManager/EventManager/QueryEvents")]
-    )
+    conn = _RecordingConnector([_http_error(400, f"https://vc{_QUERY_EVENTS_PATH}")])
     with pytest.raises(httpx.HTTPStatusError):
-        await event_tail_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={},
-            connector=conn,  # type: ignore[arg-type]
-        )
+        await _run_event_tail(conn, {})
 
 
 # ---------------------------------------------------------------------------

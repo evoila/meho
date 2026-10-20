@@ -59,8 +59,12 @@ async def protected_resource_metadata() -> dict[str, Any]:
       Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,
       which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls
       back to ``f"{backplane_url}/mcp"``.
-    * ``authorization_servers`` — the Keycloak issuer URL. MCP 2025-06-18
-      §Authorization Server Discovery requires this to be non-empty.
+    * ``authorization_servers`` — the issuer URL exactly as configured
+      in ``KEYCLOAK_ISSUER_URL``. MCP 2025-06-18 §Authorization Server
+      Discovery requires this to be non-empty. The value is not
+      trailing-slash-normalised: RFC 8414 §3.3 makes clients compare
+      it byte-for-byte with the ``issuer`` in the discovery document,
+      and providers such as authentik publish theirs with a ``/``.
     * ``scopes_supported`` — v0.2 ships two scopes that downstream
       Tasks (T3 RBAC filter, T4 reference tool, T5 audit) consume.
       Conservative: clients that request only ``mcp:read`` can list /
@@ -79,7 +83,7 @@ async def protected_resource_metadata() -> dict[str, Any]:
     return {
         "resource": mcp_resource_uri(settings),
         "authorization_servers": [
-            str(settings.keycloak_issuer_url).rstrip("/"),
+            str(settings.keycloak_issuer_url),
         ],
         "scopes_supported": ["mcp:read", "mcp:execute"],
         "bearer_methods_supported": ["header"],

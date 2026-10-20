@@ -217,8 +217,7 @@ async def write_mcp_audit_row(
     the audit commit succeeds. Callers that don't need the id (e.g.
     the helper-level test that exercises the writer directly) can
     omit the kwarg and get a fresh uuid4 generated here. Returns the
-    audit id used for the row so the dispatch call site can plumb it
-    through to ``publish_event`` either way.
+    audit id used for the row.
 
     *event_class* has no default. The handlers take it from
     :func:`~meho_backplane.audit_cutover.wrapper_row_class`:

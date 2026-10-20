@@ -29,8 +29,11 @@ Both ride the **same** per-dispatch capture scope + op context that
   its own richer span under the same trace. REST-backed typed connectors are
   already covered by the shared httpx ``vendor_call`` seam; the SSH families
   (bind9 / holodeck / pfsense / rke2 / windows_dns) record per-command spans
-  from the shared :meth:`SshConnector._run_command` seam. The direct-SDK
-  families (hvac / kubernetes / pymongo / postgres and the googleapiclient-
+  from the shared :meth:`SshConnector._run_command` seam. The Kubernetes
+  connector records one ``vendor_call`` span per API HTTP request from its
+  ``kubernetes_asyncio`` transport
+  (:mod:`meho_backplane.connectors.kubernetes._wire_span`, #3841). The other
+  direct-SDK families (hvac / pymongo / postgres and the googleapiclient-
   and REST-backed gcloud) are covered by the shared ``typed`` span at the
   op granularity, the natural unit for a one-op-one-SDK-interaction handler.
 

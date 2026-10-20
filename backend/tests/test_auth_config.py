@@ -110,25 +110,23 @@ def test_auth_config_cli_client_id_defaults_empty_when_unset(
     assert payload["audience"] == "meho-backplane"
 
 
-def test_auth_config_normalises_trailing_slash_on_issuer(
+def test_auth_config_keeps_issuer_trailing_slash_as_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Keycloak issuer URL is returned without a trailing slash.
+    """The issuer URL is returned exactly as configured, slash included.
 
-    Keycloak's discovery document advertises the canonical issuer
-    without a trailing slash; the CLI then builds
-    ``<issuer>/.well-known/openid-configuration``. Without
-    normalisation a double slash would appear in the discovery URL.
-    The route's :func:`str.rstrip` should drop trailing slashes
-    regardless of how the operator typed the env var.
+    Providers such as authentik publish their issuer with a trailing
+    slash (#4273). The CLI strips it itself before it builds
+    ``<issuer>/.well-known/openid-configuration``, so the route must
+    not normalise the value away from the published form.
     """
     monkeypatch.setenv(
         "KEYCLOAK_ISSUER_URL",
-        "https://keycloak.evba.lab/realms/evba/",
+        "https://authentik.test/application/o/meho/",
     )
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("KEYCLOAK_CLI_CLIENT_ID", "meho-cli")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.evba.lab")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
 
     try:
@@ -139,8 +137,7 @@ def test_auth_config_normalises_trailing_slash_on_issuer(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["keycloak_issuer"] == "https://keycloak.evba.lab/realms/evba"
-    assert not payload["keycloak_issuer"].endswith("/")
+    assert payload["keycloak_issuer"] == "https://authentik.test/application/o/meho/"
 
 
 def test_auth_config_is_unauthenticated(

@@ -1,106 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""G6 ``credential_read`` classifier integration test (G3.3-T5 / #549).
+"""G6.1 ``credential_read`` dispatch test (decision #3, #549).
 
-Load-bearing PII guarantee for the single most-used agent op. Decision
-#3 (``docs/decisions/locked-decisions.md``) names ``vault.kv.read`` and
-``vault.kv.list`` as the canonical ``credential_read`` ops: the G6
-broadcast feed must emit an **aggregate-only** view for them — the
-fact that someone touched a credential, never *which* credential. No
-mount, no path, no key names, no values may reach the stream.
+Vault KV reads carry the shape of an environment (mount, path, key
+names) and the secret itself. The dispatcher writes one audit row per
+dispatch; the row's payload must carry the ``credential_read`` class
+and none of that material.
 
-This module proves that contract end-to-end across the
-dispatch + broadcast boundary, exercising the **real**
-``vault.kv.read`` / ``vault.kv.list`` handlers
-(:func:`~meho_backplane.connectors.vault.ops.vault_kv_read` /
-:func:`~meho_backplane.connectors.vault.ops.vault_kv_list`) registered
-via :func:`~meho_backplane.connectors.vault.ops.register_vault_typed_operations`
-and driven through :func:`~meho_backplane.operations.dispatch`. The
-Vault HTTP client is replaced with the shared in-process fake
-(:func:`tests._vault_fakes.install_fake_vault`), seeded with
-distinctive sentinel mount / path / key / value strings. The broadcast
-publisher is swapped for a recording stub so the emitted
-:class:`~meho_backplane.broadcast.events.BroadcastEvent` can be
-inspected without standing up a Valkey container.
+The test drives the **real** :func:`meho_backplane.operations.dispatch`
+path against the in-process Vault fake (``install_fake_vault``) using
+distinctive sentinel mount / path / key / value strings, then reads the
+stored audit row back and checks by exclusion. A dispatch publishes no
+Broadcast event (#3758), so the audit row is the only record to check.
 
-Why assert by exclusion on the *serialised event*: the redacted
-``payload`` for ``credential_read`` collapses to
-``{op_class, result_status}``, but the enclosing
-:class:`BroadcastEvent` always carries ``op_id``, ``target_name`` and
-``result_status`` as top-level fields (decision #3's
-``{op_id, target, result_status}`` aggregate). The leak surface is
-therefore the whole serialised event, not just ``payload`` — a
-regression that smuggled the path into a new top-level field would
-pass a ``payload``-only assertion. Each test serialises the event with
-``model_dump_json()`` and asserts every secret-shaped sentinel
-substring is absent from that text.
-
-Reconciliation with the issue body (#549): the body describes #545
-setting ``op_class='credential_read'`` as *register-time descriptor
-metadata* read back by the classifier. The shipped G6 substrate has
-**no per-row ``op_class`` column** on ``endpoint_descriptor`` —
-classification is op-id-based via
-:func:`~meho_backplane.broadcast.events.classify_op` (the
-``_CREDENTIAL_READ_OPS`` allowlist plus the ``_READ_SUFFIXES`` /
-``_WRITE_SUFFIXES`` tuples). #228 (G6.1 SSE feed) is shipped/CLOSED, so
-this integrates against the real classifier path. The test satisfies
-the *intent* of decision #3 — aggregate-only emission for the two
-credential-read ops, proven through the live dispatch + broadcast
-path — against the mechanism that actually shipped.
-
-Skip-clean: per the issue's DoD, the test skips (does not fail) when
-the broadcast feed is not configured in the environment
-(``BROADCAST_REDIS_URL`` unset / blank), so a sandbox without the
-broadcast substrate reports a clean skip rather than a spurious
-failure. The publisher swap means no real Valkey connection is ever
-opened; the guard mirrors the operator-facing "broadcast disabled"
-posture.
+A contrast op (``vault.sys.health``, class ``read``) goes through the
+same path so the classification is shown to be op-driven.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from collections.abc import Iterator
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.connectors.vault.ops_sys import (
     register_vault_sys_typed_operations,
 )
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 from tests._vault_fakes import install_fake_vault
-
-# ---------------------------------------------------------------------------
-# Skip-clean guard — broadcast disabled in the environment
-# ---------------------------------------------------------------------------
-
-#: The G6.1 substrate has no boolean "broadcast enabled" flag — the
-#: feed is "on" iff a Valkey URL is configured. A sandbox that does not
-#: provision the broadcast substrate leaves ``BROADCAST_REDIS_URL``
-#: unset; treating that as the disabled posture lets the test skip
-#: cleanly there (issue #549 DoD) rather than fail. The publisher is
-#: swapped for a recording stub in every test below, so this guard is
-#: about *environment intent*, not about whether a socket would open.
-_BROADCAST_DISABLED = not (os.environ.get("BROADCAST_REDIS_URL") or "").strip()
-
-pytestmark = pytest.mark.skipif(
-    _BROADCAST_DISABLED,
-    reason="broadcast feed disabled (BROADCAST_REDIS_URL unset) — G6 "
-    "credential_read classifier integration test skipped cleanly per #549 DoD",
-)
-
 
 # ---------------------------------------------------------------------------
 # Sentinel secret material — distinctive enough that any leak is obvious
@@ -111,9 +51,9 @@ pytestmark = pytest.mark.skipif(
 #: cannot collide with the (allowed) target name.
 _SENTINEL_MOUNT = "sntlmount0zzz"
 #: Folder/secret path. Each segment is its own distinctive token so a
-#: *partial* leak (just one segment reaching the stream) is still
+#: *partial* leak (just one segment reaching the row) is still
 #: caught — exactly the environment-name-shaped structure decision #3
-#: forbids broadcasting. No segment is a generic English word, so the
+#: forbids recording. No segment is a generic English word, so the
 #: by-exclusion search can't false-positive on the allowed
 #: ``target_name`` (``rdc-vault-prod``).
 _SENTINEL_PATH_SEGMENTS = ("sntlenv0zzz", "sntlsvc0zzz", "sntlleaf0zzz")
@@ -124,11 +64,10 @@ _SENTINEL_KEYS = ["sntlkey0apikey0zzz", "sntlkey0token0zzz"]
 _SENTINEL_SECRET = {"password": "sntlvalue0p4ssw0rd0zzz"}
 
 #: Every substring that MUST NOT appear anywhere in a ``credential_read``
-#: broadcast event. The mount, the full path, **each path segment** (a
+#: audit row payload. The mount, the full path, **each path segment** (a
 #: partial-leak regression is still a leak), every key name, and the
-#: secret value. The decision-#3 aggregate explicitly *permits*
-#: ``op_id`` + ``target_name`` + ``result_status``; none of these
-#: sentinels appear in those allowed fields, so a hit is an
+#: secret value. None of these sentinels appear in the allowed fields
+#: (``op_id``, ``op_class``, ``result_status``, hashes), so a hit is an
 #: unambiguous secret-material leak.
 _FORBIDDEN_SUBSTRINGS: tuple[str, ...] = (
     _SENTINEL_MOUNT,
@@ -201,25 +140,6 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with an in-memory recording stub.
-
-    The dispatch audit helper invokes ``publish_event`` via the imported
-    reference inside :mod:`meho_backplane.operations._audit`; patching
-    that module attribute is sufficient (the same seam
-    :mod:`tests.test_operations_dispatcher` uses). No real Valkey
-    connection is opened.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 def _make_operator() -> Operator:
     """Construct an :class:`Operator` directly — no JWT round-trip.
 
@@ -250,16 +170,15 @@ class _VaultDispatchTarget:
 
     The dispatcher reads ``product`` / ``fingerprint.version`` /
     ``preferred_impl_id`` (connector resolution — tolerated-miss for
-    typed ops) and ``id`` / ``name`` (audit row + broadcast
-    ``target_name``). The Vault handlers read the operator JWT from the
-    request-scoped :class:`~meho_backplane.auth.operator.Operator` the
-    dispatcher threads (G0.8-T3 #629), **not** from this target — so it
-    carries no ``raw_jwt``.
+    typed ops) and ``id`` / ``name`` (audit row). The Vault handlers
+    read the operator JWT from the request-scoped
+    :class:`~meho_backplane.auth.operator.Operator` the dispatcher
+    threads (G0.8-T3 #629), **not** from this target — so it carries
+    no ``raw_jwt``.
 
-    ``name`` is a benign, non-secret label; the broadcast event is
-    *allowed* to carry it (decision #3's aggregate includes the
-    target). It is deliberately distinct from every forbidden
-    sentinel so the by-exclusion assertion can't false-positive on it.
+    ``name`` is a benign, non-secret label. It is deliberately distinct
+    from every forbidden sentinel so the by-exclusion assertion can't
+    false-positive on it.
     """
 
     def __init__(self) -> None:
@@ -271,49 +190,43 @@ class _VaultDispatchTarget:
 
 
 # ---------------------------------------------------------------------------
-# credential_read aggregate-only contract — vault.kv.read / vault.kv.list
+# credential_read audit-row contract — vault.kv.read / vault.kv.list
 # ---------------------------------------------------------------------------
 
 
-def _assert_aggregate_only(event: BroadcastEvent, op_id: str) -> None:
-    """Assert *event* is the decision-#3 aggregate for a credential read.
+async def _audit_row_for(op_id: str) -> AuditLog:
+    """Return the single dispatch audit row written for *op_id*."""
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+        )
+    assert len(rows) == 1, f"expected one audit row for {op_id}, got {len(rows)}"
+    return rows[0]
 
-    The redacted ``payload`` is exactly ``{op_class, result_status}``;
-    the enclosing event carries ``op_id`` / ``target_name`` /
-    ``result_status`` (the allowed aggregate). The whole serialised
-    event must contain none of the secret-shaped sentinels.
-    """
-    assert event.op_id == op_id
-    assert event.op_class == "credential_read"
-    assert event.result_status == "ok"
-    # payload is aggregate-only — no params, no path/mount/key/value.
-    assert event.payload == {
-        "op_class": "credential_read",
-        "result_status": "ok",
-    }
 
-    serialised = event.model_dump_json()
-    # Defensive: model_dump_json must round-trip to the same shape the
-    # SSE feed (#228) and MCP resource consumers deserialise.
-    assert json.loads(serialised)["op_class"] == "credential_read"
+def _assert_no_secret_in_row(row: AuditLog, op_id: str) -> None:
+    """Assert the credential-read audit row for *op_id* carries no secret material."""
+    assert row.payload["op_id"] == op_id
+    assert row.payload["op_class"] == "credential_read"
+    assert row.payload["result_status"] == "ok"
 
+    serialised = json.dumps(row.payload, default=str)
     for forbidden in _FORBIDDEN_SUBSTRINGS:
         assert forbidden not in serialised, (
-            f"credential_read leak: {forbidden!r} reached the broadcast "
-            f"event for {op_id} — serialised event: {serialised}"
+            f"credential_read leak: {forbidden!r} reached the audit row "
+            f"for {op_id} — payload: {serialised}"
         )
 
 
 @pytest.mark.asyncio
-async def test_vault_kv_read_broadcast_is_aggregate_only(
+async def test_vault_kv_read_secret_not_in_audit_row(
     monkeypatch: pytest.MonkeyPatch,
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.kv.read`` broadcasts only ``{op_id, target, result_status}``.
+    """``vault.kv.read`` is audited as ``credential_read`` without the secret.
 
-    DoD #1 — the read op's broadcast event contains exactly the
-    aggregate; mount / path / key / value never present (by-exclusion).
+    DoD #1 — mount / path / key / value never reach the audit row
+    (by-exclusion).
     """
     fake = install_fake_vault(monkeypatch)
     fake.secrets.kv.v2.secret = dict(_SENTINEL_SECRET)
@@ -332,25 +245,25 @@ async def test_vault_kv_read_broadcast_is_aggregate_only(
     )
 
     assert result.status == "ok", result.error
-    # The handler really ran against the fake — the secret value is in
-    # the OperationResult (operator-facing, audited), proving the leak
-    # surface below is a real exclusion, not a vacuous one.
-    assert result.result == {"data": _SENTINEL_SECRET, "version": fake.secrets.kv.v2.version}
+    # The handler really ran against the fake: the read landed and the
+    # result carries the data block. The response redactor masks the
+    # password value before it reaches the caller, so the exclusion
+    # below is checked on the audit row, not on the result.
+    assert set(result.result) == {"data", "version"}
+    assert result.result["version"] == fake.secrets.kv.v2.version
     assert fake.secrets.kv.v2.read_calls == [
         {"path": _SENTINEL_PATH, "mount_point": _SENTINEL_MOUNT}
     ]
 
-    assert len(captured_events) == 1
-    _assert_aggregate_only(captured_events[0], "vault.kv.read")
+    _assert_no_secret_in_row(await _audit_row_for("vault.kv.read"), "vault.kv.read")
 
 
 @pytest.mark.asyncio
-async def test_vault_kv_list_broadcast_is_aggregate_only(
+async def test_vault_kv_list_secret_not_in_audit_row(
     monkeypatch: pytest.MonkeyPatch,
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.kv.list`` broadcasts only the aggregate.
+    """``vault.kv.list`` is audited as ``credential_read`` without the key names.
 
     DoD #2 — same by-exclusion assertion as the read op. Key names are
     structure too (decision #3) — the list op is ``credential_read``
@@ -378,29 +291,26 @@ async def test_vault_kv_list_broadcast_is_aggregate_only(
         {"path": _SENTINEL_PATH, "mount_point": _SENTINEL_MOUNT}
     ]
 
-    assert len(captured_events) == 1
-    _assert_aggregate_only(captured_events[0], "vault.kv.list")
+    _assert_no_secret_in_row(await _audit_row_for("vault.kv.list"), "vault.kv.list")
 
 
 # ---------------------------------------------------------------------------
-# Contrast — a non-credential_read op broadcasts its normal payload
+# Contrast — a non-credential_read op is audited with its own class
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_non_credential_read_op_broadcasts_full_payload(
+async def test_non_credential_read_op_is_audited_as_read(
     monkeypatch: pytest.MonkeyPatch,
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.sys.health`` broadcasts its normal (non-redacted) payload.
+    """``vault.sys.health`` is audited with class ``read``.
 
-    DoD #3 — proves the redaction is classifier-driven, not blanket.
+    DoD #3 — proves the classification is op-driven, not blanket.
     ``vault.sys.health`` classifies ``read`` (the ``.health``
-    suffix), so its broadcast carries the full ``params`` block. Same
-    dispatch + broadcast path, same recording publisher, same fake
-    Vault — only the op-id differs, so a divergence here is purely the
-    classifier doing its job.
+    suffix). Same dispatch + audit path, same fake Vault — only the
+    op-id differs, so a divergence here is purely the classifier doing
+    its job.
     """
     install_fake_vault(monkeypatch)
     await register_vault_sys_typed_operations(embedding_service=stub_embedding_service)
@@ -418,30 +328,16 @@ async def test_non_credential_read_op_broadcasts_full_payload(
 
     assert result.status == "ok", result.error
 
-    assert len(captured_events) == 1
-    event = captured_events[0]
-    assert event.op_id == "vault.sys.health"
-    # Classifier-driven: NOT credential_read, NOT aggregate-only.
-    assert event.op_class == "read"
-    assert event.op_class != "credential_read"
-    # Full-payload class — the redactor passes the request params
-    # through verbatim under ``params``. The dispatch audit helper
-    # (:func:`meho_backplane.operations._audit.publish_broadcast`)
-    # hands ``{"params": params}`` to ``redact_payload``, so the
-    # non-redacted branch nests the op params one level deep. The
-    # load-bearing contrast is that the params block is *present at
-    # all* — a ``credential_read`` op has no ``params`` key whatsoever.
-    assert event.payload == {
-        "op_class": "read",
-        "params": {"params": {}},
-        "result_status": "ok",
-    }
-    assert "params" in event.payload
+    row = await _audit_row_for("vault.sys.health")
+    assert row.payload["op_id"] == "vault.sys.health"
+    # Classifier-driven: NOT credential_read.
+    assert row.payload["op_class"] == "read"
+    assert row.payload["result_status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
 # Classifier-contrast on a single fixed input — same op-id surface,
-# opposite redaction. Pins the "credential_read vs read" boundary that
+# different class. Pins the "credential_read vs read" boundary that
 # the whole PII guarantee rests on.
 # ---------------------------------------------------------------------------
 
@@ -450,13 +346,12 @@ async def test_non_credential_read_op_broadcasts_full_payload(
 async def test_credential_read_and_contrast_diverge_on_same_dispatch_path(
     monkeypatch: pytest.MonkeyPatch,
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """One run, two ops: read is redacted, sys.health is not.
+    """One run, two ops: read is ``credential_read``, sys.health is ``read``.
 
     Dispatches a ``credential_read`` op and a ``read`` op back-to-back
     through the identical path with identical infrastructure. The only
-    variable is the op-id; the divergent redaction is therefore
+    variable is the op-id; the divergent class is therefore
     attributable solely to :func:`classify_op`. This is the
     load-bearing assertion decision #3 exists for.
     """
@@ -486,13 +381,11 @@ async def test_credential_read_and_contrast_diverge_on_same_dispatch_path(
 
     assert read_result.status == "ok", read_result.error
     assert health_result.status == "ok", health_result.error
-    assert len(captured_events) == 2
 
-    cred_event = next(e for e in captured_events if e.op_id == "vault.kv.read")
-    health_event = next(e for e in captured_events if e.op_id == "vault.sys.health")
+    cred_row = await _audit_row_for("vault.kv.read")
+    health_row = await _audit_row_for("vault.sys.health")
 
-    # Same path, opposite redaction — classifier-driven by construction.
-    assert cred_event.op_class == "credential_read"
-    assert health_event.op_class == "read"
-    _assert_aggregate_only(cred_event, "vault.kv.read")
-    assert "params" in health_event.payload
+    # Same path, different class — classifier-driven by construction.
+    assert cred_row.payload["op_class"] == "credential_read"
+    assert health_row.payload["op_class"] == "read"
+    _assert_no_secret_in_row(cred_row, "vault.kv.read")

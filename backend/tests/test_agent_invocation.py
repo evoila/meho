@@ -79,7 +79,6 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.db.models import AgentRun as AgentRunRow
-from meho_backplane.operations import _audit as audit_module
 from meho_backplane.operations import agent_run as run_lifecycle
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._audit import work_ref_var
@@ -1394,18 +1393,6 @@ async def _dispatch_rows(op_id: str) -> list[AuditLog]:
         return list(result.scalars().all())
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Capture the broadcast events the dispatcher publishes."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 async def test_direct_run_without_agent_grant_runs_the_op_for_the_person(
     stub_embedding_service: AsyncMock,
 ) -> None:
@@ -1431,15 +1418,14 @@ async def test_direct_run_without_agent_grant_runs_the_op_for_the_person(
 
 async def test_direct_run_is_limited_by_the_agent_grants(
     stub_embedding_service: AsyncMock,
-    captured_events: list[Any],
 ) -> None:
     """A direct run cannot do what the agent's grants deny (#4237).
 
     The person who starts the run may run ``vault.kv.read`` (the control
     test above). The agent principal holds a ``*`` deny grant, so the call
-    the run makes is denied. The audit row and the broadcast event name the
-    person as the subject and the agent as the actor, and the run's read
-    views show both identities.
+    the run makes is denied. The audit row names the person as the subject
+    and the agent as the actor, and the run's read views show both
+    identities.
     """
     await _seed_echo_op(stub_embedding_service)
     await _seed_definition(toolset={"meta_tools": ["call_operation"]})
@@ -1457,12 +1443,7 @@ async def test_direct_run_is_limited_by_the_agent_grants(
     assert row.operator_sub == "alice"
     assert row.actor_sub == "agent:reader"
     assert row.agent_session_id == outcome.run_id
-
-    events = [e for e in captured_events if e.op_id == "vault.kv.read"]
-    assert len(events) == 1
-    assert events[0].result_status == "denied"
-    assert events[0].principal_sub == "alice"
-    assert events[0].actor_sub == "agent:reader"
+    assert row.payload["result_status"] == "denied"
 
     view = await invoker.poll(person, outcome.run_id)
     assert (view.identity_sub, view.identity_act) == ("alice", "agent:reader")

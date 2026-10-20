@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog
@@ -714,7 +714,6 @@ async def _seed_topology_nodes() -> None:
 _BULK_ROUTE = "/api/v1/topology/edges/bulk"
 _BULK_EDGE = {"from": {"name": "svc-a"}, "kind": "depends-on", "to": {"name": "db-b"}}
 _ANNOTATE_ROW = ("operation_execution", "ANNOTATE", "topology.annotate")
-_PUBLISH_PATCH = "meho_backplane.topology.annotate.publish_event"
 
 
 async def test_rest_bulk_import_dry_run_is_routine_and_apply_keeps_its_own_record(
@@ -730,8 +729,7 @@ async def test_rest_bulk_import_dry_run_is_routine_and_apply_keeps_its_own_recor
     assert preview.json()["dry_run"] is True
     assert await _audit_rows() == []
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()):
-        applied = client.post(_BULK_ROUTE, json={"edges": [_BULK_EDGE], "dry_run": False})
+    applied = client.post(_BULK_ROUTE, json={"edges": [_BULK_EDGE], "dry_run": False})
     assert applied.status_code == 200, applied.text
     rows = await _audit_rows()
     assert _shape(rows) == [_ANNOTATE_ROW]
@@ -818,16 +816,8 @@ async def _seed_pending_request() -> uuid.UUID:
 
 async def test_rest_approval_decision_keeps_only_its_own_record(
     rest: tuple[TestClient, _Caller],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, _caller = rest
-
-    async def _no_broadcast(**_kwargs: Any) -> None:
-        return None
-
-    from meho_backplane.operations import approval_queue
-
-    monkeypatch.setattr(approval_queue, "publish_approval_event", _no_broadcast)
     request_id = await _seed_pending_request()
 
     response = client.post(f"/api/v1/approvals/{request_id}/reject", json={"reason": "no"})
@@ -1042,10 +1032,9 @@ async def test_mcp_bulk_import_dry_run_is_routine_and_apply_keeps_its_own_record
     assert "error" not in preview, preview
     assert await _audit_rows() == []
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()):
-        applied = _tool_call(
-            client, "meho_topology_bulk_import", {"rows": rows_arg, "dry_run": False}, 2
-        )
+    applied = _tool_call(
+        client, "meho_topology_bulk_import", {"rows": rows_arg, "dry_run": False}, 2
+    )
     assert "error" not in applied, applied
     rows = await _audit_rows()
     assert sorted(_shape(rows)) == [

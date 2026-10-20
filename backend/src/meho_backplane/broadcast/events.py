@@ -385,11 +385,11 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
 )
 
 #: Op-ids that classify as ``checks`` — the checks subsystem's own
-#: state-change events, published by
-#: :mod:`meho_backplane.checks.broadcast` rather than by the audit
-#: middleware: the Dashboard rollup edge (#2720,
-#: ``publish_check_transition_event``) and the evaluation-loop watchdog's
-#: stall/recovery pair (#2763, ``publish_scheduler_liveness_event``).
+#: state-change events: the Dashboard rollup edge (#2720) and the
+#: evaluation-loop watchdog's stall/recovery pair (#2763). The checks
+#: plane stopped publishing them to Broadcast in #3758 (checks keep their
+#: own notification pipeline); the class stays so older entries still
+#: classify the same way.
 #:
 #: An explicit allowlist, **not** a ``checks.`` prefix branch. The
 #: ``/api/v1/checks/*`` gateway routes already own three shipped op-ids
@@ -755,24 +755,19 @@ def classify_op(op_id: str) -> str:
        their dotted identity forever.
     4b. ``approval`` — every op-id with the ``approval.`` prefix
        (``approval.pending`` / ``.approved`` / ``.rejected`` /
-       ``.expired``, emitted by
-       :func:`~meho_backplane.operations.approval_queue.publish_approval_event`)
-       classifies as the dedicated ``approval`` class. The approvals
-       console surface (G10.7-T3 #1778) subscribes its notifications
-       bell to ``/ui/broadcast/stream?op_class=approval`` -- an
-       exact-match server-side filter on this class -- so the lifecycle
-       events need their own class rather than falling through to
-       ``other`` (which would mix them with every unclassified op and
-       defeat the filter). The class is **not** sensitive
+       ``.expired``, and the ``approval.*`` audit op-ids) classifies as
+       the dedicated ``approval`` class, so an ``op_class=approval``
+       audit filter finds the lifecycle rows rather than mixing them
+       with every unclassified op under ``other``. The class is **not** sensitive
        (``approval.*`` payloads carry only ``connector_id`` / ``op_id`` /
        ``decision`` / the request id, never secret material), so it
        stays full-detail like ``other`` did -- see
        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`.
     4c. ``checks`` — the checks subsystem's own state-change events
-       (:data:`_CHECK_EVENT_OPS`; ``checks.transition`` from #2720's
-       :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
+       (:data:`_CHECK_EVENT_OPS`; ``checks.transition`` from #2720
        plus #2763's ``checks.scheduler_stalled`` /
-       ``checks.scheduler_recovered`` watchdog pair).
+       ``checks.scheduler_recovered`` watchdog pair; no longer published
+       since #3758).
        Its own class for the same reason ``approval`` has one: a feed
        watcher filters ``op_class=checks`` server-side to follow
        Dashboard rollup edges without reading every unclassified op.
@@ -1036,8 +1031,7 @@ def redact_payload(
     When ``"aggregate"`` or ``"full"`` is passed
     explicitly, the resolver (:func:`compute_effective_broadcast_detail`)
     has already decided the effective detail and this function just
-    renders it. Callers that don't go through the resolver
-    (:func:`meho_backplane.operations._audit.publish_broadcast`) keep
+    renders it. Callers that don't go through the resolver keep
     the ``detail=None`` default and the existing per-class behaviour.
 
     Forward-compatibility note: the return shape is a plain ``dict``

@@ -50,6 +50,7 @@ _TAGGING_DELETE_OP_IDS = frozenset(
     }
 )
 _TAGGING_REMOVAL_OP_IDS = _TAG_DETACH_OP_IDS | _TAGGING_DELETE_OP_IDS
+_LIBRARY_ITEM_DELETE = "DELETE:/content/library/item/{libraryItemId}"
 
 
 @pytest.fixture(autouse=True)
@@ -141,6 +142,60 @@ def test_vmware_floor_makes_tagging_removals_destructive(
     assert floored.requires_approval is True
 
 
+@pytest.mark.parametrize("version", ["8.0", "9.0"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/content/library/item/{libraryItemId}",
+        "/api/content/library/item/{libraryItemId}",
+        "/content/library/item/{library_item_id}",
+    ],
+)
+def test_vmware_floor_makes_library_item_delete_destructive(path: str, version: str) -> None:
+    """A content-library item delete cannot be undone, so it lands ``destructive`` (#4058)."""
+    proto = EndpointDescriptorProto(
+        op_id=f"DELETE:{path}",
+        method="DELETE",
+        path=path,
+        parameter_schema={"type": "object", "properties": {}},
+        safety_level="dangerous",
+        requires_approval=False,
+    )
+
+    floored = apply_safety_floor(
+        product="vmware", version=version, impl_id="vmware-rest", proto=proto
+    )
+
+    assert floored.safety_level == "destructive"
+    assert floored.requires_approval is True
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/content/library/item/{libraryItemId}"),
+        ("PATCH", "/content/library/item/{libraryItemId}"),
+        ("DELETE", "/content/library/item/{libraryItemId}/storage/{storage}"),
+        ("DELETE", "/content/local-library/{libraryId}"),
+    ],
+)
+def test_vmware_floor_leaves_other_library_ops_alone(method: str, path: str) -> None:
+    proto = EndpointDescriptorProto(
+        op_id=f"{method}:{path}",
+        method=method,
+        path=path,
+        parameter_schema={"type": "object", "properties": {}},
+        safety_level="dangerous" if method == "DELETE" else "caution",
+        requires_approval=method == "DELETE",
+    )
+
+    floored = apply_safety_floor(
+        product="vmware", version="9.0", impl_id="vmware-rest", proto=proto
+    )
+
+    assert floored is proto
+
+
 def test_vmware_floor_leaves_other_deletes_at_dangerous() -> None:
     """A generic ``DELETE`` outside the tagging family keeps the parser posture."""
     proto = EndpointDescriptorProto(
@@ -227,14 +282,13 @@ def test_pinned_vcenter_spec_deletes_and_tag_detach_wait_for_approval() -> None:
         impl_id="vmware-rest",
     )
     served = {p.op_id for p in protos}
-    assert_op_ids_served(
-        set(_TAGGING_REMOVAL_OP_IDS), served, spec_label="vcenter-9.0/vcenter.yaml"
-    )
+    destructive = set(_TAGGING_REMOVAL_OP_IDS) | {_LIBRARY_ITEM_DELETE}
+    assert_op_ids_served(destructive, served, spec_label="vcenter-9.0/vcenter.yaml")
 
     gated = {p.op_id for p in protos if p.method == "DELETE"} | set(_TAG_DETACH_OP_IDS)
 
     assert _ungated(protos, gated) == []
-    assert _not_destructive(protos, set(_TAGGING_REMOVAL_OP_IDS)) == []
+    assert _not_destructive(protos, destructive) == []
 
 
 def test_pinned_nsx_spec_deletes_wait_for_approval() -> None:

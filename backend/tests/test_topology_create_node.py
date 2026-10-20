@@ -24,11 +24,10 @@ half; the MCP-level surface is covered in
 * **Tenant boundary** — a name seeded in tenant-B is invisible to a
   tenant-A operator; their create_or_get inserts a fresh row in
   tenant-A and does not collide with the tenant-B row.
-* **Audit + broadcast** — every call writes exactly one
-  ``audit_log`` row (``op_id='topology.create_node'``,
-  ``method='CREATE_NODE'``, ``op_class='write'``) and publishes
-  exactly one broadcast event. Publish failure is swallowed
-  (fail-open).
+* **Audit** — every call writes exactly one ``audit_log`` row
+  (``op_id='topology.create_node'``, ``method='CREATE_NODE'``,
+  ``op_class='write'``). A create publishes no Broadcast event
+  (#3758).
 * **Bootstrap → annotate flow** — a fresh tenant can seed two nodes
   via :func:`create_or_get_node` and then annotate an edge between
   them (the issue's "from-zero-to-annotated" acceptance criterion at
@@ -45,7 +44,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -67,8 +65,6 @@ from meho_backplane.topology import (
     create_or_get_node,
 )
 from meho_backplane.topology.query import query_history, query_timeline
-
-_PUBLISH = "meho_backplane.topology.nodes.publish_event"
 
 
 @pytest.fixture(autouse=True)
@@ -131,16 +127,15 @@ async def test_create_node_inserts_fresh_row() -> None:
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="seeded from INVENTORY.md L42",
-                evidence_url="https://example.test/inv#L42",
-            )
+    async with sessionmaker() as session:
+        result = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="seeded from INVENTORY.md L42",
+            evidence_url="https://example.test/inv#L42",
+        )
 
     assert result.was_created is True
     assert result.node.kind == "vault-role"
@@ -169,23 +164,22 @@ async def test_create_node_is_idempotent_on_repeat() -> None:
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            first = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="first",
-            )
-        async with sessionmaker() as session:
-            second = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="second",
-            )
+    async with sessionmaker() as session:
+        first = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="first",
+        )
+    async with sessionmaker() as session:
+        second = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="second",
+        )
 
     assert first.was_created is True
     assert second.was_created is False
@@ -231,15 +225,14 @@ async def test_create_node_over_auto_promotes_discovered_by() -> None:
         )
         await session.commit()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vm",
-                name="legacy-vm",
-                note="taking ownership for cross-system depends-on",
-            )
+    async with sessionmaker() as session:
+        result = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vm",
+            name="legacy-vm",
+            note="taking ownership for cross-system depends-on",
+        )
 
     assert result.was_created is False
     assert result.node.source == "curated"
@@ -264,22 +257,21 @@ async def test_reseed_of_curated_row_keeps_original_author() -> None:
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            await create_or_get_node(
-                session,
-                _operator(tenant_id, sub="op-original"),
-                kind="service",
-                name="shared-svc",
-            )
-        async with sessionmaker() as session:
-            result = await create_or_get_node(
-                session,
-                _operator(tenant_id, sub="op-second"),
-                kind="service",
-                name="shared-svc",
-                note="second seeder's note",
-            )
+    async with sessionmaker() as session:
+        await create_or_get_node(
+            session,
+            _operator(tenant_id, sub="op-original"),
+            kind="service",
+            name="shared-svc",
+        )
+    async with sessionmaker() as session:
+        result = await create_or_get_node(
+            session,
+            _operator(tenant_id, sub="op-second"),
+            kind="service",
+            name="shared-svc",
+            note="second seeder's note",
+        )
 
     assert result.was_created is False
     assert result.node.source == "curated"
@@ -305,15 +297,14 @@ async def test_create_node_rejects_malformed_kind_before_db_write(bad_kind: str)
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()) as publish_mock:
-        async with sessionmaker() as session:
-            with pytest.raises(InvalidNodeKindError) as excinfo:
-                await create_or_get_node(
-                    session,
-                    _operator(tenant_id),
-                    kind=bad_kind,
-                    name="entangled",
-                )
+    async with sessionmaker() as session:
+        with pytest.raises(InvalidNodeKindError) as excinfo:
+            await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind=bad_kind,
+                name="entangled",
+            )
 
     message = str(excinfo.value)
     assert bad_kind in message
@@ -322,7 +313,7 @@ async def test_create_node_rejects_malformed_kind_before_db_write(bad_kind: str)
     # ...and the well-known kinds are echoed as suggestions.
     assert "vault-role" in message
 
-    # No row landed, no broadcast emitted.
+    # No row landed.
     async with sessionmaker() as session:
         rows = (
             (await session.execute(select(GraphNode).where(GraphNode.tenant_id == tenant_id)))
@@ -330,7 +321,6 @@ async def test_create_node_rejects_malformed_kind_before_db_write(bad_kind: str)
             .all()
         )
     assert rows == []
-    publish_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -344,14 +334,13 @@ async def test_create_node_accepts_novel_kind() -> None:
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="dns-record",
-                name="www.example.com",
-            )
+    async with sessionmaker() as session:
+        result = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="dns-record",
+            name="www.example.com",
+        )
 
     assert result.was_created is True
     assert result.node.kind == "dns-record"
@@ -365,25 +354,24 @@ async def test_create_node_accepts_novel_kind() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Audit + broadcast
+# Audit
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_create_node_writes_one_audit_row_and_one_broadcast() -> None:
-    """Exactly one ``audit_log`` row + one broadcast event per call."""
+async def test_create_node_writes_one_audit_row() -> None:
+    """Exactly one ``audit_log`` row per call."""
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()) as publish_mock:
-        async with sessionmaker() as session:
-            await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="principal",
-                name="k8s-sa-foo",
-                evidence_url="https://example.test/inv#sa-foo",
-            )
+    async with sessionmaker() as session:
+        await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="principal",
+            name="k8s-sa-foo",
+            evidence_url="https://example.test/inv#sa-foo",
+        )
 
     async with sessionmaker() as session:
         audits = (
@@ -405,40 +393,6 @@ async def test_create_node_writes_one_audit_row_and_one_broadcast() -> None:
     assert payload["was_created"] is True
     assert payload["evidence_url"] == "https://example.test/inv#sa-foo"
 
-    # Exactly one broadcast emission with the same audit_id pre-allocated.
-    assert publish_mock.await_count == 1
-    event = publish_mock.await_args.args[0]
-    assert event.op_id == "topology.create_node"
-    assert event.op_class == "write"
-    assert event.audit_id == row.id
-    assert event.target_name == "k8s-sa-foo"
-
-
-@pytest.mark.asyncio
-async def test_create_node_broadcast_is_fail_open() -> None:
-    """A broadcast publish exception is logged, never raised."""
-    tenant_id = await _seed_tenant()
-    sessionmaker = get_sessionmaker()
-
-    with patch(_PUBLISH, new=AsyncMock(side_effect=RuntimeError("stream down"))):
-        async with sessionmaker() as session:
-            result = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-            )
-
-    # Row still landed despite the publisher failure.
-    assert result.was_created is True
-    async with sessionmaker() as session:
-        rows = (
-            (await session.execute(select(GraphNode).where(GraphNode.tenant_id == tenant_id)))
-            .scalars()
-            .all()
-        )
-    assert len(rows) == 1
-
 
 # ---------------------------------------------------------------------------
 # Tenant boundary
@@ -457,21 +411,20 @@ async def test_create_node_does_not_collide_across_tenants() -> None:
     tenant_b = await _seed_tenant(slug="tenant-b")
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            await create_or_get_node(
-                session,
-                _operator(tenant_b, sub="op-b"),
-                kind="vault-role",
-                name="rdc-vault",
-            )
-        async with sessionmaker() as session:
-            result_a = await create_or_get_node(
-                session,
-                _operator(tenant_a, sub="op-a"),
-                kind="vault-role",
-                name="rdc-vault",
-            )
+    async with sessionmaker() as session:
+        await create_or_get_node(
+            session,
+            _operator(tenant_b, sub="op-b"),
+            kind="vault-role",
+            name="rdc-vault",
+        )
+    async with sessionmaker() as session:
+        result_a = await create_or_get_node(
+            session,
+            _operator(tenant_a, sub="op-a"),
+            kind="vault-role",
+            name="rdc-vault",
+        )
 
     assert result_a.was_created is True
 
@@ -499,33 +452,29 @@ async def test_create_node_then_annotate_round_trip() -> None:
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with (
-        patch(_PUBLISH, new=AsyncMock()),
-        patch("meho_backplane.topology.annotate.publish_event", new=AsyncMock()),
-    ):
-        async with sessionmaker() as session:
-            first = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="principal",
-                name="k8s-sa-prod",
-            )
-        async with sessionmaker() as session:
-            second = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-            )
-        async with sessionmaker() as session:
-            edge = await annotate_edge(
-                session,
-                _operator(tenant_id),
-                NodeRef("k8s-sa-prod", "principal"),
-                "authenticates-via",
-                NodeRef("rdc-vault", "vault-role"),
-                note="bootstrap test",
-            )
+    async with sessionmaker() as session:
+        first = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="principal",
+            name="k8s-sa-prod",
+        )
+    async with sessionmaker() as session:
+        second = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+        )
+    async with sessionmaker() as session:
+        edge = await annotate_edge(
+            session,
+            _operator(tenant_id),
+            NodeRef("k8s-sa-prod", "principal"),
+            "authenticates-via",
+            NodeRef("rdc-vault", "vault-role"),
+            note="bootstrap test",
+        )
 
     assert first.was_created is True
     assert second.was_created is True
@@ -566,16 +515,15 @@ async def test_create_node_emits_created_history_row_visible_to_history_verb() -
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="seeded from INVENTORY.md L42",
-                evidence_url="https://example.test/inv#L42",
-            )
+    async with sessionmaker() as session:
+        result = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="seeded from INVENTORY.md L42",
+            evidence_url="https://example.test/inv#L42",
+        )
 
     # Exactly one history row landed for this node, ``created``.
     async with sessionmaker() as session:
@@ -636,14 +584,13 @@ async def test_create_node_seed_appears_in_timeline_verb() -> None:
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="principal",
-                name="k8s-sa-prod",
-            )
+    async with sessionmaker() as session:
+        result = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="principal",
+            name="k8s-sa-prod",
+        )
 
     timeline = await query_timeline(_operator(tenant_id))
     # Exactly one entry — the create_node seed.
@@ -672,25 +619,24 @@ async def test_create_node_idempotent_reseed_does_not_double_write_history() -> 
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            first = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="same",
-                evidence_url="https://example.test/same",
-            )
-        async with sessionmaker() as session:
-            second = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="same",
-                evidence_url="https://example.test/same",
-            )
+    async with sessionmaker() as session:
+        first = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="same",
+            evidence_url="https://example.test/same",
+        )
+    async with sessionmaker() as session:
+        second = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="same",
+            evidence_url="https://example.test/same",
+        )
 
     assert first.was_created is True
     assert second.was_created is False
@@ -727,23 +673,22 @@ async def test_create_node_meaningful_reseed_emits_updated_history_row() -> None
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            first = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="first",
-            )
-        async with sessionmaker() as session:
-            second = await create_or_get_node(
-                session,
-                _operator(tenant_id),
-                kind="vault-role",
-                name="rdc-vault",
-                note="second",
-            )
+    async with sessionmaker() as session:
+        first = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="first",
+        )
+    async with sessionmaker() as session:
+        second = await create_or_get_node(
+            session,
+            _operator(tenant_id),
+            kind="vault-role",
+            name="rdc-vault",
+            note="second",
+        )
 
     assert first.was_created is True
     assert second.was_created is False
@@ -788,21 +733,20 @@ async def test_create_node_history_does_not_leak_across_tenants() -> None:
     tenant_b = await _seed_tenant(slug="tenant-b")
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            await create_or_get_node(
-                session,
-                _operator(tenant_b, sub="op-b"),
-                kind="vault-role",
-                name="rdc-vault",
-            )
-        async with sessionmaker() as session:
-            await create_or_get_node(
-                session,
-                _operator(tenant_a, sub="op-a"),
-                kind="vault-role",
-                name="rdc-vault",
-            )
+    async with sessionmaker() as session:
+        await create_or_get_node(
+            session,
+            _operator(tenant_b, sub="op-b"),
+            kind="vault-role",
+            name="rdc-vault",
+        )
+    async with sessionmaker() as session:
+        await create_or_get_node(
+            session,
+            _operator(tenant_a, sub="op-a"),
+            kind="vault-role",
+            name="rdc-vault",
+        )
 
     timeline_a = await query_timeline(_operator(tenant_a, sub="op-a"))
     assert len(timeline_a.rows) == 1

@@ -32,6 +32,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector, KubernetesTargetLike
 from meho_backplane.connectors.kubernetes.ops_customresource import custom_resource_row
 from meho_backplane.connectors.kubernetes.redaction import (
+    LAST_APPLIED_ANNOTATION,
     REDACTED_PREFIX,
     redact_kubernetes_payload,
     redact_secret_value,
@@ -166,6 +167,44 @@ def test_list_envelope_of_secrets_all_redacted() -> None:
     for item in out["items"]:
         assert item["data"]["tls.key"] == redact_secret_value(_TLS_KEY_B64)
     assert _TLS_KEY_B64 not in str(out)
+
+
+def test_secret_list_items_without_kind_are_redacted() -> None:
+    """``GET .../secrets`` returns a ``SecretList`` whose items carry no ``kind``."""
+    item = _make_secret(with_string_data=True)
+    del item["kind"]
+    del item["apiVersion"]
+    envelope = {"apiVersion": "v1", "kind": "SecretList", "items": [item]}
+    out = redact_kubernetes_payload(envelope)
+    (redacted,) = out["items"]
+    assert redacted["data"]["tls.key"] == redact_secret_value(_TLS_KEY_B64)
+    assert redacted["stringData"]["config.ini"] == redact_secret_value(_STRINGDATA_PLAINTEXT)
+    assert _TLS_KEY_B64 not in str(out)
+    assert _STRINGDATA_PLAINTEXT not in str(out)
+
+
+def test_kindless_items_outside_a_secret_list_are_untouched() -> None:
+    """Only a ``SecretList`` envelope makes a kind-less item a Secret."""
+    item = {"metadata": {"name": "cm"}, "data": {"config.ini": _STRINGDATA_PLAINTEXT}}
+    out = redact_kubernetes_payload({"kind": "ConfigMapList", "items": [item]})
+    assert out["items"][0]["data"]["config.ini"] == _STRINGDATA_PLAINTEXT
+
+
+def test_last_applied_annotation_on_secret_is_redacted() -> None:
+    """``kubectl apply`` repeats every value in the last-applied annotation."""
+    secret = _make_secret()
+    secret["metadata"]["annotations"] = {
+        LAST_APPLIED_ANNOTATION: f'{{"data":{{"tls.key":"{_TLS_KEY_B64}"}}}}',
+        "owner": "team-a",
+    }
+    out = redact_kubernetes_payload(secret)
+    annotations = out["metadata"]["annotations"]
+    assert annotations[LAST_APPLIED_ANNOTATION].startswith(REDACTED_PREFIX)
+    assert annotations["owner"] == "team-a"
+    assert _TLS_KEY_B64 not in str(out)
+    # The annotation on a non-Secret object stays as it is.
+    config_map = {"kind": "ConfigMap", "metadata": {"annotations": {LAST_APPLIED_ANNOTATION: "x"}}}
+    assert redact_kubernetes_payload(config_map) == config_map
 
 
 def test_nested_secret_deep_in_structure_is_caught() -> None:

@@ -3,10 +3,14 @@
 
 """REST tests for ``/api/v1/service-principals/grants*`` (#3151).
 
-Two contracts:
+Three contracts:
 
 * **RBAC** — every route is gated by ``require_role(TenantRole.OPERATOR)``;
   a ``read_only`` JWT gets HTTP 403 ``insufficient_role`` everywhere.
+* **People only on create and revoke (#4616)** — a machine ``principal_kind``
+  (``agent`` / ``service``) holding the ``operator`` role gets HTTP 403
+  ``human_principal_required`` on create and revoke, before the route runs,
+  and the refusal lands on the audit log. List and show stay role-only.
 * **Happy path (operator)** — create → list → show → revoke round-trips,
   and the create-time review rejects a delete-shaped op / a wildcard with
   HTTP 422.
@@ -26,7 +30,6 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -40,16 +43,6 @@ from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _BASE = "/api/v1/service-principals/grants"
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence the broadcast publisher so responses don't stall on Valkey."""
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)
@@ -110,6 +103,70 @@ def test_read_only_role_is_rejected(
         response = client.request(method, path, headers=headers, json=body)
     assert response.status_code == 403, response.text
     assert response.json() == {"detail": "insufficient_role"}
+
+
+# RUNNER is refused earlier on the wire (401 missing_runner_id and the
+# runner path-cage in middleware), so it never reaches the human-only guard
+# over REST. Same split as ``test_api_v1_agent_grants``.
+_MACHINE_KINDS: tuple[str, ...] = ("agent", "service")
+
+_HUMAN_ONLY_ENDPOINTS: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
+    ("POST", _BASE, _ENDPOINTS[2][2]),
+    ("DELETE", f"{_BASE}/{_GRANT_ID}", None),
+)
+
+
+def _machine_operator_token(key: Any, *, kind: str, sub: str) -> str:
+    """Mint a machine principal at ``operator`` so only the people-only gate can refuse it."""
+    return mint_token(
+        key,
+        sub=sub,
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind=kind,
+    )
+
+
+async def _refusal_audit_rows(operator_sub: str, method: str, path: str) -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        return list(
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.operator_sub == operator_sub,
+                        AuditLog.method == method,
+                        AuditLog.path == path,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+@pytest.mark.parametrize("kind", _MACHINE_KINDS)
+@pytest.mark.parametrize("method, path, body", _HUMAN_ONLY_ENDPOINTS)
+async def test_machine_principal_denied_on_create_and_revoke(
+    client: TestClient, method: str, path: str, body: dict[str, Any] | None, kind: str
+) -> None:
+    """A machine ``operator`` token → 403 ``human_principal_required`` on create and revoke (#4616).
+
+    The token holds the ``operator`` role, so the role check passes and the
+    403 can only come from the people-only check. The refusal is audited
+    as a 403 row, the same way the approval routes record theirs.
+    """
+    sub = f"machine-{kind}-{method.lower()}"
+    key = make_rsa_keypair(f"kid-machine-{kind}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_machine_operator_token(key, kind=kind, sub=sub)}"}
+        response = client.request(method, path, headers=headers, json=body)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("human_principal_required"), response.text
+
+    rows = await _refusal_audit_rows(sub, method, path)
+    assert len(rows) == 1
+    assert rows[0].status_code == 403
 
 
 def test_operator_crud_round_trip(client: TestClient) -> None:

@@ -38,7 +38,6 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -55,11 +54,6 @@ from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
-
-# Patch site — broadcast publisher in the service module.
-_PUBLISH_NODES_PATCH = "meho_backplane.topology.nodes.publish_event"
-_PUBLISH_ANNOTATE_PATCH = "meho_backplane.topology.annotate.publish_event"
-
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -224,17 +218,16 @@ async def test_create_node_inserts_row_and_returns_was_created_true(
     """tools/call meho_topology_create_node {...} on empty tenant → fresh row."""
     client, _op = client_with_operator
 
-    with patch(_PUBLISH_NODES_PATCH, new=AsyncMock()) as publish_mock:
-        response = _create_node_call(
-            client,
-            10,
-            {
-                "kind": "vault-role",
-                "name": "rdc-vault",
-                "note": "INVENTORY.md L42",
-                "evidence_url": "https://example.test/inv#L42",
-            },
-        )
+    response = _create_node_call(
+        client,
+        10,
+        {
+            "kind": "vault-role",
+            "name": "rdc-vault",
+            "note": "INVENTORY.md L42",
+            "evidence_url": "https://example.test/inv#L42",
+        },
+    )
 
     body = response.json()
     assert body["result"]["isError"] is False
@@ -261,9 +254,6 @@ async def test_create_node_inserts_row_and_returns_was_created_true(
     assert len(rows) == 1
     assert rows[0].properties["note"] == "INVENTORY.md L42"
 
-    # One service-level broadcast.
-    assert publish_mock.await_count == 1
-
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_create_node_is_idempotent_on_repeat(
@@ -273,13 +263,12 @@ async def test_create_node_is_idempotent_on_repeat(
     """A second tools/call with the same (kind, name) → was_created=false."""
     client, _op = client_with_operator
 
-    with patch(_PUBLISH_NODES_PATCH, new=AsyncMock()):
-        first = _create_node_call(client, 20, {"kind": "vault-role", "name": "rdc-vault"})
-        second = _create_node_call(
-            client,
-            21,
-            {"kind": "vault-role", "name": "rdc-vault", "note": "second"},
-        )
+    first = _create_node_call(client, 20, {"kind": "vault-role", "name": "rdc-vault"})
+    second = _create_node_call(
+        client,
+        21,
+        {"kind": "vault-role", "name": "rdc-vault", "note": "second"},
+    )
 
     first_payload = json.loads(first.json()["result"]["content"][0]["text"])
     second_payload = json.loads(second.json()["result"]["content"][0]["text"])
@@ -366,24 +355,20 @@ async def test_bootstrap_then_annotate_round_trip_via_mcp(
     """
     client, _op = client_with_operator
 
-    with (
-        patch(_PUBLISH_NODES_PATCH, new=AsyncMock()),
-        patch(_PUBLISH_ANNOTATE_PATCH, new=AsyncMock()),
-    ):
-        node_one = _create_node_call(client, 40, {"kind": "principal", "name": "k8s-sa-prod"})
-        node_two = _create_node_call(client, 41, {"kind": "vault-role", "name": "rdc-vault"})
-        edge = _annotate_call(
-            client,
-            42,
-            {
-                "from_name": "k8s-sa-prod",
-                "from_node_kind": "principal",
-                "kind": "authenticates-via",
-                "to_name": "rdc-vault",
-                "to_node_kind": "vault-role",
-                "note": "bootstrap",
-            },
-        )
+    node_one = _create_node_call(client, 40, {"kind": "principal", "name": "k8s-sa-prod"})
+    node_two = _create_node_call(client, 41, {"kind": "vault-role", "name": "rdc-vault"})
+    edge = _annotate_call(
+        client,
+        42,
+        {
+            "from_name": "k8s-sa-prod",
+            "from_node_kind": "principal",
+            "kind": "authenticates-via",
+            "to_name": "rdc-vault",
+            "to_node_kind": "vault-role",
+            "note": "bootstrap",
+        },
+    )
 
     assert node_one.json()["result"]["isError"] is False
     assert node_two.json()["result"]["isError"] is False
@@ -437,16 +422,15 @@ async def test_annotate_missing_endpoint_still_returns_node_not_found(
     """
     client, _op = client_with_operator
 
-    with patch(_PUBLISH_ANNOTATE_PATCH, new=AsyncMock()):
-        response = _annotate_call(
-            client,
-            50,
-            {
-                "from_name": "ghost-principal",
-                "kind": "authenticates-via",
-                "to_name": "ghost-vault",
-            },
-        )
+    response = _annotate_call(
+        client,
+        50,
+        {
+            "from_name": "ghost-principal",
+            "kind": "authenticates-via",
+            "to_name": "ghost-vault",
+        },
+    )
 
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS

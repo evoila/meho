@@ -36,10 +36,8 @@ from uuid import UUID
 import pytest
 from sqlalchemy import update
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
-    BroadcastEvent,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.broadcast.announce_gate import (
@@ -344,17 +342,6 @@ def _reset_dispatch_state() -> Iterator[None]:
 
 
 @pytest.fixture
-def _quiet_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
-@pytest.fixture
 def stub_embedding_service() -> AsyncMock:
     service = AsyncMock()
     service.encode_one.return_value = [0.1] * 384
@@ -386,7 +373,6 @@ async def _register_op(
 async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     session: UUID | None,
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """Enabled tenant + caution write + no claim -> denied, both surfaces.
 
@@ -418,7 +404,6 @@ async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
 
 async def test_dispatch_executes_when_gate_disabled(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """A disabled tenant runs the same op unaffected."""
     await _seed_tenant(enabled=False)
@@ -437,7 +422,6 @@ async def test_dispatch_executes_when_gate_disabled(
 
 async def test_dispatch_executes_when_claim_present(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """An enabled tenant with a covering claim runs the op."""
     await _seed_tenant(enabled=True)

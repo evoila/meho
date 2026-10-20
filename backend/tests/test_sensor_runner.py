@@ -49,9 +49,7 @@ import respx
 import structlog
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.checks.assertions import AssertionSpec
 from meho_backplane.checks.repository import (
     advance_sensor_next_fire,
@@ -1203,18 +1201,6 @@ def _embedding_stub() -> AsyncMock:
     return service
 
 
-@pytest.fixture
-def _captured_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events a real dispatch emits instead of hitting the bus."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 async def _register_k8s_mould(embedding_service: AsyncMock) -> None:
     register_connector_v2(
         product=_K8S_MOULD_PRODUCT,
@@ -1310,7 +1296,6 @@ async def _create_target_bound_sensor(
 async def test_target_bound_sensor_resolves_and_dispatches_real_ok(
     _reset_registry: None,
     _embedding_stub: AsyncMock,
-    _captured_broadcast: list[BroadcastEvent],
 ) -> None:
     """A target-bound sensor evaluates end-to-end through the real resolve->dispatch.
 
@@ -1340,7 +1325,6 @@ async def test_target_bound_sensor_resolves_and_dispatches_real_ok(
 async def test_inline_target_object_resolves_by_name_real_ok(
     _reset_registry: None,
     _embedding_stub: AsyncMock,
-    _captured_broadcast: list[BroadcastEvent],
 ) -> None:
     """A full inline ``{"name": ...}`` target object resolves by name and dispatches ok.
 
@@ -1366,7 +1350,6 @@ async def test_inline_target_object_resolves_by_name_real_ok(
 async def test_unresolvable_target_name_yields_no_target_evidence(
     _reset_registry: None,
     _embedding_stub: AsyncMock,
-    _captured_broadcast: list[BroadcastEvent],
 ) -> None:
     """A target name matching no live target reads ``no_target`` -- not ``no_connector``.
 
@@ -1394,7 +1377,6 @@ async def test_unresolvable_target_name_yields_no_target_evidence(
 async def test_alias_collision_yields_ambiguous_target_evidence(
     _reset_registry: None,
     _embedding_stub: AsyncMock,
-    _captured_broadcast: list[BroadcastEvent],
 ) -> None:
     """A target name that collides across two aliases reads ``ambiguous_target``."""
     await _register_k8s_mould(_embedding_stub)
@@ -1536,7 +1518,6 @@ async def test_runner_presents_service_principal_jwt_as_wif_subject_token(
     monkeypatch: pytest.MonkeyPatch,
     _reset_registry: None,
     _embedding_stub: AsyncMock,
-    _captured_broadcast: list[BroadcastEvent],
 ) -> None:
     """AC1: the STS subject token is the runner principal's JWT, not ``""``.
 
@@ -1584,7 +1565,6 @@ async def test_ambient_adc_serves_background_dispatch_without_a_principal(
     monkeypatch: pytest.MonkeyPatch,
     _reset_registry: None,
     _embedding_stub: AsyncMock,
-    _captured_broadcast: list[BroadcastEvent],
 ) -> None:
     """AC2: ambient ADC + ``raw_jwt=""`` takes the SA-direct fallback.
 
@@ -1623,7 +1603,6 @@ async def test_gsm_credential_failure_never_reports_a_vault_error(
     monkeypatch: pytest.MonkeyPatch,
     _reset_registry: None,
     _embedding_stub: AsyncMock,
-    _captured_broadcast: list[BroadcastEvent],
 ) -> None:
     """AC3: on a GSM deploy the sensor's ``dispatch_error`` says nothing about Vault.
 

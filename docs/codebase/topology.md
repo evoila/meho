@@ -1899,8 +1899,6 @@ tables, happy path, `--json`, cross-tenant seed 404).
 - `meho_backplane.auth.operator.Operator` — `operator.tenant_id` is
   the only tenant boundary; every read statement filters node and edge
   `tenant_id` against it.
-- `meho_backplane.broadcast` — `BroadcastEvent` / `publish_event`
-  (fail-open, G6.1).
 - `meho_backplane.settings` — `topology_refresh_interval_seconds`,
   `topology_history_retention_days`,
   `topology_history_prune_interval_seconds`,

@@ -63,7 +63,7 @@ def stub_dispatch_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]
         lambda: SimpleNamespace(dispatch_concurrency_slot_ttl_seconds=3600),
     )
     audit = AsyncMock()
-    monkeypatch.setattr(dispatcher, "audit_and_broadcast_safe", audit)
+    monkeypatch.setattr(dispatcher, "audit_safe", audit)
     reject = AsyncMock()
     monkeypatch.setattr(dispatcher, "audit_rejection_safe", reject)
     gate = AsyncMock()
@@ -91,10 +91,10 @@ async def test_rate_limit_rejection_is_audited_and_skips_execution(
     assert result.status == "rate_limited"
     assert result.extras["kind"] == "rate"
     assert result.extras["retry_after_seconds"] == 30
-    # Audited (row only, no broadcast) with result_status='rate_limited' ...
+    # Audited as a rejection row with result_status='rate_limited' ...
     stub_dispatch_seams["reject"].assert_awaited_once()
     assert stub_dispatch_seams["reject"].await_args.kwargs["result_status"] == "rate_limited"
-    stub_dispatch_seams["audit"].assert_not_awaited()  # no broadcast amplification
+    stub_dispatch_seams["audit"].assert_not_awaited()  # only the rejection row is written
     # ... and the policy gate / execution were never reached (no vendor traffic).
     stub_dispatch_seams["gate"].assert_not_awaited()
 
@@ -120,7 +120,7 @@ async def test_concurrency_rejection_is_audited_and_skips_execution(
     assert result.extras["kind"] == "concurrency"
     stub_dispatch_seams["reject"].assert_awaited_once()
     assert stub_dispatch_seams["reject"].await_args.kwargs["result_status"] == "rate_limited"
-    stub_dispatch_seams["audit"].assert_not_awaited()  # no broadcast amplification
+    stub_dispatch_seams["audit"].assert_not_awaited()  # only the rejection row is written
     stub_dispatch_seams["gate"].assert_not_awaited()
 
 

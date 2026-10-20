@@ -56,7 +56,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -142,23 +141,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire.
-
-    Required for the same reason as every other DB-backed dispatcher
-    test: the real broadcast bus tries to write to a Redis stream
-    that doesn't exist in the unit-test environment.
-    """
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 # ---------------------------------------------------------------------------
 # Setup helpers
 # ---------------------------------------------------------------------------
@@ -217,7 +199,7 @@ class _VropsE2EBundle:
 
 
 @pytest.fixture
-async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VropsE2EBundle]:
+async def vcf_operations_e2e_canary() -> AsyncIterator[_VropsE2EBundle]:
     """Dispatcher-ready vROps setup over a respx-mocked appliance (happy-path).
 
     Lifecycle:

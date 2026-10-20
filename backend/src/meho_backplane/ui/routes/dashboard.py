@@ -10,21 +10,17 @@ renders three components per the Initiative work-item #6:
   routes G10.1-G10.5 fill in. The sixth tile is a static
   "deploy details" card so the grid layout is balanced without a
   trailing empty slot.
-* A live recent-activity snippet wired to the session-gated SSE
-  bridge ``/ui/broadcast/stream`` (G0.25 #1696). The chassis
-  originally pointed ``sse-connect`` at the Bearer-authenticated
-  ``/api/v1/feed``, but the browser's ``EventSource`` cannot send an
-  ``Authorization`` header (the WHATWG constructor exposes only
-  ``withCredentials``), so that wiring 401-looped and the tray never
-  left its "Connecting..." placeholder. The bridge lives under
-  ``/ui/`` where the operator's session cookie -- the same boundary
-  that gated this page render -- authenticates the stream. Frames are
-  consumed through the hidden-sink + Alpine pattern the broadcast and
-  connectors surfaces established (``dashboardFeedTray`` in
-  ``static/src/app/dashboard-feed.js``): the controller cancels the
-  extension's raw swap and renders each ``BroadcastEvent`` JSON frame
-  through ``x-text`` bindings, which keeps markup-bearing event
-  fields inert instead of letting the swap parse them into live DOM.
+* A recent-operations tray (#3758): the newest 50
+  ``operation_execution`` audit rows of the tenant, read through the
+  audit reader (:func:`~meho_backplane.audit_query.query_audit`) and
+  rendered on the server. ``recent-ops-refresh.js`` re-fetches the tray
+  from ``GET /ui/dashboard/recent-operations`` every 5 seconds while the
+  page is visible, and the tray shows when it was last updated. It used
+  to follow the Broadcast SSE stream; Broadcast now carries deliberate
+  agent announcements only. The tray and its fragment need the
+  ``operator`` role, the same minimum the audit API applies
+  (:func:`~meho_backplane.ui.roles.is_ui_operator`); a ``read_only``
+  session gets a notice instead of rows, and the fragment answers 403.
 * A version + readiness card sourced from the deployed-build label the
   chassis Jinja env binds as the ``app_version`` global -- the same
   ``CHART_VERSION`` / ``GIT_SHA`` env metadata ``GET /version`` reads
@@ -42,39 +38,29 @@ the page can echo it back to the server on subsequent state-changing
 requests. The cookie's ``SameSite=Strict`` + ``Secure`` attributes
 mirror the session cookie's posture.
 
-Why one combined handler instead of split fragments
----------------------------------------------------
-
-The Initiative explicitly scopes "dashboard view" to a single page; the
-HTMX SSE snippet swaps fragments into the same page rather than
-navigating to a sub-route. A future surface Initiative may add HTMX
-``hx-get`` partials (e.g. tenant selector dropdown), but those are
-G10.1+ scope. v0.2.0 ships the dashboard as one Jinja template.
-
 References
 ----------
 
-* HTMX 2 SSE extension -- ``sse-connect`` / ``sse-swap``:
-  https://htmx.org/extensions/sse/
 * Chassis ``base.html`` reference (sidebar links, version footer):
   ``backend/src/meho_backplane/ui/templates/base.html``
-* Session-gated SSE bridge (G10.1-T1, #867) the tray subscribes to:
-  ``backend/src/meho_backplane/ui/routes/broadcast/stream.py``
-* Canonical per-tenant SSE feed the bridge stays byte-compatible
-  with (G6.1-T4, #310):
-  ``backend/src/meho_backplane/api/v1/feed.py``
+* Audit reader: ``backend/src/meho_backplane/audit_query/query.py``
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Final
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
+from meho_backplane.audit_query import AuditQueryFilters, query_audit
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.health import readiness_snapshot
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.roles import is_ui_operator
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_dashboard_router"]
@@ -151,26 +137,84 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
 )
 
 
-#: The session-gated SSE bridge the recent-activity tray subscribes to
-#: (G0.25 #1696). NOT ``/api/v1/feed`` -- the browser ``EventSource``
-#: cannot send the Bearer header that endpoint requires, so the
-#: original wiring 401-looped forever; see the rationale in
-#: :mod:`meho_backplane.ui.routes.broadcast.stream` and the matching
-#: ``_STREAM_ENDPOINT`` constant in
-#: :mod:`meho_backplane.ui.routes.broadcast.feed`. The dashboard
-#: subscribes to the unfiltered live tail (no query parameters) --
-#: filtering is the broadcast surface's affordance.
-_FEED_STREAM_ENDPOINT: Final[str] = "/ui/broadcast/stream"
+#: Rows in the recent-operations tray. The tray is a glance surface (~12
+#: visible rows under its ``max-h-72`` scroll box); 50 gives some
+#: scroll-back and keeps the refresh query small.
+_RECENT_OPS_LIMIT: Final[int] = 50
 
-#: Hard cap on the number of event rows the tray keeps in the DOM at
-#: once, passed to the ``dashboardFeedTray`` Alpine controller. The
-#: tray is a glance surface (~12 visible rows under its ``max-h-72``
-#: scroll box), so the connectors recent-ops default (50) is the right
-#: order of magnitude -- enough scroll-back to be useful, bounded so an
-#: all-day dashboard tab can't grow the DOM unboundedly. The richer
-#: bounded-tray UX (row counters, trim affordances) is G10.1 (#338)
-#: surface work per #1696's out-of-scope.
-_FEED_TRAY_DOM_CAP: Final[int] = 50
+#: Path of the tray's refresh fragment (#3758).
+_RECENT_OPS_URL: Final[str] = "/ui/dashboard/recent-operations"
+
+_require_ui_session_dep = Depends(require_ui_session)
+
+
+async def audit_read_allowed(session: UISessionContext = _require_ui_session_dep) -> bool:
+    """FastAPI dependency: may this session read audit rows on the console?
+
+    True for ``operator`` and ``tenant_admin``; False for ``read_only``
+    and for a role lift that cannot complete. Mirrors the audit API's
+    minimum role so the tray never shows rows the API would refuse.
+    """
+    return await is_ui_operator(session)
+
+
+_audit_read_allowed_dep = Depends(audit_read_allowed)
+
+
+def _recent_ops_forbidden_context() -> dict[str, object]:
+    """Template context for a session below the ``operator`` role.
+
+    The tray renders a notice and carries no refresh URL, so
+    ``recent-ops-refresh.js`` does not poll a fragment that would 403.
+    """
+    return {
+        "recent_ops": [],
+        "recent_ops_forbidden": True,
+        "recent_ops_limit": _RECENT_OPS_LIMIT,
+    }
+
+
+async def _recent_ops_context(session: UISessionContext) -> dict[str, object]:
+    """Read the tenant's newest operation rows through the audit reader.
+
+    Same tenant scope as the audit console: ``tenant_id`` comes from the
+    validated session and is a mandatory argument of
+    :func:`~meho_backplane.audit_query.query_audit`, so another tenant's
+    rows can never appear. Only ``operation_execution`` rows (#3733)
+    count: an operation ran.
+    """
+    filters = AuditQueryFilters(
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        limit=_RECENT_OPS_LIMIT,
+    )
+    async with get_sessionmaker()() as db_session:
+        result = await query_audit(filters, tenant_id=session.tenant_id, session=db_session)
+    return {
+        "recent_ops": result.rows,
+        "recent_ops_forbidden": False,
+        "recent_ops_url": _RECENT_OPS_URL,
+        "recent_ops_limit": _RECENT_OPS_LIMIT,
+        "recent_ops_updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def _render_recent_ops(
+    request: Request,
+    session: UISessionContext = _require_ui_session_dep,
+    allowed: bool = _audit_read_allowed_dep,
+) -> HTMLResponse:
+    """Render ``GET /ui/dashboard/recent-operations`` -- the tray alone."""
+    # A session below the ``operator`` role gets the notice tray at 403.
+    if not allowed:
+        return get_templates().TemplateResponse(
+            request,
+            "_dashboard_recent_ops.html",
+            _recent_ops_forbidden_context(),
+            status_code=403,
+        )
+    return get_templates().TemplateResponse(
+        request, "_dashboard_recent_ops.html", await _recent_ops_context(session)
+    )
 
 
 async def _readiness_snapshot() -> dict[str, object]:
@@ -192,7 +236,8 @@ async def _readiness_snapshot() -> dict[str, object]:
 
 async def _render_dashboard(
     request: Request,
-    session: UISessionContext = Depends(require_ui_session),
+    session: UISessionContext = _require_ui_session_dep,
+    audit_allowed: bool = _audit_read_allowed_dep,
 ) -> HTMLResponse:
     """Render ``GET /ui/`` for the authenticated operator.
 
@@ -216,6 +261,9 @@ async def _render_dashboard(
     # lock-step, and the dashboard's behaviour is unchanged (#1776).
     request.state.ui_ready = bool(readiness["ready"])
     csrf_token = mint_csrf_token(str(session.session_id))
+    recent_ops = (
+        await _recent_ops_context(session) if audit_allowed else _recent_ops_forbidden_context()
+    )
     context = {
         "page_title": "Dashboard",
         "ready": readiness["ready"],
@@ -224,15 +272,7 @@ async def _render_dashboard(
         "operator_sub": session.operator_sub,
         "tenant_id": str(session.tenant_id),
         "csrf_token": csrf_token,
-        # Endpoint the HTMX SSE sink subscribes to. Lifted out so a
-        # future deploy can swap to a CDN-hosted edge proxy without
-        # editing the template. The session-gated bridge streams the
-        # tenant's live tail scoped by the validated session -- no
-        # tenant or limit query parameters exist on the route, so the
-        # tray subscribes bare and bounds itself client-side via
-        # ``feed_tray_cap``.
-        "feed_endpoint": _FEED_STREAM_ENDPOINT,
-        "feed_tray_cap": _FEED_TRAY_DOM_CAP,
+        **recent_ops,
     }
     response = get_templates().TemplateResponse(request, "dashboard.html", context)
     # Mirror the SameSite + Secure posture of the session cookie. The
@@ -259,6 +299,13 @@ def build_dashboard_router() -> APIRouter:
     instance per app under test without sharing route state.
     """
     router = APIRouter(tags=["ui"])
+    router.add_api_route(
+        _RECENT_OPS_URL,
+        _render_recent_ops,
+        methods=["GET"],
+        name="ui_dashboard_recent_operations",
+        response_class=HTMLResponse,
+    )
     router.add_api_route(
         "/ui/",
         _render_dashboard,

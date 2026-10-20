@@ -2336,14 +2336,18 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "enum": ["created", "rolled_back"],
             "description": (
                 "``'created'`` after every step succeeded; "
-                "``'rolled_back'`` when a post-create step failed and "
-                "the handler issued ``DELETE:/vcenter/vm/{vm}``."
+                "``'rolled_back'`` when a step failed. If a VM was "
+                "already created, the handler tried "
+                "``DELETE:/vcenter/vm/{vm}`` and ``rollback.outcome`` "
+                "says what happened."
             ),
         },
         "vm_id": {
             "type": ["string", "null"],
             "description": (
-                "Newly-created VM moid. ``null`` on rollback (the VM no longer exists)."
+                "Newly-created VM moid. ``null`` when "
+                "``status='rolled_back'``; read ``rollback`` to see "
+                "whether a VM this run created still exists."
             ),
         },
         "steps_succeeded": {

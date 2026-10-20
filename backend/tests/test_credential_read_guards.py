@@ -27,9 +27,7 @@ from uuid import UUID
 import pytest
 
 import meho_backplane.connectors.bind9  # noqa: F401 -- registers the connector at import
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
@@ -129,17 +127,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 def _make_operator() -> Operator:
@@ -262,7 +249,6 @@ async def _register_sddc_credentials_read(embedding_service: AsyncMock) -> None:
 
 async def test_sddc_ingested_credential_read_response_is_scrubbed(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The caller gets the placeholder for the password; other fields stay."""
     await _register_sddc_credentials_read(stub_embedding_service)
@@ -369,7 +355,6 @@ async def _register_bind9_config_show(embedding_service: AsyncMock) -> None:
 
 async def test_bind9_config_show_key_secret_is_redacted(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The key value becomes the placeholder; the rest of the file is unchanged."""
     await _register_bind9_config_show(stub_embedding_service)

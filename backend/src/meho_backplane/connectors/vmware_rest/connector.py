@@ -2935,7 +2935,7 @@ class VmwareRestConnector(HttpConnector):
         Delegates to
         :func:`~meho_backplane.connectors.vmware_rest.typed_ops_tasks_history.tasks_history_impl`
         (imported lazily, like the other typed ops). Returns
-        ``{"tasks": [...], "truncated", "scanned", "collector_destroyed"}``.
+        ``{"tasks": [...], "truncated", "scanned", "collector_cleanup"}``.
         """
         from meho_backplane.connectors.vmware_rest.typed_ops_tasks_history import (
             tasks_history_impl,
@@ -3009,29 +3009,79 @@ class VmwareRestConnector(HttpConnector):
             # a future code path ever caches a token without recording
             # its endpoint.
             revoke_path = paths.get(cache_key, SESSION_PATH_MODERN)
-            try:
-                resp = await client.request(
-                    "DELETE",
-                    revoke_path,
-                    headers={_SESSION_HEADER: token},
-                    extensions=extensions,
-                )
-                # Log non-2xx but don't raise — shutdown proceeds.
-                if resp.status_code >= 400:
-                    _log.warning(
-                        "vsphere_session_revoke_non_2xx",
-                        target=cache_key,
-                        status_code=resp.status_code,
-                        session_path=revoke_path,
-                    )
-            except (httpx.HTTPError, OSError) as exc:
-                _log.warning(
-                    "vsphere_session_revoke_failed",
-                    target=cache_key,
-                    error=f"{type(exc).__name__}: {exc}",
-                    session_path=revoke_path,
-                )
+            await self._vcenter_revoke_quiet(client, cache_key, token, revoke_path, extensions)
         await super().aclose()
+
+    @staticmethod
+    async def _vcenter_revoke_quiet(
+        client: httpx.AsyncClient,
+        cache_key: tuple[str, str],
+        token: str,
+        revoke_path: str,
+        extensions: dict[str, Any],
+    ) -> bool:
+        """``DELETE`` one vCenter session; log a failure instead of raising.
+
+        Returns ``True`` when vCenter accepted the revoke (a 2xx answer), so
+        the caller knows the server-side session, and everything that lived
+        in it, is gone. A non-2xx answer or a transport error is logged and
+        returns ``False`` -- shutdown and the cleanup paths that call this
+        must not block on an unreachable target.
+        """
+        try:
+            resp = await client.request(
+                "DELETE",
+                revoke_path,
+                headers={_SESSION_HEADER: token},
+                extensions=extensions,
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            _log.warning(
+                "vsphere_session_revoke_failed",
+                target=cache_key,
+                error=f"{type(exc).__name__}: {exc}",
+                session_path=revoke_path,
+            )
+            return False
+        if resp.status_code >= 400:
+            _log.warning(
+                "vsphere_session_revoke_non_2xx",
+                target=cache_key,
+                status_code=resp.status_code,
+                session_path=revoke_path,
+            )
+            return False
+        return True
+
+    async def close_session(self, target: VsphereTargetLike) -> bool:
+        """Evict the cached session for *target* and end it on the server too.
+
+        :meth:`invalidate_session` only drops the cached token; the vCenter
+        session itself lives on until vCenter times it out. This method also
+        sends the ``DELETE`` at the recorded session path, so server-side
+        objects tied to the session (a ``TaskHistoryCollector`` whose
+        ``DestroyCollector`` keeps failing, #3701) are released now rather
+        than at the idle timeout. The next call on *target* logs in again,
+        on a clean session.
+
+        Returns ``True`` when vCenter accepted the revoke. Returns ``False``
+        when no session was cached, when the revoke failed, or for an
+        ESXi-flavored session (its SOAP ``Logout`` inside
+        :meth:`invalidate_session` is best-effort and reports no outcome).
+        """
+        cache_key = target_cache_key(target)
+        async with self._session_lock:
+            token = self._session_tokens.get(cache_key)
+            flavor = self._session_flavors.get(cache_key)
+            revoke_path = self._session_paths.get(cache_key, SESSION_PATH_MODERN)
+            extensions = dict(self._session_extensions.get(cache_key) or {})
+        await self.invalidate_session(target)
+        if token is None or flavor == HOST_FLAVOR_ESXI:
+            return False
+        client = self._pooled_client_for(cache_key)
+        if client is None:
+            return False
+        return await self._vcenter_revoke_quiet(client, cache_key, token, revoke_path, extensions)
 
 
 class VmwareRest80Connector(VmwareRestConnector):

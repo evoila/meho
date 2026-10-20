@@ -17,11 +17,18 @@ ingested descriptor, zero catalog ingest):
    from the params (queued-time window, optional entity).
 2. ``TaskHistoryCollector.ReadNextTasks`` page by page. A new collector
    starts at the oldest item, so pages run oldest to newest.
-3. ``TaskHistoryCollector.DestroyCollector`` in a ``finally``, so the
-   collector is gone on the success path and on the error path.
+3. ``TaskHistoryCollector.DestroyCollector`` on the success path and on
+   the error path.
 
-A collector also dies with its client session, so a failed destroy is not
-a lasting leak; the op logs it and reports ``collector_destroyed: false``.
+The op returns only when the collector is confirmed gone. A failed
+destroy is retried (``_DESTROY_ATTEMPTS`` tries in all). When it keeps
+failing, the op closes the vCenter session that owns the collector
+(:meth:`VmwareRestConnector.close_session`): a collector dies with its
+session, and the next call logs in again on a clean session, so leaked
+collectors cannot pile up on the cached session. ``collector_cleanup``
+reports which path ran. When neither path is confirmed, the call fails
+with :class:`CollectorCleanupError` (a read error that happened first is
+raised instead, and the cleanup failure is only logged).
 
 ``TaskFilterSpec`` has no operation filter, so ``description_ids`` is
 applied here, on the rows read. The scan is bounded by
@@ -32,9 +39,11 @@ Rows use the same shape as ``vmware.tasks.recent`` (one shared parser).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
@@ -46,6 +55,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
+    method_fault_type,
     unwrap_vim_value,
     vim_moref,
 )
@@ -57,6 +67,7 @@ __all__ = [
     "TASKS_HISTORY_GROUP_KEY",
     "TASKS_HISTORY_WHEN_TO_USE",
     "VMWARE_TASKS_HISTORY_OP",
+    "CollectorCleanupError",
     "build_task_filter_spec",
     "tasks_history_impl",
 ]
@@ -73,8 +84,23 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 50
 _DEFAULT_MAX_TASKS = 200
 _MAX_TASKS_CAP = 1000
+#: ``DestroyCollector`` tries before the op falls back to closing the session.
+_DESTROY_ATTEMPTS = 3
+#: Pause between two ``DestroyCollector`` tries.
+_DESTROY_RETRY_DELAY_SECONDS = 0.5
+
+CollectorCleanup = Literal["destroyed", "session_closed"]
 
 TASKS_HISTORY_GROUP_KEY = "vmware-tasks-history"
+
+
+class CollectorCleanupError(RuntimeError):
+    """The temporary task history collector could not be removed.
+
+    Raised after every ``DestroyCollector`` try failed and the vCenter
+    session that owns the collector could not be closed either. The
+    collector then lives until vCenter times out that session.
+    """
 
 
 def _parse_time(value: Any, name: str) -> datetime:
@@ -171,27 +197,70 @@ async def _read_pages(
     return rows, True, scanned
 
 
+def _collector_already_gone(exc: Exception) -> bool:
+    """``DestroyCollector`` faulted because the collector no longer exists."""
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code == 500
+        and method_fault_type(exc.response.text) == "ManagedObjectNotFound"
+    )
+
+
 async def _destroy_collector(
     connector: VmwareRestConnector,
     operator: Operator,
     target: VsphereTargetLike,
     collector_moid: str,
 ) -> bool:
-    try:
-        await connector._post_vmomi_json(
-            target,
-            f"/{_COLLECTOR_MO_TYPE}/{collector_moid}/DestroyCollector",
-            operator=operator,
-        )
-    except Exception as exc:  # never mask the read result or its error
+    """Call ``DestroyCollector`` up to ``_DESTROY_ATTEMPTS`` times."""
+    path = f"/{_COLLECTOR_MO_TYPE}/{collector_moid}/DestroyCollector"
+    for attempt in range(1, _DESTROY_ATTEMPTS + 1):
+        try:
+            await connector._post_vmomi_json(target, path, operator=operator)
+            return True
+        except Exception as exc:
+            if _collector_already_gone(exc):
+                return True
+            _log.warning(
+                "vmware_tasks_history_destroy_failed",
+                target=target.name,
+                collector=collector_moid,
+                attempt=attempt,
+                attempts=_DESTROY_ATTEMPTS,
+                error_type=type(exc).__name__,
+            )
+        if attempt < _DESTROY_ATTEMPTS:
+            await asyncio.sleep(_DESTROY_RETRY_DELAY_SECONDS)
+    return False
+
+
+async def _remove_collector(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    collector_moid: str,
+) -> CollectorCleanup | None:
+    """Make sure the collector is gone; ``None`` when that cannot be confirmed.
+
+    First ``DestroyCollector`` (with retries). When that keeps failing,
+    close the vCenter session that owns the collector, so vCenter drops it
+    now and the next call on the target starts on a clean session.
+    """
+    if await _destroy_collector(connector, operator, target, collector_moid):
+        return "destroyed"
+    if await connector.close_session(target):
         _log.warning(
-            "vmware_tasks_history_destroy_failed",
+            "vmware_tasks_history_session_closed",
             target=target.name,
             collector=collector_moid,
-            error_type=type(exc).__name__,
         )
-        return False
-    return True
+        return "session_closed"
+    _log.error(
+        "vmware_tasks_history_collector_leaked",
+        target=target.name,
+        collector=collector_moid,
+    )
+    return None
 
 
 async def tasks_history_impl(
@@ -202,10 +271,11 @@ async def tasks_history_impl(
 ) -> dict[str, Any]:
     """Implementation of ``vmware.tasks.history``: create, page, destroy.
 
-    The collector is destroyed in a ``finally``, so no collector made by
-    this call outlives it when vCenter accepts the destroy. Returns
-    ``{"tasks": [...], "truncated", "scanned", "collector_destroyed"}``,
-    oldest task first.
+    The collector is removed on the success path and on the error path.
+    Returns ``{"tasks": [...], "truncated", "scanned", "collector_cleanup"}``,
+    oldest task first. Raises :class:`CollectorCleanupError` when the read
+    worked but the collector could not be confirmed gone; a read error wins
+    over a cleanup error.
     """
     filter_spec = build_task_filter_spec(params)
     max_tasks = params.get("max_tasks")
@@ -223,7 +293,6 @@ async def tasks_history_impl(
             "vmware.tasks.history: CreateCollectorForTasks returned no collector reference"
         )
 
-    destroyed = False
     try:
         rows, truncated, scanned = await _read_pages(
             connector,
@@ -233,8 +302,18 @@ async def tasks_history_impl(
             max_tasks=max_tasks,
             description_ids=description_ids,
         )
-    finally:
-        destroyed = await _destroy_collector(connector, operator, target, collector_moid)
+    except Exception:
+        # The read error is the one to report; the cleanup logs its own outcome.
+        await _remove_collector(connector, operator, target, collector_moid)
+        raise
+    cleanup = await _remove_collector(connector, operator, target, collector_moid)
+    if cleanup is None:
+        raise CollectorCleanupError(
+            "vmware.tasks.history: the temporary task history collector could not "
+            f"be removed: DestroyCollector failed {_DESTROY_ATTEMPTS} times and the "
+            "vCenter session that owns it could not be closed. vCenter drops the "
+            "collector when that session times out. Try again later."
+        )
 
     _log.info(
         "vmware_tasks_history_read",
@@ -242,13 +321,13 @@ async def tasks_history_impl(
         task_count=len(rows),
         scanned=scanned,
         truncated=truncated,
-        collector_destroyed=destroyed,
+        collector_cleanup=cleanup,
     )
     return {
         "tasks": rows,
         "truncated": truncated,
         "scanned": scanned,
-        "collector_destroyed": destroyed,
+        "collector_cleanup": cleanup,
     }
 
 
@@ -378,12 +457,17 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "description": "Task rows read from vCenter before the operation filter.",
         },
-        "collector_destroyed": {
-            "type": "boolean",
-            "description": "True when the temporary history collector was removed.",
+        "collector_cleanup": {
+            "type": "string",
+            "enum": ["destroyed", "session_closed"],
+            "description": (
+                "How the temporary history collector was removed: 'destroyed' "
+                "(DestroyCollector accepted) or 'session_closed' (destroy kept "
+                "failing, so MEHO closed the vCenter session that owned it)."
+            ),
         },
     },
-    "required": ["tasks", "truncated", "scanned", "collector_destroyed"],
+    "required": ["tasks", "truncated", "scanned", "collector_cleanup"],
 }
 
 #: Curated ``when_to_use`` blurb for the tasks-history group.
@@ -432,7 +516,7 @@ VMWARE_TASKS_HISTORY_OP = VmwareTypedOp(
             "{tasks: [{task, operation, entity, entity_type, entity_name, "
             "state, progress, cancelled, queue_time, start_time, "
             "complete_time, error_message}, ...], truncated, scanned, "
-            "collector_destroyed}. A long list comes back as a result handle; "
+            "collector_cleanup}. A long list comes back as a result handle; "
             "read it with result_query."
         ),
         "next_step": (

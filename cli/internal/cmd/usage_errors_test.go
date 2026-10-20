@@ -171,6 +171,44 @@ func TestUsageErrorJSONLastSettingWins(t *testing.T) {
 	}
 }
 
+// TestUsageErrorJSONSkipsFlagValues: a word that is the value of
+// another flag is not a --json setting, as in normal flag parsing.
+// "meho targets list" has --json, the string flag --product (-p), the
+// int flag --limit, the inherited string flag --work-ref and the
+// inherited bool flag -v.
+func TestUsageErrorJSONSkipsFlagValues(t *testing.T) {
+	cases := []struct {
+		name     string
+		argv     []string
+		wantJSON bool
+	}{
+		{"value of a string flag", []string{"targets", "list", "--json", "--product", "--json=false", "--bogus"}, true},
+		{"value of a string flag after the bad flag", []string{"targets", "list", "--bogus", "--product", "--json"}, false},
+		{"value in the same word", []string{"targets", "list", "--product=--json", "--bogus"}, false},
+		{"value of a short flag", []string{"targets", "list", "-p", "--json", "--bogus"}, false},
+		{"value of a short flag in the same word", []string{"targets", "list", "-p--json", "--bogus"}, false},
+		{"value of a grouped short flag", []string{"targets", "list", "-vp", "--json", "--bogus"}, false},
+		{"bool short flag takes no value", []string{"targets", "list", "-v", "--json", "--bogus"}, true},
+		{"value of an int flag", []string{"targets", "list", "--json", "--limit", "--json=false", "--bogus"}, true},
+		{"value of an inherited string flag", []string{"targets", "list", "--work-ref", "--json", "--bogus"}, false},
+		{"string flag with no value at the end", []string{"targets", "list", "--json", "--product"}, true},
+		{"wrong argument count, value of a string flag", []string{"targets", "list", "extra", "--json", "--product", "--json=false"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, exit := runCLI(t, tc.argv...)
+			if exit != output.ExitUsage {
+				t.Errorf("exit = %d, want %d", exit, output.ExitUsage)
+			}
+			gotJSON := strings.HasPrefix(stderr, `{"error":"usage_error"`)
+			gotPlain := strings.HasPrefix(stderr, "meho: usage_error: ")
+			if gotJSON != tc.wantJSON || gotPlain == tc.wantJSON {
+				t.Errorf("stderr = %q, want JSON=%v", stderr, tc.wantJSON)
+			}
+		})
+	}
+}
+
 // TestUsageErrorNoJSONWithoutJSONFlag: a command with no --json flag
 // prints the plain form, even when --json is on the command line.
 func TestUsageErrorNoJSONWithoutJSONFlag(t *testing.T) {

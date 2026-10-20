@@ -65,22 +65,66 @@ func renderUsageError(c *cobra.Command, err error, args []string) error {
 // turns it on. It reads the whole command line up to "--" and keeps
 // the last --json setting, as normal flag parsing does. The parsed
 // flag value alone is not enough: cobra stops at an unknown flag, so
-// a --json after it is found only in args.
+// a --json after it is found only in args. A word that is the value
+// of another flag of c (for example --query --json) is skipped, so
+// it does not count as a setting. Both callers run after cobra parsed
+// the flags, so c.Flags() already holds the inherited persistent
+// flags.
 func wantsJSON(c *cobra.Command, args []string) bool {
 	if c.Flags().Lookup("json") == nil {
 		return false
 	}
 	on := false
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--" {
 			break
 		}
 		if a == "--json" {
 			on = true
-		} else if v, ok := strings.CutPrefix(a, "--json="); ok {
+			continue
+		}
+		if v, ok := strings.CutPrefix(a, "--json="); ok {
 			b, err := strconv.ParseBool(v)
 			on = err == nil && b
+			continue
+		}
+		if takesNextWord(c, a) {
+			i++
 		}
 	}
 	return on
+}
+
+// takesNextWord reports whether a is a known flag of c that reads its
+// value from the next command line word, as pflag does for
+// "--name value" and "-n value". A flag written as --name=value,
+// -n=value or -nvalue carries its value in the same word. A flag with
+// an optional value (every bool flag) never reads the next word.
+// Shorthands can be grouped (-vp value): the first one that needs a
+// value takes the rest of the word, or the next word when the word
+// ends there.
+func takesNextWord(c *cobra.Command, a string) bool {
+	if name, ok := strings.CutPrefix(a, "--"); ok {
+		if strings.Contains(name, "=") {
+			return false
+		}
+		f := c.Flags().Lookup(name)
+		return f != nil && f.NoOptDefVal == ""
+	}
+	shorts, ok := strings.CutPrefix(a, "-")
+	if !ok {
+		return false
+	}
+	for i := 0; i < len(shorts); i++ {
+		f := c.Flags().ShorthandLookup(shorts[i : i+1])
+		if f == nil {
+			return false
+		}
+		if f.NoOptDefVal != "" {
+			continue
+		}
+		return i == len(shorts)-1
+	}
+	return false
 }

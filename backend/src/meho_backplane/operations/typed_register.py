@@ -429,12 +429,15 @@ async def run_typed_op_registrars(
     Dead-handler retirement (#3866)
     -------------------------------
 
-    Before the invariant sweep, built-in typed/composite rows whose
-    ``handler_ref`` no longer imports are deleted
+    Before the invariant sweep, built-in typed/composite rows listed in
+    :data:`~meho_backplane.operations.dead_handler_sweep.RETIRED_OPS` are
+    deleted
     (:func:`~meho_backplane.operations.dead_handler_sweep.retire_dead_handler_rows`).
     These are rows an older release registered for an op this release
     removed; left in place, discovery advertises them and every call
-    fails with ``handler_unreachable``.
+    fails with ``handler_unreachable``. Rows the list does not name are
+    kept even when their handler does not import here, so an older server
+    sharing the database cannot delete ops a newer release owns.
     """
     await _run_typed_op_registrars(embedding_service=embedding_service)
     await retire_dead_handler_rows()

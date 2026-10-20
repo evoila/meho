@@ -20,6 +20,9 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vmware_rest import (
+    library_item_delete_preview as _ingested_previews,
+)
 from meho_backplane.connectors.vmware_rest.composites import _library_delete, _write
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA,
@@ -27,7 +30,7 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA,
     CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA,
 )
-from meho_backplane.operations._preview import blast_radius_missing_reason
+from meho_backplane.operations._preview import _PREVIEW_BUILDERS, blast_radius_missing_reason
 from tests._vmware_teardown_fake import GateRecorder, VimFake, moref, operator, parked, preview_ctx
 
 _LIB = "11111111-1111-1111-1111-111111111111"
@@ -525,3 +528,79 @@ async def test_item_preview_lists_files() -> None:
 def test_item_schema_rejects(params: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         Draft202012Validator(CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA).validate(params)
+
+
+# ---------------------------------------------------------------------------
+# The ingested DELETE:/content/library/item/{libraryItemId} (#4058): destructive
+# by the VMware floor, so it needs this preview before it waits for approval.
+# ---------------------------------------------------------------------------
+
+
+def _ingested_ctx(conn: _RestFake, item_id: Any, name: str = "libraryItemId") -> Any:
+    return preview_ctx({name: item_id}, conn)
+
+
+@pytest.mark.parametrize("op_id", sorted(_ingested_previews.LIBRARY_ITEM_DELETE_OP_IDS))
+def test_every_ingested_item_delete_spelling_has_a_preview_builder(op_id: str) -> None:
+    assert _PREVIEW_BUILDERS[op_id] is _ingested_previews.library_item_delete_preview
+
+
+@pytest.mark.parametrize("name", ["libraryItemId", "library_item_id"])
+async def test_ingested_item_delete_preview_lists_the_item_and_its_files(name: str) -> None:
+    conn = _store(items=1)
+    conn.items[_uuid(0)]["files"] = [{"name": "media.iso", "size": 4096}]
+    effect = await _ingested_previews.library_item_delete_preview(
+        _ingested_ctx(conn, _uuid(0), name)
+    )
+    assert effect is not None
+    assert blast_radius_missing_reason(effect) is None
+    block = effect["blast_radius"]
+    assert block["object"]["id"] == _uuid(0)
+    assert block["object"]["name"] == "appliance-0"
+    assert block["object"]["library_name"] == "demo-lib"
+    assert block["object"]["present"] is True
+    assert block["children"] == [{"kind": "file", "name": "media.iso", "size_bytes": 4096}]
+    assert block["irreversibility"] == "permanent"
+    assert "warning" not in block
+    assert conn.deletes() == []
+
+
+async def test_ingested_item_delete_preview_warns_when_a_vm_mounts_the_item() -> None:
+    conn = _store(items=1)
+    _mount(conn, _uuid(0))
+    effect = await _ingested_previews.library_item_delete_preview(_ingested_ctx(conn, _uuid(0)))
+    assert effect is not None
+    assert blast_radius_missing_reason(effect) is None
+    block = effect["blast_radius"]
+    assert "refusal" not in block
+    assert block["blockers"][0]["name"] == "iso-user"
+    assert "vmware.composite.content_library.item.delete" in block["warning"]
+    assert conn.deletes() == []
+
+
+async def test_ingested_item_delete_preview_warns_for_a_subscribed_library_item() -> None:
+    conn = _store()
+    conn.libraries[_SUB] = {"name": "demo-sub", "type": "SUBSCRIBED"}
+    conn.items[_ITEM] = {"name": "tkr", "type": "ovf", "size": 5, "library_id": _SUB}
+    effect = await _ingested_previews.library_item_delete_preview(_ingested_ctx(conn, _ITEM))
+    assert effect is not None
+    assert "subscribed library" in effect["blast_radius"]["warning"]
+
+
+async def test_ingested_item_delete_preview_for_an_absent_item_is_honest() -> None:
+    conn = _store(items=1)
+    effect = await _ingested_previews.library_item_delete_preview(_ingested_ctx(conn, _uuid(404)))
+    assert effect is not None
+    assert blast_radius_missing_reason(effect) is None
+    assert effect["blast_radius"]["object"]["present"] is False
+    assert effect["blast_radius"]["irreversibility"] == "none-object-already-absent"
+
+
+@pytest.mark.parametrize("bad", [*_TRAVERSAL_IDS, None, 7])
+async def test_ingested_item_delete_preview_refuses_a_non_uuid_id_before_any_request(
+    bad: Any,
+) -> None:
+    conn = _store(items=1)
+    with pytest.raises(ValueError, match="UUID"):
+        await _ingested_previews.library_item_delete_preview(_ingested_ctx(conn, bad))
+    assert conn.calls == []

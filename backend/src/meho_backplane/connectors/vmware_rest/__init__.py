@@ -107,6 +107,12 @@ register_connector_v2(
 # during ``run_typed_op_registrars`` -- same lifecycle phase the typed
 # Vault ops use.
 from meho_backplane.connectors.vmware_rest import composites  # noqa: E402
+
+# The ingested content-library item delete is destructive (#4058); its preview
+# reuses the composite planner, so it is imported after the composites.
+from meho_backplane.connectors.vmware_rest import (  # noqa: E402, F401
+    library_item_delete_preview as _library_item_delete_preview,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import (  # noqa: E402
     VMWARE_TYPED_OPS,
     register_vmware_typed_operations,

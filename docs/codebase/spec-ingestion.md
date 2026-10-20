@@ -516,11 +516,13 @@ from a preview builder before the op can wait for approval, and a generic
 ingested delete has no builder, so a `destructive` default would make every
 ingested delete un-runnable. A connector floor raises an op to
 `destructive` when it ships the builder: the VMware floor does this for the
-vCenter tagging removals (see the floor table below and
-`connectors/vmware_rest/tagging_delete_preview.py`).
+vCenter tagging removals and the content-library item delete (see the floor
+tables below, `connectors/vmware_rest/tagging_delete_preview.py`, and
+`connectors/vmware_rest/library_item_delete_preview.py`).
 `test_operations_ingest_delete_approval.py` checks that no `DELETE` in a
 shipped spec, or in the pinned vCenter and NSX specs, lands without
-approval, and that the pinned vCenter tagging removals land `destructive`.
+approval, and that the pinned vCenter tagging removals and the library item
+delete land `destructive`.
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -652,6 +654,31 @@ blast radius, a second operator's approval running the delete once, a
 service account's live grant never running a detach, the escaping and
 traversal refusal for body-supplied ids, and the complete lists above the
 detail cap.
+
+The same floor puts the **content-library item delete**
+(`DELETE /content/library/item/{id}`) in the `destructive` tier with
+`requires_approval=True` (#4058), on the 8.0 and 9.0 catalogs and with or
+without the `/api` mount. The item and its files cannot be brought back,
+like a deleted VM.
+
+The preview builder in `connectors/vmware_rest/library_item_delete_preview.py`
+is registered under every op_id spelling (`{libraryItemId}` /
+`{library_item_id}`, with and without `/api`). It reuses the read-only
+planner of the governed `vmware.composite.content_library.item.delete`, so
+the approver sees the item, its library, its files, and any VM that mounts
+it. Two rules:
+
+- The id must be a content-library id (a UUID). Any other id makes the
+  builder raise, so the delete is refused before it waits for approval.
+- The plain delete does not apply the composite's refusals (an item in a
+  subscribed library, an item a VM still mounts). When the composite would
+  refuse, the block carries a `warning` that names the composite, so the
+  approver can reject the plain delete and use the composite instead.
+
+`test_connectors_vmware_rest_composites_library_delete.py` covers the
+builder; `test_operations_ingest_delete_approval.py` covers the floor. Rows
+stored by an earlier ingest keep their old posture until the next ingest;
+`meho connector review` lists them as needing correction.
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 (always `'ingested'`), `product`, `version`, `impl_id`, `embedding`,

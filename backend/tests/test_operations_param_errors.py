@@ -105,6 +105,53 @@ def test_path_under_a_nested_dynamic_key_is_redacted() -> None:
     assert "[REDACTED:" in entry["path"]
 
 
+_CREDENTIAL = "examplecredential123456"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f'password="{_CREDENTIAL}"',
+        f"password='{_CREDENTIAL}'",
+        f"password=\n{_CREDENTIAL}",
+        f"password=\t{_CREDENTIAL}",
+        f"password=\\{_CREDENTIAL}",
+    ],
+    ids=["double-quoted", "single-quoted", "newline", "tab", "backslash"],
+)
+def test_quoted_or_escaped_credential_key_is_redacted_in_expected(key: str) -> None:
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    (entry,) = validate_params(schema, {key: 1})
+    assert _CREDENTIAL not in json.dumps(entry)
+    assert "[REDACTED:" in entry["expected"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f'password="{_CREDENTIAL}"',
+        f"password='{_CREDENTIAL}'",
+        f"password=\n{_CREDENTIAL}",
+        f"password=\t{_CREDENTIAL}",
+        f"password=\\{_CREDENTIAL}",
+    ],
+    ids=["double-quoted", "single-quoted", "newline", "tab", "backslash"],
+)
+def test_quoted_or_escaped_credential_key_is_redacted_in_path(key: str) -> None:
+    schema = {"type": "object", "additionalProperties": {"type": "integer"}}
+    (entry,) = validate_params(schema, {key: "not an int"})
+    assert _CREDENTIAL not in json.dumps(entry)
+    assert entry["path"].startswith("$['")
+    assert "[REDACTED:" in entry["path"]
+
+
+def test_path_keeps_the_json_path_shape() -> None:
+    inner = {"type": "object", "additionalProperties": {"type": "integer"}}
+    schema = {"type": "object", "properties": {"tags": {"type": "array", "items": inner}}}
+    (entry,) = validate_params(schema, {"tags": [{"a": 1}, {"it's": "x"}]})
+    assert entry["path"] == "$.tags[1]['it\\'s']"
+
+
 def test_path_under_an_oversized_key_is_capped() -> None:
     schema = {"type": "object", "additionalProperties": {"type": "integer"}}
     (entry,) = validate_params(schema, {"k" * 10_000: "not an int"})

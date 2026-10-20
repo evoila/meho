@@ -13,10 +13,15 @@ secret pasted into the wrong field, so echoing it back would put it in
 cleartext into the response and the audit envelope.
 
 The one instance-side fact used is the set of *key names* in an object
-(to name an undeclared or missing property). Key names are the caller's
-words for "which param", which is what they need to fix the call. As
-defense in depth, every built string still runs through the same
-credential redactor and length cap the other error builders use.
+(to name an undeclared or missing property, or as a step of ``path``).
+Key names are the caller's words for "which param", which is what they
+need to fix the call. A key name can still look like a secret, so every
+name runs through the credential redactor *raw*, before it is quoted or
+escaped: JSON or JSON-path escaping turns a quote inside the name into
+``\\"`` or ``\\'`` and a newline into ``\\n``, and the redactor's
+patterns no longer match the escaped text. As defense in depth, every
+built string then runs through the same redactor and length cap the
+other error builders use.
 """
 
 from __future__ import annotations
@@ -47,16 +52,48 @@ def _render(value: Any) -> str:
         return str(value)
 
 
-def _listing(items: list[Any]) -> str:
-    """Join up to :data:`_MAX_LISTED` rendered items; count the rest."""
-    shown = ", ".join(_render(item) for item in items[:_MAX_LISTED])
-    rest = len(items) - _MAX_LISTED
+def _name(name: str) -> str:
+    """Render one property name: redact the raw name first, then quote it."""
+    return _render(_sanitize_free_text(name))
+
+
+def _listing(rendered: list[str]) -> str:
+    """Join up to :data:`_MAX_LISTED` already rendered items; count the rest."""
+    shown = ", ".join(rendered[:_MAX_LISTED])
+    rest = len(rendered) - _MAX_LISTED
     return f"{shown} (+{rest} more)" if rest > 0 else shown
+
+
+def _names(names: list[str]) -> str:
+    return _listing([_name(name) for name in names])
 
 
 def _instance_keys(err: ValidationError) -> list[str]:
     instance = err.instance
     return [str(key) for key in instance] if isinstance(instance, Mapping) else []
+
+
+#: A key that JSON path writes as ``.key``; any other key goes in ``['...']``.
+_PLAIN_KEY: Final[re.Pattern[str]] = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
+
+
+def _json_path(err: ValidationError) -> str:
+    """Build the JSON path of the bad spot from redacted key names.
+
+    Same shape as jsonschema's ``err.json_path`` (``$.a[0]['b c']``), but
+    each caller-supplied key is redacted before the path escapes it.
+    """
+    path = "$"
+    for step in err.absolute_path:
+        if isinstance(step, int):
+            path += f"[{step}]"
+            continue
+        key = _sanitize_free_text(str(step))
+        if _PLAIN_KEY.match(key):
+            path += f".{key}"
+        else:
+            path += "['" + key.replace("\\", "\\\\").replace("'", "\\'") + "']"
+    return path
 
 
 def _type(err: ValidationError) -> tuple[str, str]:
@@ -68,7 +105,7 @@ def _type(err: ValidationError) -> tuple[str, str]:
 
 def _enum(err: ValidationError) -> tuple[str, str]:
     values = err.validator_value if isinstance(err.validator_value, list) else []
-    return f"one of: {_listing(values)}", "use one of the listed values"
+    return f"one of: {_listing([_render(v) for v in values])}", "use one of the listed values"
 
 
 def _const(err: ValidationError) -> tuple[str, str]:
@@ -80,7 +117,7 @@ def _required(err: ValidationError) -> tuple[str, str]:
     present = set(_instance_keys(err))
     missing = [str(name) for name in required if name not in present]
     return (
-        f"required property missing: {_listing(missing)}",
+        f"required property missing: {_names(missing)}",
         "add the missing property to params",
     )
 
@@ -96,9 +133,9 @@ def _additional(err: ValidationError) -> tuple[str, str]:
     ]
     hint = "remove the undeclared property"
     if declared:
-        hint += f"; declared params are: {_listing(declared)}"
+        hint += f"; declared params are: {_names(declared)}"
     return (
-        f"undeclared property: {_listing(extra)} (not in the op's declared params)",
+        f"undeclared property: {_names(extra)} (not in the op's declared params)",
         hint,
     )
 
@@ -107,7 +144,7 @@ def _dependent(err: ValidationError) -> tuple[str, str]:
     deps = err.validator_value if isinstance(err.validator_value, Mapping) else {}
     present = set(_instance_keys(err))
     pairs = [
-        f"{name} needs {_listing([str(d) for d in needs if d not in present])}"
+        f"{name} needs {_names([str(d) for d in needs if d not in present])}"
         for name, needs in deps.items()
         if name in present and isinstance(needs, list) and any(d not in present for d in needs)
     ]
@@ -169,8 +206,9 @@ def describe_violation(err: ValidationError) -> dict[str, Any]:
     Keys: ``path`` (JSON path of the bad spot), ``validator`` (the schema
     keyword that failed), ``expected`` (what the schema wants there) and
     ``remediation`` (a short, fixed hint). No field carries the rejected
-    value. The path is sanitized too: under ``additionalProperties`` or
-    ``patternProperties`` it holds a caller-supplied key name.
+    value. The path is built from redacted key names too: under
+    ``additionalProperties`` or ``patternProperties`` it holds a
+    caller-supplied key name.
     """
     validator = str(err.validator)
     describer = _DESCRIBERS.get(validator)
@@ -180,7 +218,7 @@ def describe_violation(err: ValidationError) -> dict[str, Any]:
     else:
         expected, remediation = describer(err)
     return {
-        "path": _sanitize_free_text(err.json_path),
+        "path": _sanitize_free_text(_json_path(err)),
         "validator": validator,
         "expected": _sanitize_free_text(expected),
         "remediation": _sanitize_free_text(remediation),

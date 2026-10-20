@@ -240,7 +240,8 @@ class Operator(BaseModel):
 #: carrying no ``principal_kind`` claim); every other kind is a machine
 #: credential — an agent client, a non-MEHO service account, or a satellite
 #: runner. The human-only governance verbs (approval decisions, agent-grant
-#: create / elevate, agent-principal register) refuse these kinds on **every**
+#: create / elevate, standing-grant create / revoke for service principals
+#: (#4616), agent-principal register) refuse these kinds on **every**
 #: transport (meho-internal#289): approval is a human decision (v0.1-spec §7).
 MACHINE_PRINCIPAL_KINDS: frozenset[PrincipalKind] = frozenset(
     {PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER}

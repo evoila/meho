@@ -19,8 +19,8 @@ never runs. This module proves the *refinement* this task adds:
 * **No execution on the park path** — the source ``read_secret`` and the
   sink ``write_secret`` are never called for an unapproved move (spied
   call counts stay 0).
-* **No secret in the parking broadcast** — the ``approval.pending`` event
-  the park publishes carries no value substring.
+* **No secret in the stored audit rows** — the rows the park writes
+  carry no value substring.
 * **Time-boxed scope** — an AGENT principal holding an
   ``op_pattern="secret.*"`` / ``verdict="auto-execute"`` grant whose
   ``expires_at`` is in the past is refused (the move never executes); a
@@ -60,10 +60,8 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-import meho_backplane.broadcast.publisher as _publisher_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.secret.endpoints import (
     SecretEndpoint,
@@ -76,6 +74,7 @@ from meho_backplane.db.models import (
     AgentPermission,
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditLog,
     PermissionVerdict,
 )
 from meho_backplane.main import app
@@ -150,24 +149,6 @@ async def _registered_secret_broker_op(
     """Upsert the ``secret.move`` descriptor row for dispatch-driving tests."""
     await register_secret_broker_operations(embedding_service=stub_embedding_service)
     yield
-
-
-@pytest.fixture
-def captured_broadcasts(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record every :func:`publish_event` call.
-
-    ``publish_approval_event`` imports ``publish_event`` from
-    :mod:`meho_backplane.broadcast.publisher` at call time, so patching the
-    source symbol on that module captures the parking ``approval.pending``
-    broadcast.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(_publisher_module, "publish_event", _capture)
-    return events
 
 
 def _make_operator(
@@ -318,32 +299,31 @@ async def test_move_refuses_execution_without_approval(
 
 
 # ---------------------------------------------------------------------------
-# (Criterion 4) The parking broadcast carries no secret substring
+# (Criterion 4) The stored audit rows carry no secret substring
 # ---------------------------------------------------------------------------
 
 
-async def test_no_secret_in_broadcast(
+async def test_no_secret_in_audit_rows(
     monkeypatch: pytest.MonkeyPatch,
-    captured_broadcasts: list[BroadcastEvent],
     _registered_secret_broker_op: None,
 ) -> None:
-    """The ``approval.pending`` broadcast the park publishes is value-free.
+    """The audit rows the park writes are value-free.
 
-    ``secret.move`` classifies ``"other"`` (full-detail broadcast on the
-    publish-on-write path), so the value-free-params invariant is
-    load-bearing. The park path itself publishes only the
-    ``approval.pending`` lifecycle event (no params); this asserts no
-    secret substring appears in any captured event.
+    ``secret.move`` classifies ``"other"``, so the value-free-params
+    invariant is load-bearing. The park writes the dispatch row and the
+    ``approval.request`` row; this asserts no secret substring appears
+    in any stored row. A park publishes no Broadcast event (#3758).
     """
     install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
 
     result = await _dispatch_move(_make_operator())
     assert result.status == "awaiting_approval", result.error
 
-    assert captured_broadcasts, "expected an approval.pending broadcast"
-    for event in captured_broadcasts:
-        assert _SECRET_VALUE not in json.dumps(event.payload)
-        assert _SECRET_VALUE not in event.model_dump_json()
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+    assert rows, "expected the park to write audit rows"
+    for row in rows:
+        assert _SECRET_VALUE not in json.dumps(row.payload, default=str)
 
 
 # ---------------------------------------------------------------------------

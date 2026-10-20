@@ -3,8 +3,8 @@
 
 """Typed-op metadata + registrar for :class:`InstallerConnector`.
 
-The Installer's governed bring-up surface ships as five submit/poll typed
-primitives (``source_kind="typed"``, #3078; retry #3123) so they dispatch on
+The Installer's governed bring-up surface ships as six submit/poll/list typed
+primitives (``source_kind="typed"``, #3078; retry #3123; list #3418) so they dispatch on
 a fresh boot with zero catalog ingest:
 
 * ``installer.sddc.spec.validate`` — submit an ``SddcSpec`` validation
@@ -18,15 +18,20 @@ a fresh boot with zero catalog ingest:
   ``dangerous`` + ``requires_approval``).
 * ``installer.sddc.bringup.status`` — poll one bring-up task
   (``GET /v1/sddcs/{id}``; ``safe``).
+* ``installer.sddc.list`` — list every bring-up task with its id and status,
+  no id needed (``GET /v1/sddcs``; ``safe``; #3418).
 
 Plus the **air-gapped depot lifecycle** family (#3121, group
 ``installer-depot``): ``installer.system.depot.get`` / ``.set`` (read /
 configure the release depot, PUT running the vendor connection check
-synchronously), ``installer.system.trusted-certificates.list`` / ``.add``
+synchronously), ``installer.system.depot.sync-status`` (the catalog
+ingest that runs after a connect, #3406),
+``installer.system.trusted-certificates.list`` / ``.add``
 (outbound trust store — the depot TLS-trust fix), and
 ``installer.bundles.list`` / ``.download`` (bundle inventory + the mandatory
-explicit GA pre-download). Reads are ``safe``; the three writes are
-``caution`` + ``requires_approval``.
+explicit GA pre-download), plus ``installer.bundles.download-status`` (the
+per-bundle failure message and progress, #3410). Reads are ``safe``; the
+three writes are ``caution`` + ``requires_approval``.
 
 The vendor bring-up API is natively asynchronous — every submit returns its
 tracking object in seconds and progress rides the status polls — so each
@@ -109,7 +114,9 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its verdict; installer.sddc.bringup.start (dangerous, approval-gated) "
         "starts the bring-up and installer.sddc.bringup.status polls the task's "
         "lifecycle state (IN_PROGRESS / COMPLETED_WITH_SUCCESS / "
-        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; on "
+        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; installer.sddc.list "
+        "lists every bring-up task with its id and status and needs no id, so "
+        "use it to find a running bring-up whose id you do not have; on "
         "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
         "approval-gated) resumes the task from its failed sub-task. The "
         "one-shot governed validate-then-deploy unit is "
@@ -125,15 +132,23 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "depot, first import the depot's TLS certificate via "
         "installer.system.trusted-certificates.add (approval-gated; "
         "installer.system.trusted-certificates.list reads the trust store) "
-        "and retry; after a successful connect the catalog ingests and "
-        "installer.bundles.list populates within about a minute; then "
+        "and retry; after a successful connect the appliance ingests the "
+        "release catalog in the background, so poll "
+        "installer.system.depot.sync-status until the sync has finished "
+        "(errorMessage empty and lastSyncCompletionTimestamp later than the "
+        "depot.set call; a non-empty errorMessage means the sync failed) "
+        "instead of polling installer.bundles.list blindly; then "
+        "installer.bundles.list lists the ingested bundles; then "
         "installer.bundles.download (approval-gated, one batch) explicitly "
         "downloads the release bundles BEFORE validating a spec — a freshly "
         "connected installer pins components to the newest catalog versions "
         "and hard-fails Versions-and-Bundles when those binaries are absent "
         "from the depot, so the explicit GA download is a required step, not "
         "an optimization. Poll installer.bundles.list downloadStatus until "
-        "the set is SUCCESSFUL."
+        "the set is SUCCESSFUL; installer.bundles.download-status reads the "
+        "per-bundle failure message, isDownloadable flag and downloaded bytes, "
+        "so a FAILED bundle can be told apart as retry-worthy or not "
+        "downloadable from this depot."
     ),
 }
 
@@ -214,6 +229,20 @@ _SDDC_TASK_RESULT_DIGEST: dict[str, Any] = {
     "name_field": "name",
     "active_states": ["IN_PROGRESS"],
     "failed_states": ["FAILED", "COMPLETED_WITH_FAILURE"],
+}
+
+#: ``PageOfBundleDownloadStatusInfo`` digest (#3410). A release-wide read runs
+#: to ~180 rows and reduces to a handle; this hint adds per-``downloadStatus``
+#: counts and the ``bundleId`` of every IN_PROGRESS row inline. FAILED rows are
+#: deliberately NOT kept whole inline (a depot outage fails every row, which
+#: would put the whole set back inline); callers read them with a ``bundle_id``
+#: call or a ``result_query`` on the handle. Field names match the vendored
+#: ``vcf-installer-9.1`` OpenAPI (``components.schemas.BundleDownloadStatusInfo``).
+_BUNDLE_DOWNLOAD_STATUS_DIGEST: dict[str, Any] = {
+    "collection": "elements",
+    "status_field": "downloadStatus",
+    "name_field": "bundleId",
+    "active_states": ["IN_PROGRESS"],
 }
 
 
@@ -515,6 +544,64 @@ _EMPTY_PARAMS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_SDDC_LIST = InstallerTypedOp(
+    op_id="installer.sddc.list",
+    handler_attr="sddc_list",
+    summary="List every VCF bring-up task on the Installer with its id and status.",
+    description=(
+        "Reads GET /v1/sddcs — every VCF bring-up (SDDC) task the Installer "
+        "knows, running or finished. Needs no id: use it to find the id of a "
+        "bring-up that was started (for example by an approved "
+        "installer.sddc.bringup.start) when that id was lost. Each task is cut "
+        "down to id / name / status / deploymentType / vcfInstanceName / "
+        "creationTimestamp; the large sddcSubTasks[] and milestones[] arrays are "
+        "dropped — read them with installer.sddc.bringup.status and the id. "
+        "Works with zero catalog ingest. safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={
+        "type": "object",
+        "properties": {
+            "elements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "status": {"type": "string"},
+                        "deploymentType": {"type": "string"},
+                        "vcfInstanceName": {"type": "string"},
+                        "creationTimestamp": {"type": "string"},
+                    },
+                },
+            },
+            "pageMetadata": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+    group_key=_GROUP_BRINGUP,
+    tags=("read-only", "vcf", "installer", "bringup", "status", "list"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call to see which VCF bring-ups exist on the Installer and their "
+            "state, or to recover the id of a running bring-up you no longer "
+            "have, then poll installer.sddc.bringup.status with that id."
+        ),
+        output_shape=(
+            "{elements: [{id, name, status, deploymentType, vcfInstanceName, "
+            "creationTimestamp}], pageMetadata?}. status is IN_PROGRESS / "
+            "COMPLETED_WITH_SUCCESS / ROLLBACK_SUCCESS / COMPLETED_WITH_FAILURE. "
+            "No sub-task detail here — call installer.sddc.bringup.status with "
+            "the id for it. A long list reduces to a JSONFlux handle; read the "
+            "rest with result_query."
+        ),
+        parameter_hints={},
+    ),
+)
+
 _DEPOT_GET = InstallerTypedOp(
     op_id="installer.system.depot.get",
     handler_attr="system_depot_get",
@@ -605,6 +692,56 @@ _DEPOT_SET = InstallerTypedOp(
                 "{isOfflineDepot: true, hostname, port}}."
             ),
         },
+    ),
+)
+
+_DEPOT_SYNC_STATUS = InstallerTypedOp(
+    op_id="installer.system.depot.sync-status",
+    handler_attr="system_depot_sync_status",
+    summary="Read the Installer's depot catalog sync (ingest) state.",
+    description=(
+        "Reads GET /v1/system/settings/depot/depot-sync-info — the "
+        "DepotSyncInfo object (syncStatus / errorMessage / "
+        "lastSyncCompletionTimestamp). After installer.system.depot.set "
+        "connects a depot, the appliance ingests the release catalog in the "
+        "background; installer.bundles.list stays empty until that ingest "
+        "finishes. This read tells 'ingest still running' apart from "
+        "'ingest failed' and 'ingest done', so callers can wait for it "
+        "before listing or downloading bundles. Password keys are scrubbed. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={
+        "type": "object",
+        "properties": {
+            "syncStatus": {"type": "string"},
+            "errorMessage": {"type": "string"},
+            "lastSyncCompletionTimestamp": {"type": "string"},
+        },
+        "additionalProperties": True,
+    },
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "depot", "system", "sync"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call after installer.system.depot.set succeeds, and poll it, to "
+            "know when the depot catalog has finished ingesting — before "
+            "installer.bundles.list / installer.bundles.download. Also call "
+            "when installer.bundles.list is empty, to tell 'still ingesting' "
+            "from 'ingest failed'."
+        ),
+        output_shape=(
+            "{syncStatus, errorMessage?, lastSyncCompletionTimestamp?}. "
+            "syncStatus is the vendor's state string, passed through as sent "
+            "(the 9.1 API does not list its values). The catalog is ready when "
+            "errorMessage is empty and lastSyncCompletionTimestamp is later "
+            "than the depot.set call; a non-empty errorMessage means the sync "
+            "failed — fix the depot instead of waiting. Confirm with a "
+            "non-empty installer.bundles.list."
+        ),
+        parameter_hints={},
     ),
 )
 
@@ -717,6 +854,76 @@ _BUNDLES_LIST = InstallerTypedOp(
     ),
 )
 
+_BUNDLES_DOWNLOAD_STATUS = InstallerTypedOp(
+    op_id="installer.bundles.download-status",
+    handler_attr="bundles_download_status",
+    summary="Per-bundle download detail: status, failure message, progress.",
+    description=(
+        "Reads GET /v1/bundles/download-status — the vendor "
+        "PageOfBundleDownloadStatusInfo. Each element carries bundleId / "
+        "componentType / version / downloadStatus plus the detail "
+        "installer.bundles.list rows lack: message (the vendor error text of "
+        "a failed download), downloadedSize (bytes so far), isDownloadable "
+        "(whether the bundle can be downloaded right now), downloadId (the "
+        "download task id), and the scheduled/start/end times. Optional "
+        "filters: bundle_id, release_version, image_type. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "bundle_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Only this bundle (an id from installer.bundles.list).",
+            },
+            "release_version": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Only bundles of this VCF release, e.g. 9.1.0.0.",
+            },
+            "image_type": {
+                "type": "string",
+                "enum": ["INSTALL", "PATCH"],
+                "description": "Only INSTALL or only PATCH bundles.",
+            },
+        },
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "bundles", "depot"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call when installer.bundles.list shows a bundle as FAILED (or a "
+            "download seems stuck) to learn why and how far it got. A FAILED "
+            "row with isDownloadable=false means the bundle cannot be "
+            "downloaded from this depot right now (for example the payload "
+            "is missing) — stop polling and fix the depot. A FAILED row with "
+            "isDownloadable=true and a transfer error in message is worth one "
+            "more installer.bundles.download."
+        ),
+        output_shape=(
+            "{elements: [{bundleId, componentType, version, downloadStatus, "
+            "message?, downloadedSize?, isDownloadable?, downloadId?, "
+            "downloadScheduledTime, downloadStartTime?, downloadEndTime?, "
+            "isDownloadCancellable}], pageMetadata}. downloadedSize is bytes; "
+            "compare with sizeMB from installer.bundles.list for progress. A "
+            "release-wide read reduces to a handle with status_counts and the "
+            "in_progress bundle ids inline; read FAILED rows with bundle_id or "
+            "result_query."
+        ),
+        parameter_hints={
+            "bundle_id": "Pass one id to read a single bundle's detail.",
+            "release_version": "Pass the target release to check its whole set.",
+            "image_type": "INSTALL for bring-up bundles; omit for both.",
+        },
+        result_digest=_BUNDLE_DOWNLOAD_STATUS_DIGEST,
+    ),
+)
+
 _BUNDLES_DOWNLOAD = InstallerTypedOp(
     op_id=INSTALLER_BUNDLES_DOWNLOAD_OP_ID,
     handler_attr="bundles_download",
@@ -774,20 +981,25 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 
 #: The typed ops :class:`InstallerConnector` registers at lifespan startup,
 #: in submit → poll order per primitive pair (the bring-up trio adds the
-#: failed-task retry between its submit and its poll; the depot family runs
-#: in its air-gapped lifecycle order: settings read/write → trust store
-#: read/write → bundle inventory read/download).
+#: failed-task retry between its submit and its poll, and the id-less task
+#: list after its poll; the depot family runs
+#: in its air-gapped lifecycle order: settings read/write → catalog sync
+#: read → trust store read/write → bundle inventory read / download-detail
+#: read / download).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
     _BRINGUP_START,
     _BRINGUP_RETRY,
     _BRINGUP_STATUS,
+    _SDDC_LIST,
     _DEPOT_GET,
     _DEPOT_SET,
+    _DEPOT_SYNC_STATUS,
     _TRUSTED_CERTIFICATES_LIST,
     _TRUSTED_CERTIFICATE_ADD,
     _BUNDLES_LIST,
+    _BUNDLES_DOWNLOAD_STATUS,
     _BUNDLES_DOWNLOAD,
 )
 

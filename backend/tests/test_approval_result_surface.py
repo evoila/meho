@@ -36,7 +36,6 @@ from httpx import ASGITransport
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
@@ -69,7 +68,7 @@ _BRINGUP_CONNECTOR = "vcf-installer-9.x"
 
 @pytest.fixture(autouse=True)
 def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin every env var :class:`Settings` requires + silence the broadcast."""
+    """Pin every env var :class:`Settings` requires."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", _ISSUER)
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", _AUDIENCE)
     monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
@@ -79,11 +78,6 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
     monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
     monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
     get_settings.cache_clear()
     clear_jwks_cache()
     yield

@@ -1,28 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the Broadcast Last-24h history pane (#2549).
+"""Behavioural tests for the Broadcast history pane (#2549, #3758).
 
-The history pane used to hard-drop agent-authored announcements
-(``_is_audit_event``) so it was write-only for humans. #2549 turns that
-drop into a user-facing ``?kind=`` filter and renders both event kinds:
+Since #3758 the pane reads stored agent announcements from the archive
+(Broadcast carries agent announcements only):
 
-* ``GET /ui/broadcast/history`` (no kind) renders both operations AND
-  announcements into the seed data island.
-* ``?kind=agent_announcement`` / ``?kind=operation`` each return only
-  their kind (route test).
+* ``GET /ui/broadcast/history`` renders the session tenant's stored
+  announcements of the retention window into the seed data island,
+  newest first; another tenant's announcements never appear.
+* ``?kind=agent_announcement`` keeps them; ``?kind=operation`` is empty.
 * Announcement free text is emitted through Jinja ``| tojson`` (which
-  escapes ``<`` / ``>`` / ``&`` for the script-element text context) and
-  bound via Alpine ``x-text`` on render, so an ``activity`` carrying
-  ``<script>`` never reaches the DOM as live markup.
-* A mixed pre/post-T1 replay (a pre-#2544 announcement carrying only
-  ``event_kind``, a pre-migration operation carrying no ``kind``) renders
-  200 without error (back-compat).
-
-The read helper (:func:`list_recent_events_fail_soft`) is patched so the
-route tests need no live Valkey; its dict shape is reproduced verbatim
-(the fail-soft path serialises via ``_dump_event_plain`` — no
-untrusted-text envelope — because this HTML sink escapes separately).
+  escapes ``<`` / ``>`` / ``&``) and bound via Alpine ``x-text``, so an
+  ``activity`` carrying ``<script>`` never reaches the DOM as markup.
+* A database error degrades the pane to its empty state, not a 500.
 """
 
 from __future__ import annotations
@@ -32,7 +23,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
@@ -70,6 +61,7 @@ from meho_backplane.ui.routes.broadcast.history import (
     _normalise_kind_filter,
 )
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests.broadcast_admission_helpers import seed_announcement
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
 _BACKPLANE_URL = "https://meho.test"
@@ -147,76 +139,6 @@ def _authenticated_client(session_id: uuid.UUID) -> TestClient:
     return client
 
 
-def _operation_dict(
-    *,
-    op_id: str = "vsphere.vm.list",
-    kind: str | None = "operation",
-) -> dict[str, Any]:
-    """One audit-driven event dict as ``list_recent_events_fail_soft`` returns it.
-
-    ``kind=None`` reproduces a pre-migration entry that carries no
-    discriminator on the wire (inferred as an operation).
-    """
-    event: dict[str, Any] = {
-        "id": "1715600000000-0",
-        "cursor": "1715600000000-0",
-        "event_id": str(uuid.uuid4()),
-        "ts": "2026-05-13T00:00:00Z",
-        "tenant_id": str(_TENANT_A),
-        "principal_sub": "op-test",
-        "target_name": "rdc-vcenter",
-        "op_id": op_id,
-        "op_class": "read",
-        "result_status": "ok",
-        "audit_id": "33333333-3333-3333-3333-333333333333",
-        "payload": {"op_class": "read", "params": {}, "result_status": "ok"},
-    }
-    if kind is not None:
-        event["kind"] = kind
-    return event
-
-
-def _announcement_dict(
-    *,
-    activity: str = "rotating tokens on cluster X",
-    use_event_kind_only: bool = False,
-) -> dict[str, Any]:
-    """One announcement dict as the fail-soft (unwrapped) path returns it.
-
-    ``use_event_kind_only`` reproduces a pre-#2544/T1 announcement that
-    carries only the historical ``event_kind`` alias, no top-level
-    ``kind`` (back-compat replay).
-    """
-    event: dict[str, Any] = {
-        "id": "1715600000001-0",
-        "cursor": "1715600000001-0",
-        "event_kind": "agent_announcement",
-        "ts": "2026-05-13T00:01:00Z",
-        "tenant_id": str(_TENANT_A),
-        "principal_sub": "agent-bot",
-        "activity": activity,
-        "target": "cluster-x",
-        "targets": ["kube-a"],
-        "planned_op_class": "credential_write",
-        "ttl_minutes": 30,
-        "work_ref": "gh:evoila/meho#123",
-        "phase": "start",
-    }
-    if not use_event_kind_only:
-        event["kind"] = "agent_announcement"
-    return event
-
-
-def _patch_history(events: list[dict[str, Any]]) -> AsyncMock:
-    """Patch the route's read helper to return *events* (newest-last order).
-
-    The route reverses to newest-first, so the returned list is the
-    XRANGE ascending order; the mock ignores its arguments.
-    """
-    mock = AsyncMock(return_value={"events": events, "next_cursor": None})
-    return mock
-
-
 # ---------------------------------------------------------------------------
 # Pure helper unit tests
 # ---------------------------------------------------------------------------
@@ -257,31 +179,39 @@ def test_matches_kind_filter_selects_single_kind() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_history_renders_both_kinds_by_default() -> None:
-    """No kind filter → both operations and announcements seed the island."""
+def _seed(**fields: Any) -> None:
+    asyncio.run(seed_announcement(_TENANT_A, **fields))
+
+
+def test_history_renders_stored_announcements_newest_first() -> None:
     session_id = _seed_session_sync()
-    events = [_operation_dict(op_id="vsphere.vm.list"), _announcement_dict()]
-    with patch.object(history_module, "list_recent_events_fail_soft", _patch_history(events)):
-        client = _authenticated_client(session_id)
-        response = client.get("/ui/broadcast/history")
+    _seed(activity="older step")
+    _seed(activity="rotating tokens on cluster X")
+    client = _authenticated_client(session_id)
+    response = client.get("/ui/broadcast/history")
     assert response.status_code == 200
     body = response.text
-    assert "vsphere.vm.list" in body
     assert "agent_announcement" in body
-    assert "rotating tokens on cluster X" in body
+    assert body.index("rotating tokens on cluster X") < body.index("older step")
+
+
+def test_history_is_tenant_scoped() -> None:
+    session_id = _seed_session_sync()
+    asyncio.run(seed_announcement(uuid.uuid4(), activity="other tenant plan"))
+    client = _authenticated_client(session_id)
+    response = client.get("/ui/broadcast/history")
+    assert response.status_code == 200
+    assert "other tenant plan" not in response.text
 
 
 def test_history_announcement_row_markup_is_agent_authored() -> None:
     """The row partial carries the announcement branch + escaped activity binding."""
     session_id = _seed_session_sync()
-    events = [_announcement_dict()]
-    with patch.object(history_module, "list_recent_events_fail_soft", _patch_history(events)):
-        client = _authenticated_client(session_id)
-        response = client.get("/ui/broadcast/history")
+    _seed()
+    client = _authenticated_client(session_id)
+    response = client.get("/ui/broadcast/history")
     assert response.status_code == 200
     body = response.text
-    # Announcement branch + its structured-field bindings render server-side
-    # (Alpine markup; evaluated client-side but authored here).
     assert "isAnnouncement(ev)" in body
     assert 'x-text="ev.activity"' in body
     assert "announcementTargets(ev)" in body
@@ -292,61 +222,36 @@ def test_history_announcement_row_markup_is_agent_authored() -> None:
 def test_history_activity_is_html_escaped_in_island() -> None:
     """A ``<script>``-bearing activity is escaped by ``| tojson`` in the island."""
     session_id = _seed_session_sync()
-    events = [_announcement_dict(activity="<script>alert(1)</script>")]
-    with patch.object(history_module, "list_recent_events_fail_soft", _patch_history(events)):
-        client = _authenticated_client(session_id)
-        response = client.get("/ui/broadcast/history")
+    _seed(activity="<script>alert(1)</script>")
+    client = _authenticated_client(session_id)
+    response = client.get("/ui/broadcast/history")
     assert response.status_code == 200
     body = response.text
-    # The raw tag never appears as live markup; tojson escapes ``<`` / ``>``.
     assert "<script>alert(1)</script>" not in body
     assert "\\u003cscript\\u003e" in body
 
 
-def test_history_kind_filter_announcement_only() -> None:
-    """``?kind=agent_announcement`` returns only announcements."""
+def test_history_kind_filter() -> None:
+    """``?kind=agent_announcement`` keeps announcements; ``?kind=operation`` is empty."""
     session_id = _seed_session_sync()
-    events = [_operation_dict(op_id="vsphere.vm.list"), _announcement_dict()]
-    with patch.object(history_module, "list_recent_events_fail_soft", _patch_history(events)):
-        client = _authenticated_client(session_id)
-        response = client.get("/ui/broadcast/history", params={"kind": "agent_announcement"})
-    assert response.status_code == 200
-    body = response.text
-    assert "rotating tokens on cluster X" in body
-    assert "vsphere.vm.list" not in body
+    _seed(activity="rotating tokens on cluster X")
+    client = _authenticated_client(session_id)
+    announcements = client.get("/ui/broadcast/history", params={"kind": "agent_announcement"})
+    operations = client.get("/ui/broadcast/history", params={"kind": "operation"})
+    assert "rotating tokens on cluster X" in announcements.text
+    assert operations.status_code == 200
+    assert "rotating tokens on cluster X" not in operations.text
 
 
-def test_history_kind_filter_operation_only() -> None:
-    """``?kind=operation`` returns only audit-driven operations."""
+def test_history_database_error_renders_empty_pane() -> None:
+    from sqlalchemy.exc import OperationalError
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise OperationalError("SELECT", {}, Exception("db down"))
+
     session_id = _seed_session_sync()
-    events = [_operation_dict(op_id="vsphere.vm.list"), _announcement_dict()]
-    with patch.object(history_module, "list_recent_events_fail_soft", _patch_history(events)):
-        client = _authenticated_client(session_id)
-        response = client.get("/ui/broadcast/history", params={"kind": "operation"})
-    assert response.status_code == 200
-    body = response.text
-    assert "vsphere.vm.list" in body
-    assert "rotating tokens on cluster X" not in body
-
-
-def test_history_mixed_pre_post_t1_replay_renders_without_error() -> None:
-    """A pre-migration op (no kind) + pre-T1 announcement (event_kind only) render 200."""
-    session_id = _seed_session_sync()
-    events = [
-        _operation_dict(op_id="legacy.op", kind=None),
-        _announcement_dict(activity="legacy announce", use_event_kind_only=True),
-    ]
-    with patch.object(history_module, "list_recent_events_fail_soft", _patch_history(events)):
+    with patch.object(history_module, "latest_announcements", _boom):
         client = _authenticated_client(session_id)
         response = client.get("/ui/broadcast/history")
     assert response.status_code == 200
-    body = response.text
-    assert "legacy.op" in body
-    assert "legacy announce" in body
-    # The pre-migration op still counts as an operation under the filter.
-    with patch.object(history_module, "list_recent_events_fail_soft", _patch_history(events)):
-        client = _authenticated_client(session_id)
-        op_only = client.get("/ui/broadcast/history", params={"kind": "operation"})
-    assert op_only.status_code == 200
-    assert "legacy.op" in op_only.text
-    assert "legacy announce" not in op_only.text
+    assert "db down" not in response.text

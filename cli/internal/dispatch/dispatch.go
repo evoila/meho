@@ -79,7 +79,8 @@ type CallRequestBody struct {
 // SearchHit mirrors the backend OperationSearchHit Pydantic model.
 // Pointer fields are nullable per the backend's frozen pydantic
 // model — preserved so JSON unmarshal keeps the null vs zero-value
-// distinction.
+// distinction. The score fields are only sent to a tenant_admin who
+// asks for them (#3668), so they are omitempty here.
 //
 // Promoted from the 9 per-vendor copies (harbor / hetzner-robot /
 // nsx / sddc-manager / vcf-automation / vcf-fleet / vcf-logs /
@@ -93,9 +94,9 @@ type SearchHit struct {
 	GroupKey         *string  `json:"group_key"`
 	SafetyLevel      string   `json:"safety_level"`
 	RequiresApproval bool     `json:"requires_approval"`
-	FusedScore       float64  `json:"fused_score"`
-	Bm25Score        *float64 `json:"bm25_score"`
-	CosineScore      *float64 `json:"cosine_score"`
+	FusedScore       float64  `json:"fused_score,omitempty"`
+	Bm25Score        *float64 `json:"bm25_score,omitempty"`
+	CosineScore      *float64 `json:"cosine_score,omitempty"`
 }
 
 // SearchResponse is the JSON envelope returned by
@@ -107,7 +108,7 @@ type SearchResponse struct {
 }
 
 // ErrOpError is the sentinel returned when the dispatcher reported a
-// structured failure (status == "error" or "denied"). main translates
+// structured failure (status == "error", "denied" or "rate_limited"). main translates
 // a non-nil RunE error into a non-zero exit; SilenceErrors=true on
 // each command keeps cobra from double-printing the error string.
 var ErrOpError = errors.New("operation status not ok")
@@ -118,6 +119,12 @@ var ErrOpError = errors.New("operation status not ok")
 // row and parked the call; it is a first-class non-error outcome that
 // Render surfaces as a parked dispatch and maps to exit 0.
 const StatusAwaitingApproval = "awaiting_approval"
+
+// StatusRateLimited is the refusal the dispatcher returns when the caller
+// is over its rate or concurrency limit (#3500). The operation did not
+// run. The envelope carries extras.retry_after_seconds; the CLI renders
+// it like "error" / "denied" and exits 1. It never retries by itself.
+const StatusRateLimited = "rate_limited"
 
 // ParkedHint is the operator-facing one-liner Render prints under the
 // status header when a dispatch parks. Exported so the parallel
@@ -553,7 +560,7 @@ func isSpace(b byte) bool {
 
 // Render runs the unified post-dispatch path every verb uses: validate
 // the status enum, render the envelope (JSON or human), then map
-// "error" / "denied" to ErrOpError. When prettyPrinter is nil the
+// "error" / "denied" / "rate_limited" to ErrOpError. When prettyPrinter is nil the
 // generic envelope is used.
 //
 // awaiting_approval (parked) is intercepted here — ahead of the
@@ -581,7 +588,7 @@ func (c Connector) Render(
 		return nil // parked, not failed — exit 0.
 	}
 	switch r.Status {
-	case "ok", "error", "denied":
+	case "ok", "error", "denied", StatusRateLimited:
 		// fall through.
 	default:
 		return output.RenderError(cmd.ErrOrStderr(), UnknownStatusError(r.Status), jsonOut)

@@ -67,16 +67,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
@@ -90,7 +89,7 @@ from ._vault_fakes import install_fake_client
 # The kubeconfig's server URL + client token are the load-bearing secret
 # fields: the server URL gives a remote attacker the API endpoint, and a
 # bearer token is a direct credential. Both MUST stay out of every log
-# event, OperationResult, and broadcast payload.
+# event, OperationResult, and audit row.
 # ---------------------------------------------------------------------------
 
 _CANARY_SERVER_URL = "https://k8s-credread-canary.test.invalid:6443"
@@ -181,18 +180,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events so the audit/broadcast leg is asserted."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -312,7 +299,6 @@ def _stub_namespace_list_response() -> Any:
 async def test_dispatch_executes_full_credread_chain_returns_ok(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The full dispatch->loader->kubeconfig->handler chain returns status="ok"."""
@@ -373,23 +359,26 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     # The handler ran against the mocked CoreV1Api.
     core_v1_mock.list_namespace.assert_awaited_once()
 
-    # One audit + one broadcast for the dispatched op.
-    assert len(captured_events) == 1
+    # One audit row for the dispatched op.
+    async with get_sessionmaker()() as fresh:
+        audit_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == _OP_ID))).scalars().all()
+        )
+    assert len(audit_rows) == 1
 
 
 @pytest.mark.asyncio
 async def test_credread_chain_never_leaks_kubeconfig_in_result_or_logs(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No kubeconfig content rides the OperationResult or any captured log event.
 
     The kubeconfig YAML in the Vault fake carries three canary fields
     (server URL, bearer token, client cert PEM); each is asserted absent
-    from the dispatch result, every structlog event, and the broadcast
-    payload. The kubeconfig is treated as ephemeral in-memory state —
+    from the dispatch result, every structlog event, and the stored
+    audit rows. The kubeconfig is treated as ephemeral in-memory state —
     same discipline the shared
     :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
     helper enforces for the REST connectors.
@@ -436,16 +425,16 @@ async def test_credread_chain_never_leaks_kubeconfig_in_result_or_logs(
     assert _CANARY_CLIENT_CERT_PEM not in result_blob, "client cert PEM leaked into OperationResult"
 
     # The kubeconfig never rides any structlog event (loader, connector,
-    # dispatcher, audit, broadcast).
+    # dispatcher, audit).
     log_blob = repr(captured)
     assert _CANARY_SERVER_URL not in log_blob, "server URL leaked into structlog events"
     assert _CANARY_BEARER_TOKEN not in log_blob, "bearer token leaked into structlog events"
     assert _CANARY_CLIENT_CERT_PEM not in log_blob, "client cert PEM leaked into structlog events"
 
-    # The kubeconfig never rides the broadcast event payload either.
-    events_blob = repr(captured_events)
-    assert _CANARY_SERVER_URL not in events_blob, "server URL leaked into broadcast events"
-    assert _CANARY_BEARER_TOKEN not in events_blob, "bearer token leaked into broadcast events"
-    assert _CANARY_CLIENT_CERT_PEM not in events_blob, (
-        "client cert PEM leaked into broadcast events"
-    )
+    # The kubeconfig never rides the stored audit rows either.
+    async with get_sessionmaker()() as fresh:
+        audit_rows = (await fresh.execute(select(AuditLog))).scalars().all()
+    audit_blob = repr([row.payload for row in audit_rows])
+    assert _CANARY_SERVER_URL not in audit_blob, "server URL leaked into audit rows"
+    assert _CANARY_BEARER_TOKEN not in audit_blob, "bearer token leaked into audit rows"
+    assert _CANARY_CLIENT_CERT_PEM not in audit_blob, "client cert PEM leaked into audit rows"

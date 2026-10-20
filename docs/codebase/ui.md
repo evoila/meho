@@ -86,7 +86,7 @@ Sanctioned exceptions:
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter), mints a second per-flow `browser_binding` secret (login-CSRF defence, F10 #272), and registers the verifier + binding + `return_to` in a server-side `PKCEVerifierStore`; it returns `(url, state, browser_binding)`. `exchange_code_for_tokens` pops the pending flow, **rejects it (`browser_binding_mismatch`) when the callback's replayed binding is missing or does not match — before the token exchange** (constant-time `hmac.compare_digest`), then exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
 | `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Login sets the short-lived `browser_binding` cookie (`login_binding_cookie_name(state)` = `meho_ob_<sha256(state)[:32]>`; `HttpOnly; Secure; SameSite=Lax; Path=/ui/auth; Max-Age=<flow TTL>`) — `Lax`, not `Strict`, so it survives the cross-site top-level callback navigation from a separately hosted Keycloak; the per-`state` name lets concurrent logins from one browser bind independently. Callback reads that cookie, passes it to `exchange_code_for_tokens` for the binding check, verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks, sets `meho_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`), and clears the single-use binding cookie on success. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
 | `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. `require_ui_admin` (the write-route RBAC gate) loads + verifies the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). After every successful row load the middleware also runs the drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation.revalidate_read_session`): past `ui_session_read_revalidation_seconds` (default 300; `0` = every request) without a validation, the stored token is re-presented to the JWKS-cached JWT chain -- an in-memory check on a cache hit, escalating to one reactive refresh only once the token is past `exp` -- and a terminal failure collapses to the same redirect-to-login as a missing session. This bounds IdP revocation / role-demotion lag on read renders to ~(access-token TTL + threshold) instead of the 12 h absolute session lifetime; the anchor is a process-local last-validated map (not `last_seen_at`, which active sessions bump every request, so a gap-based gate would never fire for exactly the sessions that matter). |
-| `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies: `require_ui_admin`, the session middleware's drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation`), plus (G10.x #121) every per-route operator lift that re-verifies the stored access token to surface `tenant_role` / `sub` — `agents.operator`, `connectors.operator` (and the topology write gates that reuse its `lift_operator_from_session`), `memory.operator`, and the `kb` / `runbooks` / `operations` / `audit` / `keycloak` / `vault` route resolvers. Each calls `load_fresh_session` then `verify_access_token_with_refresh` (mirroring the `approvals` / `corpus` / `retrieval` precedent) rather than bare `load_session` + `verify_jwt_for_audience`, so no token-consuming `/ui/*` route 401s on an expired-but-refreshable token. The soft-fail role probes (`runbooks` / `audit` `_resolve_role`, the `agents` / `connectors` `resolve_role_probe`) keep their `try/except` → "no privileges" floor: a terminal `session_expired` from an unavailable refresh is absorbed there, never a 5xx. The dashboard-feed fix (#1696) needed no caller here — it re-pointed the tray at the existing session-gated `/ui/broadcast/stream` bridge, which reads Valkey directly under `require_ui_session` and never presents the access token. |
+| `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies: `require_ui_admin`, the session middleware's drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation`), plus (G10.x #121) every per-route operator lift that re-verifies the stored access token to surface `tenant_role` / `sub` — `agents.operator`, `connectors.operator` (and the topology write gates that reuse its `lift_operator_from_session`), `memory.operator`, and the `kb` / `runbooks` / `operations` / `audit` / `keycloak` / `vault` route resolvers. Each calls `load_fresh_session` then `verify_access_token_with_refresh` (mirroring the `approvals` / `corpus` / `retrieval` precedent) rather than bare `load_session` + `verify_jwt_for_audience`, so no token-consuming `/ui/*` route 401s on an expired-but-refreshable token. The soft-fail role probes (`runbooks` / `audit` `_resolve_role`, the `agents` / `connectors` `resolve_role_probe`) keep their `try/except` → "no privileges" floor: a terminal `session_expired` from an unavailable refresh is absorbed there, never a 5xx. The dashboard-feed fix (#1696) needed no caller here — it re-pointed the tray at the existing session-gated `/ui/broadcast/stream` bridge, which reads the announcement archive under `require_ui_session` and never presents the access token. |
 | `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts two recoverable shapes, both only for HTML navigations (`Accept: text/html`): (1) `401 session_expired` on `/ui/*` (G0.25 #1694) -> `302 /ui/auth/login?return_to=<path>` + `meho_session` cookie clear; (2) `400 authorization_state_expired` on `/ui/auth/callback` (G0.29 #2089, Leg 1) -> `303 /ui/auth/login` (no cookie touched -- pre-session; no `return_to` -- it died with the expired verifier). Non-HTML callers on either shape keep the structured JSON body (the `session_expired` case also clears the dead cookie). Every other HTTPException -- including the callback's genuine IdP `authorization_failed` and its token-endpoint `502` -- delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes and the non-recoverable callback errors are untouched. |
 
 The Jinja2 `Environment` is a module-level singleton (constructed on
@@ -982,7 +982,7 @@ keeps a full-screen wall display from logging out mid-stream.
 | `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Accepts `?op_class=&principal=&target=&op_id=` so a copy-pasted filtered URL reproduces the view. `?wall=1` selects the no-chrome wall-monitor layout (`broadcast/wall.html`) instead. |
 | `GET /ui/broadcast/feed` | Filtered feed **fragment** (`broadcast/_feed.html`) — the filter-bar submit target. Re-renders the feed with the active server-side filters baked into a fresh `sse-connect` URL. |
 | `GET /ui/broadcast/stream` | Session-gated SSE bridge (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
-| `GET /ui/broadcast/history` | Last-24h replay **fragment** (`broadcast/_history.html`) — the "Last 24h" tab's HTMX target. A finite `XRANGE` pull of the tenant's last-24h events seeded into the shared `broadcastFeed` controller. |
+| `GET /ui/broadcast/history` | Last-24h replay **fragment** (`broadcast/_history.html`) — the "Last 24h" tab's HTMX target. A finite read of the tenant's last-24h stored announcements seeded into the shared `broadcastFeed` controller. |
 | `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). Shared by the live feed, the wall view, and the history pane. |
 
 ### Why a UI-owned SSE bridge instead of subscribing to `/api/v1/feed`
@@ -1038,7 +1038,7 @@ the colour policy stays one auditable map.
 | `broadcast/_event_drawer.html` | Event detail drawer: op identity, operation metadata, identifiers (audit_id / request_id / broadcast event_id), full payload (or the 🔒 placeholder for sensitive ops). Alpine `click.outside` / Escape / Close dismiss. |
 | `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
 | `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
-| `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the historical events the `/ui/broadcast/history` route pulled via `XRANGE`, so the rows render through `_event_row.html` and open the same drawer as the live feed. |
+| `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the stored announcements the `/ui/broadcast/history` route read from the archive, so the rows render through `_event_row.html` and open the same drawer as the live feed. |
 | `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
 
 ### Performance + empty state
@@ -1099,8 +1099,8 @@ A feed-row click calls the controller's `openDrawer(ev)`, which
 `htmx.ajax`-GETs the drawer fragment into `#event-drawer`. The path
 parameter is the **audit id**, not the broadcast event id:
 
-* The broadcast `event_id` lives only on the ephemeral, MAXLEN-trimmed
-  Valkey stream — it is not a column on any table.
+* The broadcast `event_id` identifies the announcement on the feed — it
+  is not a column on `audit_log`.
 * The canonical, queryable record is the `audit_log` row, keyed by
   `audit_log.id`, which every `BroadcastEvent` carries as `audit_id`.
   The drawer's full payload + `request_id` exist only there.
@@ -1202,16 +1202,15 @@ is the SSE feed; the "Last 24h" tab lazy-loads `/ui/broadcast/history`
 the first time it is shown (`hx-trigger="intersect once"` fires the GET
 when the initially-hidden pane scrolls into view).
 
-The history route pulls the tenant's last-24h events with a **finite**
-`XRANGE` over `meho:feed:{session.tenant_id}` — the opposite shape from
-the live feed's BLOCKing `XREAD`: a bounded batch read that returns
-immediately (no streaming, no `while True`, so it cannot hang a worker).
-The window start is a bare millisecond timestamp `now - retention_hours`
-(`BROADCAST_RETENTION_HOURS`, default 24); Valkey `XRANGE` auto-completes
-the bare timestamp's sequence to `0`, so the range spans every entry from
-that millisecond to `+` (the live tail), bounded by `COUNT = 1000` (the
-same in-DOM row budget as the live feed). `XRANGE` returns oldest-first;
-the route reverses to newest-first to match the live feed.
+The history route reads the tenant's newest stored announcements from
+the `agent_announcement` archive (#3758) through
+`broadcast.archive_reader.latest_announcements`: a **finite** read that
+returns immediately (no streaming, no `while True`, so it cannot hang a
+worker). The window is `now - retention_hours`
+(`BROADCAST_RETENTION_HOURS`, default 24), bounded by the same 1000-row
+in-DOM budget as the live feed, newest-first. Automatic operations are
+no longer on Broadcast, so the "Operations" filter shows nothing; the
+audit console and `query_audit` are the record of operations.
 
 The route passes the events as the `history_events` list, which the
 fragment renders through Jinja's `| tojson` filter into a
@@ -1223,8 +1222,8 @@ same `_event_row.html` partial and opens the same T2 drawer on a click —
 a history row is byte-identical to a live row. The `init` op_id re-read
 is gated to `#broadcast-feed` (the live feed) so it never leaks the live
 filter onto the history pane, which keeps its own filter state. The
-history fetch is fail-soft: a transient Valkey error returns an empty
-list (the pane shows its empty state) rather than 500-ing the fragment.
+history fetch is fail-soft: a database error returns an empty list
+(the pane shows its empty state) rather than 500-ing the fragment.
 
 **Why a data island, not an `x-data` attribute (B1, PR #1044).** Event
 fields (`op_id`, `target_name`, `principal_sub`, payload values) are
@@ -1286,21 +1285,21 @@ binding untrusted data into Alpine. Regression coverage lives in
 ### Cross-tenant isolation
 
 The page carries no tenant data beyond the operator's own identity; live
-events arrive over the tenant-scoped bridge whose stream key is
-`meho:feed:{session.tenant_id}`. The target dropdown and the event
+announcements arrive over the tenant-scoped bridge, which reads the
+archive for `session.tenant_id`. The target dropdown and the event
 drawer both scope to `session.tenant_id` at the SQL `WHERE` clause —
 never a query parameter — so a tenant-A operator can never surface
-tenant-B targets or audit rows. The history pane keys the same way: its
-`XRANGE` reads `meho:feed:{session.tenant_id}`, taken from the validated
+tenant-B targets or audit rows. The history pane keys the same way: it
+reads the archive for `session.tenant_id`, taken from the validated
 session, never a query parameter — so a tenant-A operator's replay can
-never surface tenant-B events. The wall view reuses the live feed
+never surface tenant-B announcements. The wall view reuses the live feed
 fragment, so it inherits the live bridge's tenant scoping unchanged. The
 [T1 broadcast suite](../../backend/tests/test_ui_broadcast_feed.py) pins
 the generator's stream-key derivation per tenant; the
 [T2 filters suite](../../backend/tests/test_ui_broadcast_filters.py)
 pins the dropdown + drawer tenant scoping; the
 [T3 wall/replay suite](../../backend/tests/test_ui_broadcast_wall_replay.py)
-pins the history pane's per-tenant `XRANGE` key + the wall layout + the
+pins the history pane's per-tenant archive read + the wall layout + the
 sliding-session extension.
 
 ### Known limits
@@ -2245,7 +2244,8 @@ the same way broadcast / topology / memory retired theirs.
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET` | `/ui/connectors` | Sortable + filterable targets list. URL: `?sort=name|product|host|last_probed_at|status&dir=asc|desc&product=<slug>`. Full-page render or `_table_rows.html` fragment (HX-Request branch). |
-| `GET` | `/ui/connectors/{name}` | Per-target detail. Renders properties + fingerprint card + recent-ops card (SSE-live) + available-operations matrix. Alias-aware target resolution via `resolve_target`. |
+| `GET` | `/ui/connectors/{name}` | Per-target detail. Renders properties + fingerprint card + recent-ops card (server-rendered from the audit log; rows need the `operator` role) + available-operations matrix. Alias-aware target resolution via `resolve_target`. |
+| `GET` | `/ui/connectors/{name}/recent-operations` | The recent-ops card alone (newest 10 `operation_execution` audit rows). `recent-ops-refresh.js` fetches it every 5 seconds while the page is visible. A session below `operator` gets the notice card at 403 (#3758). |
 | `POST` | `/ui/connectors/{name}/probe` | Re-probe action. Tenant_admin RBAC gated server-side (the template hides the button optimistically; the handler is the authority). Persists the new fingerprint and swaps the refreshed `_fingerprint_card.html` fragment. |
 | `GET` | `/ui/connectors/create` | (T2 #874) HTMX-loaded create-target modal. Tenant_admin gated. Product `<select>` server-rendered from `registered_product_tokens()`; auth_model `<select>` from the `AuthModel` enum. |
 | `POST` | `/ui/connectors/create` | (T2 #874) Create submit. Builds a `TargetCreate` and delegates to the REST `create_target` handler in-process. Success → 204 + `HX-Redirect: /ui/connectors`; validation failure → 422 + modal re-rendered with per-field errors. |
@@ -2269,9 +2269,11 @@ the same way broadcast / topology / memory retired theirs.
 
 The detail page's available-operations matrix and the re-probe action both consume `resolve_connector_or_label(target)` — the same helper the `/api/v1/targets/{name}/probe` REST route uses (G0.14-T1 #1142). The detail page then resolves the matching v2-registry entry to produce the canonical `"<impl_id>-<version>"` `connector_id` the operations meta-tool query reads (`list_operation_groups`'s shape). When the registry has the chosen class under multiple keys (the K8s pattern, both a v1 wildcard and a v2 versioned key), the detail page picks the versioned key — same precedence the G0.6 dispatcher's lookup uses.
 
-### SSE wiring for recent ops
+### Recent-ops card refresh and role gate (#3758)
 
-The recent-ops card on the detail page is live-driven by the existing G10.1 broadcast SSE bridge: the card embeds `sse-connect="/ui/broadcast/stream?target=<urlencoded-name>"` plus `sse-swap="broadcast"`. An Alpine controller (`connectorsRecentOps`, `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js`) hooks `htmx:sse-before-message`, parses each `event: broadcast` frame's JSON, and prepends a row to its bounded `events` array (cap 50; older rows trim). The card is initially seeded by the server-rendered last-10 audit rows so the page is useful even before any new event streams in.
+The recent-ops card is rendered on the server from the newest 10 `operation_execution` audit rows on the target. `recent-ops-refresh.js` swaps in a fresh copy from `GET /ui/connectors/{name}/recent-operations` every 5 seconds while the page is visible; the card shows when it was updated. There is no Broadcast subscription any more: Broadcast carries agent announcements only.
+
+Audit rows need the `operator` role, the same minimum the audit API applies (`require_role(TenantRole.OPERATOR)` in `api/v1/audit.py`). The page-load role probe (`resolve_role_probe`, `is_operator`) decides: a `read_only` session, or a role lift that could not complete, gets the card with a notice and no refresh URL, and the fragment answers 403 with the same notice. The dashboard tray (`GET /ui/dashboard/recent-operations`) applies the same gate through `meho_backplane.ui.roles.is_ui_operator`.
 
 ### RBAC posture for re-probe
 
@@ -2286,7 +2288,7 @@ Every list / detail / probe path filters on `session_ctx.tenant_id`:
 * Probe: same `resolve_target` gate before the write.
 * Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible.
 * Ops matrix: `(operation_group.tenant_id IS NULL OR operation_group.tenant_id = :tenant_id)` — same shape `list_operation_groups` uses for the agent surface.
-* Recent-ops SSE: the underlying `/ui/broadcast/stream` bridge takes the tenant from the session row, never from a query parameter, so the per-target filter cannot leak across tenants.
+* Recent-ops fragment: resolves the target name in the session's tenant (`resolve_target`, 404 on a cross-tenant name) after the role gate, so the fragment never shows another tenant's rows.
 
 ### Create / edit forms (Task #874)
 
@@ -2418,11 +2420,11 @@ detail surface that didn't exist when v0.7.0 cut:
 * `backend/src/meho_backplane/ui/templates/connectors/_table_rows.html` — list rows fragment (HTMX swap target).
 * `backend/src/meho_backplane/ui/templates/connectors/detail.html` — full-page detail template.
 * `backend/src/meho_backplane/ui/templates/connectors/_fingerprint_card.html` — fingerprint card (also returned by the re-probe POST).
-* `backend/src/meho_backplane/ui/templates/connectors/_recent_ops.html` — SSE-live recent-ops card.
+* `backend/src/meho_backplane/ui/templates/connectors/_recent_ops.html` — recent-ops card (server-rendered; also the fragment response; notice shape for a session below `operator`).
 * `backend/src/meho_backplane/ui/templates/connectors/_ops_matrix.html` — grouped operations matrix.
 * `backend/src/meho_backplane/ui/templates/connectors/_probe_alert.html` — failure alert fragment (no_connector / ambiguous).
-* `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js` — `connectorsRecentOps` Alpine controller.
-* `backend/tests/test_ui_connectors_view.py` — auth boundary, list (full + fragment + sort + filter + cross-tenant), detail (properties + alias + 404 + cross-tenant + recent ops + ops matrix + ambiguous / no-connector branches), fingerprint card (present / never), re-probe button visibility (operator vs tenant_admin), SSE wiring + URL-encoding, re-probe (success + 403 operator + 501 no-connector + 404 unknown).
+* `backend/src/meho_backplane/ui/static/src/app/recent-ops-refresh.js` — shared 5-second visible-page refresh for the connector card and the dashboard tray.
+* `backend/tests/test_ui_connectors_view.py` — auth boundary, list (full + fragment + sort + filter + cross-tenant), detail (properties + alias + 404 + cross-tenant + recent ops + ops matrix + ambiguous / no-connector branches), fingerprint card (present / never), re-probe button visibility (operator vs tenant_admin), recent-ops refresh wiring + URL-encoding + role gate (read_only 403 / operator / tenant_admin), re-probe (success + 403 operator + 501 no-connector + 404 unknown).
 
 ### Bulk import (Task #875)
 

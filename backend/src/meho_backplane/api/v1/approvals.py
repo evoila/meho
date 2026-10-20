@@ -109,8 +109,8 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     get_decision_delegation,
     get_request,
-    publish_approval_event,
     read_approval_result,
+    record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
 )
@@ -507,8 +507,8 @@ async def _capture_operator_decision(
 ) -> ApprovalRequest:
     """Commit a ``/decide`` operator decision + publish, mapping errors to HTTP.
 
-    Runs the approve/reject inside one transaction, publishes the
-    fail-open broadcast after commit, and projects the approval-queue
+    Runs the approve/reject inside one transaction, records the
+    fail-open add-on step event after commit, and projects the approval-queue
     exceptions onto the same HTTP status codes the ``/approve`` route
     uses. Returns the decided :class:`ApprovalRequest` (the caller decides
     whether to re-dispatch). Extracted so :func:`decide_approval_request`
@@ -528,11 +528,10 @@ async def _capture_operator_decision(
                 )
             await session.commit()
         # Publish AFTER commit (fail-open).
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision=decision,
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:
@@ -763,11 +762,10 @@ async def _record_approval_decision(
             await session.commit()
         # Publish AFTER commit (G11.2-T5): a phantom event cannot
         # outlive a failed transaction; helper is fail-open.
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision="approved",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:
@@ -945,11 +943,10 @@ async def reject_approval_request(
                 reason=body.reason,
             )
             await session.commit()
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision="rejected",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:
@@ -1060,8 +1057,8 @@ async def decide_approval_request(
     """Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).
 
     Flips the request to ``approved`` or ``rejected``, writes the
-    decision audit row, and publishes the ``approval.{approved,rejected}``
-    broadcast event. Backs the CLI/MCP operator-decision flow where the
+    decision audit row, and records the ``approval.{approved,rejected}``
+    add-on step event. Backs the CLI/MCP operator-decision flow where the
     operator approves by id alone.
 
     On **every approval** the decision then drives a re-dispatch using the

@@ -47,7 +47,6 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any, ClassVar
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import sqlalchemy as sa
@@ -90,7 +89,6 @@ from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 pytestmark = pytest.mark.skipif(not DOCKER_AVAILABLE, reason=SKIP_REASON)
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
-_PUBLISH = "meho_backplane.topology.refresh.publish_event"
 
 # Return the schema to its pre-cut-over shape between tests. Test-only:
 # production never restores the old key once scoped rows exist.
@@ -229,8 +227,7 @@ async def _add_target(name: str, target_id: uuid.UUID | None = None) -> Target:
 
 async def _refresh(target: Target, hints: TopologyHints) -> None:
     _FakeCluster.answers[target.id] = hints
-    with patch(_PUBLISH, new=AsyncMock()):
-        await refresh_target_topology(target, _operator())
+    await refresh_target_topology(target, _operator())
 
 
 async def _legacy_graph(

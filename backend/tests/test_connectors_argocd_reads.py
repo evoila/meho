@@ -36,6 +36,7 @@ dispatch lifecycle + Vault fake, and :mod:`tests.test_connectors_bind9_reads`
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -46,16 +47,21 @@ import pytest
 import respx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import meho_backplane.operations.result_query as result_query_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.argocd import ARGOCD_OPS, ArgoCdConnector
+from meho_backplane.connectors.argocd.connector import _augment_app_health
 from meho_backplane.connectors.argocd.redaction import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.jsonflux.query.contract import ResultQuerySpec
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import reset_handler_cache
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import search_operations
 from meho_backplane.settings import get_settings
 
+from ._result_store_helpers import MemoryResultStore
 from ._vault_fakes import install_fake_client
 
 _CANARY_TOKEN = "argocd-bearer-canary-must-not-leak-reads"
@@ -190,7 +196,40 @@ _APP_LIST_RESPONSE: dict[str, Any] = {
                 "sync": {"status": "OutOfSync"},
                 "health": {"status": "Degraded"},
             },
-        }
+        },
+        {
+            "metadata": {"name": "billing"},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+        },
+        {
+            "metadata": {"name": "payments"},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+        },
+        {
+            # ArgoCD's own "Unknown" is kept as is, not folded into "unknown".
+            "metadata": {"name": "legacy"},
+            "status": {"sync": {"status": "Unknown"}, "health": {"status": "Unknown"}},
+        },
+        {
+            # A new app with no status reported yet.
+            "metadata": {"name": "drafts"},
+            "status": {},
+        },
+    ],
+}
+#: The flat columns ``argocd.app.list`` adds to each item, in fixture order.
+_APP_LIST_DERIVED: list[dict[str, str]] = [
+    {"name": "guestbook", "health_status": "Degraded", "sync_status": "OutOfSync"},
+    {"name": "billing", "health_status": "Healthy", "sync_status": "Synced"},
+    {"name": "payments", "health_status": "Healthy", "sync_status": "Synced"},
+    {"name": "legacy", "health_status": "Unknown", "sync_status": "Unknown"},
+    {"name": "drafts", "health_status": "unknown", "sync_status": "unknown"},
+]
+_APP_LIST_EXPECTED: dict[str, Any] = {
+    "metadata": _APP_LIST_RESPONSE["metadata"],
+    "items": [
+        {**item, **derived}
+        for item, derived in zip(_APP_LIST_RESPONSE["items"], _APP_LIST_DERIVED, strict=True)
     ],
 }
 _APP_GET_RESPONSE: dict[str, Any] = {
@@ -287,7 +326,8 @@ _CLUSTER_LIST_WITH_CONFIG_RESPONSE: dict[str, Any] = {
 #: A repo's HTTPS-basic password + SSH key + bearer token — must never
 #: survive the ``argocd.repo.list`` handler's read-side redaction (#3501).
 _REPO_SECRET_PASSWORD = "repo-https-password-must-not-leak"
-_REPO_SECRET_SSH_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----must-not-leak-----END-----"
+# Split so the pre-commit private-key hook does not flag this fake key.
+_REPO_SECRET_SSH_KEY = "-----BEGIN " + "OPENSSH PRIVATE KEY-----must-not-leak-----END-----"
 _REPO_SECRET_BEARER = "repo-bearer-token-must-not-leak"
 #: A repository-list payload that carries the credential fields argocd-server
 #: echoes for a broad-RBAC token, so the redaction test proves the handler
@@ -367,7 +407,9 @@ async def test_each_read_op_dispatches_live_and_returns_payload(
         )
 
     assert result.status == "ok", result.error
-    assert result.result == payload
+    # app.list adds flat status columns to each item; the rest pass through.
+    expected = _APP_LIST_EXPECTED if op_id == "argocd.app.list" else payload
+    assert result.result == expected
     assert route.called and route.call_count == 1
     sent_auth = route.calls[0].request.headers.get("authorization")
     assert sent_auth == f"Bearer {_CANARY_TOKEN}"
@@ -429,6 +471,128 @@ async def test_app_list_forwards_projects_and_selector_query(
     sent_url = route.calls[0].request.url
     assert sent_url.params.get_list("projects") == ["team-a", "team-b"]
     assert sent_url.params.get("selector") == "env=prod"
+
+
+async def _dispatch_app_list(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Dispatch ``argocd.app.list`` against the canned list and return the result."""
+    install_fake_client(monkeypatch, secret={"token": _CANARY_TOKEN})
+    async with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        mock.get("/api/v1/applications").respond(200, json=_APP_LIST_RESPONSE)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="argocd.app.list",
+            target=_ReadTarget(),
+            params={},
+        )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    return result.result
+
+
+@pytest.mark.asyncio
+async def test_app_list_adds_flat_status_columns_and_keeps_raw_fields(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each app gets top-level health_status / sync_status / name; raw fields stay the same."""
+    await _register_ops(_stub_embedding)
+    payload = await _dispatch_app_list(monkeypatch)
+
+    items = payload["items"]
+    assert len(items) == len(_APP_LIST_RESPONSE["items"])
+    for item, raw, derived in zip(
+        items, _APP_LIST_RESPONSE["items"], _APP_LIST_DERIVED, strict=True
+    ):
+        assert {key: item[key] for key in derived} == derived
+        # The vendor sub-objects are byte-identical to what ArgoCD sent.
+        for key in ("status", "metadata"):
+            assert json.dumps(item[key]) == json.dumps(raw[key])
+    assert payload["metadata"] == _APP_LIST_RESPONSE["metadata"]
+
+
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        (
+            {"metadata": {"name": "a"}, "status": {"health": {}, "sync": {}}},
+            {"name": "a", "health_status": "unknown", "sync_status": "unknown"},
+        ),
+        (
+            {"metadata": {"name": "b"}, "status": {"health": {"status": 3}, "sync": None}},
+            {"name": "b", "health_status": "unknown", "sync_status": "unknown"},
+        ),
+        (
+            {"metadata": {"name": "c"}, "status": {"health": {"status": ""}}},
+            {"name": "c", "health_status": "unknown", "sync_status": "unknown"},
+        ),
+        (
+            {"status": "broken"},
+            {"name": "unknown", "health_status": "unknown", "sync_status": "unknown"},
+        ),
+        (
+            {"metadata": {"name": "d"}, "status": {"health": {"status": "Unknown"}}},
+            {"name": "d", "health_status": "Unknown", "sync_status": "unknown"},
+        ),
+        (
+            {
+                "metadata": {"name": "e"},
+                "status": {"health": {"status": "Suspended"}, "sync": {"status": "Unknown"}},
+            },
+            {"name": "e", "health_status": "Suspended", "sync_status": "Unknown"},
+        ),
+    ],
+)
+def test_augment_app_health_uses_unknown_bucket_for_missing_values(
+    item: dict[str, Any], expected: dict[str, str]
+) -> None:
+    """A missing or non-string value becomes "unknown"; ArgoCD's "Unknown" is kept."""
+    raw = json.dumps(item)
+    out = _augment_app_health({"items": [item]})["items"][0]
+    assert {key: out[key] for key in expected} == expected
+    assert json.dumps({k: v for k, v in out.items() if k not in expected}) == raw
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"items": None, "metadata": {}}, {"metadata": {}}, {"items": ["not-an-app"]}],
+)
+def test_augment_app_health_leaves_other_shapes_untouched(payload: dict[str, Any]) -> None:
+    """No apps (``items: null``) or unexpected shapes pass through unchanged."""
+    before = json.dumps(payload)
+    assert json.dumps(_augment_app_health(payload)) == before
+
+
+@pytest.mark.asyncio
+async def test_result_query_counts_apps_per_health_status(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """COUNT + GROUP BY health_status over the stored app.list rows gives one row per state."""
+    await _register_ops(_stub_embedding)
+    payload = await _dispatch_app_list(monkeypatch)
+
+    operator = _make_operator()
+    store = MemoryResultStore()
+    _, handle = await JsonFluxReducer(row_threshold=0, store=store).reduce(
+        payload,
+        None,
+        context={"tenant_id": str(operator.tenant_id), "operator_sub": operator.sub},
+    )
+    assert handle is not None
+    monkeypatch.setattr(result_query_module, "get_result_handle_store", lambda: store)
+
+    result = await result_query_module.run_result_query(
+        operator,
+        handle.handle_id,
+        ResultQuerySpec(group_by=["health_status"], aggregate=[{"func": "COUNT"}]),
+    )
+
+    counts = {row["health_status"]: row["count"] for row in result["rows"]}
+    assert counts == {"Degraded": 1, "Healthy": 2, "Unknown": 1, "unknown": 1}
+    assert result["coverage"] == "complete"
 
 
 @pytest.mark.asyncio

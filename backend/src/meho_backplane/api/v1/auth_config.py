@@ -93,15 +93,17 @@ async def auth_config() -> AuthConfigResponse:
 
     Reads :func:`~meho_backplane.settings.get_settings` so the response
     cannot drift from the values :mod:`~meho_backplane.auth.jwt` uses
-    when it validates inbound JWTs. The issuer URL is trailing-slash-
-    normalised here — Keycloak's discovery document advertises the
-    canonical form without a trailing slash and the CLI's own URL
-    construction (``<issuer>/.well-known/openid-configuration``) is
-    cleaner against the normalised form.
+    when it validates inbound JWTs. The issuer URL is returned exactly
+    as configured, trailing slash included. Keycloak publishes its
+    issuer without one; providers such as authentik publish theirs
+    with one, and a client that compares the value against the
+    discovery document (RFC 8414 §3.3) needs the published form. The
+    CLI strips the slash itself before it builds
+    ``<issuer>/.well-known/openid-configuration``.
     """
     settings = get_settings()
     return AuthConfigResponse(
-        keycloak_issuer=str(settings.keycloak_issuer_url).rstrip("/"),
+        keycloak_issuer=str(settings.keycloak_issuer_url),
         audience=settings.keycloak_audience,
         cli_client_id=settings.keycloak_cli_client_id,
     )

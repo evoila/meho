@@ -69,7 +69,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -358,18 +357,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -597,7 +584,7 @@ class _VcfaE2EBundle:
 
 
 @pytest.fixture
-async def vcfa_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VcfaE2EBundle]:
+async def vcfa_e2e_canary() -> AsyncIterator[_VcfaE2EBundle]:
     """Dispatcher-ready VCFA setup over a respx-mocked dual-plane appliance.
 
     Lifecycle:
@@ -844,9 +831,7 @@ async def test_vcfa_e2e_jsonflux_handle_populated_for_deployment_list(
     )
 
 
-async def test_vcfa_e2e_per_call_fqdn_override_threads_to_connector(
-    captured_events: list[Any],
-) -> None:
+async def test_vcfa_e2e_per_call_fqdn_override_threads_to_connector() -> None:
     """Per-call ``target.fqdn`` override on the dispatch body wins over the DB row.
 
     Exercises acceptance criterion (e) under the #2863 posture: the
@@ -919,9 +904,7 @@ async def test_vcfa_e2e_per_call_fqdn_override_threads_to_connector(
             reset_dispatcher_caches()
 
 
-async def test_vcfa_e2e_ip_host_without_fqdn_surfaces_descriptive_error(
-    captured_events: list[Any],
-) -> None:
+async def test_vcfa_e2e_ip_host_without_fqdn_surfaces_descriptive_error() -> None:
     """IP-host target with no ``fqdn`` set surfaces a descriptive error_code.
 
     Exercises acceptance criterion (b)'s "descriptive error, not blank
@@ -968,9 +951,7 @@ async def test_vcfa_e2e_ip_host_without_fqdn_surfaces_descriptive_error(
     )
 
 
-async def test_vcfa_e2e_provider_request_carries_bearer_jwt(
-    captured_events: list[Any],
-) -> None:
+async def test_vcfa_e2e_provider_request_carries_bearer_jwt() -> None:
     """Provider-plane GET request carries Authorization: Bearer <provider-jwt>.
 
     Asserts the post-login Bearer header is the JWT the provider

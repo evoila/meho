@@ -114,9 +114,9 @@ _log = structlog.get_logger(__name__)
 #: A tool handler receives the validated operator and the
 #: jsonschema-validated arguments dict, and returns a JSON-serialisable dict
 #: that the :func:`~meho_backplane.mcp.handlers.handle_tools_call` wrapper
-#: packs into the MCP ``content`` array. Returning ``isError`` semantics
-#: (tool-execution errors per MCP spec §Error Handling) is currently
-#: out of scope for the registry; T4 reference tools wire it.
+#: packs into the MCP ``content`` array. The wrapper sets ``isError``
+#: (tool-execution errors per MCP spec §Error Handling) from the
+#: ``status`` of an ``OperationResult`` envelope; handlers never set it.
 ToolHandler = Callable[[Operator, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 #: A resource handler receives the operator and the URI-template variables

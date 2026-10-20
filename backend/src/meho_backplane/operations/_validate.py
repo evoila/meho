@@ -515,7 +515,7 @@ async def policy_gate(
 
     The function is **async** — it opens its own DB session to load the
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
-    mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
+    mirroring the same pattern :func:`audit_safe` uses.
     """
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:

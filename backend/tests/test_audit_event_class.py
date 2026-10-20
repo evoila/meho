@@ -34,7 +34,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AUDIT_EVENT_CLASSES, AuditEventClass, AuditLog
 from meho_backplane.memory.audit import write_internal_audit_row
 from meho_backplane.operations import approval_queue
-from meho_backplane.operations._audit import audit_and_broadcast_safe, write_audit_row
+from meho_backplane.operations._audit import audit_safe, write_audit_row
 from meho_backplane.settings import get_settings
 
 _SRC_ROOT = Path(meho_backplane.__file__).resolve().parent
@@ -136,7 +136,7 @@ def test_inventory_flags_each_unclassified_shape() -> None:
     "writer",
     [
         write_audit_row,
-        audit_and_broadcast_safe,
+        audit_safe,
         write_internal_audit_row,
         approval_queue._write_audit_row,
     ],

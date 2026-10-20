@@ -81,9 +81,7 @@ from uuid import UUID, uuid4
 import pytest
 from structlog.testing import capture_logs
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.kubernetes import (
     KubernetesConnector,
     parse_kubeconfig_yaml,
@@ -381,21 +379,9 @@ async def k8s_live_wired(
     yield
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 async def test_live_dispatch_kubeconfig_from_vault_lists_namespaces(
     seeded_vault_target: _LiveK3dTarget,
     configured_jwt_backend: dict[str, Any],
-    captured_events: list[BroadcastEvent],
     k8s_live_wired: None,
     k3s_kubeconfig_text: str,
 ) -> None:

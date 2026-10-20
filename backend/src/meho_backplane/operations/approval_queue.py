@@ -103,7 +103,6 @@ from meho_backplane.operations._audit import (
     parent_audit_id_var,
     policy_decision_var,
     resolve_agent_session_id,
-    resolve_broadcast_lineage,
     work_ref_var,
 )
 from meho_backplane.operations._errors import result_already_resumed, result_denied
@@ -153,8 +152,8 @@ __all__ = [
     "get_request",
     "list_pending",
     "parse_delegation",
-    "publish_approval_event",
     "read_approval_result",
+    "record_approval_step_event",
     "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
@@ -1291,8 +1290,8 @@ async def create_pending_request(
         tenant_id=str(operator.tenant_id),
         run_id=str(run_id) if run_id else None,
     )
-    # Expose the audit_id as a transient attr so callers can publish the
-    # ``approval.pending`` broadcast event AFTER they commit the session.
+    # Expose the audit_id as a transient attr so callers can record the
+    # ``approval.pending`` step event AFTER they commit the session.
     # A publish-before-commit would surface a phantom event if the commit
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
@@ -1546,8 +1545,8 @@ async def claim_resume(
     Why a conditional ``UPDATE`` rather than a Python ``if`` + edit (the
     same reasoning as :func:`~meho_backplane.operations.agent_run.extend_lease`'s
     lease claim): a read-then-write would race a concurrent resumer -- the
-    agent waiter woken by the ``approval.approved`` broadcast vs. the
-    operator surface that published it -- with both reading
+    agent waiter that read the approved row vs. the operator surface
+    that approved it -- with both reading
     ``resumed_at IS NULL`` and both dispatching the write. The predicate
     and the write commit together in one statement, so at most one resumer
     wins even across processes / pods: a concurrent claim blocks on the
@@ -1732,7 +1731,7 @@ async def resume_dispatch_after_approval(
     Exactly-one-resumer claim (#2293): every operator surface routes
     through here, and for a run-bound request the in-process agent waiter
     (:mod:`meho_backplane.agent.approval_wait`) also resumes off the
-    ``approval.approved`` broadcast. Both must win :func:`claim_resume`
+    approved row it reads. Both must win :func:`claim_resume`
     before dispatching, so the approved op executes exactly once: this
     path wins the claim right before :func:`dispatch` (after the
     fail-closed checks, so a refused resume never burns the claim) and, if
@@ -1756,7 +1755,7 @@ async def resume_dispatch_after_approval(
     # refused resume (pre-0036 params gap, unresolvable target) never burns
     # the claim and leaves the op un-executable. A lost claim means another
     # resumer already executed the approved op (the in-process agent waiter
-    # woken by the same approval.approved broadcast, or a racing operator
+    # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
     # double-dispatching the approved write.
     if not await claim_resume(request.id):
@@ -2243,9 +2242,9 @@ async def expire_stale_requests(
     Returns:
         List of the expired :class:`ApprovalRequest` rows (may be empty).
         Each row carries the transient ``_audit_id`` attribute (the
-        decision row's primary key) so the caller can publish a
-        fail-open ``approval.expired`` broadcast event **after commit**
-        via :func:`publish_approval_event`. The attribute is set on
+        decision row's primary key) so the caller can record a
+        fail-open ``approval.expired`` step event **after commit**
+        via :func:`record_approval_step_event`. The attribute is set on
         every returned row — see :func:`approve_request` /
         :func:`reject_request` for the same pattern.
     """
@@ -2322,7 +2321,7 @@ async def _expire_request(
         tenant_id=str(operator.tenant_id),
     )
     # Expose the audit_id as a transient attr so the caller can
-    # publish the ``approval.expired`` broadcast event AFTER commit.
+    # record the ``approval.expired`` step event AFTER commit.
     # See create_pending_request / approve_request / reject_request
     # for the same publish-after-commit invariant: a publish-before-
     # commit would surface a phantom event if the commit fails.
@@ -2655,33 +2654,32 @@ async def read_approval_result(
 
 
 # ---------------------------------------------------------------------------
-# G11.2-T5 (#818) broadcast notifications. Fail-open: a broadcast outage
-# never blocks the durable decision (the row + audit are the truth).
+# #3027 add-on step events for approval lifecycle steps.
 # ---------------------------------------------------------------------------
 
 
-async def publish_approval_event(
+async def record_approval_step_event(
     *,
     tenant_id: uuid.UUID,
     request: ApprovalRequest,
     decision: str,
-    principal_sub: str,
     audit_id: uuid.UUID,
 ) -> None:
-    """Publish a fail-open broadcast event for an approval lifecycle step.
+    """Record an approval lifecycle step for the paired add-on that asked for it.
 
     *decision* is one of ``"pending"`` (creation), ``"approved"``,
-    ``"rejected"``, or ``"expired"`` (sweeper-driven). The broadcast
-    ``op_id`` is ``approval.<decision>`` so operator watchers can match
-    the family with a simple glob (``approval.*``).
+    ``"rejected"``, or ``"expired"`` (sweeper-driven). The event kind is
+    ``approval.<decision>``.
 
-    #3027 step-event push: alongside the fail-open Valkey broadcast, the
-    outcome is durably recorded for the paired add-on that **requested**
-    the approval (matched by ``request.principal_sub`` — the requester's
-    ``sub``, constant across the request's lifecycle, so every decision
-    routes to the same add-on regardless of who decided it). The record is
-    a self-contained fail-open commit; a no-op when the requester is not a
-    paired add-on.
+    #3027 step-event push: the outcome is durably recorded for the paired
+    add-on that **requested** the approval (matched by
+    ``request.principal_sub`` — the requester's ``sub``, constant across
+    the request's lifecycle, so every decision routes to the same add-on
+    regardless of who decided it). The record is a self-contained
+    fail-open commit; a no-op when the requester is not a paired add-on.
+
+    No Broadcast event is published (#3758). The stored approval row is
+    what waiters, the approvals bell and the console read.
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
 
@@ -2699,39 +2697,3 @@ async def publish_approval_event(
             "work_ref": request.work_ref,
         },
     )
-    try:
-        from meho_backplane.broadcast.events import BroadcastEvent, classify_op
-        from meho_backplane.broadcast.publisher import publish_event
-
-        broadcast_op_id = f"approval.{decision}"
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=tenant_id,
-            principal_sub=principal_sub,
-            op_id=broadcast_op_id,
-            op_class=classify_op(broadcast_op_id),
-            result_status="ok",
-            audit_id=audit_id,
-            payload={
-                "op_class": classify_op(broadcast_op_id),
-                "result_status": "ok",
-                "approval_request_id": str(request.id),
-                "decision": decision,
-                "connector_id": request.connector_id,
-                "approval_op_id": request.op_id,
-            },
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
-        )
-        await publish_event(event)
-    except Exception:
-        # Fail-open: a broadcast outage must not block the durable
-        # decision. The row + audit row remain the source of truth.
-        _log().exception(
-            "approval_broadcast_failed",
-            approval_request_id=str(request.id),
-            decision=decision,
-        )

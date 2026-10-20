@@ -29,7 +29,6 @@ import pytest
 import respx
 from sqlalchemy import update
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -398,11 +397,6 @@ def _dispatch_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     reset_dispatcher_caches()
     clear_registry()
-
-    async def _no_publish(_event: Any) -> None:
-        return None
-
-    monkeypatch.setattr(audit_module, "publish_event", _no_publish)
     yield
     reset_dispatcher_caches()
     clear_registry()

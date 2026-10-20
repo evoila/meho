@@ -66,7 +66,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -143,18 +142,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
     yield
     reset_dispatcher_caches()
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +233,8 @@ class _VrliE2EBundle:
 
 
 @pytest.fixture
-async def vrli_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VrliE2EBundle]:
+async def vrli_e2e_canary() -> AsyncIterator[_VrliE2EBundle]:
     """Dispatcher-ready vRLI setup over a respx-mocked appliance (happy-path)."""
-    del captured_events  # the fixture's side-effect is the patched publisher
 
     await _insert_vrli_descriptors()
     seeded_target = await _seed_target()
@@ -285,9 +271,7 @@ class _Vrli401RetryBundle:
 
 
 @pytest.fixture
-async def vrli_e2e_401_recovery(
-    captured_events: list[Any],
-) -> AsyncIterator[_Vrli401RetryBundle]:
+async def vrli_e2e_401_recovery() -> AsyncIterator[_Vrli401RetryBundle]:
     """vRLI setup that simulates a single 401 on a downstream call.
 
     The session-create route answers twice (initial establish +
@@ -296,7 +280,6 @@ async def vrli_e2e_401_recovery(
     returns a distinct ``sessionId`` so tests can assert the cache is
     invalidated + refreshed (not stale-served).
     """
-    del captured_events
 
     await _insert_vrli_descriptors()
     target = await _seed_target()
@@ -343,9 +326,7 @@ async def vrli_e2e_401_recovery(
 
 
 @pytest.fixture
-async def vrli_e2e_401_persists(
-    captured_events: list[Any],
-) -> AsyncIterator[_Vrli401RetryBundle]:
+async def vrli_e2e_401_persists() -> AsyncIterator[_Vrli401RetryBundle]:
     """vRLI setup that returns 401 from the downstream call even after re-login.
 
     Drives the second-401-fails contract: when a fresh session token
@@ -353,7 +334,6 @@ async def vrli_e2e_401_persists(
     ``RuntimeError`` naming the target rather than entering a retry
     loop.
     """
-    del captured_events
 
     await _insert_vrli_descriptors()
     target = await _seed_target()
@@ -393,9 +373,7 @@ async def vrli_e2e_401_persists(
 
 
 @pytest.fixture
-async def vrli_e2e_440_recovery(
-    captured_events: list[Any],
-) -> AsyncIterator[_Vrli401RetryBundle]:
+async def vrli_e2e_440_recovery() -> AsyncIterator[_Vrli401RetryBundle]:
     """vRLI setup that simulates a single 440 (session expired) on a downstream call.
 
     Mirrors :func:`vrli_e2e_401_recovery` but the downstream
@@ -406,7 +384,6 @@ async def vrli_e2e_440_recovery(
     connector must treat 440 exactly like 401 — invalidate the cached
     token, re-login via ``POST /api/v2/sessions``, retry once.
     """
-    del captured_events
 
     await _insert_vrli_descriptors()
     target = await _seed_target()
@@ -453,9 +430,7 @@ async def vrli_e2e_440_recovery(
 
 
 @pytest.fixture
-async def vrli_e2e_440_persists(
-    captured_events: list[Any],
-) -> AsyncIterator[_Vrli401RetryBundle]:
+async def vrli_e2e_440_persists() -> AsyncIterator[_Vrli401RetryBundle]:
     """vRLI setup that returns 440 from the downstream call even after re-login.
 
     The failure half of the 440 contract: a fresh session token that
@@ -463,7 +438,6 @@ async def vrli_e2e_440_persists(
     naming the target and the status rather than entering a retry loop —
     same fast-fail posture as the second-401 case.
     """
-    del captured_events
 
     await _insert_vrli_descriptors()
     target = await _seed_target()
@@ -952,9 +926,7 @@ async def test_vrli_e2e_jsonflux_handle_populated_for_event_query(
 
 
 @pytest.fixture
-async def vrli_e2e_reserved_constraint(
-    captured_events: list[Any],
-) -> AsyncIterator[tuple[_VrliE2EBundle, Any]]:
+async def vrli_e2e_reserved_constraint() -> AsyncIterator[tuple[_VrliE2EBundle, Any]]:
     """vRLI setup seeding the ``{+constraints}`` reserved-expansion events op.
 
     Layers a single non-curated ``GET:/api/v2/events/{+constraints}``
@@ -963,7 +935,6 @@ async def vrli_e2e_reserved_constraint(
     yielded so the test can assert it was hit — a ``%2F``-mangled URL
     would miss it.
     """
-    del captured_events
 
     await _insert_vrli_descriptors()
     await _insert_vrli_reserved_constraint_descriptor()

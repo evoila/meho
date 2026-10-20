@@ -5,20 +5,18 @@
 
 Covers the four acceptance criteria the issue body specifies:
 
-1. The wrapped ``call_operation`` tool the agent loop calls subscribes (via the
-   existing broadcast SSE/watch substrate) and reacts to
-   ``approval.{approved,rejected}`` events keyed on its own pending
-   ``approval_request_id``.
-2. On ``approval.approved``, the runtime resumes by re-invoking
+1. The wrapped ``call_operation`` tool the agent loop calls reads its own
+   stored approval row (by ``approval_request_id``) until it shows a
+   decision. Since #3758 no approval event is on Broadcast.
+2. On ``approved``, the runtime resumes by re-invoking
    :func:`~meho_backplane.operations.dispatch` with ``_approved=True`` and the
    original in-memory params; the audit chain shows the op actually executed.
-3. On ``approval.rejected``, the runtime surfaces the rejection to the tool
+3. On ``rejected``, the runtime surfaces the rejection to the tool
    result (the model's view) so the agent can reason about the operator's
    decision.
 4. The test below pauses an agent run → operator approves via the
-   :func:`~meho_backplane.operations.approval_queue.approve_request` /
-   ``broadcast_publish_event`` path the ``/decide`` and MCP ``meho_approvals_*``
-   handlers use (**not** the REST ``/approve+params`` re-dispatch express lane)
+   :func:`~meho_backplane.operations.approval_queue.approve_request` path the
+   ``/decide`` handler uses (**not** the REST ``/approve+params`` re-dispatch express lane)
    → the agent run resumes and the op executes with the correct audit shape.
 
 What the tests deliberately do NOT do
@@ -28,9 +26,7 @@ What the tests deliberately do NOT do
   the unit of interest (the loop just calls it). Driving a real
   ``FunctionModel`` would add ~1s per case for zero coverage gain; the
   parallel suite ``test_agent_invoke.py`` already exercises the loop wiring.
-* They do NOT hit Valkey — ``get_broadcast_blocking_client`` is stubbed with an
-  AsyncMock whose ``xread`` returns a single seeded entry once and then
-  idles (the BLOCK-timeout shape the existing UI feed tests use).
+* They do NOT hit Valkey — the wait does not use it any more.
 * They do NOT cover process-restart resume — that's an explicit out-of-scope
   item in the #1117 task body (live-wait only; durable-checkpoint follow-up
   belongs to a separate G11.1 task).
@@ -59,7 +55,6 @@ from meho_backplane.agent.approval_wait import (
 )
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import reset_broadcast_client_for_testing
-from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.db.models import Target as TargetORM
@@ -137,212 +132,37 @@ def _make_operator(
     )
 
 
-def _build_decision_entry(
-    *,
-    approval_request_id: uuid.UUID,
-    decision: str,
-    tenant_id: uuid.UUID = _TENANT_ID,
-    audit_id: uuid.UUID | None = None,
-) -> tuple[str, dict[str, str]]:
-    """Build one XREAD entry shaped exactly like ``publish_approval_event`` writes.
-
-    Mirrors :func:`meho_backplane.operations.approval_queue.publish_approval_event`
-    verbatim so the test's stubbed stream is wire-compatible with what the
-    publisher would produce: one ``event`` field carrying the JSON-serialised
-    :class:`BroadcastEvent`, payload keyed by ``approval_request_id`` /
-    ``decision``. Each test seeds one decision entry; the AsyncMock idles
-    forever after, simulating the broadcast tail.
-    """
-    event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC),
-        tenant_id=tenant_id,
-        principal_sub="reviewer-sub",
-        op_id=f"approval.{decision}",
-        op_class="other",
-        result_status="ok",
-        audit_id=audit_id or uuid.uuid4(),
-        payload={
-            "op_class": "other",
-            "result_status": "ok",
-            "approval_request_id": str(approval_request_id),
-            "decision": decision,
-            "connector_id": "apprestest-1.x",
-            "approval_op_id": "apprestest.op",
-        },
-    )
-    return ("1715600000000-0", {"event": event.model_dump_json()})
-
-
-def _stub_broadcast_client_with_decision(
-    *,
-    monkeypatch: pytest.MonkeyPatch,
-    decision_entry: tuple[str, dict[str, str]],
-) -> AsyncMock:
-    """Stub the agent's blocking-client getter; yield *decision_entry* once, then idle.
-
-    Subsequent ``xread`` calls return ``None`` (the BLOCK-timeout shape) so
-    the wait loop idles cleanly until the test completes or the wall-clock
-    cap fires. Patches the agent's ``get_broadcast_blocking_client``
-    (the long-poll client switched in for RDC #789 N1 / Initiative
-    #1353) and the module-level binding on
-    :mod:`meho_backplane.broadcast.client` so callers via either path
-    see the same fake.
-
-    Returns the AsyncMock so callers can assert against its ``xread`` call
-    history.
-    """
-    stream_key = f"meho:feed:{_TENANT_ID}"
-    call_state = {"n": 0}
-
-    async def _xread_side_effect(*args: object, **kwargs: object) -> object:
-        call_state["n"] += 1
-        if call_state["n"] == 1:
-            return [(stream_key, [decision_entry])]
-        # Honour the caller's block window so the next iteration doesn't
-        # tight-loop the event loop.
-        block_ms = kwargs.get("block")
-        if isinstance(block_ms, int) and block_ms > 0:
-            await asyncio.sleep(min(0.01, block_ms / 1000))
-        return None
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=_xread_side_effect)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    monkeypatch.setattr(
-        "meho_backplane.broadcast.client.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    return client
-
-
 # ---------------------------------------------------------------------------
 # wait_for_approval_decision — the read-side primitive
 # ---------------------------------------------------------------------------
 
 
-async def test_wait_returns_approved_when_decision_broadcast_arrives(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The wait observes an ``approval.approved`` entry on the tenant stream.
+async def test_wait_never_uses_valkey() -> None:
+    """The wait reads only the stored row; it has no Valkey client (#3758)."""
+    import meho_backplane.agent.approval_wait as approval_wait_module
 
-    Asserts the read-side primitive's contract: subscribe → filter on the
-    request id → return ``"approved"``. This is the building block the
-    wrapped ``call_operation`` tool uses.
-    """
-    approval_request_id = uuid.uuid4()
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=approval_request_id,
-            decision="approved",
-        ),
-    )
+    assert not hasattr(approval_wait_module, "get_broadcast_blocking_client")
+
+
+async def test_wait_ignores_other_requests_decisions() -> None:
+    """Another request's approved row does not satisfy this wait."""
+    await _park_request(requester=_make_operator(), status=ApprovalRequestStatus.APPROVED)
+    pending = await _park_request(requester=_make_operator())
 
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID,
-        approval_request_id=approval_request_id,
-        timeout_seconds=2.0,
-    )
-    assert decision == "approved"
-
-
-async def test_wait_returns_rejected_when_decision_broadcast_arrives(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The wait observes an ``approval.rejected`` entry and reports it."""
-    approval_request_id = uuid.uuid4()
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=approval_request_id,
-            decision="rejected",
-        ),
-    )
-
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID,
-        approval_request_id=approval_request_id,
-        timeout_seconds=2.0,
-    )
-    assert decision == "rejected"
-
-
-async def test_wait_ignores_other_requests_decisions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A decision broadcast for a DIFFERENT request id does not satisfy the wait.
-
-    Guards against the "wait returns on first decision event" foot-gun: in
-    a busy tenant, multiple pending approvals are decided in parallel; each
-    waiter must filter on its own request id.
-    """
-    other_request_id = uuid.uuid4()
-    target_request_id = uuid.uuid4()
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=other_request_id,
-            decision="approved",
-        ),
-    )
-
-    # Sub-second timeout via the fixture; the wait should idle past the
-    # mismatched event and return "timeout" rather than wrongly returning
-    # "approved".
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID,
-        approval_request_id=target_request_id,
+        approval_request_id=pending.id,
         timeout_seconds=0.3,
     )
     assert decision == "timeout"
 
 
-async def test_wait_times_out_when_no_decision_arrives(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No decision event → wait returns ``"timeout"`` after the cap elapses."""
-    client = AsyncMock()
-    client.xread = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-
+async def test_wait_times_out_when_no_row_exists() -> None:
+    """No stored row → the wait returns ``"timeout"`` after the cap."""
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID,
         approval_request_id=uuid.uuid4(),
         timeout_seconds=0.2,
-    )
-    assert decision == "timeout"
-
-
-async def test_wait_fail_open_on_broadcast_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Valkey-side error during ``xread`` returns ``"timeout"`` (fail-open).
-
-    Mirrors the publisher's fail-open contract: a broadcast outage during
-    the wait surfaces as a timeout so the agent can decide what to do, not
-    as an uncaught exception that crashes the run. The audit row + decision
-    row remain the durable source of truth.
-    """
-    from redis.exceptions import ConnectionError as RedisConnectionError
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=RedisConnectionError("valkey unreachable"))
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID,
-        approval_request_id=uuid.uuid4(),
-        timeout_seconds=0.3,
     )
     assert decision == "timeout"
 
@@ -366,12 +186,10 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
        :func:`~meho_backplane.operations.approval_queue.approve_request`
        call the ``/decide`` route + MCP ``meho_approvals_approve`` use —
        NOT the REST ``/approve+params`` re-dispatch express lane).
-    4. The broadcast publishes ``approval.approved`` for the request.
-    5. The agent's wait observes the event and the wrapper re-invokes
+    4. The agent's wait reads the approved row and the wrapper re-invokes
        ``dispatch(..., _approved=True)`` with the original params.
-    6. The audit chain shows the op actually executed.
+    5. The audit chain shows the op actually executed.
     """
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -381,15 +199,6 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
         reset_dispatcher_caches,
     )
     from meho_backplane.operations.approval_queue import approve_request
-
-    # Capture publish_event calls so the dispatcher's audit publish doesn't
-    # hit Valkey during the test.
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -477,18 +286,8 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
         await s.commit()
     assert row.status == "approved"
 
-    # Step 3: the broadcast publishes approval.approved. Stub the broadcast
-    # client so the wait sees the event without a real Valkey.
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=approval_request_id,
-            decision="approved",
-        ),
-    )
-
-    # Step 4: drive the agent's resume helper -- the wait observes the
-    # decision event and the wrapper re-dispatches with _approved=True.
+    # Step 3: drive the agent's resume helper -- the wait reads the
+    # approved row and the wrapper re-dispatches with _approved=True.
     awaiting_envelope = first.model_dump(mode="json")
     resumed = await resume_or_surface_awaiting_approval(
         operator=operator,
@@ -549,7 +348,6 @@ async def test_resume_stamps_parent_audit_id_so_chain_replays_as_one_subtree(
     3. ``replay_session`` reconstructs one subtree: the request row as root
        with the decision and the executed dispatch as its children.
     """
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.audit_query.replay import replay_session
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -561,11 +359,6 @@ async def test_resume_stamps_parent_audit_id_so_chain_replays_as_one_subtree(
     )
     from meho_backplane.operations._audit import agent_session_id_var, parent_audit_id_var
     from meho_backplane.operations.approval_queue import approve_request
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -656,13 +449,6 @@ async def test_resume_stamps_parent_audit_id_so_chain_replays_as_one_subtree(
 
     # Step 3: drive the agent resume with the session re-bound (as the
     # agent's own task still carries it while it awaits the decision).
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=approval_request_id,
-            decision="approved",
-        ),
-    )
     awaiting_envelope = first.model_dump(mode="json")
     session_token = agent_session_id_var.set(session_id)
     try:
@@ -722,7 +508,10 @@ async def test_resume_surfaces_rejection_to_model(
     = "rejected"`` plus a human-readable ``error`` message, so the agent's
     model sees a structured tool result rather than a crash.
     """
-    approval_request_id = uuid.uuid4()
+    rejected = await _park_request(
+        requester=_make_operator(), status=ApprovalRequestStatus.REJECTED
+    )
+    approval_request_id = rejected.id
     awaiting_envelope: dict[str, Any] = {
         "status": "awaiting_approval",
         "op_id": "apprestest.op",
@@ -734,13 +523,6 @@ async def test_resume_surfaces_rejection_to_model(
             "approval_request_id": str(approval_request_id),
         },
     }
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=approval_request_id,
-            decision="rejected",
-        ),
-    )
 
     operator = _make_operator()
     out = await resume_or_surface_awaiting_approval(
@@ -787,14 +569,7 @@ async def test_resume_surfaces_timeout_with_distinct_error_code(
         },
     }
 
-    # No matching event will arrive; the wait elapses.
-    client = AsyncMock()
-    client.xread = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-
+    # No stored row exists for this id; the wait elapses.
     operator = _make_operator()
     out = await resume_or_surface_awaiting_approval(
         operator=operator,
@@ -830,44 +605,6 @@ async def test_resume_raises_on_missing_approval_request_id() -> None:
             awaiting_envelope={"status": "awaiting_approval", "extras": {}},
             timeout_seconds=1.0,
         )
-
-
-async def test_wait_skips_malformed_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A malformed broadcast entry is logged + skipped, the wait keeps looping.
-
-    Guards against a single bad publisher (or a wire-format drift) poisoning
-    every waiting agent. The wait skips the entry and continues until either
-    a good entry arrives or the timeout elapses.
-    """
-    approval_request_id = uuid.uuid4()
-    malformed_entry = ("1715600000000-0", {"event": "not-json"})
-    good_entry = _build_decision_entry(
-        approval_request_id=approval_request_id,
-        decision="approved",
-    )
-    call_state = {"n": 0}
-
-    async def _xread_side_effect(*args: object, **kwargs: object) -> object:
-        call_state["n"] += 1
-        if call_state["n"] == 1:
-            return [(f"meho:feed:{_TENANT_ID}", [malformed_entry])]
-        if call_state["n"] == 2:
-            return [(f"meho:feed:{_TENANT_ID}", [good_entry])]
-        return None
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=_xread_side_effect)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID,
-        approval_request_id=approval_request_id,
-        timeout_seconds=2.0,
-    )
-    assert decision == "approved"
 
 
 # ---------------------------------------------------------------------------
@@ -933,8 +670,8 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
 
     #2293 double-dispatch polarity, agent side: the request is approved and
     an operator approval surface has already won the exactly-one-resumer
-    claim (and re-dispatched). When the agent waiter then observes the
-    ``approval.approved`` broadcast, it must lose the claim and surface a
+    claim (and re-dispatched). When the agent waiter then reads the
+    approved row, it must lose the claim and surface a
     benign ``already_resumed`` envelope to the agent — **without** calling
     ``call_operation_with_approval`` a second time (the write must not run
     twice).
@@ -963,8 +700,7 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
         await s.commit()
     approval_request_id = request.id
 
-    # The operator surface approved the request (matching the ``approved``
-    # decision broadcast below) and then won the claim. The approve flip is
+    # The operator surface approved the request and then won the claim. The approve flip is
     # required because ``claim_resume`` now (F12 / #274) only latches an
     # ``approved`` row; without it the claim would fail closed on a pending
     # row rather than modelling the winning operator-surface resumer.
@@ -988,14 +724,6 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
         raise AssertionError("the waiter must not re-dispatch after losing the claim")
 
     monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy_call_with_approval)
-
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=approval_request_id,
-            decision="approved",
-        ),
-    )
 
     awaiting_envelope: dict[str, Any] = {
         "status": "awaiting_approval",
@@ -1024,8 +752,7 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
 
 
 # ---------------------------------------------------------------------------
-# Stored approval row is the authority; the broadcast is only the fast path
-# (#3732)
+# The stored approval row is the only source (#3732, #3758)
 # ---------------------------------------------------------------------------
 
 
@@ -1061,7 +788,7 @@ async def _park_request(
 
 
 async def _set_status(request_id: uuid.UUID, status: ApprovalRequestStatus) -> None:
-    """Commit a decision on the stored row without publishing any broadcast."""
+    """Commit a decision on the stored row."""
     async with get_sessionmaker()() as s:
         row = await s.get(ApprovalRequest, request_id)
         assert row is not None
@@ -1075,97 +802,6 @@ async def _set_status_later(
 ) -> None:
     await asyncio.sleep(delay)
     await _set_status(request_id, status)
-
-
-def _stub_quiet_notifier(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, list[int]]:
-    """A notifier that never delivers: each ``XREAD`` idles for its BLOCK window.
-
-    Models a lost broadcast event. Returns the mock and the list of BLOCK
-    windows (ms) the wait asked for.
-    """
-    blocks: list[int] = []
-
-    async def _xread(*_args: object, **kwargs: object) -> object:
-        block_ms = kwargs.get("block")
-        assert isinstance(block_ms, int)
-        blocks.append(block_ms)
-        await asyncio.sleep(block_ms / 1000)
-        return None
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=_xread)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    return client, blocks
-
-
-def _stub_notifier_outage(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """A notifier whose every ``XREAD`` fails (Valkey unreachable)."""
-    from redis.exceptions import ConnectionError as RedisConnectionError
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=RedisConnectionError("valkey unreachable"))
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    return client
-
-
-def _stub_stalled_notifier(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, list[bool]]:
-    """A notifier that accepts ``XREAD`` but never answers (Valkey hung).
-
-    Unlike :func:`_stub_quiet_notifier` it ignores the BLOCK window. Only the
-    wait's own local cut-off can end a call. Returns the mock and a list that
-    grows by one entry each time a stalled call is cancelled by that cut-off.
-    """
-    cancelled: list[bool] = []
-
-    async def _xread(*_args: object, **_kwargs: object) -> object:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.append(True)
-            raise
-        return None
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=_xread)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    return client, cancelled
-
-
-def _stub_late_failing_notifier(
-    monkeypatch: pytest.MonkeyPatch, *, extra_s: float
-) -> tuple[AsyncMock, list[bool]]:
-    """A notifier whose every ``XREAD`` raises late: *extra_s* after its BLOCK window.
-
-    Models a Valkey that drops the connection just before the wait's local
-    cut-off. Returns the mock and a list that grows by one entry per raise.
-    """
-    from redis.exceptions import ConnectionError as RedisConnectionError
-
-    raised: list[bool] = []
-
-    async def _xread(*_args: object, **kwargs: object) -> object:
-        block_ms = kwargs.get("block")
-        assert isinstance(block_ms, int)
-        await asyncio.sleep(block_ms / 1000 + extra_s)
-        raised.append(True)
-        raise RedisConnectionError("valkey dropped the connection")
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=_xread)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    return client, raised
 
 
 def _record_stored_read_times(monkeypatch: pytest.MonkeyPatch) -> list[float]:
@@ -1230,26 +866,20 @@ async def test_durable_decision_before_subscribe_is_returned(
 ) -> None:
     """A decision committed before the wait starts is read from the stored row.
 
-    The ``"$"`` tail cursor cannot see an event published before the first
-    ``XREAD``, so the wait reads the row first and never subscribes.
+    The first stored read sees it, so the wait returns at once.
     """
     request = await _park_request(requester=_make_operator(), status=status)
-    client, _blocks = _stub_quiet_notifier(monkeypatch)
 
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=2.0
     )
 
     assert decision == status.value
-    assert client.xread.await_count == 0
 
 
-async def test_durable_decision_during_notifier_outage_is_returned(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A notifier error triggers a stored-row re-read; the decision is not lost."""
+async def test_decision_landing_mid_wait_is_returned() -> None:
+    """A decision committed while the wait runs is seen by a later read."""
     request = await _park_request(requester=_make_operator())
-    client = _stub_notifier_outage(monkeypatch)
     flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 0.1))
 
     decision = await wait_for_approval_decision(
@@ -1258,80 +888,35 @@ async def test_durable_decision_during_notifier_outage_is_returned(
     await flip
 
     assert decision == "approved"
-    assert client.xread.await_count >= 1
 
 
-async def test_durable_recheck_interval_bounds_a_lost_event(
+async def test_poll_interval_bounds_the_gap_between_stored_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With the event lost, the row is re-read within the re-check interval.
-
-    The BLOCK window is capped at the time left until the next re-read, so the
-    gap between two reads never exceeds :data:`_DURABLE_RECHECK_SECONDS`.
-    """
+    """The row is read at least every :data:`_POLL_SECONDS` until it changes."""
     import meho_backplane.agent.approval_wait as approval_wait_module
 
-    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", 0.05)
+    poll_s = 0.05
+    monkeypatch.setattr(approval_wait_module, "_POLL_SECONDS", poll_s)
     request = await _park_request(requester=_make_operator())
-    _client, blocks = _stub_quiet_notifier(monkeypatch)
-    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.EXPIRED, 0.1))
+    read_times = _record_stored_read_times(monkeypatch)
+    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.EXPIRED, 0.3))
 
-    started = asyncio.get_running_loop().time()
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=5.0
     )
-    elapsed = asyncio.get_running_loop().time() - started
     await flip
 
     assert decision == "expired"
-    assert elapsed < 2.0
-    assert blocks
-    assert max(blocks) <= 50
-
-
-async def test_stalled_notifier_does_not_delay_the_stored_reread(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ``XREAD`` that never answers is cut off; the row is still re-read on time.
-
-    The blocking client has a 35 s socket timeout. Without the local cut-off a
-    hung Valkey would hold each ``XREAD`` that long, far past the re-check
-    interval, so the decision on the stored row would not be seen. The gap
-    between two stored reads must stay within the re-check interval: a
-    cut-off that only fires one reply grace *after* the ``BLOCK`` window
-    would stretch every gap by that grace.
-    """
-    import meho_backplane.agent.approval_wait as approval_wait_module
-
-    recheck_s = 0.5
-    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", recheck_s)
-    monkeypatch.setattr(approval_wait_module, "_XREAD_REPLY_GRACE_SECONDS", 0.2)
-    request = await _park_request(requester=_make_operator())
-    client, cancelled = _stub_stalled_notifier(monkeypatch)
-    read_times = _record_stored_read_times(monkeypatch)
-    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 1.2))
-
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=30.0
-    )
-    await flip
-
-    assert decision == "approved"
-    assert client.xread.await_count >= 2
-    assert cancelled
     gaps = [later - earlier for earlier, later in itertools.pairwise(read_times)]
     assert len(gaps) >= 2
-    # Each read takes a few milliseconds itself; allow for that and for
-    # scheduler jitter, but not for a full reply grace on top of the bound.
-    assert max(gaps) < recheck_s + 0.1
+    # Each read takes a few milliseconds itself; allow for that and jitter.
+    assert max(gaps) < poll_s + 0.1
 
 
-async def test_stalled_notifier_timeout_honours_the_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With the defaults, a hung ``XREAD`` cannot push the wait past its deadline."""
+async def test_timeout_honours_the_deadline() -> None:
+    """The wait ends at its deadline, after one last stored read."""
     request = await _park_request(requester=_make_operator())
-    _client, cancelled = _stub_stalled_notifier(monkeypatch)
 
     started = asyncio.get_running_loop().time()
     decision = await wait_for_approval_decision(
@@ -1340,89 +925,13 @@ async def test_stalled_notifier_timeout_honours_the_deadline(
     elapsed = asyncio.get_running_loop().time() - started
 
     assert decision == "timeout"
-    assert elapsed < 1.5
-    assert cancelled
+    assert elapsed < 0.3 + 0.2
 
 
-async def test_late_notifier_error_does_not_delay_the_stored_reread(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ``XREAD`` that raises just before the cut-off still re-reads the row on time.
+async def test_default_poll_interval_is_at_most_five_seconds() -> None:
+    from meho_backplane.agent.approval_wait import _POLL_SECONDS
 
-    The error back-off must run *after* the stored read, not before it. A
-    back-off that runs first adds up to a full second to the gap between
-    two reads, so a late error would push the gap past the re-check interval.
-    """
-    import meho_backplane.agent.approval_wait as approval_wait_module
-
-    recheck_s = 0.5
-    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", recheck_s)
-    monkeypatch.setattr(approval_wait_module, "_XREAD_REPLY_GRACE_SECONDS", 0.2)
-    monkeypatch.setattr(approval_wait_module, "_XREAD_ERROR_BACKOFF_SECONDS", 0.1)
-    request = await _park_request(requester=_make_operator())
-    # BLOCK ends 0.2 s before the cut-off; the raise lands 0.1 s after BLOCK,
-    # so every call errors 0.1 s before the local cut-off would fire.
-    client, raised = _stub_late_failing_notifier(monkeypatch, extra_s=0.1)
-    read_times = _record_stored_read_times(monkeypatch)
-    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 1.2))
-
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=30.0
-    )
-    await flip
-
-    assert decision == "approved"
-    assert client.xread.await_count >= 2
-    assert len(raised) >= 2
-    gaps = [later - earlier for earlier, later in itertools.pairwise(read_times)]
-    assert len(gaps) >= 2
-    assert max(gaps) < recheck_s + 0.1
-
-
-async def test_late_notifier_error_honours_the_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With the defaults, an ``XREAD`` that raises just before the deadline ends on time.
-
-    The one-second error back-off is cut at the deadline, so the final
-    stored read runs when the wait is due to end, not a second later.
-    """
-    request = await _park_request(requester=_make_operator())
-    timeout_s = 0.3
-    # The BLOCK window for a 0.3 s budget is 0.15 s; the raise lands at
-    # 0.25 s, just before the 0.3 s deadline.
-    _client, raised = _stub_late_failing_notifier(monkeypatch, extra_s=0.1)
-    read_times = _record_stored_read_times(monkeypatch)
-
-    started = asyncio.get_running_loop().time()
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=timeout_s
-    )
-    elapsed = asyncio.get_running_loop().time() - started
-
-    assert decision == "timeout"
-    assert raised
-    assert elapsed < timeout_s + 0.2
-    # The row is read right after the error, before any back-off pause.
-    assert len(read_times) >= 3
-
-
-async def test_default_recheck_interval_is_at_most_five_seconds() -> None:
-    from meho_backplane.agent.approval_wait import (
-        _BLOCK_WINDOW_MS,
-        _DURABLE_RECHECK_SECONDS,
-        _XREAD_ERROR_BACKOFF_SECONDS,
-        _XREAD_REPLY_GRACE_SECONDS,
-    )
-
-    assert _DURABLE_RECHECK_SECONDS <= 5.0
-    assert _BLOCK_WINDOW_MS <= 5_000
-    # The BLOCK window ends one grace before each read; a grace close to the
-    # interval would leave no room for the broadcast fast path.
-    assert _XREAD_REPLY_GRACE_SECONDS * 2 <= _DURABLE_RECHECK_SECONDS
-    # The error back-off runs after a stored read; one close to the interval
-    # would leave the next XREAD no time before the following read is due.
-    assert _XREAD_ERROR_BACKOFF_SECONDS * 2 <= _DURABLE_RECHECK_SECONDS
+    assert _POLL_SECONDS <= 5.0
 
 
 async def test_deadline_reread_returns_late_durable_decision(
@@ -1432,9 +941,8 @@ async def test_deadline_reread_returns_late_durable_decision(
     import meho_backplane.agent.approval_wait as approval_wait_module
 
     # No periodic re-read inside this short wait: only the final one can see it.
-    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", 100.0)
+    monkeypatch.setattr(approval_wait_module, "_POLL_SECONDS", 100.0)
     request = await _park_request(requester=_make_operator())
-    _stub_quiet_notifier(monkeypatch)
     flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.REJECTED, 0.05))
 
     decision = await wait_for_approval_decision(
@@ -1447,7 +955,6 @@ async def test_deadline_reread_returns_late_durable_decision(
 
 async def test_timeout_only_when_row_still_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     request = await _park_request(requester=_make_operator())
-    _stub_notifier_outage(monkeypatch)
 
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=0.3
@@ -1466,7 +973,6 @@ async def test_timeout_when_stored_row_cannot_be_read(monkeypatch: pytest.Monkey
         raise OperationalError("SELECT", {}, Exception("database unavailable"))
 
     monkeypatch.setattr(approval_queue_module, "get_request", _broken_get_request)
-    _stub_notifier_outage(monkeypatch)
 
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID, approval_request_id=uuid.uuid4(), timeout_seconds=0.3
@@ -1482,7 +988,6 @@ async def test_durable_read_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) ->
         requester=_make_operator(tenant_id=other_tenant),
         status=ApprovalRequestStatus.APPROVED,
     )
-    _stub_quiet_notifier(monkeypatch)
 
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=0.2
@@ -1503,7 +1008,6 @@ async def test_durable_reject_or_expiry_never_dispatches(
 ) -> None:
     requester = _make_operator()
     request = await _park_request(requester=requester)
-    _stub_notifier_outage(monkeypatch)
     dispatched = _forbid_dispatch(monkeypatch)
     flip = asyncio.create_task(_set_status_later(request.id, status, 0.05))
 
@@ -1522,29 +1026,12 @@ async def test_durable_reject_or_expiry_never_dispatches(
     assert await _resumed_at(request.id) is None
 
 
-async def test_expired_broadcast_event_ends_the_wait(monkeypatch: pytest.MonkeyPatch) -> None:
-    approval_request_id = uuid.uuid4()
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(
-            approval_request_id=approval_request_id, decision="expired"
-        ),
-    )
-
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID, approval_request_id=approval_request_id, timeout_seconds=2.0
-    )
-
-    assert decision == "expired"
-
-
 async def test_cancellation_propagates_without_later_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled wait raises, and an approval that lands later runs nothing."""
     requester = _make_operator()
     request = await _park_request(requester=requester)
-    _stub_quiet_notifier(monkeypatch)
     dispatched = _forbid_dispatch(monkeypatch)
 
     task = asyncio.create_task(
@@ -1588,7 +1075,6 @@ async def test_durable_approval_lost_claim_keeps_winner_handoff(
     )
     assert request.execution_handle is not None
     assert await claim_resume(request.id) is True
-    _stub_notifier_outage(monkeypatch)
     dispatched = _forbid_dispatch(monkeypatch)
 
     out = await resume_or_surface_awaiting_approval(
@@ -1616,7 +1102,6 @@ async def test_durable_approval_winner_claims_and_discards_handoff(
         params=params,
     )
     assert request.execution_handle is not None
-    _stub_notifier_outage(monkeypatch)
     dispatched = _forbid_dispatch(monkeypatch)
     flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 0.05))
 
@@ -1639,7 +1124,6 @@ async def test_competing_resumers_dispatch_at_most_once(monkeypatch: pytest.Monk
     """Two waiters on one approved row: one dispatches, the other is already_resumed."""
     requester = _make_operator(sub="agent-durable-race")
     request = await _park_request(requester=requester, status=ApprovalRequestStatus.APPROVED)
-    _stub_notifier_outage(monkeypatch)
     dispatched = _forbid_dispatch(monkeypatch)
 
     async def _resume() -> dict[str, Any]:
@@ -1680,7 +1164,6 @@ async def test_post_approval_dispatch_outcome_is_returned_unchanged(
 
     requester = _make_operator(sub="agent-durable-outcome")
     request = await _park_request(requester=requester, status=ApprovalRequestStatus.APPROVED)
-    _stub_notifier_outage(monkeypatch)
 
     async def _dispatch(_operator: Operator, _arguments: dict[str, Any]) -> dict[str, Any]:
         return dispatch_envelope

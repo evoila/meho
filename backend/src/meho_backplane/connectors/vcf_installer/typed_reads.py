@@ -3,9 +3,11 @@
 
 """Typed (bound-method) read implementations for :class:`InstallerConnector`.
 
-The bring-up *poll* primitives — the bring-up task status and the spec
-validation status — plus the air-gapped depot-lifecycle *reads* (#3121:
-depot settings, trusted certificates, bundle inventory) are registered as
+The bring-up *poll* primitives — the bring-up task status, the id-less
+bring-up task list (#3418), and the spec validation status — plus the
+air-gapped depot-lifecycle *reads* (#3121: depot settings, trusted
+certificates, bundle inventory; #3406: depot catalog sync status) are
+registered as
 typed ops (``source_kind="typed"``) so they dispatch on a fresh boot with
 zero catalog state. Each function here is the body a thin bound-method shim
 on :class:`~meho_backplane.connectors.vcf_installer.connector.InstallerConnector`
@@ -40,9 +42,12 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_installer.session import InstallerTargetLike
 
 __all__ = [
+    "installer_bundles_download_status_impl",
     "installer_bundles_list_impl",
     "installer_depot_settings_get_impl",
+    "installer_depot_sync_status_impl",
     "installer_sddc_bringup_status_impl",
+    "installer_sddc_list_impl",
     "installer_sddc_validation_status_impl",
     "installer_trusted_certificates_list_impl",
     "scrub_password_keys",
@@ -53,12 +58,34 @@ __all__ = [
 #: pattern — instead of mirroring a literal.
 _SDDC_STATUS_PATH = "/v1/sddcs/{id}"
 
+#: The id-less bring-up task list (vendor ``getSddcTasks`` → ``PageOfSddcTask``).
+#: The same path is the ``POST`` deploy path; here it is only ever read.
+_SDDC_LIST_PATH = "/v1/sddcs"
+
+#: The ``SddcTask`` fields :func:`installer_sddc_list_impl` keeps per task. A
+#: whitelist, so the large ``sddcSubTasks[]`` / ``milestones[]`` arrays and any
+#: field the vendor adds later never reach the list result. Field names pinned
+#: by the vendored ``vcf-installer-9.1`` OpenAPI (``components.schemas.SddcTask``).
+SDDC_TASK_SUMMARY_KEYS: tuple[str, ...] = (
+    "id",
+    "name",
+    "status",
+    "deploymentType",
+    "vcfInstanceName",
+    "creationTimestamp",
+)
+
 #: The spec-validation status vendor path (``{id}`` substituted at call time).
 _VALIDATION_STATUS_PATH = "/v1/sddcs/validations/{id}"
 
 #: Depot settings (``DepotSettings``: vmwareAccount / offlineAccount /
 #: depotConfiguration) — the read half of #3121's depot pair.
 _DEPOT_SETTINGS_PATH = "/v1/system/settings/depot"
+
+#: Depot catalog sync state (``DepotSyncInfo``: syncStatus / errorMessage /
+#: lastSyncCompletionTimestamp) — the appliance ingests the release catalog
+#: asynchronously after a depot connect; this read reports that ingest (#3406).
+_DEPOT_SYNC_INFO_PATH = "/v1/system/settings/depot/depot-sync-info"
 
 #: Appliance outbound trust store (``TrustedCertificate`` page) — the read
 #: half of #3121's trusted-certificates pair.
@@ -67,6 +94,18 @@ _TRUSTED_CERTIFICATES_PATH = "/v1/sddc-manager/trusted-certificates"
 #: Bundle inventory (``PageOfBundle``; populated only after a depot connect +
 #: catalog ingest) — the read half of #3121's bundle pair.
 _BUNDLES_PATH = "/v1/bundles"
+
+#: Per-bundle download state (``PageOfBundleDownloadStatusInfo``: status,
+#: failure ``message``, ``downloadedSize`` progress, ``isDownloadable``, the
+#: download task id) — the detail ``PageOfBundle`` rows do not carry (#3410).
+_BUNDLE_DOWNLOAD_STATUS_PATH = "/v1/bundles/download-status"
+
+#: Op param name → vendor query param name for the download-status filters.
+_BUNDLE_DOWNLOAD_STATUS_QUERY = {
+    "bundle_id": "bundleId",
+    "release_version": "releaseVersion",
+    "image_type": "imageType",
+}
 
 
 def scrub_password_keys(value: Any) -> Any:
@@ -99,6 +138,35 @@ async def installer_sddc_bringup_status_impl(
     return await connector._get_json(
         target, _SDDC_STATUS_PATH.replace("{id}", sddc_id), operator=operator
     )
+
+
+async def installer_sddc_list_impl(
+    connector: InstallerConnector,
+    operator: Operator,
+    target: InstallerTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``installer.sddc.list`` — list every bring-up task via ``GET /v1/sddcs``.
+
+    Needs no id, so a caller that lost the task id of a running bring-up can
+    find it again. Each vendor ``SddcTask`` is cut down to
+    :data:`SDDC_TASK_SUMMARY_KEYS`: one task can carry ~260 ``sddcSubTasks``
+    rows, and the per-task detail is one ``installer.sddc.bringup.status``
+    call away. Returns ``{"elements": [...], "pageMetadata"?}``.
+    """
+    payload = await connector._get_json(target, _SDDC_LIST_PATH, operator=operator)
+    elements = payload.get("elements")
+    tasks = elements if isinstance(elements, list) else []
+    result: dict[str, Any] = {
+        "elements": [
+            {key: task[key] for key in SDDC_TASK_SUMMARY_KEYS if key in task}
+            for task in tasks
+            if isinstance(task, dict)
+        ]
+    }
+    if "pageMetadata" in payload:
+        result["pageMetadata"] = payload["pageMetadata"]
+    return result
 
 
 async def installer_sddc_validation_status_impl(
@@ -141,6 +209,25 @@ async def installer_depot_settings_get_impl(
     return cast("dict[str, Any]", scrub_password_keys(payload))
 
 
+async def installer_depot_sync_status_impl(
+    connector: InstallerConnector,
+    operator: Operator,
+    target: InstallerTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``installer.system.depot.sync-status`` — read the depot catalog sync
+    state via ``GET /v1/system/settings/depot/depot-sync-info``.
+
+    Returns the vendor ``DepotSyncInfo`` (``syncStatus`` / ``errorMessage`` /
+    ``lastSyncCompletionTimestamp``). The 9.1 spec does not enumerate the
+    ``syncStatus`` values, so the object is returned as the vendor sends it.
+    ``password`` keys are scrubbed the same way as the depot settings read,
+    so a credential can never leak even if the vendor adds one.
+    """
+    payload = await connector._get_json(target, _DEPOT_SYNC_INFO_PATH, operator=operator)
+    return cast("dict[str, Any]", scrub_password_keys(payload))
+
+
 async def installer_trusted_certificates_list_impl(
     connector: InstallerConnector,
     operator: Operator,
@@ -173,3 +260,30 @@ async def installer_bundles_list_impl(
     ``downloadStatus`` / ``version`` fields rather than dumping elements.
     """
     return await connector._get_json(target, _BUNDLES_PATH, operator=operator)
+
+
+async def installer_bundles_download_status_impl(
+    connector: InstallerConnector,
+    operator: Operator,
+    target: InstallerTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``installer.bundles.download-status`` — read per-bundle download detail
+    via ``GET /v1/bundles/download-status``.
+
+    The optional ``bundle_id`` / ``release_version`` / ``image_type`` params
+    map to the vendor ``bundleId`` / ``releaseVersion`` / ``imageType`` query
+    filters; absent ones are not sent. Returns the vendor
+    ``PageOfBundleDownloadStatusInfo``: per element ``downloadStatus``, the
+    failure ``message``, ``downloadedSize`` (bytes so far), ``isDownloadable``,
+    ``downloadId`` (the download task id) and the start/end/scheduled times.
+    The vendor schema carries no credential fields, so nothing is scrubbed.
+    """
+    query = {
+        vendor_key: str(params[param_key])
+        for param_key, vendor_key in _BUNDLE_DOWNLOAD_STATUS_QUERY.items()
+        if params.get(param_key)
+    }
+    return await connector._get_json(
+        target, _BUNDLE_DOWNLOAD_STATUS_PATH, operator=operator, params=query or None
+    )

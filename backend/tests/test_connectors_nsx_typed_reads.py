@@ -788,10 +788,10 @@ def test_each_op_parameter_schema_disallows_additional_properties(op_id: str) ->
 
 
 @pytest.mark.parametrize("op_id", sorted(_EXPECTED_OP_IDS))
-def test_each_op_has_llm_instructions_with_when_to_use_and_output_shape(op_id: str) -> None:
+def test_each_op_has_llm_instructions_with_when_to_call_and_output_shape(op_id: str) -> None:
     op = next(o for o in NSX_TYPED_OPS if o.op_id == op_id)
     assert op.llm_instructions is not None
-    assert op.llm_instructions.get("when_to_use", "").strip() != ""
+    assert op.llm_instructions.get("when_to_call", "").strip() != ""
     assert "output_shape" in op.llm_instructions
 
 

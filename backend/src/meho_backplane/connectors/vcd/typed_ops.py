@@ -112,13 +112,45 @@ VCD_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 #: Empty parameter object shared by every read (all are no-argument list ops —
-#: the provider session is estate-wide, so no per-call selector is needed).
-_NO_PARAMS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
+#: the provider session is estate-wide, so no per-call selector is needed). The
+#: one example is the empty call.
+_NO_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+    "examples": [{}],
+}
 
-#: Response schema shared by every vCD read: the cloudapi collection returns a
-#: ``{values: []}`` envelope and the query service a ``{record: []}`` envelope,
-#: so a permissive object schema fits both.
-_OBJECT_RESPONSE: dict[str, Any] = {"type": "object", "additionalProperties": True}
+
+def _field(type_: str, description: str) -> dict[str, Any]:
+    """Return one described response field."""
+    return {"type": type_, "description": description}
+
+
+def _record_envelope(record_type: str, record_fields: dict[str, Any]) -> dict[str, Any]:
+    """Return the classic query-service ``{record: [...], total, page, pageSize}`` schema."""
+    return {
+        "type": "object",
+        "properties": {
+            "record": {
+                "type": "array",
+                "description": f"One {record_type} per row.",
+                "items": {
+                    "type": "object",
+                    "properties": record_fields,
+                    "additionalProperties": True,
+                },
+            },
+            "total": _field("integer", "How many rows match in total, across all pages."),
+            "page": _field("integer", "The page number of this answer."),
+            "pageSize": _field("integer", "How many rows one page holds."),
+        },
+        "additionalProperties": True,
+    }
+
+
+_NAME = _field("string", "The name of the object.")
+_ORG_NAME = _field("string", "The name of the organization that owns it.")
 
 _READ_TAGS = ("read-only", "vcd", "vcloud-director")
 
@@ -135,14 +167,35 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="org_list",
         summary="List the organizations in the vCD instance.",
         description=(
-            "Lists organizations via GET /cloudapi/1.0.0/orgs — the top of the vCD "
-            "tenancy tree and the entry point for a migration inventory. A provider "
-            "session sees every org. Returns the cloudapi {resultTotal, values: []} "
-            "envelope; each Org carries a urn:vcloud:org: id, name, displayName, "
-            "isEnabled. Dispatches with zero catalog ingest. safety_level=safe, read-only."
+            "Lists the organizations (GET /cloudapi/1.0.0/orgs), the top of the vCD tenant tree. A"
+            " provider session sees every org. Each org has a urn:vcloud:org: id, name, "
+            "displayName and isEnabled. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
-        response_schema=_OBJECT_RESPONSE,
+        response_schema={
+            "type": "object",
+            "properties": {
+                "values": {
+                    "type": "array",
+                    "description": "One organization per entry.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": _field("string", "The org id, a urn:vcloud:org: URN."),
+                            "name": _NAME,
+                            "displayName": _field("string", "The name shown in the UI."),
+                            "isEnabled": _field("boolean", "Whether the org is enabled."),
+                        },
+                        "additionalProperties": True,
+                    },
+                },
+                "resultTotal": _field("integer", "How many orgs exist in total."),
+                "pageCount": _field("integer", "How many pages the result has."),
+                "page": _field("integer", "The page number of this answer."),
+                "pageSize": _field("integer", "How many entries one page holds."),
+            },
+            "additionalProperties": True,
+        },
         group_key=_GROUP_INVENTORY,
         tags=(*_READ_TAGS, "org"),
         safety_level="safe",
@@ -154,14 +207,21 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="vdc_list",
         summary="List the organization VDCs (compute/storage allocations).",
         description=(
-            "Lists org VDCs via GET /api/query?type=adminOrgVdc&format=records — the "
-            "per-org compute/storage allocations a migration must re-home. Returns the "
-            "query-service {record: []} envelope; each AdminOrgVdcRecord carries name, "
-            "orgName, providerVdcName, numberOfVApps/numberOfVMs, allocation figures. "
-            "Dispatches with zero catalog ingest. safety_level=safe, read-only."
+            "Lists the organization VDCs with the query service (type=adminOrgVdc): the compute "
+            "and storage each org has. Each row has name, orgName, providerVdcName and the vApp "
+            "and VM counts. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
-        response_schema=_OBJECT_RESPONSE,
+        response_schema=_record_envelope(
+            "AdminOrgVdcRecord",
+            {
+                "name": _NAME,
+                "orgName": _ORG_NAME,
+                "providerVdcName": _field("string", "The provider VDC that backs this VDC."),
+                "numberOfVApps": _field("integer", "How many vApps the VDC holds."),
+                "numberOfVMs": _field("integer", "How many VMs the VDC holds."),
+            },
+        ),
         group_key=_GROUP_INVENTORY,
         tags=(*_READ_TAGS, "vdc"),
         safety_level="safe",
@@ -173,14 +233,22 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="vapp_list",
         summary="List the vApps (deployable multi-VM units).",
         description=(
-            "Lists vApps via GET /api/query?type=adminVApp&format=records — the "
-            "move-together boundary for migration waves. Returns the query-service "
-            "{record: []} envelope; each AdminVAppRecord carries name, orgName, vdcName, "
-            "status, numberOfVMs, isDeployed. A large list is reduced to a JSONFlux "
-            "handle. Dispatches with zero catalog ingest. safety_level=safe, read-only."
+            "Lists the vApps with the query service (type=adminVApp): groups of VMs that move "
+            "together in a migration. Each row has name, orgName, vdcName, status, numberOfVMs and"
+            " isDeployed. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
-        response_schema=_OBJECT_RESPONSE,
+        response_schema=_record_envelope(
+            "AdminVAppRecord",
+            {
+                "name": _NAME,
+                "orgName": _ORG_NAME,
+                "vdcName": _field("string", "The VDC the vApp lives in."),
+                "status": _field("string", "The vApp state, for example POWERED_ON."),
+                "numberOfVMs": _field("integer", "How many VMs the vApp holds."),
+                "isDeployed": _field("boolean", "Whether the vApp is deployed."),
+            },
+        ),
         group_key=_GROUP_INVENTORY,
         tags=(*_READ_TAGS, "vapp"),
         safety_level="safe",
@@ -192,15 +260,24 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="vm_list",
         summary="List the virtual machines across the estate.",
         description=(
-            "Lists VMs via GET /api/query?type=adminVM&format=records — the core "
-            "migration-workload inventory (count, sizing, guest OS of every VM). Returns "
-            "the query-service {record: []} envelope; each AdminVMRecord carries name, "
-            "containerName (vApp), vdc, org, status, numberOfCpus, memoryMB, guestOs. A "
-            "large inventory is reduced to a JSONFlux handle. Dispatches with zero "
-            "catalog ingest. safety_level=safe, read-only."
+            "Lists every VM with the query service (type=adminVM): the main migration inventory. "
+            "Each row has name, containerName (the vApp), vdc, org, status, numberOfCpus, memoryMB"
+            " and guestOs. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
-        response_schema=_OBJECT_RESPONSE,
+        response_schema=_record_envelope(
+            "AdminVMRecord",
+            {
+                "name": _NAME,
+                "containerName": _field("string", "The vApp the VM belongs to."),
+                "vdc": _field("string", "The VDC the VM lives in."),
+                "org": _field("string", "The organization that owns the VM."),
+                "status": _field("string", "The VM state, for example POWERED_ON."),
+                "numberOfCpus": _field("integer", "How many virtual CPUs the VM has."),
+                "memoryMB": _field("integer", "The VM memory in MB."),
+                "guestOs": _field("string", "The guest operating system."),
+            },
+        ),
         group_key=_GROUP_INVENTORY,
         tags=(*_READ_TAGS, "vm"),
         safety_level="safe",
@@ -212,14 +289,22 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="catalog_list",
         summary="List the catalogs (vApp-template + media libraries).",
         description=(
-            "Lists catalogs via GET /api/query?type=adminCatalog&format=records — the "
-            "vApp-template and media libraries a migration must recreate on the target. "
-            "Returns the query-service {record: []} envelope; each AdminCatalogRecord "
-            "carries name, orgName, isShared/isPublished, numberOfVAppTemplates/"
-            "numberOfMedia. Dispatches with zero catalog ingest. safety_level=safe, read-only."
+            "Lists the catalogs with the query service (type=adminCatalog): the vApp template and "
+            "media libraries. Each row has name, orgName, isShared, isPublished and the template "
+            "and media counts. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
-        response_schema=_OBJECT_RESPONSE,
+        response_schema=_record_envelope(
+            "AdminCatalogRecord",
+            {
+                "name": _NAME,
+                "orgName": _ORG_NAME,
+                "isShared": _field("boolean", "Whether the catalog is shared."),
+                "isPublished": _field("boolean", "Whether the catalog is published to other orgs."),
+                "numberOfVAppTemplates": _field("integer", "How many vApp templates it holds."),
+                "numberOfMedia": _field("integer", "How many media files (ISO) it holds."),
+            },
+        ),
         group_key=_GROUP_INVENTORY,
         tags=(*_READ_TAGS, "catalog"),
         safety_level="safe",
@@ -232,15 +317,21 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="edge_gateway_list",
         summary="List the edge gateways (org-VDC network edges).",
         description=(
-            "Lists edge gateways via GET /api/query?type=edgeGateway&format=records — the "
-            "org-VDC network egress + services (NAT, firewall, VPN) boundary a migration "
-            "must re-home. Returns the query-service {record: []} envelope; each "
-            "EdgeGatewayRecord carries name, vdc, orgName, numberOfExtNetworks, "
-            "numberOfOrgNetworks. Dispatches with zero catalog ingest. safety_level=safe, "
-            "read-only."
+            "Lists the edge gateways with the query service (type=edgeGateway): the network edge "
+            "(NAT, firewall, VPN) of each org VDC. Each row has name, vdc, orgName and the network"
+            " counts. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
-        response_schema=_OBJECT_RESPONSE,
+        response_schema=_record_envelope(
+            "EdgeGatewayRecord",
+            {
+                "name": _NAME,
+                "vdc": _field("string", "The VDC the edge gateway serves."),
+                "orgName": _ORG_NAME,
+                "numberOfExtNetworks": _field("integer", "How many external networks it uses."),
+                "numberOfOrgNetworks": _field("integer", "How many org networks it serves."),
+            },
+        ),
         group_key=_GROUP_NETWORKING,
         tags=(*_READ_TAGS, "edge-gateway", "network"),
         safety_level="safe",
@@ -253,15 +344,23 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="task_list",
         summary="List recent asynchronous tasks.",
         description=(
-            "Lists recent tasks via GET /api/query?type=adminTask&format=records — 'what is "
-            "vCD doing / just did', used to confirm the estate is quiescent before a "
-            "migration cutover. Returns the query-service {record: []} envelope; each "
-            "AdminTaskRecord carries name, status, objectName, orgName, startDate/endDate, "
-            "ownerName. A large list is reduced to a JSONFlux handle. Dispatches with "
-            "zero catalog ingest. safety_level=safe, read-only."
+            "Lists recent tasks with the query service (type=adminTask): what vCD does or just "
+            "did. Each row has name, status, objectName, orgName, startDate, endDate and "
+            "ownerName. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
-        response_schema=_OBJECT_RESPONSE,
+        response_schema=_record_envelope(
+            "AdminTaskRecord",
+            {
+                "name": _field("string", "The operation the task runs."),
+                "status": _field("string", "The task state, for example running, success, error."),
+                "objectName": _field("string", "The object the task works on."),
+                "orgName": _ORG_NAME,
+                "startDate": _field("string", "When the task started."),
+                "endDate": _field("string", "When the task ended."),
+                "ownerName": _field("string", "Who started the task."),
+            },
+        ),
         group_key=_GROUP_TASKS,
         tags=(*_READ_TAGS, "task"),
         safety_level="safe",

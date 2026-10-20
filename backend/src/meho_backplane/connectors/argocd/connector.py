@@ -158,6 +158,46 @@ def _is_acceptable_auth_model(value: Any) -> bool:
     return bool(value == AuthModel.SHARED_SERVICE_ACCOUNT.value)
 
 
+#: Bucket for a derived column whose vendor field is missing or not a
+#: non-empty string. Lowercase on purpose: ArgoCD's own ``"Unknown"`` health /
+#: sync value is kept verbatim, so the two stay apart in a ``GROUP BY``.
+_MISSING = "unknown"
+
+
+def _nested_str(obj: Any, *keys: str) -> str:
+    """Return the non-empty string at ``obj[k1][k2]...``, else :data:`_MISSING`."""
+    for key in keys:
+        if not isinstance(obj, dict):
+            return _MISSING
+        obj = obj.get(key)
+    return obj if isinstance(obj, str) and obj else _MISSING
+
+
+def _augment_app_health(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach flat ``health_status`` / ``sync_status`` / ``name`` to each app.
+
+    ArgoCD carries an app's state only nested (``status.health.status``,
+    ``status.sync.status``, ``metadata.name``), and ``result_query`` groups
+    and counts over top-level columns only. These derived string siblings let
+    ``COUNT`` + ``GROUP BY health_status`` answer "how many apps are
+    unhealthy" -- the prometheus ``_augment_numeric_samples`` shape (#2964).
+    The raw ``status`` / ``metadata`` fields stay byte-identical.
+
+    A missing or non-string vendor field derives to ``"unknown"``, so a group
+    has no NULL gap. Mutates *payload* in place -- it is the freshly parsed
+    body ``_get_json`` owns per call -- and returns it. A body without an
+    ``items`` list (``items: null`` for no apps, errors) is untouched.
+    """
+    items = payload.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                item["health_status"] = _nested_str(item, "status", "health", "status")
+                item["sync_status"] = _nested_str(item, "status", "sync", "status")
+                item["name"] = _nested_str(item, "metadata", "name")
+    return payload
+
+
 class ArgoCdConnector(HttpConnector):
     """ArgoCD 3.x REST connector with bearer-token auth.
 
@@ -433,7 +473,9 @@ class ArgoCdConnector(HttpConnector):
         Optional ``projects`` (list of AppProject names) and ``selector``
         (Kubernetes label selector) narrow the result. Returns ArgoCD's
         ``ApplicationList`` (``{"items": [...], "metadata": {...}}``); each
-        item carries the app's sync + health status.
+        item carries the app's sync + health status, plus flat derived
+        ``health_status`` / ``sync_status`` / ``name`` columns (see
+        :func:`_augment_app_health`).
         """
         query: dict[str, Any] = {}
         projects = params.get("projects")
@@ -445,8 +487,10 @@ class ArgoCdConnector(HttpConnector):
         selector = params.get("selector")
         if selector:
             query["selector"] = selector
-        return await self._get_json(
-            target, route_path(APP_LIST_ROUTE), operator=operator, params=query or None
+        return _augment_app_health(
+            await self._get_json(
+                target, route_path(APP_LIST_ROUTE), operator=operator, params=query or None
+            )
         )
 
     async def app_get(

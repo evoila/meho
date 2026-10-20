@@ -162,6 +162,12 @@ Set it up in three steps:
      secretKey: approval_handoff_encryption_key
    ```
 
+With a built-in part of the core on (`corePostgres.enabled` or
+`coreKeycloak.enabled`), the install makes this key itself, in the Secret
+`<release>-core-approval-handoff` (key `approval_handoff_encryption_key`).
+Skip steps 1 and 2 and set `approvalHandoff.secretName` to that name. See
+[core-secrets.md](core-secrets.md).
+
 The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
 creating a new Fernet key in the referenced Secret and restarting all
 backplane pods together. Existing unexecuted credential-write approvals were

@@ -56,13 +56,18 @@ def _call(client: TestClient, arguments: dict[str, Any], *, req_id: int = 1) -> 
     )
 
 
-def _structured(response: Any) -> dict[str, Any]:
-    """Return the structured result and check it against the outputSchema."""
+def _structured(response: Any, *, is_error: bool = False) -> dict[str, Any]:
+    """Return the structured result and check it against the outputSchema.
+
+    ``is_error`` is the expected MCP ``isError`` flag. It follows the
+    envelope ``status`` (#3675): a failed run answers ``status="error"``,
+    so the flag is true; a pending, running or finished run keeps it false.
+    """
     assert response.status_code == 200
     body = response.json()
     assert "error" not in body, body
     result = body["result"]
-    assert result["isError"] is False, result
+    assert result["isError"] is is_error, result
     structured: dict[str, Any] = result["structuredContent"]
     assert structured == json.loads(result["content"][0]["text"])
     entry = mcp_registry.get_tool("call_operation")
@@ -248,7 +253,8 @@ async def test_failed_run_reports_an_error(
     client, _op = client_with_operator
     run_id = await _insert_run(status=OperationRunStatus.FAILED, error="worker lost its lease")
     payload = _structured(
-        _call(client, {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(run_id)})
+        _call(client, {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(run_id)}),
+        is_error=True,
     )
     assert payload["status"] == "error"
     assert payload["extras"]["error_code"] == "run_failed"

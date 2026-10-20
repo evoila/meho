@@ -230,12 +230,21 @@ CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: RFC 3339 date-time (``2026-10-19T08:00:00Z``, optional fraction, ``Z`` or
+#: ``+hh:mm``). The parameter validator does not check ``format``, so the
+#: pattern is what rejects a bad time before it reaches vCenter.
+_RFC3339_DATE_TIME_PATTERN = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+)
+
 #: ``vmware.composite.event.tail`` parameter schema.
 #:
-#: Reads recent events from EventManager via the vi-json
+#: Reads vCenter events from EventManager via the vi-json
 #: ``POST:/EventManager/{moId}/QueryEvents`` sub-op. Equivalent of
 #: ``govc events`` against a vSphere target. The default ``moId`` is
-#: the canonical ``EventManager`` singleton.
+#: the canonical ``EventManager`` singleton. The filter keys map onto the
+#: vim ``EventFilterSpec`` the handler always sends.
 EVENT_TAIL_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -250,16 +259,79 @@ EVENT_TAIL_PARAMETER_SCHEMA: dict[str, Any] = {
                 "per-DC event managers."
             ),
         },
-        "max_events": {
+        "begin_time": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": _RFC3339_DATE_TIME_PATTERN,
+            "description": (
+                "Only events at or after this time (RFC 3339, for example "
+                "'2026-10-19T08:00:00Z'). Sent as EventFilterSpec.time.beginTime."
+            ),
+        },
+        "end_time": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": _RFC3339_DATE_TIME_PATTERN,
+            "description": (
+                "Only events at or before this time (RFC 3339). Sent as "
+                "EventFilterSpec.time.endTime."
+            ),
+        },
+        "event_type_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {"type": "string", "minLength": 1},
+            "description": (
+                "Only events of these types. Use the vim event class name "
+                "(for example 'VmPoweredOnEvent') or the eventTypeId of an "
+                "EventEx event (for example "
+                "'esx.problem.storage.apd.start'). The eventTypeId of each "
+                "returned row is in the same form. Sent as "
+                "EventFilterSpec.eventTypeId."
+            ),
+        },
+        "entity": {
+            "type": "object",
+            "properties": {
+                "moId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Managed-object ID, for example 'datastore-12'.",
+                },
+                "type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "vim managed entity type, for example 'Datastore', "
+                        "'HostSystem', 'VirtualMachine', 'ClusterComputeResource'."
+                    ),
+                },
+                "recursion": {
+                    "type": "string",
+                    "enum": ["self", "children", "all"],
+                    "default": "all",
+                    "description": (
+                        "Which events to include: 'self' (only this entity), "
+                        "'children' (only its children) or 'all' (both)."
+                    ),
+                },
+            },
+            "required": ["moId", "type"],
+            "additionalProperties": False,
+            "description": (
+                "Only events about this managed entity. Sent as EventFilterSpec.entity."
+            ),
+        },
+        "max_count": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 10000,
+            "maximum": 1000,
             "default": 100,
             "description": (
-                "Cap on the number of events returned. The vi-json "
-                "QueryEvents call accepts a filter -- the handler "
-                "applies the cap client-side after the sub-op returns "
-                "so older events are dropped uniformly."
+                "Most events to return. Sent to vCenter as "
+                "EventFilterSpec.maxCount, so the limit is applied on the "
+                "server."
             ),
         },
     },
@@ -282,8 +354,29 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Managed-object ID of the entity to query metrics for "
-                "(e.g. 'vm-1234', 'host-5678'). Required: every QueryPerf "
-                "call is per-entity."
+                "(e.g. 'vm-1234', 'host-5678', 'domain-c9'). Required: every "
+                "QueryPerf call is per-entity. The vim type is read from the "
+                "prefix: 'host-' is HostSystem, 'vm-' is VirtualMachine, "
+                "'domain-c' is ClusterComputeResource. For any other entity, "
+                "set entity_type."
+            ),
+        },
+        "entity_type": {
+            "type": "string",
+            "enum": [
+                "HostSystem",
+                "VirtualMachine",
+                "ClusterComputeResource",
+                "ComputeResource",
+                "ResourcePool",
+                "VirtualApp",
+                "Datastore",
+                "Datacenter",
+            ],
+            "description": (
+                "vim type of the entity. Optional: when left out it comes "
+                "from the entity_moid prefix. Set it when the prefix is not "
+                "one of 'host-', 'vm-' or 'domain-c'."
             ),
         },
         "perf_manager_moid": {
@@ -301,8 +394,10 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "minimum": 1,
             "default": 20,
             "description": (
-                "Sample interval for the QueryPerf call. The default 20 s "
-                "matches vSphere's real-time historical interval."
+                "Sample interval (vim intervalId) for both calls. The "
+                "default 20 s is the real-time interval of hosts and VMs. "
+                "Clusters have no real-time data; use a historical "
+                "interval such as 300 for them."
             ),
         },
         "max_samples": {
@@ -312,7 +407,8 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "default": 60,
             "description": (
                 "Cap on the number of returned samples per counter. "
-                "Applied client-side after the sub-op returns."
+                "Sent to QueryPerf as maxSample; vCenter applies it to "
+                "real-time data only."
             ),
         },
     },
@@ -573,29 +669,62 @@ EVENT_TAIL_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "events": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "createdTime": {
+                        "type": ["string", "null"],
+                        "description": "When the event was logged (RFC 3339).",
+                    },
+                    "eventTypeId": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Event type: the eventTypeId of an EventEx / "
+                            "ExtendedEvent, else the vim event class name. "
+                            "Usable as an event_type_ids filter value."
+                        ),
+                    },
+                    "fullFormattedMessage": {
+                        "type": ["string", "null"],
+                        "description": "The event text vCenter shows.",
+                    },
+                    "entity": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "type": {"type": ["string", "null"]},
+                            "moId": {"type": ["string", "null"]},
+                            "name": {"type": ["string", "null"]},
+                        },
+                        "description": (
+                            "The managed entity the event is about (the most "
+                            "specific one it names), or null."
+                        ),
+                    },
+                },
+                "required": ["createdTime", "eventTypeId", "fullFormattedMessage", "entity"],
+            },
             "description": (
-                "Capped list of event dicts from "
-                "``POST:/EventManager/{moId}/QueryEvents`` (vi-json). "
-                "Truncated client-side to ``max_events``."
+                "One short row per event from "
+                "``POST:/EventManager/{moId}/QueryEvents`` (vi-json), in "
+                "the order vCenter returned them. At most ``max_count`` rows."
             ),
         },
         "count": {
             "type": "integer",
             "minimum": 0,
-            "description": "Post-cap length of ``events`` -- detects truncation.",
+            "description": "Number of rows in ``events``.",
         },
         "moId": {
             "type": "string",
             "description": "EventManager managed-object ID the call targeted.",
         },
-        "max_events_applied": {
+        "max_count_applied": {
             "type": "integer",
             "minimum": 1,
-            "description": "Effective ``max_events`` cap applied to the response.",
+            "description": "The ``max_count`` limit sent to vCenter.",
         },
     },
-    "required": ["events", "count", "moId", "max_events_applied"],
+    "required": ["events", "count", "moId", "max_count_applied"],
 }
 
 

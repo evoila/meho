@@ -43,9 +43,8 @@ Idempotently provision the public CLI + MCP clients in a Keycloak realm
 meho admin keycloak bootstrap-clients [flags]
 ```
 
-- `--admin-group-name` — top-level group the admin user joins (drives group-gated tools)
 - `--admin-user-email` — optional email for the new admin user
-- `--admin-user-username` — username of the admin user to provision (required unless --skip-user-provisioning)
+- `--admin-user-username` — username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
@@ -60,9 +59,8 @@ meho admin keycloak bootstrap-clients [flags]
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
 - `--mcp-web-origin` — CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)
 - `--realm` — target realm name (NOT the master realm — that's where the admin token is minted)
-- `--skip-user-provisioning` — skip the group + user creation steps (use when users are externally-managed via federation / SCIM)
-- `--tenant-id` — hardcoded value for the `tenant_id` claim mapper (UUID; the lab convention is one tenant per realm)
-- `--tenant-role` — hardcoded value for the `tenant_role` claim mapper (one of tenant_admin / operator / read_only)
+- `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
+- `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
 
 ## `meho agent`
 
@@ -1126,7 +1124,7 @@ meho connector ingest [flags]
 - `--product` — product name (e.g. vmware, kubernetes); manual mode (required with --version/--impl/--spec)
 - `--spec` — spec URI; repeat for multi-spec merge under one connector_id; manual mode
 - `--spec-info-versions-compatible` — manual mode: declare that the spec's info.version is compatible with --version even when they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set (>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is rejected; mutually exclusive with --catalog (the catalog row carries its own band)
-- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403)
+- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
 - `--version` — product version (e.g. 9.0, 1.x); manual mode
 
 ### `meho connector ingest-status`
@@ -3478,16 +3476,18 @@ meho operation result-query <handle_id> [flags]
 
 ### `meho operation search`
 
-Hybrid BM25 + cosine RRF search across enabled operations
+Search a connector's operations, or show one operation's call contract
 
 ```
-meho operation search <connector_id> <query> [flags]
+meho operation search <connector_id> [query] [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group` — narrow the search to one group_key within the connector
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
+- `--op-id` — show this one operation's call contract instead of ranked hits
+- `--scores` — add ranking scores to each hit (honoured for tenant_admin only)
 
 ## `meho pfsense`
 

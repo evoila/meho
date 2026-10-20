@@ -58,8 +58,11 @@ from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mc
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
+    SEARCH_NARROWING_MAX,
+    SEARCH_OUTCOMES,
     ConnectorNotIngestedError,
     UnknownConnectorError,
+    UnknownOperationError,
     call_operation,
     list_operation_groups,
     preview_operation,
@@ -130,12 +133,15 @@ async def _search_operations_handler(
 
     Shares :func:`_list_operation_groups_handler`'s connector-error
     mapping so both discovery meta-tools surface the same typed
-    ``-32602`` taxonomy (#1482).
+    ``-32602`` taxonomy (#1482). An unknown ``op_id`` in exact-op mode
+    (#3668) maps the same way, with ``data.reason=unknown_op``.
     """
     try:
         return await search_operations(operator, arguments)
     except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
         raise _connector_error_to_invalid_params(exc) from exc
+    except UnknownOperationError as exc:
+        raise McpInvalidParamsError(str(exc), data=exc.as_error_data()) from exc
 
 
 async def _call_operation_handler(
@@ -313,6 +319,111 @@ register_mcp_tool(
 )
 
 
+_SAFETY_LEVEL_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["safe", "caution", "dangerous", "destructive"],
+}
+
+#: Ranked mode: slim hits. The three score fields appear only when a
+#: tenant_admin caller sets ``include_scores`` (#3668).
+_SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "hits": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "op_id": {"type": "string"},
+                    "summary": {"type": ["string", "null"]},
+                    "description": {"type": ["string", "null"]},
+                    "group_key": {"type": ["string", "null"]},
+                    "safety_level": _SAFETY_LEVEL_SCHEMA,
+                    "requires_approval": {"type": "boolean"},
+                    "fused_score": {"type": "number"},
+                    "bm25_score": {"type": ["number", "null"]},
+                    "cosine_score": {"type": ["number", "null"]},
+                },
+                "required": ["op_id", "safety_level", "requires_approval"],
+            },
+        },
+        "query_duration_ms": {"type": "number"},
+        "outcome": {"type": "string", "enum": list(SEARCH_OUTCOMES)},
+        "advisory": {"type": ["string", "null"]},
+        "narrowing": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": SEARCH_NARROWING_MAX,
+        },
+    },
+    "required": ["hits", "query_duration_ms", "outcome", "narrowing"],
+}
+
+#: Exact-op mode: one call contract (``operations._contract.OperationContract``).
+_SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "operation": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "op_id": {"type": "string"},
+                "summary": {"type": ["string", "null"]},
+                "description": {"type": ["string", "null"]},
+                "group_key": {"type": ["string", "null"]},
+                "safety_level": _SAFETY_LEVEL_SCHEMA,
+                "requires_approval": {"type": "boolean"},
+                "parameter_schema": {"type": "object"},
+                "examples": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string"},
+                            "param": {"type": ["string", "null"]},
+                            "value": {},
+                        },
+                        "required": ["source", "param", "value"],
+                    },
+                },
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "required": {"type": "boolean"},
+                        "resolves_by": {"type": "string", "enum": ["name"]},
+                        "guidance": {"type": "string"},
+                    },
+                    "required": ["required", "resolves_by", "guidance"],
+                },
+                "result_shape": {
+                    "type": "object",
+                    "properties": {
+                        "envelope_fields": {"type": "array", "items": {"type": "string"}},
+                        "guidance": {"type": "string"},
+                    },
+                    "required": ["envelope_fields", "guidance"],
+                },
+                "pagination_hint": {"type": ["object", "null"]},
+                "recovery": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "connector_id",
+                "op_id",
+                "safety_level",
+                "requires_approval",
+                "parameter_schema",
+                "examples",
+                "target",
+                "result_shape",
+                "pagination_hint",
+                "recovery",
+            ],
+        },
+    },
+    "required": ["operation"],
+}
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
@@ -327,16 +438,33 @@ register_mcp_tool(
             "by combined lexical + semantic match. Inspect each hit's "
             "`safety_level` and `requires_approval` before calling "
             "`call_operation` on it. Arguments: `connector_id` (required), "
-            "`query` (required, free-form), `group` (optional, narrows "
+            "`query` (free-form), `group` (optional, narrows "
             "to that group's ops), `limit` (default 10, max 50). "
+            "EXACT-OP MODE: once you have an `op_id`, call again with "
+            "`op_id` (instead of `query`) BEFORE `call_operation`. You get "
+            "back one `operation` object, not ranked hits: the exact "
+            "`parameter_schema` `call_operation` checks `params` against, "
+            "small examples, whether a `target` is needed (pass the "
+            "target's NAME, not the id `list_targets` returns), the result "
+            "shape (large results come back as a `handle` you read with "
+            "`result_query`), and retry rules. An unknown op_id is an "
+            "error (`-32602`, `data.reason=unknown_op`). "
             "`connector_id` is `<impl_id>-<version>` (NOT the bare "
             "product name); an unknown connector_id is an error "
             "(`-32602`, `data.reason=unknown_connector`), and a "
             "registered-but-not-ingested connector is a recoverable error "
             "(`-32602`, `data.reason=connector_not_ingested` + "
-            "`data.next_step.verb` to run, then retry). An unknown group, "
-            "by contrast, narrows the result set to zero hits and is not "
-            "an error."
+            "`data.next_step.verb` to run, then retry). Every other result "
+            "carries `outcome`: `matched` (the top hit matched your words "
+            "and is clearly ahead; call it), `ambiguous` (hits are weak or "
+            "nearly tied: do not call any of them, narrow the search "
+            "first), `no_match` (nothing matched; do "
+            "not call an operation this search did not return), "
+            "`unknown_group` (the group does not exist; `narrowing` lists "
+            "valid group keys), or `zero_enabled_operations` (nothing on "
+            "this connector is enabled; do not call it, an operator must "
+            "enable operations). `advisory` explains any outcome other than "
+            "`matched`; `narrowing` lists next steps."
         ),
         inputSchema={
             "type": "object",
@@ -368,42 +496,43 @@ register_mcp_tool(
                     "default": 10,
                     "description": "Maximum number of ranked hits to return.",
                 },
+                "op_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Exact-op mode: return this one operation's call "
+                        "contract instead of ranked hits. `query`, `group` "
+                        "and `limit` are ignored when it is set."
+                    ),
+                },
+                "include_scores": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Add ranking scores to each ranked hit. Only "
+                        "honoured for a tenant_admin caller; ignored "
+                        "otherwise. For tuning descriptions, not for "
+                        "picking an operation."
+                    ),
+                },
             },
-            "required": ["connector_id", "query"],
+            "required": ["connector_id"],
+            # Either `query` (ranked mode) or `op_id` (exact-op mode) is
+            # needed. `anyOf` is stripped from the wire schema (the
+            # Anthropic Messages API rejects top-level combinators), so
+            # the description carries the rule to agents; the server-side
+            # jsonschema check in mcp/handlers.py still enforces it.
+            "anyOf": [
+                {"required": ["query"]},
+                {"required": ["op_id"]},
+            ],
             "additionalProperties": False,
         },
+        # Two shapes (#3668): ranked hits, or one exact-op contract. Same
+        # top-level ``oneOf`` idiom as ``query_audit``'s flat|replay union.
         outputSchema={
             "type": "object",
-            "properties": {
-                "hits": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "op_id": {"type": "string"},
-                            "summary": {"type": ["string", "null"]},
-                            "description": {"type": ["string", "null"]},
-                            "group_key": {"type": ["string", "null"]},
-                            "safety_level": {
-                                "type": "string",
-                                "enum": ["safe", "caution", "dangerous", "destructive"],
-                            },
-                            "requires_approval": {"type": "boolean"},
-                            "fused_score": {"type": "number"},
-                            "bm25_score": {"type": ["number", "null"]},
-                            "cosine_score": {"type": ["number", "null"]},
-                        },
-                        "required": [
-                            "op_id",
-                            "safety_level",
-                            "requires_approval",
-                            "fused_score",
-                        ],
-                    },
-                },
-                "query_duration_ms": {"type": "number"},
-            },
-            "required": ["hits", "query_duration_ms"],
+            "oneOf": [_SEARCH_RANKED_OUTPUT_SCHEMA, _SEARCH_EXACT_OP_OUTPUT_SCHEMA],
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",
@@ -605,10 +734,24 @@ register_mcp_tool(
                     # client validating the structured result against this
                     # outputSchema (MCP 2025-06-18: "Clients SHOULD
                     # validate structured results against this schema")
-                    # must accept it. ``pending`` / ``running`` are the
-                    # async-mode answers (#3695): a call started with
-                    # ``async: true`` that has not finished yet.
-                    "enum": ["ok", "error", "denied", "awaiting_approval", "pending", "running"],
+                    # must accept it. ``rate_limited`` is the refusal the
+                    # dispatcher returns when the caller is over its
+                    # per-principal rate or concurrency cap (#3500); the
+                    # envelope carries ``extras.retry_after_seconds``.
+                    # ``pending`` / ``running`` are the async-mode answers
+                    # (#3695): a call started with ``async: true`` that has
+                    # not finished yet. The enum lists only statuses this
+                    # tool actually emits at this boundary (no
+                    # ``already_resumed`` — that one is approval-resume only).
+                    "enum": [
+                        "ok",
+                        "error",
+                        "denied",
+                        "awaiting_approval",
+                        "rate_limited",
+                        "pending",
+                        "running",
+                    ],
                 },
                 "op_id": {"type": "string"},
                 "result": {

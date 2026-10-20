@@ -1,0 +1,18 @@
+{{- if not .Values.hostname }}
+{{- fail "coreKeycloak.hostname is empty. Set it to MEHO's public DNS name (the same value as ingress.host)." }}
+{{- end }}
+{{- if not .Values.firstTenantId }}
+{{- fail "coreKeycloak.firstTenantId is empty. Set it to a UUID: pick one per install (for example with uuidgen) and keep it." }}
+{{- end }}
+# The MEHO realm, imported by Keycloak at its first start (`--import-realm`).
+# No secret is in this file: every `${...}` is filled by Keycloak from the
+# pod's environment during the import (see the StatefulSet).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "coreKeycloak.fullname" . }}-realm
+  labels:
+    {{- include "coreKeycloak.labels" . | nindent 4 }}
+data:
+  meho-realm.json: |
+    {{- .Files.Get "files/meho-realm.json" | nindent 4 }}

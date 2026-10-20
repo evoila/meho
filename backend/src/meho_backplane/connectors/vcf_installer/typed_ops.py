@@ -3,8 +3,8 @@
 
 """Typed-op metadata + registrar for :class:`InstallerConnector`.
 
-The Installer's governed bring-up surface ships as five submit/poll typed
-primitives (``source_kind="typed"``, #3078; retry #3123) so they dispatch on
+The Installer's governed bring-up surface ships as six submit/poll/list typed
+primitives (``source_kind="typed"``, #3078; retry #3123; list #3418) so they dispatch on
 a fresh boot with zero catalog ingest:
 
 * ``installer.sddc.spec.validate`` — submit an ``SddcSpec`` validation
@@ -18,11 +18,15 @@ a fresh boot with zero catalog ingest:
   ``dangerous`` + ``requires_approval``).
 * ``installer.sddc.bringup.status`` — poll one bring-up task
   (``GET /v1/sddcs/{id}``; ``safe``).
+* ``installer.sddc.list`` — list every bring-up task with its id and status,
+  no id needed (``GET /v1/sddcs``; ``safe``; #3418).
 
 Plus the **air-gapped depot lifecycle** family (#3121, group
 ``installer-depot``): ``installer.system.depot.get`` / ``.set`` (read /
 configure the release depot, PUT running the vendor connection check
-synchronously), ``installer.system.trusted-certificates.list`` / ``.add``
+synchronously), ``installer.system.depot.sync-status`` (the catalog
+ingest that runs after a connect, #3406),
+``installer.system.trusted-certificates.list`` / ``.add``
 (outbound trust store — the depot TLS-trust fix), and
 ``installer.bundles.list`` / ``.download`` (bundle inventory + the mandatory
 explicit GA pre-download). Reads are ``safe``; the three writes are
@@ -109,7 +113,9 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its verdict; installer.sddc.bringup.start (dangerous, approval-gated) "
         "starts the bring-up and installer.sddc.bringup.status polls the task's "
         "lifecycle state (IN_PROGRESS / COMPLETED_WITH_SUCCESS / "
-        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; on "
+        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; installer.sddc.list "
+        "lists every bring-up task with its id and status and needs no id, so "
+        "use it to find a running bring-up whose id you do not have; on "
         "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
         "approval-gated) resumes the task from its failed sub-task. The "
         "one-shot governed validate-then-deploy unit is "
@@ -125,8 +131,13 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "depot, first import the depot's TLS certificate via "
         "installer.system.trusted-certificates.add (approval-gated; "
         "installer.system.trusted-certificates.list reads the trust store) "
-        "and retry; after a successful connect the catalog ingests and "
-        "installer.bundles.list populates within about a minute; then "
+        "and retry; after a successful connect the appliance ingests the "
+        "release catalog in the background, so poll "
+        "installer.system.depot.sync-status until the sync has finished "
+        "(errorMessage empty and lastSyncCompletionTimestamp later than the "
+        "depot.set call; a non-empty errorMessage means the sync failed) "
+        "instead of polling installer.bundles.list blindly; then "
+        "installer.bundles.list lists the ingested bundles; then "
         "installer.bundles.download (approval-gated, one batch) explicitly "
         "downloads the release bundles BEFORE validating a spec — a freshly "
         "connected installer pins components to the newest catalog versions "
@@ -515,6 +526,64 @@ _EMPTY_PARAMS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_SDDC_LIST = InstallerTypedOp(
+    op_id="installer.sddc.list",
+    handler_attr="sddc_list",
+    summary="List every VCF bring-up task on the Installer with its id and status.",
+    description=(
+        "Reads GET /v1/sddcs — every VCF bring-up (SDDC) task the Installer "
+        "knows, running or finished. Needs no id: use it to find the id of a "
+        "bring-up that was started (for example by an approved "
+        "installer.sddc.bringup.start) when that id was lost. Each task is cut "
+        "down to id / name / status / deploymentType / vcfInstanceName / "
+        "creationTimestamp; the large sddcSubTasks[] and milestones[] arrays are "
+        "dropped — read them with installer.sddc.bringup.status and the id. "
+        "Works with zero catalog ingest. safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={
+        "type": "object",
+        "properties": {
+            "elements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "status": {"type": "string"},
+                        "deploymentType": {"type": "string"},
+                        "vcfInstanceName": {"type": "string"},
+                        "creationTimestamp": {"type": "string"},
+                    },
+                },
+            },
+            "pageMetadata": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+    group_key=_GROUP_BRINGUP,
+    tags=("read-only", "vcf", "installer", "bringup", "status", "list"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call to see which VCF bring-ups exist on the Installer and their "
+            "state, or to recover the id of a running bring-up you no longer "
+            "have, then poll installer.sddc.bringup.status with that id."
+        ),
+        output_shape=(
+            "{elements: [{id, name, status, deploymentType, vcfInstanceName, "
+            "creationTimestamp}], pageMetadata?}. status is IN_PROGRESS / "
+            "COMPLETED_WITH_SUCCESS / ROLLBACK_SUCCESS / COMPLETED_WITH_FAILURE. "
+            "No sub-task detail here — call installer.sddc.bringup.status with "
+            "the id for it. A long list reduces to a JSONFlux handle; read the "
+            "rest with result_query."
+        ),
+        parameter_hints={},
+    ),
+)
+
 _DEPOT_GET = InstallerTypedOp(
     op_id="installer.system.depot.get",
     handler_attr="system_depot_get",
@@ -605,6 +674,56 @@ _DEPOT_SET = InstallerTypedOp(
                 "{isOfflineDepot: true, hostname, port}}."
             ),
         },
+    ),
+)
+
+_DEPOT_SYNC_STATUS = InstallerTypedOp(
+    op_id="installer.system.depot.sync-status",
+    handler_attr="system_depot_sync_status",
+    summary="Read the Installer's depot catalog sync (ingest) state.",
+    description=(
+        "Reads GET /v1/system/settings/depot/depot-sync-info — the "
+        "DepotSyncInfo object (syncStatus / errorMessage / "
+        "lastSyncCompletionTimestamp). After installer.system.depot.set "
+        "connects a depot, the appliance ingests the release catalog in the "
+        "background; installer.bundles.list stays empty until that ingest "
+        "finishes. This read tells 'ingest still running' apart from "
+        "'ingest failed' and 'ingest done', so callers can wait for it "
+        "before listing or downloading bundles. Password keys are scrubbed. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={
+        "type": "object",
+        "properties": {
+            "syncStatus": {"type": "string"},
+            "errorMessage": {"type": "string"},
+            "lastSyncCompletionTimestamp": {"type": "string"},
+        },
+        "additionalProperties": True,
+    },
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "depot", "system", "sync"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call after installer.system.depot.set succeeds, and poll it, to "
+            "know when the depot catalog has finished ingesting — before "
+            "installer.bundles.list / installer.bundles.download. Also call "
+            "when installer.bundles.list is empty, to tell 'still ingesting' "
+            "from 'ingest failed'."
+        ),
+        output_shape=(
+            "{syncStatus, errorMessage?, lastSyncCompletionTimestamp?}. "
+            "syncStatus is the vendor's state string, passed through as sent "
+            "(the 9.1 API does not list its values). The catalog is ready when "
+            "errorMessage is empty and lastSyncCompletionTimestamp is later "
+            "than the depot.set call; a non-empty errorMessage means the sync "
+            "failed — fix the depot instead of waiting. Confirm with a "
+            "non-empty installer.bundles.list."
+        ),
+        parameter_hints={},
     ),
 )
 
@@ -774,17 +893,20 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 
 #: The typed ops :class:`InstallerConnector` registers at lifespan startup,
 #: in submit → poll order per primitive pair (the bring-up trio adds the
-#: failed-task retry between its submit and its poll; the depot family runs
-#: in its air-gapped lifecycle order: settings read/write → trust store
-#: read/write → bundle inventory read/download).
+#: failed-task retry between its submit and its poll, and the id-less task
+#: list after its poll; the depot family runs
+#: in its air-gapped lifecycle order: settings read/write → catalog sync
+#: read → trust store read/write → bundle inventory read/download).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
     _BRINGUP_START,
     _BRINGUP_RETRY,
     _BRINGUP_STATUS,
+    _SDDC_LIST,
     _DEPOT_GET,
     _DEPOT_SET,
+    _DEPOT_SYNC_STATUS,
     _TRUSTED_CERTIFICATES_LIST,
     _TRUSTED_CERTIFICATE_ADD,
     _BUNDLES_LIST,

@@ -92,6 +92,7 @@ from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._pgvector_image import pgvector_test_image
 from tests.fixtures.synthetic_n_plus_1 import (
     FUTURE_JSONB_FIELD_DEFAULT,
     FUTURE_TEXT_FIELD_DEFAULT,
@@ -360,7 +361,8 @@ class TestForwardCompatRollback:
         )
         _install_fake_vault(monkeypatch)
 
-        # pgvector/pgvector:pg16: after G0.4-T1 (#258) migration 0003 runs
+        # The chart's pgvector image (``tests/_pgvector_image.py``, #4039):
+        # after G0.4-T1 (#258) migration 0003 runs
         # ``CREATE EXTENSION IF NOT EXISTS vector`` as part of ``upgrade head``,
         # so the testcontainers image must have pgvector pre-installed.
         # ``postgres:16-alpine`` (the v0.1-chassis choice) lacks the .control
@@ -369,7 +371,7 @@ class TestForwardCompatRollback:
         # env-overridable via ``MEHO_TEST_PGVECTOR_IMAGE`` so a registry-
         # mirror swap (GHCR cache, internal Harbor) does not require a
         # code change — same knob the integration conftest honours.
-        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        image = pgvector_test_image()
         with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()
             async_url = _async_url_from(sync_url)
@@ -526,7 +528,7 @@ class TestSeedRdcInternalConventionsPgIdempotency:
         """
         from testcontainers.postgres import PostgresContainer
 
-        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        image = pgvector_test_image()
         with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()
             async_url = _async_url_from(sync_url)
@@ -628,7 +630,7 @@ class TestSupersedeDefaultConventionsPgIdempotency:
         """Upgrade head then stamp 0027 + upgrade 0028 again: counts stable."""
         from testcontainers.postgres import PostgresContainer
 
-        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        image = pgvector_test_image()
         with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()
             async_url = _async_url_from(sync_url)
@@ -906,7 +908,7 @@ class TestAuditLogAppendOnlyTrigger:
         """
         from testcontainers.postgres import PostgresContainer
 
-        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        image = pgvector_test_image()
         with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()
             async_url = _async_url_from(sync_url)

@@ -239,6 +239,30 @@ def test_networkpolicy_off_by_default_and_admits_backplane_when_on() -> None:
     assert rule["ports"] == [{"port": "http", "protocol": "TCP"}]
 
 
+def test_nothing_cluster_wide_by_default() -> None:
+    docs = _openbao_docs()
+    assert not [d for d in docs if d["kind"].startswith("Cluster") or d["kind"] == "ServiceAccount"]
+    pod = _one(docs, "StatefulSet")["spec"]["template"]["spec"]
+    assert "serviceAccountName" not in pod
+
+
+def test_auth_delegator_binds_its_own_account() -> None:
+    docs = _openbao_docs("--set", "coreVault.authDelegator=true", "--namespace", "meho")
+    _one(docs, "ServiceAccount", "test-vault")
+    binding = _one(docs, "ClusterRoleBinding")
+    assert binding["metadata"]["name"] == "meho-test-vault-auth-delegator"
+    assert binding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "system:auth-delegator",
+    }
+    (subject,) = binding["subjects"]
+    assert subject == {"kind": "ServiceAccount", "name": "test-vault", "namespace": "meho"}
+    pod = _one(docs, "StatefulSet")["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "test-vault"
+    assert pod["automountServiceAccountToken"] is True
+
+
 def test_long_release_name_keeps_names_valid() -> None:
     release = "r" * 53  # Helm's longest release name
     docs = _openbao_docs(release=release)

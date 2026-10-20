@@ -23,7 +23,14 @@ spec:
       labels:
         {{- include "coreVault.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if .Values.authDelegator }}
+      # The Kubernetes login method sends this pod's token to the cluster
+      # to check other tokens; the auth-delegator binding allows that.
+      serviceAccountName: {{ include "coreVault.fullname" . }}
+      automountServiceAccountToken: true
+      {{- else }}
       automountServiceAccountToken: false
+      {{- end }}
       # No `<SERVICE>_PORT` variables from other Services in the namespace:
       # a Service named `vault` would otherwise set `VAULT_PORT` here.
       enableServiceLinks: false

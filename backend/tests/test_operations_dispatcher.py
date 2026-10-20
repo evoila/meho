@@ -676,7 +676,105 @@ async def test_dispatch_returns_invalid_params_when_schema_violated(
     assert result.extras["error_code"] == "invalid_params"
     validation = result.extras["validation_errors"]
     assert isinstance(validation, list)
-    assert any(err["validator"] == "required" for err in validation)
+    assert validation == [
+        {
+            "path": "$",
+            "validator": "required",
+            "expected": 'required property missing: "path"',
+            "remediation": "add the missing property to params",
+        }
+    ]
+    assert result.extras["validation_errors_suppressed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_invalid_params_never_echoes_the_rejected_value(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#3669: a rejected value never rides the ``invalid_params`` envelope.
+
+    jsonschema's own message quotes the bad value. A credential sent to the
+    wrong field would then come back in cleartext. The entry is built from
+    the schema side only, so the value (here a bearer token, which the
+    default redaction policy matches) is absent from the whole envelope.
+    """
+    secret = "eyJtoken" + "$value!123" + "abcdef"
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "version": {"type": "integer"},
+                "mode": {"enum": ["latest", "pinned"]},
+                "path": {"type": "string", "pattern": "^[a-z/]+$"},
+            },
+            "additionalProperties": False,
+        },
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_FakeTarget(product="vault"),
+        params={
+            "version": "Bearer " + secret,
+            "mode": "Bearer " + secret,
+            "path": "Bearer " + secret,
+        },
+    )
+    assert result.extras["error_code"] == "invalid_params"
+    entries = result.extras["validation_errors"]
+    assert {e["validator"] for e in entries} == {"type", "enum", "pattern"}
+    for entry in entries:
+        assert set(entry) == {"path", "validator", "expected", "remediation"}
+    dumped = json.dumps(result.model_dump(mode="json"))
+    assert secret not in dumped
+
+
+@pytest.mark.asyncio
+async def test_dispatch_invalid_params_caps_the_error_list(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#3669: many violations -> a capped list plus a suppressed count."""
+    from meho_backplane.operations._errors import _MAX_VALIDATION_ERRORS
+
+    count = _MAX_VALIDATION_ERRORS + 5
+    properties = {f"p{i}": {"type": "integer"} for i in range(count)}
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={"type": "object", "properties": properties},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_FakeTarget(product="vault"),
+        params=dict.fromkeys(properties, "x"),
+    )
+    assert result.extras["error_code"] == "invalid_params"
+    assert len(result.extras["validation_errors"]) <= _MAX_VALIDATION_ERRORS
+    assert result.extras["validation_errors_suppressed"] == 5
+    assert result.error == (
+        f"invalid_params: {count} validation error(s); showing the first {_MAX_VALIDATION_ERRORS}"
+    )
 
 
 @pytest.mark.asyncio

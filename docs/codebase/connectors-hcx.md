@@ -93,8 +93,8 @@ against this rule:
    path ending in `swagger.json`, `swagger.yaml`, `openapi.json` or
    `openapi.yaml`;
 3. refused: everything else, and any path with `..`, `//`, `\`, an
-   encoded dot or slash (`%2e`, `%2f`), a scheme, a host name, a fragment,
-   whitespace or a control character. A query string may hold only
+   encoded dot or slash (`%2e`, `%2f`), a semicolon (`;`), a scheme, a host
+   name, a fragment, whitespace or a control character. A query string may hold only
    `group` and `apiVersion`.
 
 A refused path stops with an error and sends no HTTP request.

@@ -24,8 +24,8 @@ Only two kinds of path, checked before any vendor call:
    ``openapi.yaml``.
 
 Every other path is refused. So is a path with ``..``, ``//``, ``\\``, an
-encoded dot or slash, a scheme, a host name, a fragment or a control
-character. A query string may hold only ``group`` and ``apiVersion``.
+encoded dot or slash, a semicolon, a scheme, a host name, a fragment or a
+control character. A query string may hold only ``group`` and ``apiVersion``.
 
 The read sends one ``GET`` to the target's own address with the target's
 own login. It does not follow a redirect: the answer carries the
@@ -73,8 +73,9 @@ _API_FILE_SUFFIXES = ("swagger.json", "swagger.yaml", "openapi.json", "openapi.y
 #: The only query keys a documentation path may carry.
 _ALLOWED_QUERY_KEYS = frozenset({"group", "apiVersion"})
 
-#: Encoded dot / slash forms that would change meaning after decoding.
-_REFUSED_FRAGMENTS = ("..", "//", "\\", "://", "%2e", "%2f", "%5c", "#")
+#: Characters and encoded forms that have no place in a documentation or
+#: API file path. Checked on the raw string, before any decoding.
+_REFUSED_FRAGMENTS = ("..", "//", "\\", "://", "%2e", "%2f", "%5c", "#", ";", "%3b")
 
 #: Largest text part. Small enough that one ``result_query`` answer (256 KiB)
 #: holds several parts; large enough that a few-MB file is tens of rows.

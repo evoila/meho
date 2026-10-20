@@ -84,7 +84,7 @@ _API_FILE_GET = HcxTypedOp(
                     "and paths under /hybridity/docs/, or a Swagger/OpenAPI file path (a part "
                     "named api-docs, swagger-resources or swagger-config, or a name ending in "
                     "swagger.json, swagger.yaml, openapi.json or openapi.yaml). A query string "
-                    "may hold only group and apiVersion. No '..', '//', scheme or host."
+                    "may hold only group and apiVersion. No '..', '//', ';', scheme or host."
                 ),
             },
         },

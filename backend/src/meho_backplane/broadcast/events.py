@@ -108,6 +108,44 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         # so audit + broadcast collapse to aggregate-only on top of its
         # requires_approval gate; the result is value-free by construction.
         "k8s.secret.read_to_ref",
+        # #4617 -- the ingested SDDC Manager reads whose answer holds
+        # credentials. Same posture as ``sddc.credential.list``: the catalog
+        # row ``sddc`` / ``9.0`` raises them to caution with approval, and
+        # this entry scrubs the answer and collapses the broadcast. An op id
+        # matches on its own, so one entry covers the path on every
+        # ingested connector that serves it.
+        # The credential store and its password-rotation tasks.
+        "GET:/v1/credentials",
+        "GET:/v1/credentials/{id}",
+        "GET:/v1/credentials/tasks",
+        "GET:/v1/credentials/tasks/{id}",
+        "GET:/v1/credentials/tasks/{id}/subtasks/{subtaskId}",
+        "GET:/v1/credentials/tasks/{id}/resource-credentials",
+        # Depot, backup and proxy settings carry account passwords.
+        "GET:/v1/system/settings/depot",
+        "GET:/v1/system/backup-configuration",
+        "GET:/v1/system/backup-configuration/backup-locations",
+        "GET:/v1/system/proxy-configuration",
+        # Host prechecks echo the host password; VASA providers and their
+        # users carry passwords; a management-component task spec carries
+        # the admin and root passwords.
+        "GET:/v1/hosts/prechecks/{id}",
+        "GET:/v1/vasa-providers",
+        "GET:/v1/vasa-providers/{id}",
+        "GET:/v1/vasa-providers/{id}/users",
+        "GET:/v1/vcf-management-components/tasks/{taskId}/spec",
+        # Users carry an API key; identity providers carry the sync client
+        # bearer token.
+        "GET:/v1/users",
+        "GET:/v1/users/ui",
+        "GET:/v1/users/local/admin",
+        "GET:/v1/identity-providers",
+        "GET:/v1/identity-providers/{id}",
+        # #4617 -- a BIND config file can hold TSIG and rndc key secrets.
+        # The answer is one text field, so the Tier-1 ``bind_key_secret``
+        # rule does the redaction; this entry collapses the broadcast and
+        # keeps the flight recorder from storing the body.
+        "bind9.config.show",
     }
 )
 

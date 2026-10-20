@@ -21,6 +21,21 @@
 # ~6-8-min parallel shards, cutting the dominant PR-wall contributor. Per-job
 # `timeout-minutes` caps a runaway gate at roughly twice its observed cost.
 #
+# Runner placement (#4626, step 1): the six small jobs — `changes`,
+# `python-lint`, `python-unit-lane`, `go-lint-test`,
+# `cli-api-snapshot-freshness` and `helm-lint-template` — run on GitHub-
+# hosted `ubuntu-latest` runners. They need only public toolchains and
+# public-registry egress. Before the move they queued on the internal
+# `meho-runners-ci` pool (8 slots) behind the big test jobs: a median wait of
+# about 14 minutes for jobs that run for seconds to two minutes, and the
+# detect job at the start plus the fan-in at the end put that wait on the
+# critical path of every run twice. The jobs that pull test images from the
+# internal mirror or read the private spec shelf stay on the internal pools:
+# `python-unit-shard` (heavy pool), `python-integration`,
+# `python-migration-tests` and the push-only coverage jobs. Every moved job
+# keeps its name, `if:` guard and triggers, so the required checks are
+# unchanged.
+#
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
 # `.md`). On such a PR the heavy Python lanes — `python-lint`, the four
@@ -171,7 +186,7 @@ jobs:
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       migrations: ${{ steps.detect.outputs.migrations }}
@@ -265,8 +280,9 @@ jobs:
     # python-unit-lane fan-in below. Whole-tree ruff + ruff format + mypy: none
     # of it is shardable by test file, none of it needs testcontainers / the
     # vendor spec-shelf / the embedding or spaCy models, and it is CPU-cheap
-    # (~1-2 min), so it runs ONCE here on the dense light pool rather than N
-    # times inside every pytest shard. Same fork-PR guard as every other job,
+    # (~1-2 min), so it runs ONCE here on a GitHub-hosted runner rather than N
+    # times inside every pytest shard. Nothing in it needs the internal network
+    # (#4626). Same fork-PR guard as every other job,
     # plus the #3252 docs-only skip: a proven docs-only PR skips this job (and
     # the shards) so the required unit-lane fan-in reports success-by-skip.
     # `needs: changes` makes `docs_only` readable here; if the detect job
@@ -277,7 +293,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
     timeout-minutes: 10
     defaults:
@@ -354,8 +370,8 @@ jobs:
        needs.changes.outputs.docs_only != 'true')
     # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods) — #761.
     # Four shards fit inside the 5-pod ceiling. Only the pytest sweep is
-    # CPU/memory-bound enough to want the extra cores; ruff/mypy stayed on the
-    # light pool in python-lint.
+    # CPU/memory-bound enough to want the extra cores; ruff/mypy run once in
+    # python-lint on a GitHub-hosted runner.
     runs-on: meho-runners-ci-heavy
     strategy:
       # 4 stride shards (#3251 started with 3; #4655 raised it to 4 after the
@@ -910,13 +926,15 @@ jobs:
     # workflow-level concurrency group, so a PR force-push cancels the whole
     # in-flight run as a SET and a fresh run supersedes it — there is no
     # partial-cancel path that could leave this gate green on stale shards.
-    # Light pool: this job does no setup and runs one bash step.
+    # GitHub-hosted runner (#4626): this job does no setup and runs one bash
+    # step, and it is the last job of every CI run — it must never wait for a
+    # slot on the internal pool.
     needs: [changes, python-lint, python-unit-shard]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
@@ -1744,9 +1762,11 @@ jobs:
 
   go-lint-test:
     name: Go (golangci-lint + go test)
-    # Fork-PR guard mirrors the Python job — same rationale.
+    # Fork-PR guard mirrors the Python job — same rationale. Runs on a
+    # GitHub-hosted runner since #4626: it needs only the Go toolchain and
+    # public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1842,7 +1862,10 @@ jobs:
         # editors/manpages/etc. The proper long-term fix is to bake
         # the C toolchain into the meho-runners-ci base image; until
         # then this step keeps PR CI green without expanding the
-        # workflow's blast radius.
+        # workflow's blast radius. On the GitHub-hosted runner this job
+        # uses since #4626, gcc and libc6-dev are preinstalled, so the
+        # probe passes and apt never runs; the step stays so the job can
+        # move back to the internal pool without edits.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -1899,9 +1922,10 @@ jobs:
 
   cli-api-snapshot-freshness:
     name: CLI API snapshot freshness
-    # Fork-PR guard mirrors the other jobs — needs the internal runner pool.
+    # Fork-PR guard mirrors the other jobs (kept unchanged by #4626). Runs on
+    # a GitHub-hosted runner: it needs only Go, uv and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1928,6 +1952,8 @@ jobs:
         # duplicating their commands (which would drift from the Makefile).
         # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
         # step; baking make into the base image is the long-term fix.
+        # The GitHub-hosted runner this job uses since #4626 ships make,
+        # so the step is a no-op there and stays for a possible move back.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -1985,9 +2011,10 @@ jobs:
 
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
-    # Fork-PR guard mirrors the other jobs.
+    # Fork-PR guard mirrors the other jobs. Runs on a GitHub-hosted runner
+    # since #4626: helm + kubeconform need only public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2011,7 +2038,8 @@ jobs:
         # cannot write to /usr/local/bin (regression caught in PR #173
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install
-        # step's frozen PATH.
+        # step's frozen PATH. $HOME/.local/bin works the same on the
+        # GitHub-hosted runner this job uses since #4626.
         run: |
           set -euo pipefail
           KC_VER=v0.6.7

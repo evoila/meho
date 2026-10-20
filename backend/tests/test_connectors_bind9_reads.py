@@ -23,8 +23,10 @@ Coverage matrix (per Task #588 acceptance criteria):
   invariants against mocked ``_run_command``: correct command,
   correct argument plumbing, structured-error envelopes from the
   dispatcher seam (path rejection, missing zone).
-* ``BIND9_OPS`` registration shape -- all four new ops carry
-  ``safety_level='safe'``, ``additionalProperties=False`` on the
+* ``BIND9_OPS`` registration shape -- the three zone / record reads carry
+  ``safety_level='safe'``; ``bind9.config.show`` is ``caution`` with
+  approval because a config file can hold TSIG / rndc key secrets
+  (#4617). All four carry ``additionalProperties=False`` on the
   parameter schema, non-empty ``llm_instructions``, and bind9-namespace
   op_ids.
 """
@@ -721,12 +723,19 @@ def test_bind9_ops_table_includes_all_t2_read_ops() -> None:
 
 @pytest.mark.parametrize(
     "op_id",
-    ["bind9.zone.list", "bind9.zone.read", "bind9.record.get", "bind9.config.show"],
+    ["bind9.zone.list", "bind9.zone.read", "bind9.record.get"],
 )
 def test_each_read_op_is_safe_and_no_approval(op_id: str) -> None:
     op = next(o for o in BIND9_OPS if o.op_id == op_id)
     assert op.safety_level == "safe"
     assert op.requires_approval is False
+
+
+def test_config_show_is_caution_with_approval() -> None:
+    """#4617: a config file can hold TSIG / rndc key secrets, so the read waits."""
+    op = next(o for o in BIND9_OPS if o.op_id == "bind9.config.show")
+    assert op.safety_level == "caution"
+    assert op.requires_approval is True
 
 
 @pytest.mark.parametrize(

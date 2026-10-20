@@ -2766,9 +2766,12 @@ async def _audit_denied_and_return(
 ) -> OperationResult:
     """Write the ``denied`` audit row for a refused park, then return the result.
 
-    The one audit path for a ``write_capability_denied`` refusal (#3542),
-    shared by the dispatcher park (:func:`_handle_needs_approval`) and the
-    composite sub-op gate (``composite.enforce_subop_policy``). The row lands
+    The one audit path for every refusal that stops a park before an approval
+    row exists: the destructive-tier binding checks (#3197, #4647), a
+    ``write_capability_denied`` preflight (#3542) and an idempotency-key
+    conflict (#3486). Shared by the dispatcher park
+    (:func:`_handle_needs_approval`) and the composite sub-op gate
+    (``composite.enforce_subop_policy``). The row lands
     on the refused op's own path with the refusal details under
     ``payload["error"]``, like an ordinary policy denial. For a sub-op the
     row carries the parent operation's audit id through
@@ -2820,11 +2823,18 @@ async def _handle_needs_approval(
     operation audit trail.
 
     For a ``destructive``-tier op (#3197) the park is gated first by
-    :func:`_destructive_binding_refusal`: it refuses (fail-closed, no row
-    written) unless the caller presented a matching ``preview_hash`` and the
-    ``proposed_effect`` carries a blast-radius statement. The verified
-    ``preview_hash`` is then persisted on the row for approve-time
-    re-verification.
+    :func:`_destructive_binding_refusal`: it refuses (fail-closed, no
+    approval row written) unless the caller presented a matching
+    ``preview_hash`` and the ``proposed_effect`` carries a blast-radius
+    statement. The refusal is recorded as a ``denied`` audit row like the
+    preflight refusal above (#4647). The verified ``preview_hash`` is then
+    persisted on the row for approve-time re-verification.
+
+    Two refusals write no audit row on purpose: a missing approval
+    encryption key (``ApprovalHandoffKeyError``) and a failure while saving
+    the approval request. Neither is a decision about the call; both are a
+    MEHO-side fault, and no audit event class describes them. They stay in
+    the structured log only.
 
     On success returns :func:`~meho_backplane.operations._errors.result_awaiting_approval`
     with the pending row's id in ``extras["approval_request_id"]``.
@@ -2877,10 +2887,11 @@ async def _handle_needs_approval(
         params=params,
     )
 
-    # #3197: the destructive tier refuses to park (fail-closed, no durable
+    # #3197: the destructive tier refuses to park (fail-closed, no approval
     # row) unless the caller presented a matching preview_hash and the
     # blast-radius statement is present. Non-destructive ops skip this
-    # entirely and park exactly as before.
+    # entirely and park exactly as before. #4647: the refused attempt is
+    # still audited as a denial, like a policy denial.
     if descriptor.safety_level == "destructive":
         refusal = await _destructive_binding_refusal(
             op_id=op_id,
@@ -2893,7 +2904,15 @@ async def _handle_needs_approval(
             duration_ms=duration_ms,
         )
         if refusal is not None:
-            return refusal
+            return await _audit_denied_and_return(
+                refusal,
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
 
     # #3542: a preflight that says the write will be denied refuses the
     # park (no approval row written) instead of asking a person to approve

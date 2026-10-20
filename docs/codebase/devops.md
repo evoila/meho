@@ -1475,7 +1475,8 @@ shape (deterministic file-stride matrix + fan-in):
   and the four residues partition the file set **exactly** (union == full,
   pairwise disjoint). #3251 started with 3 shards. #4655 raised the count
   to 4 when the slowest shard reached the 660 s per-shard budget (579 s
-  as a middle value on `main`, up to 663 s). The budget stayed at 660 s:
+  as a middle value and up to 605 s on `main`; 663 s on a pull request).
+  The budget stayed at 660 s:
   the rule in `ci.yml` is to measure, then add shards, not to raise the
   budget. To change the count again, edit the matrix and `TOTAL` in the
   pytest step together. File-level sharding is strictly coarser than what

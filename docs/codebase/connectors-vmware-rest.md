@@ -680,6 +680,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    ingested. The reconcile lane above pins the corrected body shape, against
    a fixture always and against the pinned vendor 8.0 U3 spec when the shelf
    has it.
+   **8.0 VI-JSON calls (#4333).** The same lane collects every VI-JSON
+   method the connector calls (from the source) and checks it against the
+   vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
+   version gate or an entry with the reason in the lane's exclusion list.
+   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
+   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
+   `vmware.host.vsan_health` calls it best-effort. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md).
    **Operation summaries (#4329).** Search and the operation-group step
    read each operation's one-line `summary`. The full vendor specs fall
    short in two ways, and `ingest_corrections.py` fixes both at ingest

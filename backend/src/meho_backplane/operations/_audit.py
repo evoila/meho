@@ -45,6 +45,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
 from meho_backplane.operations.caller_gone import caller_gone_at
+from meho_backplane.request_usage.collector import current_request_id
 
 __all__ = [
     "AgentRunAuditMeta",
@@ -671,7 +672,10 @@ async def write_audit_row(
             method="DISPATCH",
             path=descriptor.op_id,
             status_code=status_code_for_result(result_status),
-            request_id=None,
+            # #3695: the request's correlation id. A standing-grant
+            # auto-approval row written for this call carries the same
+            # value, so the approval links forward to this row.
+            request_id=current_request_id(),
             duration_ms=Decimal(str(round(duration_ms, 2))),
             payload=payload,
             raw_payload=raw_payload,

@@ -10472,7 +10472,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. Audited via the audit middleware.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. Audited via the audit middleware.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -10578,7 +10578,7 @@
           "service-principal-grants"
         ],
         "summary": "Revoke Grant",
-        "description": "Revoke (soft-delete) a standing grant.\n\n``reason`` is optional, so a revoke without one stays valid. When given,\nit is stored as ``revoked_reason`` on the grant row and as ``reason`` in\nthe audit row payload, the same way create records its ``reason``.\nIt is a query parameter, not a body, because a DELETE body is not well\nsupported by HTTP clients and proxies.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
+        "description": "Revoke (soft-delete) a standing grant.\n\nOnly a person may revoke one: a machine principal gets 403\n``human_principal_required`` before this runs.\n``reason`` is optional, so a revoke without one stays valid. When given,\nit is stored as ``revoked_reason`` on the grant row and as ``reason`` in\nthe audit row payload, the same way create records its ``reason``.\nIt is a query parameter, not a body, because a DELETE body is not well\nsupported by HTTP clients and proxies.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
         "operationId": "revoke_grant_api_v1_service_principals_grants__grant_id__delete",
         "parameters": [
           {

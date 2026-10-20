@@ -1517,6 +1517,34 @@ networkPolicy:
   # satellite-runner inbound listener are out of scope — they use the
   # ingress hostname, not this rule.
   ingestAllowedNamespaces: []
+  # -- Extra outgoing rules for the backplane NetworkPolicy, each a normal
+  # Kubernetes egress rule, added exactly as written (#3516). With the
+  # policy on, the backplane reaches only the three CIDRs above, the
+  # in-cluster stores and DNS — list here the networks of the systems MEHO
+  # manages and the AI service. Open only the networks and ports MEHO
+  # needs. Every rule must have a `to` list (the chart refuses a rule
+  # without one, because Kubernetes reads a missing `to` as "every
+  # destination"). The rule is checked against the address the packet is
+  # redirected to, so for a system behind an in-cluster ingress or load
+  # balancer name the ingress Pods and their port, not the VIP. Example:
+  #   extraEgress:
+  #     - to:
+  #         - ipBlock:
+  #             cidr: 192.0.2.0/24
+  #       ports:
+  #         - port: 443
+  #           protocol: TCP
+  #     - to:
+  #         - namespaceSelector:
+  #             matchLabels:
+  #               kubernetes.io/metadata.name: traefik
+  #           podSelector:
+  #             matchLabels:
+  #               app.kubernetes.io/name: traefik
+  #       ports:
+  #         - port: 8443
+  #           protocol: TCP
+  extraEgress: []
 
 # -- Node selector applied to the Pod template.
 nodeSelector: {}

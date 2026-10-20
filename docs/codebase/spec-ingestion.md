@@ -529,7 +529,11 @@ methods as `POST /<Type>/{moId}/<Method>`, so its HTTP verb alone would
 otherwise classify an object destroy as `caution`. This is a raise-only rule:
 it never weakens a stricter existing classification. The vocabulary is narrow
 by design; connector-owned safety floors remain the explicit scoped overlay
-for vendor- and version-specific rules.
+for vendor- and version-specific rules. The word list and the rule live in
+one module, `meho_backplane/delete_names.py`, and the standing-grant checks,
+the governed-step list, the flight recorder and the stored-delete review use
+the same list, so an op id such as `POST:/VirtualMachine/{moId}/Destroy_Task`
+counts as a delete everywhere MEHO makes that decision (#4632).
 
 #### Connector safety floors
 

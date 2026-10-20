@@ -253,17 +253,35 @@ delete-shaped ops:
 
 - **by configured pattern** (`Settings.service_grant_delete_shaped_patterns`,
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
-  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`), and
+  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`),
+- **by vendor action name** (#4632): an ingested op id whose last path part
+  starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
+  `POST:/VirtualMachine/{moId}/Destroy_Task`. VI-JSON (the JSON form of
+  vCenter's older object API) sends every method as a `POST`, so neither
+  the HTTP method nor a pattern sees these deletes. The word list and the
+  rule are the ingest parser's, in `meho_backplane/delete_names.py`; the
+  parser, the grant service, the flight recorder and the stored-delete
+  review all import that one module. This sign does **not** depend on the
+  pattern setting: a changed `SERVICE_GRANT_DELETE_SHAPED_PATTERNS` keeps
+  it. Lookalikes such as `Destroyer_Task` or `Reset_Task` stay grantable,
+  and
 - **by descriptor** (best-effort when a descriptor resolves via
   `lookup_descriptor`): the `destructive` safety tier (#3183), the HTTP
   `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
 
-`_delete_shaped_reason_by_descriptor` single-sources that descriptor-level
-classification and is consulted at **both** ends: create-time (above) and
-dispatch-time (`consult_and_record_grant`, so a stale grant predating an
-op's promotion into the `destructive` tier can never satisfy it). That is
-what makes "a standing grant can never satisfy a destructive op" hold
-whether the grant is being created or consulted.
+The first two signs need only the op id (`delete_shaped_refusal_reason`),
+so they also work for an op with no stored row. The action-name sign and
+`_delete_shaped_reason_by_descriptor` are consulted at **both** ends:
+create-time (above) and dispatch-time (`consult_and_record_grant`, so a
+stale grant predating an op's promotion into the `destructive` tier, or a
+grant row written for a VI-JSON delete, can never satisfy it). An inner
+step of a multi-step operation reaches the gate as an in-memory record with
+only its declared level — no method, no tags — so for it the op id is the
+only sign, and the action name is what catches `Destroy_Task`. That is what
+makes "a standing grant can never satisfy a destructive op" hold whether
+the grant is being created or consulted. A grant row that already exists
+for such an op stays in the list but never lets the op run; revoke it with
+`meho service-principals grants revoke <id>`.
 
 Ops the workflow models as its human gate (e.g. a bring-up start) are
 expected to stay ungranted — the grant list is the floor, not a bypass.
@@ -309,7 +327,9 @@ id, the manifest tuples it fans out to via
 `connectors/vmware_rest/composites/_governed_subops.py`, referencing the
 `_SUB_OPS_*` constants, never re-typing them) — not hand-maintained. A
 **delete-shaped** rollback / delete leg (e.g. `vm.create`'s
-`DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`) is flagged
+`DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`, or
+`vm.destroy`'s VI-JSON step `POST:/VirtualMachine/{moId}/Destroy_Task`,
+which only its action name marks as a delete, #4632) is flagged
 `grantable=false` with the same refusal reason `create` would raise, so the
 operator knows up front that a **partial failure of that composite still
 requires a human** (the delete rollback can never run unattended). Grantable

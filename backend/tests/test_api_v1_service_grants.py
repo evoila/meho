@@ -222,11 +222,12 @@ def test_operator_crud_round_trip(client: TestClient) -> None:
     "op_id, expect_fragment",
     [
         ("DELETE:/vcenter/vm/{vm}", "delete-shaped"),
+        ("POST:/VirtualMachine/{moId}/Destroy_Task", "vendor action name 'Destroy_Task'"),
         ("vmware.composite.vm.*", "wildcard"),
     ],
 )
 def test_create_review_rejects_bad_op(client: TestClient, op_id: str, expect_fragment: str) -> None:
-    """A delete-shaped op / a wildcard op_id is refused with HTTP 422."""
+    """A delete-shaped op, a vendor delete action name, or a wildcard op_id is refused with 422."""
     key = make_rsa_keypair("kid-op2")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))

@@ -538,6 +538,43 @@ async def test_review_payload_reports_stored_deletes_below_destructive() -> None
 
 
 @pytest.mark.asyncio
+async def test_review_payload_reports_stored_vendor_delete_action_names() -> None:
+    """#4632: a stored VI-JSON delete that an earlier ingest left too weak is listed.
+
+    ``POST:/VirtualMachine/{moId}/Destroy_Task`` is a POST, so neither its
+    method nor a floor marks it. Its action name does. A lookalike stays
+    off the report.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="POST:/VirtualMachine/{moId}/Destroy_Task",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="POST:/VirtualMachine/{moId}/Reset_Task",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    rows = {row.op_id: row for row in payload.delete_ops_below_destructive}
+    assert sorted(rows) == ["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    assert payload.delete_ops_needing_correction_count == 1
+    destroy = rows["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    assert destroy.method == "POST"
+    assert destroy.expected_safety_level == "dangerous"
+    assert destroy.expected_requires_approval is True
+    assert destroy.needs_correction is True
+    assert "a fresh ingest gives dangerous" in destroy.reason
+
+
+@pytest.mark.asyncio
 async def test_review_payload_delete_report_is_empty_without_stored_deletes() -> None:
     """A connector with only reads and ordinary writes reports no deletes."""
     tenant_id = uuid.uuid4()

@@ -325,6 +325,52 @@ delivered, `unavailable` means execution completed but shaping failed and caller
 must inspect audit/status evidence without re-invoking it, and `partial` means
 the response was too large to deliver but the `handle` still reaches the caller.
 
+### `call_operation` outcomes and `isError` (#3675)
+
+The `call_operation` `status` enum lists every status the dispatcher can
+return at this boundary: `ok`, `error`, `denied`, `awaiting_approval` and
+`rate_limited`. `already_resumed` is not in it: only the human approval
+path (the approve endpoint resuming a waiting call) sees it. `pending` is
+not in it either.
+
+`rate_limited` means the caller is over its rate limit or its limit on
+operations running at the same time (#3500, see
+[`rate-limiting.md`](rate-limiting.md)). The operation did not run. The
+envelope carries `extras.retry_after_seconds`; the caller decides when to
+try again. MEHO never retries on its own.
+
+`handle_tools_call` sets the MCP `isError` flag from the envelope
+`status` for the two tools that return an `OperationResult` envelope,
+`call_operation` and `preview_operation`
+(`_tool_result_is_error` in `mcp/handlers.py`):
+
+| `status` | `isError` |
+|---|---|
+| `error`, `denied`, `rate_limited` | `true` |
+| `ok`, `awaiting_approval`, anything else (for example `unavailable`) | `false` |
+
+This follows MCP 2025-06-18 §Tools/Error Handling: a failure the tool
+caught (API failure, business rule) is a tool execution error, reported
+inside a normal JSON-RPC result with `isError: true`. The
+`structuredContent` and the text block are sent either way, so the
+caller still reads `extras`. A call that waits for approval
+(`awaiting_approval`) is a successful hand-off: the request is stored
+and audited, so it is not an error and must not be retried. Every other
+tool keeps `isError: false`.
+
+The REST route `POST /api/v1/operations/call` does not change: every
+dispatcher outcome, `rate_limited` included, is HTTP 200 with the
+envelope (#136 / #2110). The back-off signal is
+`extras.retry_after_seconds` in the envelope, not an HTTP 429.
+
+Tests: `tests/test_operations_meta_tools.py` (enum lock),
+`tests/test_mcp_output_schema_conformance.py`
+(`test_call_operation_rate_limited_envelope_conforms`),
+`tests/test_mcp_structured_content.py`
+(`test_is_error_follows_operation_result_status`) and
+`tests/test_api_v1_operations.py`
+(`test_post_call_rate_limited_rides_200_envelope`).
+
 ### Response wire ceiling (#3641)
 
 A completed `call_operation` response is also checked against a wire ceiling,

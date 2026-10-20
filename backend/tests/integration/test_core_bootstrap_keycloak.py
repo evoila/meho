@@ -269,9 +269,7 @@ def _finish_first_login(kc: _Keycloak, username: str) -> dict[str, Any]:
     user = _user(kc, username)
     user_rep = httpx.get(f"{admin}/users/{user['id']}", headers=headers).json()
     user_rep["requiredActions"] = []
-    user_rep.update(
-        {"firstName": "Test", "lastName": username, "email": f"{username}@example.test"}
-    )
+    user_rep.update({"firstName": "Test", "lastName": username, "email": f"{username}@example.com"})
     httpx.put(f"{admin}/users/{user['id']}", headers=headers, json=user_rep).raise_for_status()
     return user
 

@@ -336,8 +336,8 @@ async def nsx_transport_zone_list_impl(
     (vendor template), always instantiated at the ``default`` site and
     ``default`` enforcement point -- the transport-zone inventory under
     the default enforcement point. Returns ``{"results": [...]}`` where
-    each zone carries ``id``, ``display_name``, ``tz_type``
-    (OVERLAY / VLAN), and ``host_switch_name``.
+    each zone carries ``id``, ``display_name``, ``path``, and ``tz_type``
+    (``OVERLAY_BACKED`` / ``VLAN_BACKED``).
     """
     del params  # schema declares the param object empty
     path = _TRANSPORT_ZONES_PATH.format(**{"site-id": "default", "enforcementpoint-id": "default"})

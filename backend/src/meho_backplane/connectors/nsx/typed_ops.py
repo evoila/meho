@@ -426,7 +426,7 @@ _TRANSPORT_ZONE_LIST = NsxTypedOp(
     description=(
         "Lists the NSX transport zones under the default site and enforcement "
         "point (policy API). Segments and gateways attach to these zones. Each "
-        "zone has id, display_name, tz_type (OVERLAY / VLAN) and host_switch_name. "
+        "zone has id, display_name, path and tz_type (OVERLAY_BACKED or VLAN_BACKED). "
         "Read-only."
     ),
     parameter_schema=_NO_PARAMS,
@@ -435,8 +435,11 @@ _TRANSPORT_ZONE_LIST = NsxTypedOp(
             "id": _ID,
             "display_name": _DISPLAY_NAME,
             "path": _PATH,
-            "tz_type": _field("string", "The zone type, for example OVERLAY or VLAN."),
-            "host_switch_name": _field("string", "The host switch the zone uses."),
+            "tz_type": _field(
+                "string",
+                "The zone type: OVERLAY_BACKED or VLAN_BACKED. Older NSX may send "
+                "OVERLAY_STANDARD or OVERLAY_ENS.",
+            ),
         },
         "transport zones",
     ),
@@ -449,7 +452,7 @@ _TRANSPORT_ZONE_LIST = NsxTypedOp(
             "Call to list transport zones under the default enforcement "
             "point -- the scope segments and tier-gateways attach to."
         ),
-        "output_shape": "{results: [{id, display_name, tz_type, host_switch_name}, ...]}.",
+        "output_shape": "{results: [{id, display_name, path, tz_type}, ...]}.",
         "next_step": (
             "Call nsx.segment.list and match transport_zone_path to see which segments use a zone."
         ),

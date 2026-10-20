@@ -457,8 +457,7 @@ def _register_nsx_routes(mock: respx.MockRouter) -> None:
                 {
                     "id": "tz-overlay",
                     "display_name": "canary-overlay-tz",
-                    "tz_type": "OVERLAY",
-                    "host_switch_name": "canary-host-switch",
+                    "tz_type": "OVERLAY_BACKED",
                     "resource_type": "PolicyTransportZone",
                 }
             ],

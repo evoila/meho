@@ -198,7 +198,7 @@ _BACKUP_STATUS_PAYLOAD: dict[str, Any] = {
     "current_backup_operation_status": {"backup_id": "b-1", "success": True}
 }
 _TZ_PAYLOAD: dict[str, Any] = {
-    "results": [{"id": "tz-overlay", "display_name": "overlay", "tz_type": "OVERLAY"}]
+    "results": [{"id": "tz-overlay", "display_name": "overlay", "tz_type": "OVERLAY_BACKED"}]
 }
 _TIER1_PAYLOAD: dict[str, Any] = {
     "results": [{"id": "t1-a", "display_name": "tenant-a", "tier0_path": "/infra/tier-0s/t0"}]

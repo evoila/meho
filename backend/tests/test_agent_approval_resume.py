@@ -1507,16 +1507,14 @@ _GUARD_OP_ID = "POST:/api/vcenter/vm/example"
 
 
 @pytest.fixture
-async def _vmware_sibling_target(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[uuid.UUID]:
+async def _vmware_sibling_target() -> AsyncIterator[uuid.UUID]:
     """The 9.0 and 8.0 vCenter catalogs, the guard op in both, and one 8.0.3 target.
 
     Reuses the dispatcher suite's catalog doubles so the park and the resume
     run the production catalog guard and sibling fallback. The op is
     ``caution``: an agent needs no grant for that level, and it still parks
-    for approval. The audit publish is stubbed so the dispatcher never
-    reaches Valkey.
+    for approval.
     """
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.registry import clear_registry
     from meho_backplane.operations import reset_dispatcher_caches
     from tests.test_operations_dispatcher import (
@@ -1524,10 +1522,6 @@ async def _vmware_sibling_target(monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
         _register_vmware_sibling_catalogs,
     )
 
-    async def _capture(event: Any) -> None:
-        del event
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
     reset_dispatcher_caches()
     clear_registry()
     _register_vmware_sibling_catalogs()
@@ -1580,7 +1574,6 @@ async def _guard_op_audit_rows() -> list[AuditLog]:
 
 
 async def test_agent_resume_runs_on_the_stored_sibling_catalog(
-    monkeypatch: pytest.MonkeyPatch,
     _vmware_sibling_target: uuid.UUID,
 ) -> None:
     """The agent resume runs on the catalog the row stored, not the one it named.
@@ -1595,12 +1588,8 @@ async def test_agent_resume_runs_on_the_stored_sibling_catalog(
     from tests.test_operations_dispatcher import _RecordingVmwareTransport
 
     operator = _make_operator(sub="agent-sibling-resume")
-    call_arguments, awaiting, request_id = await _park_sibling_call_as_agent(operator)
+    call_arguments, awaiting, _request_id = await _park_sibling_call_as_agent(operator)
     assert _RecordingVmwareTransport.sent == []
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(approval_request_id=request_id, decision="approved"),
-    )
 
     resumed = await resume_or_surface_awaiting_approval(
         operator=operator,
@@ -1618,7 +1607,6 @@ async def test_agent_resume_runs_on_the_stored_sibling_catalog(
 
 
 async def test_agent_resume_is_refused_when_the_target_version_moved(
-    monkeypatch: pytest.MonkeyPatch,
     _vmware_sibling_target: uuid.UUID,
 ) -> None:
     """A target that moved to 9.x while the request waited gets no approved run.
@@ -1632,16 +1620,12 @@ async def test_agent_resume_is_refused_when_the_target_version_moved(
     from tests.test_operations_dispatcher import _RecordingVmwareTransport
 
     operator = _make_operator(sub="agent-sibling-resume-moved")
-    call_arguments, awaiting, request_id = await _park_sibling_call_as_agent(operator)
+    call_arguments, awaiting, _request_id = await _park_sibling_call_as_agent(operator)
     async with get_sessionmaker()() as s:
         target = await s.get(TargetORM, _vmware_sibling_target)
         assert target is not None
         target.version = "9.0.1"
         await s.commit()
-    _stub_broadcast_client_with_decision(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_decision_entry(approval_request_id=request_id, decision="approved"),
-    )
 
     resumed = await resume_or_surface_awaiting_approval(
         operator=operator,

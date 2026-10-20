@@ -740,7 +740,7 @@ async def test_destructive_subop_refused_without_preview_binding(
     The dispatcher refuses to park a ``destructive`` op that carries no
     ``preview_hash`` + blast-radius binding (#3197, ``_destructive_binding_refusal``).
     The composite seam presents no ``preview_hash``, so a destructive sub-op is
-    routed through the same refusal here -- fail-closed, no durable row -- rather
+    routed through the same refusal here -- fail-closed, no approval row -- rather
     than writing an identifier-only row the tier guards would misread. No shipped
     composite passes ``destructive`` today; this is the defense-in-depth floor.
     """
@@ -760,6 +760,47 @@ async def test_destructive_subop_refused_without_preview_binding(
     # Fail-closed: no identifier-only pending row was written for the park.
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_destructive_subop_refusal_writes_one_denied_audit_row(
+    session: AsyncSession,
+) -> None:
+    """A refused destructive step is recorded as one ``denied`` audit row (#4647).
+
+    The parent composite returns the step's result as is and the dispatcher
+    writes no audit row for a handler-returned ``denied`` result, so the gate
+    records the refusal itself on the step's path, through the same writer the
+    dispatcher park uses.
+    """
+    from meho_backplane.db.models import AuditLog
+    from meho_backplane.operations._audit import parent_audit_id_var
+
+    op_id = "DELETE:/vcenter/datacenter/{datacenter}"
+    parent_audit_id = uuid.uuid4()
+    token = parent_audit_id_var.set(parent_audit_id)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            safety_level="destructive",
+            requires_approval=True,
+            target=None,
+            params={"datacenter": "datacenter-42"},
+        )
+    finally:
+        parent_audit_id_var.reset(token)
+    assert result is not None
+    assert result.extras["error_code"] == "preview_binding_required"
+
+    rows = (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].event_class == "policy_decision"
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].payload["error"]["error_code"] == "preview_binding_required"
+    assert rows[0].parent_audit_id == parent_audit_id
 
 
 @pytest.mark.asyncio

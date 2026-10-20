@@ -330,27 +330,24 @@ class _Realm:
         if found.data:
             _say(f"user {username}: kept")
             return
+        for group in groups:
+            if await self.group_id(group) is None:
+                raise RealmStageError(f"group {group} does not exist, so {username} cannot join it")
+        # The person and their group memberships are one request, so Keycloak
+        # makes both or neither: a failed run never leaves a person without
+        # groups that the next run would keep.
         body = {
             "username": username,
             "enabled": True,
             "credentials": [{"type": "password", "value": password, "temporary": True}],
             "requiredActions": ["UPDATE_PASSWORD"],
+            "groups": [f"/{group}" for group in groups],
         }
-        reply = expect(
+        expect(
             await self.admin.call("POST", f"{self.base}/users", json=body),
             201,
             what=f"cannot create user {username}",
         )
-        user_id = id_from(reply)
-        for group in groups:
-            group_id = await self.group_id(group)
-            if group_id is None:
-                raise RealmStageError(f"group {group} does not exist, so {username} cannot join it")
-            expect(
-                await self.admin.call("PUT", f"{self.base}/users/{user_id}/groups/{group_id}"),
-                204,
-                what=f"cannot put user {username} into group {group}",
-            )
         _say(f"user {username}: created (in {', '.join(groups)})")
 
 
@@ -374,7 +371,18 @@ async def _read_or_make(store: SecretStore, name: str, fresh: Mapping[str, str])
     return data
 
 
+def _require_two_people(admin: str, approver: str, where: str) -> None:
+    """Keycloak ignores case and surrounding spaces in a user name."""
+    if admin.strip().casefold() == approver.strip().casefold():
+        raise RealmStageError(
+            f"the first admin and the second person must be two different people, "
+            f"but {where} names {admin!r} and {approver!r}, which are the same "
+            "Keycloak user"
+        )
+
+
 async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> None:
+    _require_two_people(plan.admin_username, plan.approver_username, "the chart")
     fresh = {
         "admin_username": plan.admin_username,
         "admin_password": new_password(),
@@ -382,6 +390,9 @@ async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> 
         "approver_password": new_password(),
     }
     data = await _read_or_make(store, plan.first_login_secret, fresh)
+    _require_two_people(
+        data["admin_username"], data["approver_username"], f'Secret "{plan.first_login_secret}"'
+    )
     await realm.ensure_user(data["admin_username"], data["admin_password"], ADMIN_GROUPS)
     await realm.ensure_user(data["approver_username"], data["approver_password"], APPROVER_GROUPS)
 

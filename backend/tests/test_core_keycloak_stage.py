@@ -115,6 +115,8 @@ class FakeKeycloak:
         self.calls: list[tuple[str, str]] = []
         self.session: str | None = None
         self.ignore_secret_updates = ignore_secret_updates
+        # Usernames of people whose next create fails inside Keycloak.
+        self.fail_user_create: set[str] = set()
 
     def import_realm(self, realm: Mapping[str, Any]) -> None:
         """Seed what Keycloak's ``--import-realm`` creates from the file."""
@@ -243,8 +245,17 @@ class FakeKeycloak:
         if path == "/admin/realms/meho/users":
             if body["username"] in self.users:
                 return Reply(409, {"errorMessage": "User exists with same username"})
+            # Keycloak joins the groups of a new user in the same request and
+            # the same transaction: a failure makes no user at all.
+            groups = [p.removeprefix("/") for p in body.get("groups", [])]
+            if body["username"] in self.fail_user_create:
+                self.fail_user_create.discard(body["username"])
+                return Reply(500, {"error": "unknown_error"})
+            if any(g not in self.groups for g in groups):
+                return Reply(500, {"error": "unknown_error"})
             new_id = str(uuid.uuid4())
-            self.users[body["username"]] = {"id": new_id, "groups": [], **copy.deepcopy(body)}
+            user = {"id": new_id, **copy.deepcopy(body), "groups": groups}
+            self.users[body["username"]] = user
             return Reply(201, None, f"{path}/{new_id}")
         if match := re.fullmatch(
             r"/admin/realms/meho/clients/([^/]+)/protocol-mappers/models", path
@@ -273,12 +284,6 @@ class FakeKeycloak:
             assert client is not None
             name = next(n for n, s in self.scopes.items() if s["id"] == match.group(3))
             client.setdefault(f"{match.group(2)}ClientScopes", []).append(name)
-            return Reply(204, None)
-        if match := re.fullmatch(r"/admin/realms/meho/users/([^/]+)/groups/([^/]+)", path):
-            user = next(u for u in self.users.values() if u["id"] == match.group(1))
-            group = next(g for g in self.groups.values() if g["id"] == match.group(2))
-            if group["name"] not in user["groups"]:
-                user["groups"].append(group["name"])
             return Reply(204, None)
         raise AssertionError(f"unexpected PUT {path}")
 
@@ -511,6 +516,82 @@ async def test_existing_first_login_secret_is_the_source_for_missing_people(
     assert store.secrets["rel-core-first-login"] == stored
     assert set(kc.users) == {"root-person", "second"}
     assert kc.users["root-person"]["credentials"][0]["value"] == "P" * 32
+
+
+async def test_a_failed_create_leaves_no_half_made_person_and_the_next_run_makes_both(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A person and their groups are one request: a failure makes neither."""
+    kc = _fresh()
+    kc.fail_user_create.add("admin")
+    store = FakeStore()
+    plan = _plan(realm_file)
+
+    with pytest.raises(RealmStageError, match="cannot create user admin: HTTP 500"):
+        await finish_realm(plan, _ENV, kc, store)
+    assert kc.users == {}, "no person without groups is left behind"
+    assert "boot-client" in kc.master_clients, "the first-start account stays for the retry"
+    stored = copy.deepcopy(store.secrets["rel-core-first-login"])
+    capfd.readouterr()
+
+    await finish_realm(plan, _ENV, kc, store)
+
+    assert kc.users["admin"]["groups"] == ["MEHO-Admins", "MEHO-Platform-Admins"]
+    assert kc.users["approver"]["groups"] == ["MEHO-SA-Operators"]
+    assert kc.users["admin"]["credentials"][0]["value"] == stored["admin_password"]
+    assert store.secrets["rel-core-first-login"] == stored
+    assert kc.master_clients == {}
+    out = capfd.readouterr().out
+    assert "user admin: created (in MEHO-Admins, MEHO-Platform-Admins)" in out
+    assert "user approver: created (in MEHO-SA-Operators)" in out
+
+
+async def test_a_missing_group_is_reported_before_the_person_is_made(tmp_path: Path) -> None:
+    realm = _realm_as_imported()
+    realm["groups"] = [g for g in realm["groups"] if g["name"] != "MEHO-Platform-Admins"]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(realm)
+    older_file = tmp_path / "realm-without-the-platform-group.json"
+    older_file.write_text(json.dumps(realm))
+
+    with pytest.raises(RealmStageError, match="group MEHO-Platform-Admins does not exist"):
+        await finish_realm(_plan(older_file), _ENV, kc, FakeStore())
+    assert kc.users == {}
+
+
+@pytest.mark.parametrize(
+    ("admin", "approver"),
+    [("admin", "admin"), ("Admin", "admin"), ("admin", " admin ")],
+)
+async def test_two_names_for_the_same_keycloak_user_stop_the_stage_before_the_secret(
+    realm_file: Path, admin: str, approver: str
+) -> None:
+    kc = _fresh()
+    store = FakeStore()
+    plan = _plan(realm_file, admin_username=admin, approver_username=approver)
+
+    with pytest.raises(RealmStageError, match="two different people") as caught:
+        await finish_realm(plan, _ENV, kc, store)
+
+    assert "the chart names" in str(caught.value)
+    assert store.secrets == {}
+    assert kc.users == {}
+    assert "boot-client" in kc.master_clients
+
+
+async def test_a_first_login_secret_with_one_name_twice_stops_the_stage(realm_file: Path) -> None:
+    stored = {
+        "admin_username": "same",
+        "admin_password": "P" * 32,
+        "approver_username": "SAME",
+        "approver_password": "Q" * 32,
+    }
+    store = FakeStore(existing={"rel-core-first-login": stored})
+    kc = _fresh()
+
+    with pytest.raises(RealmStageError, match='Secret "rel-core-first-login" names'):
+        await finish_realm(_plan(realm_file), _ENV, kc, store)
+    assert kc.users == {}
 
 
 async def test_first_login_secret_without_a_key_stops_the_stage(realm_file: Path) -> None:

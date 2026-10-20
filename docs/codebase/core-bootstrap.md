@@ -55,6 +55,11 @@ a value. The Secret is the source on later runs: if a person is missing but
 the Secret exists, the Job makes the person again with the stored password.
 Changing a user name in values after the first install has no effect.
 
+The two names must be two different Keycloak users. Keycloak ignores case
+and surrounding spaces in a user name, so `Admin` and `admin` are the same
+person. The Job refuses such a pair before it makes the Secret, so a wrong
+pair never leaves one person with a stored password that does not work.
+
 **One role group per person.** A person is in exactly one of the five role
 groups (`docs/decisions/login-role-groups.md`). `MEHO-Platform-Admins` is
 not a role group: it carries only `platform_admin: true` and no tenant or
@@ -128,7 +133,10 @@ Steps of the realm stage, in order:
 4. **CI login**, when on.
 5. **First login.** Read `<release>-core-first-login`; make it when missing
    (create only; "already exists" means another run won). Make each person
-   that does not exist and put them in their groups.
+   that does not exist. The person and their group memberships are one
+   request, so Keycloak makes both or neither; a run that fails here
+   leaves no person without groups, and the next run makes the person
+   again.
 6. **Swap.** Only when step 2 used the first-start account: check that
    `meho-admin` logs in with its secret, then delete the first-start
    account's client in realm `master`. If `meho-admin` cannot log in, the

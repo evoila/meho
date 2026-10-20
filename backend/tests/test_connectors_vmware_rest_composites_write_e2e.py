@@ -675,6 +675,14 @@ async def test_vm_create_rollback_on_nic_failure(
     assert result.result["status"] == "rolled_back"
     assert result.result["failed_step"] == "nic_attach"
     assert result.result["vm_id"] is None
+    # #4057: the result says which step failed, why, and that the VM is gone.
+    assert result.result["rollback"] == {"vm_id": "vm-123", "outcome": "removed"}
+    assert result.error is not None
+    assert result.error.startswith(
+        "rolled_back: vm.create failed at step 'nic_attach'; "
+        "the rollback removed the VM it created (vm-123). Cause: nic attach"
+    )
+    assert "HTTP 500" in result.error
     assert recorder.calls == [
         ("GET", "/vcenter/folder"),
         ("POST", "/vcenter/vm"),
@@ -2395,12 +2403,18 @@ async def test_vm_create_rollback_park_approve_resume_deletes_and_creates_nothin
     assert pending.resume_parent is not None
     assert pending.resume_parent["after_main_effect"] is True
     assert pending.resume_parent["state"]["rollback"]["vm_id"] == "vm-rb-1"
+    # #4057: the first result says the VM still exists until the DELETE is approved.
+    assert result.result["rollback"] == {"vm_id": "vm-rb-1", "outcome": "awaiting_approval"}
 
     resume = await _resume(pending.id, await _approve_as(pending.id, "ops-reviewer"))
 
     assert resume.status == "error", resume.result
     assert resume.extras["error_code"] == "rolled_back"
-    assert resume.result == result.result
+    assert resume.result["rollback"] == {"vm_id": "vm-rb-1", "outcome": "removed"}
+    unchanged = ("status", "vm_id", "steps_succeeded", "failed_step", "rollback_reason")
+    assert {key: resume.result[key] for key in unchanged} == {
+        key: result.result[key] for key in unchanged
+    }
     assert recorder.calls == [*first_calls, ("DELETE", "/vcenter/vm/vm-rb-1")]
     assert await _approval_row_count() == 1
 

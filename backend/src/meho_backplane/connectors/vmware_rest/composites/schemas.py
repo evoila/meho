@@ -2338,14 +2338,18 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "enum": ["created", "rolled_back"],
             "description": (
                 "``'created'`` after every step succeeded; "
-                "``'rolled_back'`` when a post-create step failed and "
-                "the handler issued ``DELETE:/vcenter/vm/{vm}``."
+                "``'rolled_back'`` when a step failed. If a VM was "
+                "already created, the handler tried "
+                "``DELETE:/vcenter/vm/{vm}`` and ``rollback.outcome`` "
+                "says what happened."
             ),
         },
         "vm_id": {
             "type": ["string", "null"],
             "description": (
-                "Newly-created VM moid. ``null`` on rollback (the VM no longer exists)."
+                "Newly-created VM moid. ``null`` when "
+                "``status='rolled_back'``; read ``rollback`` to see "
+                "whether a VM this run created still exists."
             ),
         },
         "steps_succeeded": {
@@ -2377,6 +2381,24 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Human-readable explanation of the rollback trigger; "
                 "``null`` when ``status='created'``."
+            ),
+        },
+        "rollback": {
+            "type": "object",
+            "properties": {
+                "vm_id": {"type": "string"},
+                "outcome": {
+                    "type": "string",
+                    "enum": ["removed", "awaiting_approval", "not_removed"],
+                },
+            },
+            "description": (
+                "What happened to the VM this run created (#4057). Present only "
+                "when a step after the create failed. ``removed``: the rollback "
+                "deleted the VM. ``awaiting_approval``: the delete waits for "
+                "approval and the VM exists until then. ``not_removed``: the "
+                "delete failed or was not allowed; delete ``vm_id`` by hand. The "
+                "error issue says the same in words."
             ),
         },
         "nested_hv": {

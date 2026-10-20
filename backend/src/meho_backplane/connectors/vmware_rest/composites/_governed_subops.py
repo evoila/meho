@@ -63,7 +63,7 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _write._SUB_OPS_VM_IMPORT_FROM_LIBRARY + _write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY
     ),
     "vmware.composite.vm.snapshot.revert": _write._VIM_SUB_OPS_VM_SNAPSHOT_REVERT,
-    "vmware.composite.vm.destroy": _write._VIM_SUB_OPS_VM_DESTROY,
+    "vmware.composite.vm.destroy": _write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
     "vmware.composite.vm.migrate": _write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,
     "vmware.composite.vm.power": _write._SUB_OPS_VM_POWER,

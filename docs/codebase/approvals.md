@@ -896,7 +896,10 @@ What the run row holds:
   `payload.error` with the `error_code` and the safe details (#2680).
 - `payload.approval_request_id` names the request it ran for.
 - `parent_audit_id` points at the request's `approval.request` row, next to
-  the decision row (#2086). The agent-run resume uses the same shape.
+  the decision row (#2086). The agent-run resume sets `parent_audit_id` the
+  same way, but its run row has no `payload.approval_request_id` (follow
+  `parent_audit_id` to the request), and its `operator_sub` is the agent
+  that made the call, not the approver.
 - `operator_sub` is the approver, who ran it.
 
 The approve response (`dispatch_status`, `dispatch_error`) and the stored
@@ -1324,6 +1327,31 @@ When such an op reaches `needs-approval`, `_handle_needs_approval` calls
   comparing. A non-resolvable preview → `preview_binding_required`; a
   mismatch (params swapped between preview and call, or a forged/stale
   hash) → `preview_hash_mismatch`.
+
+**Every refusal is recorded (#4647).** A `destructive` call that is
+refused before it can wait for approval, with `preview_binding_required`,
+`preview_hash_mismatch` or `blast_radius_required`, writes one `denied`
+audit row on the op's own path through `dispatcher._audit_denied_and_return`,
+the same writer a policy denial and the #3542 preflight refusal use:
+`event_class=policy_decision`, synthetic status 403,
+`payload.result_status=denied`, and the refusal code under
+`payload.error.error_code`. No approval row is written and nothing reaches
+the vendor. A refused `destructive` step inside a multi-step operation
+(`composite.enforce_subop_policy`) writes the same row on the step's path,
+linked to the parent operation's audit id in `parent_audit_id`, because the
+dispatcher writes no row for a `denied` result a handler returns.
+
+Two system faults in `_handle_needs_approval` write no audit row on
+purpose. Neither is a decision about the call; both are a MEHO-side fault
+with no fitting audit event class. They leave different traces:
+
+- A missing or malformed approval encryption key
+  (`ApprovalHandoffKeyError`) returns a `denied` result whose message names
+  the key setting. Nothing is logged. The returned result is the only
+  record.
+- A failure while saving the approval request is logged as
+  `approval_queue_create_failed` (with the op id and the operator) and
+  returns a `denied` result.
 
 The verified hash is persisted on `ApprovalRequest.preview_hash` (nullable
 `Text`, migration `0086`) — **distinct** from `params_hash` (that hashes

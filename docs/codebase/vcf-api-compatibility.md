@@ -27,11 +27,34 @@ and its [CI provisioning decision](../decisions/vendor-spec-ci-provisioning.md).
 Public Apache-2.0 `vmware/vcf-api-specs` documents are pinned by commit and
 hash, but are also summarized instead of copied.
 
-The exact 9.0 and 9.1 tags are `85151f6b` and `3949fc33`. The official
-`31b01a6` 9.1.1 upstream snapshot is untagged; it is catalog evidence only,
-until it is matched to a release ZIP or a live appliance. There is no static
-8.0 U1/U2/U3 vSphere or NSX 4.1/4.2 catalog pin yet, so their full 8-to-9 and
-4-to-9 deltas remain explicit gaps.
+The exact 9.0, 9.1 and 9.1.1 tags of `vmware/vcf-api-specs` are `9.0.0.0`
+(`85151f6b`), `9.1.0.0` (`3949fc33`) and `9.1.1.0` (`98086628`). The 9.1.1
+files were first recorded from the untagged commit `31b01a6`. The tag is two
+commits later and changes only the README, so every 9.1.1 file and its sha256
+stay the same. The 9.1.1 rows are catalog evidence only, until they are matched
+to a live appliance.
+
+The 9.1.1 component builds come from the
+[VCF 9.1.1.0 Bill of Materials](https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/release-notes/vmware-cloud-foundation-9-1-1-0-release-notes/vmware-cloud-foundation-9-1-1-0-bill-of-material.html):
+
+| Component | Version | Build |
+|---|---|---|
+| VCF Installer / SDDC Manager | 9.1.1.0 | 25713928 |
+| vCenter | 9.1.1.0 | 25712839 |
+| ESX | 9.1.1.0 | 25714478 |
+| NSX | 9.1.1.0 | 25691509 |
+| VCF Operations | 9.1.1.0 | 25679751 |
+| Log management | 9.1.1.0 | 25679624 |
+| Fleet lifecycle | 9.1.1.0 | 25713934 |
+| VCF Automation | 9.1.1.0 | 25714559 |
+
+For vSphere 8.0, the vendor VI/JSON files of 8.0 U1, U2 and U3 are pinned on
+the private shelf (the `vsphere-vi-json-8.0u1`, `-8.0u2` and `-8.0u3`
+artifacts; source: the
+[vSphere Management SDK 8.0 page](https://developer.broadcom.com/sdks/vsphere-management-sdk/8.0)).
+The 8.0 REST side has only the 8.0 U3 file (see below). There is no NSX
+4.1/4.2 catalog pin yet. So the full 8-to-9 REST delta and the 4-to-9 NSX delta
+remain explicit gaps.
 
 ## Catalog comparison
 
@@ -64,7 +87,7 @@ operation gate.
 
 Known catalog facts are recorded in the manifest. Examples: SDDC 9.0 to 9.1
 adds 48 operations and removes none; vSphere REST adds 101 and removes 9 while
-VI JSON adds 48 and removes none; the untagged 9.1.1 snapshot adds 6 SDDC,
+VI JSON adds 48 and removes none; the 9.1.1 tag adds 6 SDDC,
 31 Operations, and 1 Installer operation. Schema counts and raw named changes
 are not a substitute for transitive closure comparison.
 
@@ -217,8 +240,25 @@ the private shelf as `docs/vcenter-8.0/vcenter.yaml`. It was made from a live
 tagged 9.0/9.1 only (the `vsphere-8.x` artifact in the contract manifest has the
 provenance and sha256). CI checks out that folder and requires the file, so the
 reconcile lane (`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py`)
-compares the shipped minimal against the vendor surface on every run. An 8.0
-`vi-json.yaml` is not pinned yet.
+compares the shipped minimal against the vendor surface on every run.
+
+**VI-JSON calls against 8.0 U1, U2 and U3 (#4333).** The same lane reads the
+`vmware_rest` connector source and collects every VI-JSON method it calls
+(`POST /sdk/vim25/{release}/<Type>/<moId>/<Method>`, 50 methods today). It
+checks each one against the vendor VI/JSON file of each 8.0 update
+(`docs/vcenter-8.0/vi-json-8.0u1.yaml`, `-8.0u2.yaml`, `-8.0u3.yaml` on the
+shelf) and prints the methods a file lacks. CI requires the three files, so
+this check runs on every CI run. Without the shelf it skips.
+
+A method that a file lacks needs a version gate in the operation, or an entry
+in the lane's exclusion list (`_NOT_IN_8_0_VI_JSON`) with the reason. Today
+one method is in the list:
+
+| Method | Missing in | Why it is safe |
+|---|---|---|
+| `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` | 8.0 U1, U2, U3 | It is a vSAN health service method, not a vim25 method; no 8.0 VI/JSON file has the vSAN health service (`VsanVcClusterHealthSystem`) paths. `vmware.host.vsan_health` calls it best-effort and returns `overall_health: null` with a `read_note` when the call fails. |
+
+All other 49 methods are in all three files.
 
 ## References
 

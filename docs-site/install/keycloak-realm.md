@@ -146,8 +146,9 @@ Then put each person in **exactly one** of the five groups:
 
 - A person in **no** group gets no tenant. MEHO refuses the login with
   `401 missing_tenant_claim`.
-- A person in **two** groups gets one of the two roles, and you cannot
-  tell which one.
+- A person in **two** groups is refused. MEHO answers
+  `401 multiple_role_groups` and names the groups it found, because
+  Keycloak would otherwise pick one of the two roles at random.
 - To change a person's role, move them to another group. The change
   applies at their next login.
 - Leave the person's own `tenant_id`, `tenant_role` and `approver`

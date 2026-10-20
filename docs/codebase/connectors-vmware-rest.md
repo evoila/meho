@@ -680,6 +680,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    ingested. The reconcile lane above pins the corrected body shape, against
    a fixture always and against the pinned vendor 8.0 U3 spec when the shelf
    has it.
+   **8.0 VI-JSON calls (#4333).** The same lane collects every VI-JSON
+   method the connector calls (from the source) and checks it against the
+   vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
+   version gate or an entry with the reason in the lane's exclusion list.
+   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
+   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
+   `vmware.host.vsan_health` calls it best-effort. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md).
    **Operation summaries (#4329).** Search and the operation-group step
    read each operation's one-line `summary`. The full vendor specs fall
    short in two ways, and `ingest_corrections.py` fixes both at ingest
@@ -720,6 +728,30 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    list. The package `__init__` then queues
    `register_typed_op_registrar(register_vmware_typed_operations)`
    (`#2257`) for the typed-op rows.
+3b. **Composites and typed ops on the 8.0 catalog (#3789).** Two more
+   registrars, `register_vmware_composite_operations_8_0` and
+   `register_vmware_typed_operations_8_0`, write the same rows under
+   `connector_id="vmware-rest-8.0"`. The resolver sends a fingerprinted
+   8.0.x target to that catalog, so an agent that picks it finds
+   `vm.disk.grow`, the guest ops, `object.collect` and the rest there. The
+   rows use the same handlers and the same safety level and approval rule
+   as on 9.0; the handlers already choose the right path per vCenter
+   release. Notes:
+   - The Supervisor and namespace composites are not on the 8.0 catalog.
+     `COMPOSITES_NOT_ON_8_0` in `composites/_register.py` lists each
+     excluded composite with its reason. The test
+     `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
+     or typed op on 9.0 is neither on 8.0 nor in that list.
+   - The governed child ops inside a composite keep their
+     `vmware-rest-9.0` keys on both catalogs. One grant set covers the
+     composite on either catalog, and approving a parked child op re-runs
+     the composite on the 9.0 catalog, where it is also registered.
+   - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
+     not work on an 8.0 GA target.
+   - When the 9.0 catalog refuses an ingested op for an 8.0.x target
+     (`unqualified_target_version`), the reason now names the catalog to
+     use: `...; use connector vmware-rest-8.0 for this target`. The 8.0
+     catalog does the same for a 9.x target.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
@@ -1333,7 +1365,15 @@ row (#4217); approving it re-runs `vm.create`, which then only deletes the
 VM the first run created (`_resumed_vm_create_rollback`) and returns the
 same `rolled_back` envelope. An approved rollback DELETE with no saved
 rollback (a request saved before #4217) is refused before anything runs
-(`composite_resume_unsupported`). The other
+(`composite_resume_unsupported`). A rolled-back `vm.create` is an
+`error` result (#3813). Its error message names the failed step, says
+what happened to the VM, and ends with the cause, which carries
+vCenter's own message (`_vsphere_fault_detail`, for a REST error body
+and for a VI-JSON method fault alike). The `rollback` field
+gives the VM moid and the outcome (#4057): `removed`,
+`awaiting_approval` (the VM exists until the DELETE is approved) or
+`not_removed` (the DELETE failed or was denied; delete the VM by hand).
+The field is absent when the run failed before any VM existed. The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert. `vm.resize`'s `partial` follows the same rule: a CPU PATCH
@@ -1546,7 +1586,8 @@ issue a single-device `ReconfigVM_Task` edit (`deviceChange=[{operation:
 "edit", device: {…VirtualDisk…, capacityInBytes: <raised>}}]`) through
 `_write_vmomi_sub_op`; poll the returned Task to terminal via
 `poll_vim_task`. The `disk` param is the REST disk id, which is the string
-form of the vim `VirtualDevice.key` — so the handler matches the device by
+form of the vim `VirtualDevice.key`. It also accepts the int key (#3789);
+the handler turns it into a string first. The handler matches the device by
 `str(key)` and the REST `GET hardware/disk/{disk}` supplies label +
 capacity for the park-time preview. The preview is a live-read from→to
 capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,

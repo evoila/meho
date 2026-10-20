@@ -83,6 +83,7 @@ __all__ = [
     "VmwareTypedOp",
     "host_usage_impl",
     "register_vmware_typed_operations",
+    "register_vmware_typed_operations_8_0",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -508,8 +509,11 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
 async def register_vmware_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
+    version: str | None = None,
 ) -> None:
     """Upsert every op in :data:`VMWARE_TYPED_OPS` into ``endpoint_descriptor``.
+
+    ``version`` picks the catalog; ``None`` means the 9.0 catalog.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -536,6 +540,7 @@ async def register_vmware_typed_operations(
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
     from meho_backplane.operations.typed_register import register_typed_operation
 
+    version = version or VmwareRestConnector.version
     for op in VMWARE_TYPED_OPS:
         handler = getattr(VmwareRestConnector, op.handler_attr, None)
         if handler is None:
@@ -554,7 +559,7 @@ async def register_vmware_typed_operations(
             )
         await register_typed_operation(
             product=VmwareRestConnector.product,
-            version=VmwareRestConnector.version,
+            version=version,
             impl_id=VmwareRestConnector.impl_id,
             op_id=op.op_id,
             handler=handler,
@@ -574,6 +579,22 @@ async def register_vmware_typed_operations(
         "vmware_typed_operations_registered",
         count=len(VMWARE_TYPED_OPS),
         product=VmwareRestConnector.product,
-        version=VmwareRestConnector.version,
+        version=version,
         impl_id=VmwareRestConnector.impl_id,
+    )
+
+
+async def register_vmware_typed_operations_8_0(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """The same typed ops on ``vmware-rest-8.0``, where 8.0.x targets resolve (#3789).
+
+    The dispatcher binds the :class:`VmwareRestConnector` method handlers to
+    the resolved :class:`VmwareRest80Connector` instance (a subclass).
+    """
+    from meho_backplane.connectors.vmware_rest.connector import VmwareRest80Connector
+
+    await register_vmware_typed_operations(
+        embedding_service=embedding_service, version=VmwareRest80Connector.version
     )

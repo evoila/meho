@@ -798,10 +798,12 @@ async def enforce_subop_policy(
             # #294: a ``destructive``-tier sub-op must fail closed rather than park
             # with only the identifier-only envelope -- the same binding the
             # dispatcher enforces (#3197). The composite seam presents no
-            # ``preview_hash``, so this refuses at the binding check (no row written)
-            # for a destructive sub-op. Defense-in-depth: no shipped caller passes
-            # ``destructive`` today, but the seam must never write a weaker row than
-            # the dispatcher would for the same tier.
+            # ``preview_hash``, so this refuses at the binding check (no approval
+            # row written) for a destructive sub-op. Defense-in-depth: no shipped
+            # caller passes ``destructive`` today, but the seam must never write a
+            # weaker row than the dispatcher would for the same tier. #4647: the
+            # refusal is audited as a ``denied`` row on the sub-op's path, linked
+            # to the parent's audit id, like the preflight refusal below.
             if descriptor.safety_level == "destructive":
                 refusal = await _destructive_binding_refusal(
                     op_id=op_id,
@@ -814,7 +816,15 @@ async def enforce_subop_policy(
                     duration_ms=duration_ms,
                 )
                 if refusal is not None:
-                    return refusal
+                    return await _audit_denied_and_return(
+                        refusal,
+                        operator=operator,
+                        descriptor=descriptor,
+                        target=target,
+                        params=params,
+                        params_hash=params_hash,
+                        duration_ms=duration_ms,
+                    )
 
             # #3542: same refusal as the dispatcher park — a sub-op whose
             # permission preflight says the write will be denied does not park.

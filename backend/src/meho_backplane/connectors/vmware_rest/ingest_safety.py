@@ -10,7 +10,11 @@ import re
 from meho_backplane.operations.ingest.safety_floors import register_ingest_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
-__all__ = ["is_vmware_tagging_removal", "vmware_rest_safety_floor"]
+__all__ = [
+    "is_vmware_library_item_delete",
+    "is_vmware_tagging_removal",
+    "vmware_rest_safety_floor",
+]
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -32,6 +36,12 @@ _FLOORED_VERSIONS = frozenset({"8.0", "9.0"})
 _TAG_ASSOCIATION_PATH = "/cis/tagging/tag-association"
 _TAG_DETACH_ACTION_PREFIX = "action=detach"
 _TAGGING_OBJECT_PATH_RE = re.compile(r"/cis/tagging/(category|tag)/\{[^/{}]+\}")
+
+# A content-library item delete is ``destructive`` too (#4058): the item and
+# its files are gone for good, like a deleted VM. The preview builder lives in
+# ``library_item_delete_preview.py``; it reuses the planner of the governed
+# ``vmware.composite.content_library.item.delete``.
+_LIBRARY_ITEM_PATH_RE = re.compile(r"/content/library/item/\{[^/{}]+\}")
 
 
 def _canonical(path: str) -> tuple[str, str]:
@@ -63,6 +73,19 @@ def is_vmware_tagging_removal(method: str, path: str) -> bool:
     return _is_tag_detach(method, canonical_path, query)
 
 
+def is_vmware_library_item_delete(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is ``DELETE /content/library/item/{id}``.
+
+    Matches with or without the ``/api`` mount in the path.
+    """
+    canonical_path, query = _canonical(path)
+    return (
+        method.upper() == "DELETE"
+        and not query
+        and _LIBRARY_ITEM_PATH_RE.fullmatch(canonical_path) is not None
+    )
+
+
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
     """Identify VMware VM write families that require approval."""
     if method not in _WRITE_METHODS:
@@ -84,11 +107,13 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
 def vmware_rest_safety_floor(
     version: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
-    """Promote VM hardware, lifecycle, power, and tagging-removal writes for the VMware catalogs."""
+    """Promote VM, tagging-removal, and library-item-delete writes for the VMware catalogs."""
     if version not in _FLOORED_VERSIONS:
         return proto
     method = proto.method.upper()
-    if is_vmware_tagging_removal(method, proto.path):
+    if is_vmware_tagging_removal(method, proto.path) or is_vmware_library_item_delete(
+        method, proto.path
+    ):
         return proto.model_copy(update={"safety_level": "destructive", "requires_approval": True})
     if not _requires_vmware_safety_floor(method, proto.path):
         return proto

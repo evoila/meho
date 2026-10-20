@@ -178,12 +178,24 @@ _CLUSTER_STATUS = NsxTypedOp(
     handler_attr="cluster_status",
     summary="NSX management + control cluster health.",
     description=(
-        "Returns the NSX management-plane health via "
-        "GET /api/v1/cluster/status: mgmt_cluster_status (overall "
-        "management cluster state), control_cluster_status, and per-member "
-        "detail. The read an operator runs when a control-plane outage is "
-        "suspected. Works with zero catalog ingest. safety_level=safe, "
-        "read-only."
+        "Returns the NSX cluster health via GET /api/v1/cluster/status. "
+        "The vendor body is returned unchanged (overall_status, "
+        "detailed_cluster_status.groups, node_services_status, and the "
+        "deprecated mgmt_cluster_status / control_cluster_status). MEHO "
+        "adds flat fields so health is one read: health_overall (vendor "
+        "overall_status, else detailed_cluster_status.overall_status; "
+        "STABLE / DEGRADED / UNAVAILABLE), health_mgmt (deprecated "
+        "mgmt_cluster_status.status; INITIALIZING / UNSTABLE / DEGRADED / "
+        "STABLE / UNKNOWN), health_control (deprecated "
+        "control_cluster_status.status; NO_CONTROLLERS / UNSTABLE / "
+        "DEGRADED / STABLE / UNKNOWN), and group_status_counts (number of "
+        "cluster groups per group_status: STABLE / DEGRADED / UNSTABLE / "
+        "UNAVAILABLE / unknown). Values are NSX status codes, not numbers. "
+        "A missing source gives the lowercase literal 'unknown' (or the "
+        "'unknown' count bucket), never null; a vendor uppercase UNKNOWN "
+        "is passed through as is. Prefer health_overall: the mgmt and "
+        "control fields are deprecated by NSX. Works with zero catalog "
+        "ingest. safety_level=safe, read-only."
     ),
     parameter_schema=_NO_PARAMS,
     response_schema={"type": "object", "additionalProperties": True},
@@ -198,8 +210,15 @@ _CLUSTER_STATUS = NsxTypedOp(
             "outage is suspected."
         ),
         "output_shape": (
-            "{mgmt_cluster_status, control_cluster_status, detail: [...]}. "
-            "If unhealthy, surface the failing member's id."
+            "{health_overall, health_mgmt, health_control, "
+            "group_status_counts: {STATUS: count}, overall_status, "
+            "detailed_cluster_status: {overall_status, groups: [...]}, "
+            "node_services_status, mgmt_cluster_status, "
+            "control_cluster_status}. Read health_overall first; a value "
+            "other than STABLE, or any non-STABLE key in "
+            "group_status_counts, means unhealthy -- then surface the "
+            "failing group from detailed_cluster_status.groups. 'unknown' "
+            "means NSX did not report that field; never treat it as healthy."
         ),
     },
 )

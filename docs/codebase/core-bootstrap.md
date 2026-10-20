@@ -180,9 +180,23 @@ when nothing is missing. The Secrets it makes carry only the label
 - A person who exists is never touched: not their groups, not their
   password. To start over for one person, delete the person in Keycloak;
   the Job makes them again from the Secret.
-- Rotation of a client secret: write the new value into the
-  `<release>-core-…` Secret and run `helm upgrade`; the Job sets it on the
-  client. Restart the backplane pods that read it.
+- Rotation of the secret of `meho-web` or `meho-check-runner`: write the
+  new value into its `<release>-core-…` Secret and run `helm upgrade`; the
+  Job sets it on the client. Then restart the pods that read it.
+- Rotation of the secret of `meho-admin` is manual. The Job logs in as
+  `meho-admin` with the value in `<release>-core-keycloak-admin`, so a new
+  value in the Secret alone locks the Job out: it can no longer log in to
+  set the new value on the client, and every later run fails. Instead:
+  1. In Keycloak, set the new secret on the client `meho-admin` (realm
+     `meho`, Clients, Credentials). This needs a Keycloak admin login; the
+     first-start account is gone after the first run, so use a Keycloak
+     admin you made, or a temporary one from Keycloak's
+     `bootstrap-admin` recovery command (see the link below).
+  2. Write the same value into the Secret `<release>-core-keycloak-admin`
+     (key `client_secret`).
+  3. Restart the pods that read it, or run `helm upgrade`. The Job then
+     logs in with the new value and reports `client meho-admin: kept`.
+  Between steps 1 and 2 the backplane cannot use `meho-admin`.
 - A fresh install on kind that proves `meho login` end to end is the CI
   job of #4051, which does not exist yet. The realm stage is tested
   against a real Keycloak in

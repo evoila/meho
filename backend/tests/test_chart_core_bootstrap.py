@@ -247,6 +247,30 @@ def test_hook_role_may_read_and_patch_the_first_login_and_ci_secrets() -> None:
     )
 
 
+def test_keycloak_network_policy_admits_the_job_pod() -> None:
+    """With the subchart's NetworkPolicy on, the Job must still reach Keycloak."""
+    docs = _render(*_CORE_ON, "--set", "coreKeycloak.networkPolicy.enabled=true")
+    policy = next(
+        d
+        for d in docs
+        if d["kind"] == "NetworkPolicy" and d["metadata"]["name"] == f"{_RELEASE}-keycloak"
+    )
+    (rule,) = policy["spec"]["ingress"]
+    job = _job(docs)
+    assert job is not None
+    job_labels = job["spec"]["template"]["metadata"]["labels"]
+    admitted = [
+        peer["podSelector"]["matchLabels"]
+        for peer in rule["from"]
+        if "podSelector" in peer
+        and peer["podSelector"]["matchLabels"].items() <= job_labels.items()
+    ]
+    assert admitted == [
+        {"app.kubernetes.io/instance": _RELEASE, "app.kubernetes.io/component": "core-bootstrap"}
+    ]
+    assert rule["ports"] == [{"port": "http", "protocol": "TCP"}]
+
+
 def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> None:
     notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
     block = notes[notes.index("First login (built-in Keycloak)") :]

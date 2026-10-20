@@ -135,6 +135,15 @@ Rights: `meho-admin` has `manage-clients` and `manage-users` on realm
 `meho` (from the realm file), which covers steps 3 to 5. Only the
 first-start account can do step 6, and only it is needed there.
 
+### Network rules
+
+The Job pod carries the labels `app.kubernetes.io/instance: <release>` and
+`app.kubernetes.io/component: core-bootstrap`, not the backplane's selector
+labels, because the backplane NetworkPolicy allows no egress to the
+Kubernetes API. The Keycloak subchart's own NetworkPolicy
+(`coreKeycloak.networkPolicy.enabled`) admits port 8080 from those labels,
+so the Job reaches Keycloak with the policy on.
+
 ### GitOps and other deploy paths
 
 Same rules as the secrets Job: no `argocd.argoproj.io` annotation; the Job

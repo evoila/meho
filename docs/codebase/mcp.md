@@ -329,9 +329,10 @@ the response was too large to deliver but the `handle` still reaches the caller.
 
 The `call_operation` `status` enum lists every status the dispatcher can
 return at this boundary: `ok`, `error`, `denied`, `awaiting_approval` and
-`rate_limited`. `already_resumed` is not in it: only the human approval
-path (the approve endpoint resuming a waiting call) sees it. `pending` is
-not in it either.
+`rate_limited`. It also lists `pending` and `running`, the answers of the
+async mode (#3695, see the section on long calls below). `already_resumed`
+is not in it: only the human approval path (the approve endpoint resuming
+a waiting call) sees it.
 
 `rate_limited` means the caller is over its rate limit or its limit on
 operations running at the same time (#3500, see
@@ -453,6 +454,37 @@ The full rules, bounds, and errors are in
 `tests/test_mcp_tool_result_query.py`,
 `tests/test_mcp_output_schema_conformance.py`, and
 `tests/test_result_reduction_properties.py`.
+
+### Long calls: `call_operation` async mode (#3695)
+
+A long call (a deploy, a multi-step operation that runs for minutes) should
+not hold one MCP request open the whole time. `call_operation` takes two
+optional arguments for this. They are MCP controls and never reach the
+dispatcher:
+
+- **`async: true`** starts the call in the background and answers at once
+  with `status="pending"` and `extras.run_id`. It uses the same
+  `operation_run` row and background runner as `POST /api/v1/operations/call`
+  with `async: true` (see [`async-governed-dispatch.md`](async-governed-dispatch.md)),
+  so the policy checks, approvals and audit rows are the same as for a normal
+  call.
+- **`run_id`** (with the same `connector_id` and `op_id`) checks that run.
+  While it runs: `status="pending"` or `"running"`, with
+  `extras.started_at` and `duration_ms` counted from the start. When it is
+  done: the stored `OperationResult` of the call, with `extras.run_id` added.
+  The answer is checked against the wire limit again after the run details
+  are added, like a normal call: a result that no longer fits keeps
+  `status="ok"` and its `audit_id` and gets `delivery="partial"` or
+  `"unavailable"`. A failed or cancelled run gives `status="error"` and `extras.error_code`
+  `run_failed` / `run_cancelled`. Checking never runs the call again.
+
+An unknown run, a run of another tenant, or a run of a different
+`connector_id` / `op_id` gives the same `-32602` error with
+`data.reason="unknown_run"`. Sending `async: true` and `run_id` together
+gives `data.reason="async_with_run_id"`. No tool is added: the working
+surface stays at 25 tools, and the `outputSchema` status enum gains
+`pending` and `running`. Code: `mcp/tools/_call_operation_async.py`. Tests:
+`tests/test_mcp_call_operation_async.py`.
 
 ### Wrong connector or op id (#4031)
 

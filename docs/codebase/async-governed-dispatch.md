@@ -133,6 +133,18 @@ the `main.py` lifespan alongside the other background sweeps.
 - `db/advisory.advisory_lock`, `db/engine.get_sessionmaker`,
   `settings` (`operation_run_*` knobs), `main.py` lifespan wiring.
 
+## MCP: `call_operation` async mode (#3695)
+
+The MCP `call_operation` tool has the same async mode. `async: true` calls
+`OperationRunService.submit_call` and answers at once with
+`status="pending"` and `extras.run_id`. Calling `call_operation` again with
+the same `connector_id` / `op_id` and `run_id` reads the run through
+`OperationRunService.poll` (tenant-scoped, like the REST poll route): a
+running call answers `pending` / `running` with `extras.started_at`, a
+finished call answers with its stored envelope. This is the route for long
+multi-step calls made by an agent over MCP. Details:
+[`mcp.md`](mcp.md#long-calls-call_operation-async-mode-3695).
+
 ## Synchronous path: caller gone (#3696)
 
 Without `async: true`, the REST `/call` route and the MCP `POST /mcp` route

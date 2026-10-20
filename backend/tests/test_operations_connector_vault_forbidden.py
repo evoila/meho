@@ -46,9 +46,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -97,18 +95,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -634,9 +620,8 @@ def test_write_forbidden_empty_message_has_no_dangling_tail() -> None:
 async def test_dispatch_converts_vault_forbidden_to_structured_cause(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """hvac Forbidden dispatch -> structured cause + audit row + event.
+    """hvac Forbidden dispatch -> structured cause + audit row.
 
     The dispatcher catches :exc:`hvac.exceptions.Forbidden` ahead of the
     generic ``except Exception`` and emits the structured shape naming
@@ -690,15 +675,11 @@ async def test_dispatch_converts_vault_forbidden_to_structured_cause(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_other_hvac_errors_fall_through_to_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """hvac InvalidPath is unchanged -- generic ``connector_error`` flatten.
 
@@ -737,6 +718,3 @@ async def test_dispatch_other_hvac_errors_fall_through_to_connector_error(
     # Did NOT get reclassified as the Forbidden shape.
     assert "connector_vault_forbidden" not in result.error
     assert "expected_secret_ref" not in result.extras
-
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"

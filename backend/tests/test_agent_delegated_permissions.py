@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.broadcast.publisher as _publisher
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -244,16 +243,8 @@ async def test_agent_denial_skips_the_person_verdict(monkeypatch: pytest.MonkeyP
     assert verdict is PermissionVerdict.DENY
 
 
-async def test_agent_needs_approval_does_not_use_the_person_standing_grant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_agent_needs_approval_does_not_use_the_person_standing_grant() -> None:
     """A call that waits for approval does not record a standing grant as used."""
-    published: list[Any] = []
-
-    async def _record(event: Any) -> None:
-        published.append(event)
-
-    monkeypatch.setattr(_publisher, "publish_event", _record)
     async with get_sessionmaker()() as session:
         if await session.get(Tenant, _TENANT) is None:
             session.add(Tenant(id=_TENANT, slug="t-4237", name="Tenant 4237"))
@@ -302,4 +293,3 @@ async def test_agent_needs_approval_does_not_use_the_person_standing_grant(
             .all()
         )
     assert not [r for r in rows if r.payload.get("decision") == "auto-approved"]
-    assert not [e for e in published if e.op_id == "approval.auto_approved"]

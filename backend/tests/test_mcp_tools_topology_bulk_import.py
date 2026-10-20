@@ -32,7 +32,6 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -52,9 +51,6 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-# Broadcast publisher patch — the apply path fans out one event per row
-# through the shared annotate helper.
-_PUBLISH_PATCH = "meho_backplane.topology.annotate.publish_event"
 _TOOL_NAME = "meho_topology_bulk_import"
 
 
@@ -219,18 +215,17 @@ async def test_bulk_import_human_apply_lands_all_edges(
     await _seed_node(kind="database", name="db-b")
     await _seed_node(kind="database", name="db-c")
 
-    with patch(_PUBLISH_PATCH, new=AsyncMock()):
-        response = _bulk_import_call(
-            client,
-            20,
-            {
-                "dry_run": False,
-                "rows": [
-                    {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-b"},
-                    {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-c"},
-                ],
-            },
-        )
+    response = _bulk_import_call(
+        client,
+        20,
+        {
+            "dry_run": False,
+            "rows": [
+                {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-b"},
+                {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-c"},
+            ],
+        },
+    )
 
     body = response.json()
     assert body["result"]["isError"] is False, body

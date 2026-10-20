@@ -37,7 +37,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -117,18 +116,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 # ---------------------------------------------------------------------------
 # Setup helpers
 # ---------------------------------------------------------------------------
@@ -186,7 +173,7 @@ class _SddcE2EBundle:
 
 
 @pytest.fixture
-async def sddc_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_SddcE2EBundle]:
+async def sddc_e2e_canary() -> AsyncIterator[_SddcE2EBundle]:
     """Dispatcher-ready SDDC Manager setup over a respx-mocked appliance (happy-path).
 
     Lifecycle:
@@ -450,9 +437,7 @@ async def test_sddc_e2e_jsonflux_handle_populated_for_host_list(
     )
 
 
-async def test_sddc_ingest_enable_reads_dispatch_round_trip(
-    captured_events: list[Any],
-) -> None:
+async def test_sddc_ingest_enable_reads_dispatch_round_trip() -> None:
     """Ingested-breadth round-trip: seed staged reads → enable_reads → dispatch.
 
     Proves the generic ingested-breadth path is unaffected by retiring the

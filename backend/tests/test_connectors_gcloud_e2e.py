@@ -8,7 +8,7 @@ Acceptance criteria addressed here:
 (a) All 9 gcloud read ops dispatch through the full connector handler path
     with respx-mocked GCP REST responses and return the expected shape.
 (b) Audit row: each dispatch records op_id + target_id + params_hash via
-    the audit module — asserted via patched audit_and_broadcast_safe.
+    the audit module — asserted via patched audit_safe.
 (c) ``gcloud.compute.instances.list`` E2E asserts the JSONFlux-compatible
     ``rows`` + ``total`` envelope (acceptance criterion: "asserts the
     JSONFlux handle path").
@@ -27,7 +27,7 @@ wiring the Protocol bridge, which belongs to a separate
 infrastructure-migration task. The connector-method E2E gives the same
 dispatch coverage (auth, handler invocation, result shape) while staying
 unblocked. Audit-row coverage is achieved by patching
-``audit_and_broadcast_safe`` and verifying the call arguments, which
+``audit_safe`` and verifying the call arguments, which
 faithfully reflects the production code path.
 
 Vacuous-skip rule (per SKILL.md): integration tests requiring
@@ -162,12 +162,12 @@ def _make_connector(token: str = "e2e-bearer-token") -> GcloudConnector:
 
 
 # ---------------------------------------------------------------------------
-# Audit stub — records calls to audit_and_broadcast_safe
+# Audit stub — records calls to audit_safe
 # ---------------------------------------------------------------------------
 
 
 class _AuditCapture:
-    """Captures calls to audit_and_broadcast_safe for assertion."""
+    """Captures calls to audit_safe for assertion."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -627,13 +627,13 @@ async def test_gcloud_e2e_iam_policy_read_returns_bindings() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (b) All ops produce an audit record (patched audit_and_broadcast_safe)
+# (b) All ops produce an audit record (patched audit_safe)
 # ---------------------------------------------------------------------------
 
 # The audit record is written by the dispatcher (operations/dispatcher.py).
 # Rather than running the full dispatcher stack (which requires Target ORM
 # changes to expose gcp_project/gcp_impersonate_sa), we verify the audit
-# module is called by patching audit_and_broadcast_safe and checking that
+# module is called by patching audit_safe and checking that
 # the connector produces the fields the dispatcher would use (op_id +
 # params_hash). The dispatcher's audit call contract is separately exercised
 # in test_api_v1_operations.py and test_connectors_nsx_e2e.py.

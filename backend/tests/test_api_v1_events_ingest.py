@@ -13,7 +13,6 @@ Acceptance-criteria coverage:
   (``origin`` = source id, ``dedupe_key`` set) and one synchronous
   ``__ingest__`` audit row (criterion 2)
 * duplicate delivery -> 200 with no second outbox/audit row (criterion 1)
-* broadcast failure is fail-open (the 202 still lands)
 * rate-limit -> 429 with ``Retry-After``
 * authenticated invalid JSON -> 400
 * deeply-nested within-cap body -> parser fails closed (400, never a 500)
@@ -68,11 +67,11 @@ def client() -> Iterator[TestClient]:
 
 @pytest.fixture(autouse=True)
 def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Stub the Vault read, the rate limiter, and the broadcast for the endpoint.
+    """Stub the Vault read and the rate limiter for the endpoint.
 
     The Vault read returns the known secret (no socket); the rate limiter is a
-    no-op (its own behaviour is unit-tested); the broadcast is a no-op AsyncMock
-    (no Valkey). Individual tests re-patch a seam to drive its failure path.
+    no-op (its own behaviour is unit-tested). Individual tests re-patch a seam
+    to drive its failure path.
     """
 
     async def _read_secret(_operator: object, _ref: str) -> SecretStr:
@@ -81,16 +80,12 @@ def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     async def _no_rate_limit(*_a: object, **_k: object) -> None:
         return None
 
-    async def _no_broadcast(_event: object) -> None:
-        return None
-
     monkeypatch.setattr(
         "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
     )
     monkeypatch.setattr(
         "meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _no_rate_limit
     )
-    monkeypatch.setattr("meho_backplane.events.ingest.service.publish_event", _no_broadcast)
     yield
 
 
@@ -268,21 +263,6 @@ async def test_duplicate_delivery_is_idempotent_200(client: TestClient) -> None:
             )
         ).scalar_one()
     assert n_audit == 1
-
-
-@pytest.mark.asyncio
-async def test_broadcast_failure_is_fail_open(client: TestClient, monkeypatch) -> None:
-    await _seed_source()
-
-    async def _boom(_event: object) -> None:
-        raise RuntimeError("valkey down")
-
-    monkeypatch.setattr("meho_backplane.events.ingest.service.publish_event", _boom)
-    body = json.dumps({"type": "alert"}).encode()
-    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=_signed(body))
-    # The audit row committed before the broadcast, so the delivery still 202s.
-    assert resp.status_code == 202
-    assert await _count(EventOutbox) == 1
 
 
 # --------------------------------------------------------------------------

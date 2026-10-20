@@ -541,7 +541,6 @@ async def _drive_audit_middleware(scope_headers: list[tuple[bytes, bytes]]) -> N
 @pytest.mark.usefixtures("_http_settings_env")
 async def test_header_bind_stamps_row_and_resets_in_task(
     isolated_audit_engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Driving the middleware in-task: row carries the ref, then var resets.
 
@@ -557,13 +556,6 @@ async def test_header_bind_stamps_row_and_resets_in_task(
     :mod:`tests.test_broadcast_detail_header` takes for its
     contextvar-unbind test.)
     """
-    import meho_backplane.audit as audit_module
-
-    async def _noop_publish(_event: Any) -> None:
-        return None
-
-    monkeypatch.setattr(audit_module, "publish_event", _noop_publish)
-
     assert work_ref_var.get() is None
     await _drive_audit_middleware([(b"meho-work-ref", _WORK_REF.encode("latin-1"))])
     # The bind was reset on the way out -- no leak onto the task.

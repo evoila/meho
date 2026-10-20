@@ -17,13 +17,13 @@ Scenarios (one ``async def`` per Initiative-DoD AC):
 1. ``test_per_call_opt_in_upgrades_audit_query_to_full`` -- operator
    POSTs ``/api/v1/audit/query`` with ``X-Broadcast-Detail: full``;
    the audit row's ``broadcast_detail_origin = "request_override"``
-   and the Valkey stream entry's payload carries the full filter
-   shape (the upgrade path from decision #3's aggregate-only-by-
-   default for ``audit_query``).
+   and ``broadcast_detail_effective = "full"`` (the upgrade path from
+   decision #3's aggregate-only-by-default for ``audit_query``).
 2. ``test_tenant_rule_downgrades_read_op_to_aggregate`` -- tenant
    admin creates a rule downgrading ``meho_broadcast_overrides_list``
-   to aggregate; the next GET broadcasts an aggregate payload tagged
-   ``broadcast_detail_origin = "tenant_rule:<uuid>"``.
+   to aggregate; the next GET's audit row is tagged
+   ``broadcast_detail_origin = "tenant_rule:<uuid>"`` with
+   ``broadcast_detail_effective = "aggregate"``.
 3. ``test_scoped_rule_scope_miss_falls_through_to_default`` -- the
    rule from #2 with a non-matching ``scope_field=namespace,
    scope_value=kube-system`` no longer applies because the route
@@ -73,22 +73,21 @@ and the asyncpg pool stay on the same pytest-asyncio-managed loop --
 exactly the pattern :mod:`tests.integration.test_tenant_isolation`
 established.
 
-Real Valkey vs. mocked publish_event
-====================================
+Where the detail decision is read back
+======================================
 
-T1-T5 mock :func:`~meho_backplane.broadcast.publisher.publish_event`
-via :func:`monkeypatch.setattr` because their behavioural shape is
-"resolver said X, the event we'd have published reflects X". T6 is
-the cross-surface acceptance check; it XADDs into a real Valkey
-stream and reads back via ``XRANGE`` so the wire shape that an SSE
-or MCP-resource subscriber actually receives is what's asserted.
-The container costs ~3 s to boot once per module; with seven scenarios
-the amortised overhead is < 0.5 s/test.
+An audited request publishes no Broadcast event (#3758): the feed
+carries deliberate agent announcements only. The resolver's decision
+lands on the audit row as ``broadcast_detail_origin`` /
+``broadcast_detail_effective``, so every scenario asserts against the
+stored audit rows. The real Valkey container still backs the
+production app's broadcast client so the app boots the way it does in
+production. The container costs ~3 s to boot once per module; with
+seven scenarios the amortised overhead is < 0.5 s/test.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -191,18 +190,11 @@ async def broadcast_runtime(
     The production app reads the URL once per worker on the first
     :func:`get_broadcast_client` call; tests must clear the cache so
     the testcontainer's URL replaces whatever the autouse env fixture
-    pinned. Yielding the URL lets the test issue ``XRANGE`` directly
-    against the same stream the app's ``publish_event`` XADD-ed into.
+    pinned.
 
     The module-scoped ``valkey_url`` fixture boots one container for
-    every test in the file. Without an explicit per-test wipe the
-    stream entries from scenario N persist into scenario N+1, and any
-    scenario that asserts ``len(events) == X`` becomes order-dependent.
-    ``FLUSHDB`` is the smallest hammer that guarantees ``XRANGE`` on
-    every per-tenant ``meho:feed:<tenant>`` key returns only what the
-    *current* test published -- it drops the broadcast-event key
-    space along with anything else that might land in DB 0, which the
-    backplane only uses for the feed streams.
+    every test in the file. ``FLUSHDB`` gives each scenario a clean
+    DB 0 so nothing from scenario N persists into scenario N+1.
     """
     monkeypatch.setenv("BROADCAST_REDIS_URL", valkey_url)
     get_settings.cache_clear()
@@ -304,34 +296,8 @@ def _bearer(token: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Valkey + audit read-back helpers
+# Audit read-back helpers
 # ---------------------------------------------------------------------------
-
-
-async def _drain_stream(url: str, tenant_id: UUID) -> list[dict[str, Any]]:
-    """Read every entry in ``meho:feed:<tenant>`` and return the parsed events.
-
-    A short-lived client per call rather than reusing
-    :func:`~meho_backplane.broadcast.client.get_broadcast_client`'s
-    singleton so each scenario's assertion sees a fresh connection
-    independent of whatever pool state the production app left
-    behind. ``XRANGE`` reads the full stream in order; entries are
-    capped by ``MAXLEN ~ 10000`` on the publish side so reading the
-    whole stream is fast even after many scenarios share the same
-    tenant.
-    """
-    client = redis_async.from_url(url, decode_responses=True)
-    try:
-        entries = await client.xrange(f"meho:feed:{tenant_id}", min="-", max="+")
-    finally:
-        await client.aclose()
-    parsed: list[dict[str, Any]] = []
-    for _entry_id, fields in entries:
-        blob = fields.get("event")
-        if blob is None:
-            continue
-        parsed.append(json.loads(blob))
-    return parsed
 
 
 async def _audit_rows_for_tenant(tenant_id: UUID) -> list[AuditLog]:
@@ -380,17 +346,16 @@ async def _delete_override(client: httpx.AsyncClient, token: str, override_id: s
 
 @pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_DOCKER_SKIP_REASON)
 async def test_per_call_opt_in_upgrades_audit_query_to_full(
-    production_app: FastAPI, broadcast_runtime: str
+    production_app: FastAPI,
 ) -> None:
-    """``X-Broadcast-Detail: full`` flips an audit_query event to full detail.
+    """``X-Broadcast-Detail: full`` flips an audit_query row to full detail.
 
     The audit-query op classifies as ``audit_query`` (sensitive,
     decision #3 default aggregate). The header drives
     :class:`~meho_backplane.middleware.BroadcastDetailMiddleware` to
     bind the contextvar; the audit middleware's resolver sees
-    ``request_override="full"`` and upgrades. The Valkey stream
-    entry must include the ``params`` key (full-detail shape from
-    :func:`~meho_backplane.broadcast.events.redact_payload`).
+    ``request_override="full"`` and upgrades. The audit row records
+    the upgraded decision.
     """
     key = make_rsa_keypair("kid-opt-in")
     token = _token(key, role=TenantRole.OPERATOR)
@@ -410,13 +375,6 @@ async def test_per_call_opt_in_upgrades_audit_query_to_full(
     assert audit_row.payload["broadcast_detail_origin"] == "request_override"
     assert audit_row.payload["broadcast_detail_effective"] == "full"
 
-    events = await _drain_stream(broadcast_runtime, _TENANT_A)
-    audit_events = [e for e in events if e["op_id"] == "meho.audit.query"]
-    assert len(audit_events) == 1
-    payload = audit_events[0]["payload"]
-    # Full-detail shape from ``redact_payload``: includes ``params``.
-    assert "params" in payload, payload
-
 
 # ---------------------------------------------------------------------------
 # Scenario 2 -- tenant rule downgrades a read op to aggregate
@@ -425,9 +383,9 @@ async def test_per_call_opt_in_upgrades_audit_query_to_full(
 
 @pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_DOCKER_SKIP_REASON)
 async def test_tenant_rule_downgrades_read_op_to_aggregate(
-    production_app: FastAPI, broadcast_runtime: str
+    production_app: FastAPI,
 ) -> None:
-    """An op-wide downgrade rule changes the broadcast event's detail.
+    """An op-wide downgrade rule changes the audit row's detail decision.
 
     Setup: tenant-admin creates a rule on
     ``meho_broadcast_overrides_list`` with ``detail=aggregate``.
@@ -435,8 +393,7 @@ async def test_tenant_rule_downgrades_read_op_to_aggregate(
     ``op_id`` to the same pattern + ``op_class=read``).
     Assert: the resolver picks the tenant rule; the audit row's
     ``broadcast_detail_origin`` becomes ``"tenant_rule:<rule_id>"``
-    and the published event payload is the aggregate shape
-    ``{op_class, result_status}``.
+    and ``broadcast_detail_effective`` is ``"aggregate"``.
     """
     key = make_rsa_keypair("kid-downgrade")
     admin_token = _token(key, role=TenantRole.TENANT_ADMIN)
@@ -459,12 +416,6 @@ async def test_tenant_rule_downgrades_read_op_to_aggregate(
     list_row = list_rows[0]
     assert list_row.payload["broadcast_detail_origin"] == f"tenant_rule:{rule_id}"
     assert list_row.payload["broadcast_detail_effective"] == "aggregate"
-
-    events = await _drain_stream(broadcast_runtime, _TENANT_A)
-    list_events = [e for e in events if e["op_id"] == _LIST_OP_PATTERN]
-    assert list_events, "no broadcast event recorded for the list call"
-    aggregated = list_events[-1]["payload"]
-    assert aggregated == {"op_class": "read", "result_status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +636,7 @@ async def test_rbac_blocks_non_admin_on_rest_and_mcp(
 
 @pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_DOCKER_SKIP_REASON)
 async def test_tenant_isolation_rule_does_not_leak(production_app: FastAPI) -> None:
-    """Tenant A's downgrade rule does not change tenant B's broadcast detail.
+    """Tenant A's downgrade rule does not change tenant B's detail decision.
 
     Two parallel JWT chains (one key per tenant). Tenant A's admin
     creates a downgrade rule on ``meho_broadcast_overrides_list``;
@@ -722,7 +673,6 @@ async def test_tenant_isolation_rule_does_not_leak(production_app: FastAPI) -> N
 # the lane that lacks Docker (the per-scenario tests would otherwise
 # skip silently with no signal that the module itself is healthy).
 def test_module_imports_cleanly() -> None:
-    assert callable(_drain_stream)
     assert callable(_audit_rows_for_tenant)
     assert hasattr(redis_async, "from_url")
     assert _TENANT_A != _TENANT_B

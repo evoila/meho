@@ -680,6 +680,38 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    ingested. The reconcile lane above pins the corrected body shape, against
    a fixture always and against the pinned vendor 8.0 U3 spec when the shelf
    has it.
+   **Operation summaries (#4329).** Search and the operation-group step
+   read each operation's one-line `summary`. The full vendor specs fall
+   short in two ways, and `ingest_corrections.py` fixes both at ingest
+   time, on every `vmware-rest` catalog version:
+   - The vSphere REST spec (`vcenter.yaml`) has no `summary` on any of its
+     operations (1,275 on 9.0). An operation with no summary gets the first
+     sentence of its description, at most 120 characters. A longer first
+     sentence is cut at a word and ends with `…`. Paragraphs that only hold
+     vendor notes (`***Required privileges:*** ...`) are skipped; when
+     nothing else is left the summary stays empty.
+   - The VI-JSON spec (`vi-json.yaml`) repeats one summary for the same
+     method on many managed object types (844 operations on 9.0). When two
+     or more VI-JSON operations of one spec share a summary, each gets its
+     object type in front, for example
+     `VirtualMachine: Destroys this object, ...` and
+     `Folder: Destroys this object, ...`. A VI-JSON path is
+     `/<Type>/{moId}/...`, with an optional service segment in front
+     (`/vsan/...`). A summary that no other operation shares is kept as it
+     is, and so is any summary the spec already gives.
+
+   The shared-summary fix compares operations with each other, so it is a
+   batch correction (`register_ingest_batch_correction` in
+   `ingest/spec_corrections.py`); the description fix is part of the
+   per-operation correction. The shipped minimal specs already carry
+   summaries, so a catalog ingest of them is unchanged.
+
+   **Running installs** get the new summaries on their next ingest of the
+   full vendor specs: run the same `--spec` ingest again. The summary is
+   part of the row's body hash, so the changed rows are updated and
+   embedded again for search; rows that did not change are skipped. The
+   operator's own texts (`custom_description`, `custom_notes`) are not
+   touched.
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls

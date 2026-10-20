@@ -279,6 +279,23 @@ async def _fetch_jwks(*, force_refresh: bool = False) -> dict[str, Any]:
         return jwks
 
 
+def _accepted_issuers(settings: Settings) -> list[str]:
+    """Return the ``iss`` values a token may carry, with and without ``/``.
+
+    Keycloak publishes its issuer without a trailing slash
+    (``https://<host>/realms/<realm>``). Other OIDC providers always
+    end theirs with one — authentik publishes
+    ``https://<host>/application/o/<slug>/``. OIDC Discovery 1.0 §4.3
+    says ``iss`` is identical to the published issuer, slash included,
+    so a single exact value can only ever match one of the two
+    families. Accepting both forms of the *configured* issuer keeps
+    the check strict against a different issuer while letting the
+    operator type the value with or without the slash.
+    """
+    base = str(settings.keycloak_issuer_url).rstrip("/")
+    return [base, f"{base}/"]
+
+
 def _decode_with_jwks(
     token: str,
     jwks: dict[str, Any],
@@ -307,7 +324,7 @@ def _decode_with_jwks(
             claims_options={
                 "iss": {
                     "essential": True,
-                    "value": str(settings.keycloak_issuer_url).rstrip("/"),
+                    "values": _accepted_issuers(settings),
                 },
                 "aud": {
                     "essential": True,
@@ -499,7 +516,7 @@ def _classify_decode_error(
         return _classify_invalid_claim(
             exc,
             expected_audience=expected_audience,
-            expected_issuer=str(settings.keycloak_issuer_url).rstrip("/"),
+            expected_issuer=str(settings.keycloak_issuer_url),
         )
     if isinstance(exc, MissingClaimError):
         return _classify_missing_claim(exc)

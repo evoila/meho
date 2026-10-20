@@ -186,7 +186,7 @@ other.
 
 Beyond the connector-execution tools, the catalog carries three broadcast
 coordination tools so a hosted run is a first-class reader and writer on the
-tenant's shared feed (`meho:feed:{tenant_id}`) rather than a mute
+tenant's shared announcement feed rather than a mute
 participant:
 
 - `broadcast_announce` — publish intent / progress / completion.
@@ -818,28 +818,18 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
 `status="awaiting_approval"`, the wrapper:
 
 1. **Waits** for the decision in `meho_backplane/agent/approval_wait.py`.
-   The stored approval row is the authority; the broadcast is the fast path
-   (#3732):
+   The stored approval row is the only source (#3732, #3758):
    - It reads the stored row first (tenant-scoped, through `get_request`).
      A decision made before the wait started is returned at once.
-   - While the row is `pending`, it listens on the per-tenant Valkey stream
-     (`meho:feed:{tenant_id}`) with `XREAD BLOCK`, filtered to its own
-     `approval_request_id`. This is the same stream the SSE feed reads (`meho_broadcast_watch`
-     uses it only as a wake-up since #3748).
-   - It reads the stored row again after every Valkey error, and at least
-     every 5 seconds (`_DURABLE_RECHECK_SECONDS`). So a lost broadcast event
-     delays the agent by at most a few seconds; it does not end in a timeout.
-   - Each `XREAD` is cut off locally at the moment the next stored read is
-     due: the 5-second re-check or the deadline, whichever comes first. Its
-     `BLOCK` window ends one second earlier (`_XREAD_REPLY_GRACE_SECONDS`)
-     so a healthy reply lands in time. So a Valkey that accepts the command
-     but stops answering cannot delay a stored read past 5 seconds, and
-     cannot hold the wait for the client's 35-second socket timeout. A
-     cut-off `XREAD` counts as a Valkey error: the row is read at once.
-   - After a Valkey error it reads the row first, then pauses for at most
-     one second (`_XREAD_ERROR_BACKOFF_SECONDS`) before the next `XREAD`.
-     The pause is cut at the deadline. So an error raised late in an
-     `XREAD` cannot delay a stored read past 5 seconds or the deadline.
+   - While the row is `pending`, it reads the row again every
+     `_POLL_SECONDS` (2 seconds). That is one primary-key read per
+     interval, only while an agent waits.
+   - It does not read Valkey at all. Broadcast carries deliberate agent
+     announcements only, so no approval event is published there, and a
+     Valkey outage cannot delay or hide a decision.
+   - A failed row read (database error, row not visible to this tenant) is
+     logged and treated as "no decision seen yet"; the wait keeps reading
+     until the deadline.
    - It reads the row once more before it gives up at the deadline.
 2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
    original in-memory `params` (passed through `call_operation_with_approval`

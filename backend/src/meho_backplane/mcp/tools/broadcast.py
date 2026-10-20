@@ -554,10 +554,8 @@ async def _handler_announce(
     :func:`_publish_agent_announcement_impl` for the construct +
     publish step. The publisher is **fail-loud** -- a Valkey teardown
     propagates as :class:`Exception` and the MCP dispatcher's generic
-    handler maps it to ``-32603`` Internal Error. This is distinct
-    from :func:`~meho_backplane.broadcast.publisher.publish_event`'s
-    fail-open semantics by design (see the publisher module's
-    docstring); the agent explicitly emitted the announcement and
+    handler maps it to ``-32603`` Internal Error (see the publisher
+    module's docstring); the agent explicitly emitted the announcement and
     needs to know whether it landed.
 
     Trust boundary

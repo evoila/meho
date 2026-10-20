@@ -257,7 +257,7 @@ Most operators polish 2–4 groups per ingest; the LLM's output is usable for th
 
 ### Step 6 — mark per-op safety overrides
 
-The parser sets `DELETE` verbs to `safety_level='dangerous'` with `requires_approval=true`, so a delete waits for approval on every seat (#3827). The VMware floor raises the vCenter tag and category deletes and the tag detach actions to `destructive`. Rows stored by an earlier ingest keep their old posture until you ingest again; `meho connector review` lists every stored delete below `destructive` and flags the rows that need correction. Flip `requires_approval` on any other op whose execution should block on the approval queue:
+The parser sets `DELETE` verbs to `safety_level='dangerous'` with `requires_approval=true`, so a delete waits for approval on every seat (#3827). The VMware floor raises the vCenter tag and category deletes, the tag detach actions, and the content-library item delete to `destructive`. Rows stored by an earlier ingest keep their old posture until you ingest again; `meho connector review` lists every stored delete below `destructive` and flags the rows that need correction. Flip `requires_approval` on any other op whose execution should block on the approval queue:
 
 ```bash
 meho connector edit-op vmware-rest-9.0 'DELETE:/vcenter/vm/{vm}' \

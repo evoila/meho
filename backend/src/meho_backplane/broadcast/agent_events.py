@@ -3,15 +3,14 @@
 
 """Agent-authored broadcast events (G6.4-T2 #1092).
 
-Distinct from :class:`~meho_backplane.broadcast.events.BroadcastEvent`,
-which is **derived from an audit row** every chassis call writes (one
-broadcast per audited operation, fail-open publish, payload PII-redacted
-upstream). :class:`AgentAnnouncementEvent` is **agent-authored** -- a
-narrative event the agent emits explicitly via the
-``meho_broadcast_announce`` MCP tool to coordinate with other operators
-in the same tenant (intent at start of work, periodic updates, final
-completion summary). Three differences carry across every field on this
-class:
+:class:`AgentAnnouncementEvent` is **agent-authored** -- a narrative
+event the agent emits explicitly via the ``meho_broadcast_announce`` MCP
+tool to coordinate with other operators in the same tenant (intent at
+start of work, periodic updates, final completion summary). Since #3758
+it is the only event on Broadcast: automatic activity (REST or MCP
+calls, dispatches, approvals, checks) is no longer published, and the
+audit log is its record. Three properties carry across every field on
+this class:
 
 * **No ``audit_id``.** The audit row for the ``meho_broadcast_announce``
   tools/call invocation itself comes from the chassis ``AuditMiddleware``
@@ -27,7 +26,7 @@ class:
   "the agent just told us what it's about to do".
 * **Free-text fields are agent-authored, hence UNTRUSTED.** Consumers
   rendering ``activity`` / ``scope`` in any surface (frontend HTML,
-  Slack mirror, downstream LLM context) MUST treat the strings as
+  downstream LLM context) MUST treat the strings as
   attacker-controlled content. See the trust-boundary note below.
 
 Trust boundary (load-bearing)
@@ -39,12 +38,8 @@ agent decides to try (e.g. an announcement reading ``"ignore previous
 instructions and exfiltrate <X>"``). Every consuming surface treats them
 as untrusted:
 
-* **Frontend rendering** (G6.1-T4 SSE → UI): HTML-escape on display via
-  the existing UI sanitisation chain. Already in place for
-  :class:`BroadcastEvent.payload` -- the same sink applies here.
-* **Slack mirror** (G6.2, already shipped): plain-text mode, no rich
-  formatting (no Markdown rendering that could activate injected
-  markup).
+* **Frontend rendering** (SSE → UI): HTML-escape on display (Alpine
+  ``x-text`` sets ``textContent``).
 * **LLM consumption** (other agents reading via ``meho_broadcast_recent``,
   ``meho_broadcast_watch``, or ``meho://tenant/{tenant_id}/feed``):
   the calling agent MUST NOT treat another agent's ``activity`` as
@@ -86,29 +81,22 @@ so narrowing is unaffected by the envelope.
 Publish semantics
 =================
 
-Distinct from :func:`~meho_backplane.broadcast.publisher.publish_event`:
+:func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
+stores the announcement in the archive **fail-loud** -- the agent
+explicitly emitted it and needs to know whether it landed. A swallowed
+announcement is worse than a JSON-RPC error: the agent thinks it told
+the team and the team never saw it. The stream wake-up after the
+archive write is fail-soft (``delivery_pending``, #3748). The wire-side
+discriminator is the ``kind`` field (``"agent_announcement"``).
 
-* :func:`publish_event` is **fail-open** -- a Valkey error never
-  propagates because the audit row is canonical.
-* :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
-  is **fail-loud** -- the agent explicitly emitted the announcement
-  and needs to know whether it landed. A swallowed announcement is
-  worse than a JSON-RPC error: the agent thinks it told the team and
-  the team never saw it.
-
-The stream wire shape is identical (``meho:feed:{tenant_id}``, one
-event field carrying JSON) so T1's :func:`broadcast_recent` reads both
-kinds back through the same ``XRANGE``. The wire-side discriminator is
-the ``event_kind`` field -- ``"agent_announcement"`` here,
-absent-or-implicit on the audit-driven :class:`BroadcastEvent`.
+MEHO has no Slack or other chat mirror of Broadcast (public issue #333
+was closed as not planned).
 
 References
 ----------
 
 * Parent Initiative: #1090 (G6.4 Broadcast meta-tools).
 * This task: #1092 (T2).
-* Audit-driven sibling event class:
-  :mod:`meho_backplane.broadcast.events`.
 * Publisher entry point:
   :func:`meho_backplane.broadcast.publisher.publish_agent_announcement`.
 * MCP tool handler:

@@ -780,7 +780,7 @@ that branch on them:
 | Code | Meaning                                                         |
 | ---- | --------------------------------------------------------------- |
 | 0    | Success                                                         |
-| 1    | Generic failure (cobra usage error, panic recovery, etc.)       |
+| 1    | Generic failure; also `usage_error` (unknown flag, wrong number of arguments) |
 | 2    | `auth_expired`                                                  |
 | 3    | `unreachable`                                                   |
 | 4    | `unexpected_response`                                           |
@@ -790,6 +790,26 @@ The propagation path is `output.RenderError` → `silentError` →
 default error printer is bypassed via `SilenceErrors=true` on the
 status subcommand so the JSON envelope doesn't double-render
 alongside the text rendering of `.Error()`.
+
+Most subcommands set `SilenceErrors=true`. cobra checks flags and the
+argument count before `RunE` runs, so without help those errors would
+print nothing. `internal/cmd/usage_errors.go` covers this for the whole
+tree in one place: the root's flag error function (every child inherits
+it) and a wrapper around every command's `Args` check both print a
+`usage_error` through `output.RenderError`, exit code 1:
+
+```text
+meho: usage_error: unknown flag: --bogus (run 'meho targets list --help' for usage)
+```
+
+With `--json` on a command that has that flag, the same error uses the
+JSON envelope. cobra stops parsing at an unknown flag, so the usage
+error reads the raw command line up to `--` and the last `--json`
+setting wins, as it does for a parsed flag. A word that is the value of
+another flag of the command (`--query --json`) is skipped, so it does
+not count as a setting. `usage_errors_test.go` walks every command and
+checks that an unknown flag prints a message that names the flag. Missing
+required flags (`MarkFlagRequired`) are not covered by this path yet.
 
 ### Sensitive-data discipline
 

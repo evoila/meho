@@ -428,6 +428,64 @@ def test_issuer_mismatch_returns_invalid_issuer() -> None:
     assert response.json() == {"detail": "invalid_issuer"}
 
 
+@pytest.mark.parametrize(
+    "configured_issuer",
+    [
+        pytest.param(f"{_ISSUER}/", id="configured-with-slash"),
+        pytest.param(_ISSUER, id="configured-without-slash"),
+    ],
+)
+def test_issuer_with_trailing_slash_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_issuer: str,
+) -> None:
+    """A token whose ``iss`` ends with ``/`` passes (#4273).
+
+    authentik publishes every issuer with a trailing slash, so its
+    tokens carry ``iss`` with one. The check accepts the configured
+    issuer with or without the slash, whichever way the operator
+    typed ``KEYCLOAK_ISSUER_URL``. The discovery URL is unaffected:
+    the slash is still stripped before ``/.well-known/...`` is
+    appended, which is why the stock discovery mock matches here.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", configured_issuer)
+    get_settings.cache_clear()
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, issuer=f"{_ISSUER}/")
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sub"] == "op-42"
+
+
+def test_issuer_configured_with_trailing_slash_still_rejects_other_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepting both slash forms does not loosen the check otherwise."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{_ISSUER}/")
+    get_settings.cache_clear()
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, issuer="https://attacker.test/realms/meho/")
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "invalid_issuer"}
+
+
 def test_expired_token_returns_token_expired() -> None:
     """``exp`` in the past beyond leeway surfaces as ``token_expired``
     (G0.9.1-T12)."""

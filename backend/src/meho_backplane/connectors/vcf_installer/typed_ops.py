@@ -29,8 +29,9 @@ ingest that runs after a connect, #3406),
 ``installer.system.trusted-certificates.list`` / ``.add``
 (outbound trust store — the depot TLS-trust fix), and
 ``installer.bundles.list`` / ``.download`` (bundle inventory + the mandatory
-explicit GA pre-download). Reads are ``safe``; the three writes are
-``caution`` + ``requires_approval``.
+explicit GA pre-download), plus ``installer.bundles.download-status`` (the
+per-bundle failure message and progress, #3410). Reads are ``safe``; the
+three writes are ``caution`` + ``requires_approval``.
 
 The vendor bring-up API is natively asynchronous — every submit returns its
 tracking object in seconds and progress rides the status polls — so each
@@ -144,7 +145,10 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "and hard-fails Versions-and-Bundles when those binaries are absent "
         "from the depot, so the explicit GA download is a required step, not "
         "an optimization. Poll installer.bundles.list downloadStatus until "
-        "the set is SUCCESSFUL."
+        "the set is SUCCESSFUL; installer.bundles.download-status reads the "
+        "per-bundle failure message, isDownloadable flag and downloaded bytes, "
+        "so a FAILED bundle can be told apart as retry-worthy or not "
+        "downloadable from this depot."
     ),
 }
 
@@ -225,6 +229,20 @@ _SDDC_TASK_RESULT_DIGEST: dict[str, Any] = {
     "name_field": "name",
     "active_states": ["IN_PROGRESS"],
     "failed_states": ["FAILED", "COMPLETED_WITH_FAILURE"],
+}
+
+#: ``PageOfBundleDownloadStatusInfo`` digest (#3410). A release-wide read runs
+#: to ~180 rows and reduces to a handle; this hint adds per-``downloadStatus``
+#: counts and the ``bundleId`` of every IN_PROGRESS row inline. FAILED rows are
+#: deliberately NOT kept whole inline (a depot outage fails every row, which
+#: would put the whole set back inline); callers read them with a ``bundle_id``
+#: call or a ``result_query`` on the handle. Field names match the vendored
+#: ``vcf-installer-9.1`` OpenAPI (``components.schemas.BundleDownloadStatusInfo``).
+_BUNDLE_DOWNLOAD_STATUS_DIGEST: dict[str, Any] = {
+    "collection": "elements",
+    "status_field": "downloadStatus",
+    "name_field": "bundleId",
+    "active_states": ["IN_PROGRESS"],
 }
 
 
@@ -836,6 +854,76 @@ _BUNDLES_LIST = InstallerTypedOp(
     ),
 )
 
+_BUNDLES_DOWNLOAD_STATUS = InstallerTypedOp(
+    op_id="installer.bundles.download-status",
+    handler_attr="bundles_download_status",
+    summary="Per-bundle download detail: status, failure message, progress.",
+    description=(
+        "Reads GET /v1/bundles/download-status — the vendor "
+        "PageOfBundleDownloadStatusInfo. Each element carries bundleId / "
+        "componentType / version / downloadStatus plus the detail "
+        "installer.bundles.list rows lack: message (the vendor error text of "
+        "a failed download), downloadedSize (bytes so far), isDownloadable "
+        "(whether the bundle can be downloaded right now), downloadId (the "
+        "download task id), and the scheduled/start/end times. Optional "
+        "filters: bundle_id, release_version, image_type. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "bundle_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Only this bundle (an id from installer.bundles.list).",
+            },
+            "release_version": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Only bundles of this VCF release, e.g. 9.1.0.0.",
+            },
+            "image_type": {
+                "type": "string",
+                "enum": ["INSTALL", "PATCH"],
+                "description": "Only INSTALL or only PATCH bundles.",
+            },
+        },
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "bundles", "depot"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call when installer.bundles.list shows a bundle as FAILED (or a "
+            "download seems stuck) to learn why and how far it got. A FAILED "
+            "row with isDownloadable=false means the bundle cannot be "
+            "downloaded from this depot right now (for example the payload "
+            "is missing) — stop polling and fix the depot. A FAILED row with "
+            "isDownloadable=true and a transfer error in message is worth one "
+            "more installer.bundles.download."
+        ),
+        output_shape=(
+            "{elements: [{bundleId, componentType, version, downloadStatus, "
+            "message?, downloadedSize?, isDownloadable?, downloadId?, "
+            "downloadScheduledTime, downloadStartTime?, downloadEndTime?, "
+            "isDownloadCancellable}], pageMetadata}. downloadedSize is bytes; "
+            "compare with sizeMB from installer.bundles.list for progress. A "
+            "release-wide read reduces to a handle with status_counts and the "
+            "in_progress bundle ids inline; read FAILED rows with bundle_id or "
+            "result_query."
+        ),
+        parameter_hints={
+            "bundle_id": "Pass one id to read a single bundle's detail.",
+            "release_version": "Pass the target release to check its whole set.",
+            "image_type": "INSTALL for bring-up bundles; omit for both.",
+        },
+        result_digest=_BUNDLE_DOWNLOAD_STATUS_DIGEST,
+    ),
+)
+
 _BUNDLES_DOWNLOAD = InstallerTypedOp(
     op_id=INSTALLER_BUNDLES_DOWNLOAD_OP_ID,
     handler_attr="bundles_download",
@@ -896,7 +984,8 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 #: failed-task retry between its submit and its poll, and the id-less task
 #: list after its poll; the depot family runs
 #: in its air-gapped lifecycle order: settings read/write → catalog sync
-#: read → trust store read/write → bundle inventory read/download).
+#: read → trust store read/write → bundle inventory read / download-detail
+#: read / download).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
@@ -910,6 +999,7 @@ INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _TRUSTED_CERTIFICATES_LIST,
     _TRUSTED_CERTIFICATE_ADD,
     _BUNDLES_LIST,
+    _BUNDLES_DOWNLOAD_STATUS,
     _BUNDLES_DOWNLOAD,
 )
 

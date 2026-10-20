@@ -774,17 +774,23 @@ async def test_destructive_subop_refusal_writes_one_denied_audit_row(
     dispatcher park uses.
     """
     from meho_backplane.db.models import AuditLog
+    from meho_backplane.operations._audit import parent_audit_id_var
 
     op_id = "DELETE:/vcenter/datacenter/{datacenter}"
-    result = await enforce_subop_policy(
-        operator=_operator(),
-        connector_id=_CONNECTOR_ID,
-        op_id=op_id,
-        safety_level="destructive",
-        requires_approval=True,
-        target=None,
-        params={"datacenter": "datacenter-42"},
-    )
+    parent_audit_id = uuid.uuid4()
+    token = parent_audit_id_var.set(parent_audit_id)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            safety_level="destructive",
+            requires_approval=True,
+            target=None,
+            params={"datacenter": "datacenter-42"},
+        )
+    finally:
+        parent_audit_id_var.reset(token)
     assert result is not None
     assert result.extras["error_code"] == "preview_binding_required"
 
@@ -794,6 +800,7 @@ async def test_destructive_subop_refusal_writes_one_denied_audit_row(
     assert rows[0].status_code == 403
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].payload["error"]["error_code"] == "preview_binding_required"
+    assert rows[0].parent_audit_id == parent_audit_id
 
 
 @pytest.mark.asyncio

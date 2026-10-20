@@ -2830,11 +2830,13 @@ async def _handle_needs_approval(
     preflight refusal above (#4647). The verified ``preview_hash`` is then
     persisted on the row for approve-time re-verification.
 
-    Two refusals write no audit row on purpose: a missing approval
-    encryption key (``ApprovalHandoffKeyError``) and a failure while saving
-    the approval request. Neither is a decision about the call; both are a
-    MEHO-side fault, and no audit event class describes them. They stay in
-    the structured log only.
+    Two refusals write no audit row on purpose. Neither is a decision about
+    the call; both are a MEHO-side fault, and no audit event class describes
+    them. A missing or malformed approval encryption key
+    (``ApprovalHandoffKeyError``) only returns a ``denied`` result whose
+    message names the key setting; nothing is logged. A failure while saving
+    the approval request is logged as ``approval_queue_create_failed`` and
+    returns a ``denied`` result.
 
     On success returns :func:`~meho_backplane.operations._errors.result_awaiting_approval`
     with the pending row's id in ``extras["approval_request_id"]``.

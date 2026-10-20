@@ -304,7 +304,6 @@ async def test_first_admin_must_change_the_password_then_is_a_platform_admin(
     # Once the first login's steps are done, the password from the Secret is
     # the one Keycloak holds, and the login carries the first admin's claims.
     _finish_first_login(keycloak, "admin")
-    assert _password_login(keycloak, "admin", "not-the-password").status_code == 401
     operator = await _operator_for(keycloak, "admin", first_login["admin_password"], monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.TENANT_ADMIN

@@ -114,8 +114,6 @@ spec:
             # reads them only while it imports the realm.
             - name: MEHO_REALM_PUBLIC_URL
               value: {{ printf "https://%s" .Values.hostname | quote }}
-            - name: MEHO_REALM_TENANT_ID
-              value: {{ .Values.firstTenantId | quote }}
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

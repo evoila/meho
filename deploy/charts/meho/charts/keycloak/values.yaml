@@ -6,16 +6,17 @@
 # - a StatefulSet with one Keycloak pod on the official image, pinned by
 #   digest, started with `start --import-realm`;
 # - a ConfigMap with the MEHO realm file (`files/meho-realm.json`). It holds
-#   no secret: the client secrets, the public URL and the first tenant id
-#   are `${...}` placeholders that Keycloak fills from the pod's environment
-#   when it imports the realm at the first start;
+#   no secret: the client secrets and the public URL are `${...}`
+#   placeholders that Keycloak fills from the pod's environment when it
+#   imports the realm at the first start;
 # - a Service `<release>-keycloak` on port 8080 (plain HTTP inside the
 #   namespace; TLS ends at the ingress);
 # - a NetworkPolicy, off by default.
 #
 # Keycloak imports the realm only when it does not exist yet. A changed
-# realm file does not change a running realm; the realm stage of the
-# bootstrap Job owns changes after the first start.
+# realm file does not change a running realm. The parent chart's bootstrap
+# Job (post-install and post-upgrade) adds what is missing after the first
+# start: the groups below, and the clients and mappers of the realm file.
 
 # -- Turns the subchart on. The parent's dependency entry uses
 # `condition: coreKeycloak.enabled`. Off by default: the chart then renders
@@ -30,12 +31,48 @@ enabled: false
 # is `https://<hostname>/auth/realms/meho`. Required when `enabled: true`.
 hostname: ""
 
-# -- The first tenant's id (a UUID). Every group in the realm carries it as
+# -- The first tenant's id (a UUID). Every group in `groups` carries it as
 # the `tenant_id` attribute, so every login of the first tenant gets it as
 # the `tenant_id` claim. Pick one UUID per install (for example with
 # `uuidgen`) and keep it: a move to a new install must reuse it. Required
 # when `enabled: true`.
 firstTenantId: ""
+
+# -- The realm's role groups: the one list of their names. The bootstrap Job
+# creates each missing group with the attributes `tenant_id`
+# (= `firstTenantId`), `tenant_role` and, when `approver` is true,
+# `approver`. A Keycloak mapper copies them into each login's token. The Job
+# never changes or deletes a group that exists. Put a person in exactly one
+# of these groups: with two, the token's role is not predictable.
+groups:
+  - name: MEHO-Readers
+    tenantRole: read_only
+  - name: MEHO-Operators
+    tenantRole: operator
+  # May approve another person's dangerous change.
+  - name: MEHO-SA-Operators
+    tenantRole: operator
+  - name: MEHO-Admins
+    tenantRole: tenant_admin
+  # May approve, nothing else.
+  - name: MEHO-Approvers
+    tenantRole: read_only
+    approver: true
+
+# -- The two people the bootstrap Job creates at the first install, so the
+# first change that needs approval has someone to approve it. Each `group`
+# must be a name in `groups`. Their passwords are generated, temporary
+# (Keycloak asks for a new one at the first login) and stored in the Secret
+# `<release>-core-first-login` (keys `admin_username`, `admin_password`,
+# `approver_username`, `approver_password`). The first admin also gets the
+# realm role `platform_admin`. Later upgrades never create them again.
+firstLogin:
+  admin:
+    username: admin
+    group: MEHO-Admins
+  approver:
+    username: approver
+    group: MEHO-SA-Operators
 
 image:
   # -- Official Keycloak image (built to run with any user id in group 0).
@@ -149,8 +186,8 @@ service:
   port: 8080
 
 # -- The subchart's own ingress NetworkPolicy. Off by default. It selects the
-# Keycloak pod and admits port 8080 only from the backplane pods and from the
-# peers in `extraFrom`. When you turn it on, add your ingress controller to
+# Keycloak pod and admits port 8080 only from the backplane pods, the
+# release's bootstrap Job and the peers in `extraFrom`. When you turn it on, add your ingress controller to
 # `extraFrom`, or browser and CLI logins stop.
 networkPolicy:
   enabled: false

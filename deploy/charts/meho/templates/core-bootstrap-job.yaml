@@ -1,0 +1,127 @@
+{{- if .Values.coreKeycloak.enabled }}
+{{- /*
+The built-in core's `bootstrap` Job (#4043; core design §3), one stage: the
+realm stage. After every install and upgrade it finishes the Keycloak
+realm: the role groups, any client or mapper a newer chart adds, the client
+secrets, the first admin and the second person (first install only, with
+temporary passwords in `<release>-core-first-login`), and the removal of
+Keycloak's temporary bootstrap account. Safe to run twice; prints no value.
+Details: docs/codebase/core-bootstrap.md.
+*/}}
+{{- $bootstrapSecret := .Values.coreKeycloak.existingSecrets.bootstrap | default (printf "%s-core-keycloak-bootstrap" .Release.Name) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "meho.core.hookName" . }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    # Same policy as the secrets Job: a re-run replaces the old Job, a
+    # successful one is removed, a failed one stays for `kubectl logs`.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        # Not `meho.selectorLabels` (see core-secrets-job.yaml). The Keycloak
+        # subchart's NetworkPolicy admits this component on port 8080.
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: core-bootstrap
+    spec:
+      # `Never`: the failed pod and its one-sentence log stay (see the secrets Job).
+      restartPolicy: Never
+      serviceAccountName: {{ include "meho.core.hookName" . }}
+      # The token is needed only to write `<release>-core-first-login`.
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: bootstrap
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "meho_backplane.core.bootstrap", "keycloak"]
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Service URL, tenant id, groups and the two people; no secret.
+            - name: MEHO_CORE_BOOTSTRAP_PLAN
+              value: {{ include "meho.core.bootstrapPlan" . | quote }}
+            - name: MEHO_CORE_REALM_FILE
+              value: /realm/meho-realm.json
+            # Keycloak's temporary bootstrap account, from the Secret the
+            # Keycloak pod reads.
+            - name: KC_BOOTSTRAP_ADMIN_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $bootstrapSecret }}
+                  key: client_id
+            - name: KC_BOOTSTRAP_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $bootstrapSecret }}
+                  key: client_secret
+            # The realm file's placeholders, from the same sources as the
+            # Keycloak pod (charts/keycloak/templates/statefulset.yaml).
+            - name: MEHO_REALM_PUBLIC_URL
+              value: {{ printf "https://%s" .Values.coreKeycloak.hostname | quote }}
+            - name: MEHO_REALM_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-core-keycloak-admin" .Release.Name }}
+                  key: client_secret
+            - name: MEHO_REALM_WEB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-core-ui-auth" .Release.Name }}
+                  key: client_secret
+            - name: MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-core-check-runner" .Release.Name }}
+                  key: client_secret
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: realm
+              mountPath: /realm
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # The realm file Keycloak imported at its first start.
+        - name: realm
+          configMap:
+            name: {{ include "coreKeycloak.fullname" . }}-realm
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

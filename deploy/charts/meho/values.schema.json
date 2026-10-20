@@ -866,6 +866,8 @@
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
         "firstTenantId": { "type": "string", "description": "The first tenant's id (a UUID). Every realm group carries it as `tenant_id`. Required when enabled." },
+        "groups": { "type": "array", "description": "The realm's role groups, the one list of their names (`name`, `tenantRole`, `approver`). The bootstrap Job creates each missing group." },
+        "firstLogin": { "type": "object", "description": "`admin` and `approver` (`username`, `group`): the two people the bootstrap Job creates at the first install. Each group must be a name in `groups`." },
         "ingress": { "type": "object", "description": "`exposeAdmin`: also route the admin console on the MEHO host." },
         "image": { "type": "object" },
         "waitForDatabase": { "type": "object" },

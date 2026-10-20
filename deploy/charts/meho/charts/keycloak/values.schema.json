@@ -20,7 +20,82 @@
     "firstTenantId": {
       "type": "string",
       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$",
-      "description": "The first tenant's id, a UUID. Every realm group carries it as the `tenant_id` attribute. Required when the subchart is on."
+      "description": "The first tenant's id, a UUID. The bootstrap Job gives every group in `groups` this id as the `tenant_id` attribute. Required when the subchart is on."
+    },
+    "groups": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The realm's role groups, in one list. The bootstrap Job creates each missing group with the attributes `tenant_id` (= `firstTenantId`), `tenant_role` and, when `approver` is true, `approver`. It never changes a group that exists. A person should be in exactly one of these groups.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "tenantRole"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]*$"
+          },
+          "tenantRole": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "operator",
+              "tenant_admin"
+            ]
+          },
+          "approver": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "firstLogin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The two people the bootstrap Job creates at the first install, with temporary passwords in `<release>-core-first-login`. The first admin also gets the realm role `platform_admin`.",
+      "properties": {
+        "admin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "username",
+            "group"
+          ],
+          "properties": {
+            "username": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]*$"
+            },
+            "group": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]*$",
+              "description": "One of the names in `groups`."
+            }
+          }
+        },
+        "approver": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "username",
+            "group"
+          ],
+          "properties": {
+            "username": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]*$"
+            },
+            "group": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]*$",
+              "description": "One of the names in `groups`."
+            }
+          }
+        }
+      }
     },
     "image": {
       "type": "object",

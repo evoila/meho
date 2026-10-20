@@ -41,66 +41,14 @@
       }
     }
   ],
-  "groups": [
-    {
-      "name": "MEHO-Readers",
-      "attributes": {
-        "tenant_id": [
-          "${MEHO_REALM_TENANT_ID}"
-        ],
-        "tenant_role": [
-          "read_only"
-        ]
+  "roles": {
+    "realm": [
+      {
+        "name": "platform_admin",
+        "description": "May act across tenants (MEHO's platform_admin flag). The bootstrap Job gives it to the first admin."
       }
-    },
-    {
-      "name": "MEHO-Operators",
-      "attributes": {
-        "tenant_id": [
-          "${MEHO_REALM_TENANT_ID}"
-        ],
-        "tenant_role": [
-          "operator"
-        ]
-      }
-    },
-    {
-      "name": "MEHO-SA-Operators",
-      "attributes": {
-        "tenant_id": [
-          "${MEHO_REALM_TENANT_ID}"
-        ],
-        "tenant_role": [
-          "operator"
-        ]
-      }
-    },
-    {
-      "name": "MEHO-Admins",
-      "attributes": {
-        "tenant_id": [
-          "${MEHO_REALM_TENANT_ID}"
-        ],
-        "tenant_role": [
-          "tenant_admin"
-        ]
-      }
-    },
-    {
-      "name": "MEHO-Approvers",
-      "attributes": {
-        "tenant_id": [
-          "${MEHO_REALM_TENANT_ID}"
-        ],
-        "tenant_role": [
-          "read_only"
-        ],
-        "approver": [
-          "true"
-        ]
-      }
-    }
-  ],
+    ]
+  },
   "clients": [
     {
       "clientId": "meho-backplane",

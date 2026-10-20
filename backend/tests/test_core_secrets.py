@@ -33,6 +33,7 @@ from meho_backplane.core.secrets import (
     CoreSecretsError,
     KubernetesSecretStore,
     Plan,
+    StoredSecret,
     load_plan,
     reconcile,
 )
@@ -416,7 +417,19 @@ class _FakeCoreV1:
         assert kwargs == {"_request_timeout": 30}
         if self.read_status is not None:
             raise self._error(self.read_status)
-        return SimpleNamespace(data={"a": "YQ==", "b": "Yg=="})
+        return SimpleNamespace(
+            data={"a": "YQ==", "b": "Yg=="},
+            metadata=SimpleNamespace(annotations={"note": "x"}),
+        )
+
+    async def patch_namespaced_secret(
+        self, name: str, namespace: str, body: Any, **kwargs: Any
+    ) -> Any:
+        assert kwargs == {"_request_timeout": 30}
+        self.bodies.append(body)
+        if self.create_status is not None:
+            raise self._error(self.create_status)
+        return body
 
     async def create_namespaced_secret(self, namespace: str, body: Any, **kwargs: Any) -> Any:
         assert kwargs == {"_request_timeout": 30}
@@ -466,3 +479,21 @@ async def test_kubernetes_store_create_conflict_and_error() -> None:
         await KubernetesSecretStore(_FakeCoreV1(create_status=422), "ns").create(
             "x", {"k": "v"}, "Opaque"
         )
+
+
+async def test_kubernetes_store_reads_values_and_annotations() -> None:
+    store = KubernetesSecretStore(_FakeCoreV1(), "ns")
+    assert await store.read_data("x") == StoredSecret(
+        data={"a": "a", "b": "b"}, annotations={"note": "x"}
+    )
+    assert await KubernetesSecretStore(_FakeCoreV1(read_status=404), "ns").read_data("x") is None
+    with pytest.raises(CoreSecretsError, match=r'cannot read Secret "x": HTTP 403 Reason'):
+        await KubernetesSecretStore(_FakeCoreV1(read_status=403), "ns").read_data("x")
+
+
+async def test_kubernetes_store_annotates_without_touching_values() -> None:
+    api = _FakeCoreV1()
+    await KubernetesSecretStore(api, "ns").annotate("x", {"k": "v"})
+    assert api.bodies == [{"metadata": {"annotations": {"k": "v"}}}]
+    with pytest.raises(CoreSecretsError, match=r'cannot annotate Secret "x": HTTP 403 Reason'):
+        await KubernetesSecretStore(_FakeCoreV1(create_status=403), "ns").annotate("x", {"k": "v"})

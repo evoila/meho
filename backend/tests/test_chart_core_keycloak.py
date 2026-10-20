@@ -168,9 +168,10 @@ def test_keycloak_settings() -> None:
         "KC_HEALTH_ENABLED": "true",
         "KC_CACHE": "local",
         "MEHO_REALM_PUBLIC_URL": "https://meho.test",
-        "MEHO_REALM_TENANT_ID": _TENANT,
     }
     assert {k: env[k]["value"] for k in expected} == expected
+    # The groups (and their tenant id) come from the bootstrap Job, not the import.
+    assert "MEHO_REALM_TENANT_ID" not in env
 
 
 def test_secrets_come_from_the_secrets_job_by_name() -> None:
@@ -311,7 +312,7 @@ def test_no_ingress_when_ingress_is_off() -> None:
     assert [d for d in docs if d["kind"] == "StatefulSet" and _is_keycloak(d)]
 
 
-def test_networkpolicy_off_by_default_and_admits_backplane_when_on() -> None:
+def test_networkpolicy_off_by_default_and_admits_backplane_and_bootstrap_when_on() -> None:
     assert "NetworkPolicy" not in _keycloak_docs()
     np = _keycloak_docs(
         "--set",
@@ -329,7 +330,12 @@ def test_networkpolicy_off_by_default_and_admits_backplane_when_on() -> None:
         "app.kubernetes.io/name": "meho",
         "app.kubernetes.io/instance": "test",
     }
-    assert rule["from"][1] == {
+    # The bootstrap Job (#4043) finishes the realm through the Service.
+    assert rule["from"][1]["podSelector"]["matchLabels"] == {
+        "app.kubernetes.io/instance": "test",
+        "app.kubernetes.io/component": "core-bootstrap",
+    }
+    assert rule["from"][2] == {
         "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}
     }
     assert rule["ports"] == [{"port": "http", "protocol": "TCP"}]

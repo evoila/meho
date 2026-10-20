@@ -372,6 +372,41 @@ class KeycloakAdminClient:
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
 
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Any = None,
+        params: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """Send one authenticated Admin REST call and return the raw response.
+
+        *path* is relative to the admin URL (``/clients``, ``/users/<id>``).
+        The caller checks the status. Used by the core's realm stage
+        (:mod:`meho_backplane.core.bootstrap`), which needs many plain
+        calls rather than the agent-principal operations above.
+        """
+        assert self._http is not None
+        assert self._token
+        headers = self._auth_headers()
+        content = None
+        if json_body is not None:
+            content = json.dumps(json_body)
+            headers["Content-Type"] = "application/json"
+        try:
+            return await self._http.request(
+                method,
+                f"{self._admin_url}{path}",
+                content=content,
+                params=params,
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak {method} {path} network error: {type(exc).__name__}"
+            ) from exc
+
     async def create_client(
         self,
         *,

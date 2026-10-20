@@ -699,7 +699,8 @@ lands with #4591. The pod does not start until all five exist.
 | ConfigMap `<release>-keycloak-realm` | `meho-realm.json`, mounted at `/opt/keycloak/data/import` |
 | Service `<release>-keycloak` | port 8080, plain HTTP inside the namespace |
 | two more paths on the backplane's Ingress (parent chart, `templates/_core-keycloak.tpl`) | on `ingress.host`: `/auth/realms/meho` and `/auth/resources` only (`Prefix`), to the Keycloak Service; `coreKeycloak.ingress.exposeAdmin: true` adds `/auth/admin` and `/auth/realms/master`. One Ingress keeps one set of annotations and one TLS certificate for the host |
-| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods and `networkPolicy.extraFrom` |
+| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods, the release's bootstrap Job and `networkPolicy.extraFrom` |
+| Job `<release>-core-bootstrap` (parent chart, post-install and post-upgrade hook) | the realm stage: groups, missing clients and mappers, client secrets, the two first-login people, removal of the bootstrap account (`docs/codebase/core-bootstrap.md`) |
 
 **Addresses.** Browsers, the CLI and the `iss` claim use the public URL
 `https://<coreKeycloak.hostname>/auth` (`KC_HOSTNAME`,
@@ -736,8 +737,9 @@ Admission label, and again with user id 1000650000 in group 0.
 
 Keycloak imports the file at its **first start only**. When the realm
 exists, the import is skipped, so a changed file does not change a running
-realm. Changes after the first start go through the realm stage of the
-bootstrap Job.
+realm. After every install and upgrade the bootstrap Job's realm stage adds
+what is missing: the groups, and the clients and mappers of this file
+(`docs/codebase/core-bootstrap.md`).
 
 The file holds **no secret and no host name**. Keycloak fills every
 `${...}` from the pod's environment during the import:
@@ -745,10 +747,12 @@ The file holds **no secret and no host name**. Keycloak fills every
 | Placeholder | Value |
 | --- | --- |
 | `MEHO_REALM_PUBLIC_URL` | `https://<coreKeycloak.hostname>` |
-| `MEHO_REALM_TENANT_ID` | `coreKeycloak.firstTenantId` (a UUID; pick one per install and keep it for a move) |
 | `MEHO_REALM_ADMIN_CLIENT_SECRET`, `MEHO_REALM_WEB_CLIENT_SECRET`, `MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET` | the three client Secrets above |
 
-**Groups.** Each group carries the first tenant id and a role:
+**Groups.** They are not in the file. They are one values list,
+`coreKeycloak.groups`, and the bootstrap Job creates each missing group.
+Each group carries the first tenant id (`coreKeycloak.firstTenantId`, a
+UUID; pick one per install and keep it for a move) and a role:
 
 | Group | `tenant_role` | Other attribute |
 | --- | --- | --- |
@@ -784,6 +788,10 @@ the access token and userinfo; `approver` as a boolean), the audience
 mappers for `meho-backplane` and `https://<host>/mcp`, and the `groups`
 claim. No client has a fixed-value tenant or role mapper. The group model is
 the decision in `docs/decisions/login-role-groups.md`.
+
+**Realm role.** `platform_admin` (the right to act across tenants). The
+bootstrap Job gives it to the first admin, and the chart sets
+`JWT_PLATFORM_ADMIN_ROLE_NAME=platform_admin` on the backplane.
 
 **Realm settings.** Offline sessions end after 7 days at most
 (`offlineSessionMaxLifespanEnabled`). Brute-force detection is on.

@@ -61,7 +61,7 @@ pair with their own certificate by setting `ingress.tls.secretName`.
 **Not made by this Job:**
 
 - `-core-first-login` (the first admin's temporary passwords): the realm
-  stage of the `bootstrap` Job (#4043).
+  stage of the `bootstrap` Job (#4043, `docs/codebase/core-bootstrap.md`).
 - The `meho-backplane` client secret: Keycloak makes it at realm import, and
   it never leaves Keycloak.
 - `-core-vault-unseal`, `-core-vault-init`, `-core-vault-snapshot`,
@@ -222,6 +222,8 @@ volumes together, or neither: new passwords do not match old data.
 ## References
 
 - Core design, section 3 "Secrets at install" (internal design note).
+- `docs/codebase/core-bootstrap.md` — the `bootstrap` Job that finishes the
+  Keycloak realm after the install.
 - `docs/codebase/approvals.md` — the approval hand-off key.
 - `docs/codebase/devops.md` — chart layout and the migration Job.
 - Kubernetes RBAC, "Referring to resources" (no `resourceNames` on

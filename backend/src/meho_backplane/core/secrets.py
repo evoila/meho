@@ -30,6 +30,7 @@ Exit code ``0`` on success, ``1`` on any failure, with the reason on stderr as
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import secrets
@@ -55,6 +56,7 @@ __all__ = [
     "KubernetesSecretStore",
     "Plan",
     "SecretStore",
+    "StoredSecret",
     "build_data",
     "load_plan",
     "main",
@@ -108,6 +110,14 @@ _KINDS: Mapping[str, _KindSpec] = {
     "broadcast-auth": _KindSpec(("requirepass",)),
     "tls": _KindSpec(("tls.crt", "tls.key", "ca.crt"), "kubernetes.io/tls", needs_host=True),
 }
+
+
+@dataclass(frozen=True)
+class StoredSecret:
+    """A Secret's decoded values and its annotations."""
+
+    data: Mapping[str, str]
+    annotations: Mapping[str, str]
 
 
 class CoreSecretsError(Exception):
@@ -292,6 +302,29 @@ class KubernetesSecretStore:
                 return False
             raise CoreSecretsError(f'cannot create Secret "{name}": {_describe(exc)}') from None
         return True
+
+    async def read_data(self, name: str) -> StoredSecret | None:
+        """Return the Secret's values and annotations, or ``None`` if it does not exist."""
+        try:
+            secret = await self._api.read_namespaced_secret(
+                name, self._namespace, _request_timeout=_API_TIMEOUT_S
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise CoreSecretsError(f'cannot read Secret "{name}": {_describe(exc)}') from None
+        data = {key: base64.b64decode(value).decode() for key, value in (secret.data or {}).items()}
+        return StoredSecret(data=data, annotations=dict(secret.metadata.annotations or {}))
+
+    async def annotate(self, name: str, annotations: Mapping[str, str]) -> None:
+        """Merge *annotations* into the Secret's metadata; values stay as they are."""
+        body = {"metadata": {"annotations": dict(annotations)}}
+        try:
+            await self._api.patch_namespaced_secret(
+                name, self._namespace, body, _request_timeout=_API_TIMEOUT_S
+            )
+        except ApiException as exc:
+            raise CoreSecretsError(f'cannot annotate Secret "{name}": {_describe(exc)}') from None
 
 
 def load_plan(environ: Mapping[str, str]) -> Plan:

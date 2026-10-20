@@ -51,6 +51,15 @@ Next steps:
 {{- if not .Values.coreKeycloak.ingress.exposeAdmin }}
      The admin console is not on the ingress (coreKeycloak.ingress.exposeAdmin=false).
 {{- end }}
+  5. First login. At the first install the bootstrap Job creates the first admin
+     ({{ .Values.coreKeycloak.firstLogin.admin.username }}, in {{ .Values.coreKeycloak.firstLogin.admin.group }}) and a second person who can approve
+     changes ({{ .Values.coreKeycloak.firstLogin.approver.username }}, in {{ .Values.coreKeycloak.firstLogin.approver.group }}). Their passwords are in the Secret
+     {{ .Release.Name }}-core-first-login. Read the first admin's password:
+       kubectl -n {{ .Release.Namespace }} get secret {{ .Release.Name }}-core-first-login -o jsonpath='{.data.admin_password}' | base64 -d
+     (the second person's is under approver_password). Then log in:
+       meho login https://{{ .Values.coreKeycloak.hostname }}
+     Both passwords are temporary: Keycloak asks for a new one at the first login.
+     Change them, and give the second person's login to the person who will hold it.
 {{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 

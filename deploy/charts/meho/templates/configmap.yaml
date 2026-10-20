@@ -60,6 +60,11 @@ data:
   UI_KEYCLOAK_CLIENT_ID: {{ .Values.config.uiKeycloakClientId | quote }}
   KEYCLOAK_JWKS_CACHE_TTL_SECONDS: {{ .Values.config.keycloakJwksCacheTtlSeconds | quote }}
   KEYCLOAK_JWT_LEEWAY_SECONDS: {{ .Values.config.keycloakJwtLeewaySeconds | quote }}
+  {{- if .Values.coreKeycloak.enabled }}
+  # The built-in realm grants `platform_admin` as a realm role; the
+  # bootstrap Job gives it to the first admin (#4043).
+  JWT_PLATFORM_ADMIN_ROLE_NAME: "platform_admin"
+  {{- end }}
   # Emitted only for a Vault-backend install (Initiative #2227). A
   # GCP-native (`config.credentialBackend: gsm`) deploy leaves
   # `config.vaultAddr` empty and runs no Vault, so the key is omitted

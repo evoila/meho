@@ -1157,6 +1157,12 @@ coreKeycloak:
   # the first start. Needs `corePostgres.enabled: true`. Every other key is
   # described in `charts/keycloak/values.yaml`; set it here.
   #
+  # After every install and upgrade the `bootstrap` Job finishes the realm
+  # (docs/codebase/core-bootstrap.md). It reads two keys whose defaults live
+  # in `charts/keycloak/values.yaml`: `groups` (the role groups, the one list
+  # of their names) and `firstLogin` (the first admin and the second person,
+  # with temporary passwords in `<release>-core-first-login`).
+  #
   # While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`,
   # `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
   # `checkRunner.clientSecret.secretName` must stay empty or name the

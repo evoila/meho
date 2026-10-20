@@ -5,13 +5,16 @@
 
 The file ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` is what
 Keycloak imports at its first start. These checks pin the realm the product
-owner decided (``docs/decisions/login-role-groups.md``): five groups that
-carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
-the six clients, the mappers ``meho admin keycloak bootstrap-clients`` puts
-on the clients people log in with, and no secret or host name written into
-the file.
+owner decided (``docs/decisions/login-role-groups.md``): the six clients,
+the mappers ``meho admin keycloak bootstrap-clients`` puts on the clients
+people log in with, and no secret or host name written into the file.
 Every value that differs per install is a ``${...}`` placeholder that
 Keycloak fills from the pod's environment during the import.
+
+The five role groups (``tenant_id``, ``tenant_role``, plus ``approver`` on
+MEHO-Approvers) are not in the file since #4043: they are one values list,
+``coreKeycloak.groups``, and the bootstrap Job creates them. The group check
+below reads that list.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 _REALM_FILE = (
     Path(__file__).resolve().parents[2]
@@ -34,10 +38,11 @@ _REALM_FILE = (
     / "meho-realm.json"
 )
 
+_VALUES_FILE = _REALM_FILE.parents[1] / "values.yaml"
+
 _HUMAN_CLIENTS = ("meho-cli", "meho-mcp", "meho-web")
 _PLACEHOLDERS = {
     "MEHO_REALM_PUBLIC_URL",
-    "MEHO_REALM_TENANT_ID",
     "MEHO_REALM_ADMIN_CLIENT_SECRET",
     "MEHO_REALM_WEB_CLIENT_SECRET",
     "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET",
@@ -71,30 +76,15 @@ def test_no_company_login_yet(realm: dict[str, Any]) -> None:
     assert realm["identityProviderMappers"] == []
 
 
-def test_five_groups_with_tenant_attributes(realm: dict[str, Any]) -> None:
-    groups = {g["name"]: g["attributes"] for g in realm["groups"]}
-    assert groups == {
-        "MEHO-Readers": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["read_only"],
-        },
-        "MEHO-Operators": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["operator"],
-        },
-        "MEHO-SA-Operators": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["operator"],
-        },
-        "MEHO-Admins": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["tenant_admin"],
-        },
-        "MEHO-Approvers": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["read_only"],
-            "approver": ["true"],
-        },
+def test_five_role_groups_come_from_values_not_the_file(realm: dict[str, Any]) -> None:
+    assert "groups" not in realm
+    groups = yaml.safe_load(_VALUES_FILE.read_text())["groups"]
+    assert {g["name"]: (g["tenantRole"], g.get("approver", False)) for g in groups} == {
+        "MEHO-Readers": ("read_only", False),
+        "MEHO-Operators": ("operator", False),
+        "MEHO-SA-Operators": ("operator", False),
+        "MEHO-Admins": ("tenant_admin", False),
+        "MEHO-Approvers": ("read_only", True),
     }
 
 

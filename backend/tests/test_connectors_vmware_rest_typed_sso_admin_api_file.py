@@ -25,6 +25,8 @@ import respx
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.vault import VaultUnreachableError
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRest80Connector, VmwareRestConnector
@@ -44,6 +46,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.result_query import ResultQuerySpec, run_result_query
+from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
 _HOST = "vc-sso.test.invalid"
@@ -102,8 +105,8 @@ async def _stub_loader(_target: Any, _operator: Operator) -> dict[str, str]:
     return {"username": "svc-test", "password": "stub-password"}
 
 
-def _connector() -> VmwareRestConnector:
-    connector = VmwareRestConnector(session_loader=_stub_loader)
+def _connector(session_loader: Any = _stub_loader) -> VmwareRestConnector:
+    connector = VmwareRestConnector(session_loader=session_loader)
 
     async def _aclose() -> None:
         connector._session_tokens.clear()
@@ -136,6 +139,16 @@ async def _call(connector: VmwareRestConnector, path: str) -> dict[str, Any]:
 def _joined(answer: dict[str, Any]) -> bytes:
     parts = sorted(answer["text_parts"], key=lambda part: part["index"])
     return "".join(part["text"] for part in parts).encode("utf-8")
+
+
+def _redact_like_the_dispatcher(answer: dict[str, Any]) -> Any:
+    """Run the stored-result redaction with the labels the dispatcher uses."""
+    return apply_connector_boundary_redaction(
+        answer,
+        connector_id=f"{VmwareRestConnector.impl_id}-{VmwareRestConnector.version}",
+        tenant=str(_TENANT),
+        op=VCENTER_SSO_ADMIN_API_FILE_GET_OP.op_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +345,42 @@ async def test_failed_version_read_still_returns_the_file(version_status: int) -
     assert "/api/appliance/system/version" in answer["version_error"]
 
 
+async def _no_credentials(_target: Any, _operator: Operator) -> dict[str, str]:
+    raise VaultCredentialsReadError("no credentials stored for target 'vc-sso'")
+
+
+async def _store_login_fails(_target: Any, _operator: Operator) -> dict[str, str]:
+    raise VaultUnreachableError("credential store login failed: connection refused")
+
+
+@pytest.mark.parametrize(
+    ("loader", "error_name"),
+    [
+        (_no_credentials, "VaultCredentialsReadError"),
+        (_store_login_fails, "VaultUnreachableError"),
+    ],
+    ids=["missing-credentials", "credential-store-login-fails"],
+)
+async def test_credential_failure_on_the_version_read_still_returns_the_file(
+    loader: Any, error_name: str
+) -> None:
+    connector = _connector(session_loader=loader)
+    body = _WSDL.encode()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_WSDL_PATH).respond(200, content=body, headers={"Content-Type": "text/xml"})
+        answer = await _call(connector, _WSDL_PATH)
+    await connector.aclose()
+
+    assert answer["status"] == 200
+    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
+    assert answer["text_parts"] == [{"index": 0, "text": _WSDL}]
+    assert answer["version"] is None
+    assert answer["build"] is None
+    assert error_name in answer["version_error"]
+    assert "/api/appliance/system/version" in answer["version_error"]
+
+
 # ---------------------------------------------------------------------------
 # Large files: joining the parts gives the exact file
 # ---------------------------------------------------------------------------
@@ -440,6 +489,32 @@ async def test_non_utf8_text_is_refused() -> None:
     await connector.aclose()
 
 
+_WSDL_WITH_TOKEN_TYPE = _WSDL.replace(
+    '<xsd:include schemaLocation="admin-faults.xsd"/>',
+    '<xsd:include schemaLocation="admin-faults.xsd"/>\n'
+    '      <xsd:element name="token" type="token:SecurityToken"/>',
+)
+
+
+async def test_file_whose_text_redaction_would_change_is_refused() -> None:
+    body = _WSDL_WITH_TOKEN_TYPE.encode()
+    assert _redact_like_the_dispatcher({"text": _WSDL_WITH_TOKEN_TYPE}).manifest
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_WSDL_PATH).respond(200, content=body, headers={"Content-Type": "text/xml"})
+        with pytest.raises(SsoAdminApiFileError) as excinfo:
+            await _call(connector, _WSDL_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert _WSDL_PATH in message
+    assert "strip-api-key" in message
+    assert "text_parts.0.text" in message
+    assert "not returned" in message
+    assert "SecurityToken" not in message
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -482,12 +557,15 @@ async def test_large_answer_is_read_back_part_by_part_through_result_query(
         answer = await _call(connector, _WSDL_PATH)
     await connector.aclose()
 
+    redaction = _redact_like_the_dispatcher(answer)
+    assert redaction.manifest == ()
+    assert redaction.redacted == redaction.raw
     context = {
         "op_id": VCENTER_SSO_ADMIN_API_FILE_GET_OP.op_id,
         "operator_sub": _operator().sub,
         "tenant_id": str(_TENANT),
     }
-    summary, handle = await JsonFluxReducer(store=store).reduce(answer, None, context)
+    summary, handle = await JsonFluxReducer(store=store).reduce(redaction.redacted, None, context)
 
     assert handle is not None
     assert handle.fetch_more is not None

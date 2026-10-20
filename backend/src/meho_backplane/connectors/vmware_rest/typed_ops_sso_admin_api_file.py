@@ -24,9 +24,14 @@ The read is narrow on purpose:
   parts in order gives the exact file; ``sha256`` is the hash of the
   file bytes. A file that does not fit in one stored result is refused
   with its size, never cut.
+* MEHO redacts secret-shaped text in every stored result. The read runs
+  the same redaction rules the dispatcher will apply and refuses a file
+  whose text they would change, naming the rule. So the stored parts
+  always match ``sha256``, and redaction stays active.
 
 The vCenter version and build come from ``GET /api/appliance/system/version``
-on the connector's normal login. When that read fails, the file still
+on the connector's normal login. When that read fails (HTTP error, login
+error, or the credential store cannot serve the login), the file still
 comes back and ``version_error`` says why.
 """
 
@@ -43,14 +48,18 @@ import structlog
 from defusedxml import DefusedXmlException
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp
+from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
+    "OP_ID",
     "PART_MAX_BYTES",
     "SSO_ADMIN_API_FILE_GROUP_KEY",
     "SSO_ADMIN_API_FILE_WHEN_TO_USE",
@@ -63,6 +72,8 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+OP_ID = "vcenter.sso_admin.api_file.get"
 
 #: The SSO Admin service folder. The documented service address is
 #: ``/sso-adminserver/sdk/{domain}``.
@@ -241,10 +252,23 @@ async def _fetch_file(
 async def _read_version(
     connector: VmwareRestConnector, operator: Operator, target: VsphereTargetLike
 ) -> dict[str, Any]:
-    """Read ``version`` and ``build``; on failure return ``None`` and the reason."""
+    """Read ``version`` and ``build``; on failure return ``None`` and the reason.
+
+    The read logs in with the connector's normal credentials, so it can
+    also fail before any request goes out: no credentials for the target,
+    access denied, or a credential store that cannot be reached. Those are
+    expected failures of this best-effort read, not of the file read.
+    """
     try:
         payload = await connector._get_json(target, _APPLIANCE_VERSION_PATH, operator=operator)
-    except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+    except (
+        httpx.HTTPError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        CredentialsReadError,
+        VaultClientError,
+    ) as exc:
         return {
             "version": None,
             "build": None,
@@ -293,6 +317,40 @@ def _check_fits(answer: dict[str, Any], max_record_bytes: int) -> None:
         )
 
 
+def _check_redaction_keeps_text(
+    answer: dict[str, Any], connector: VmwareRestConnector, operator: Operator
+) -> None:
+    """Refuse a file whose text the stored-result redaction would change.
+
+    The dispatcher redacts every result with the policy for this
+    (connector, tenant, operation) before it stores the result. A rule
+    that fires on the file text would rewrite a part, and the joined parts
+    would no longer match ``sha256``. This runs the same middleware with
+    the same labels on the text parts alone, so the check and the real
+    redaction cannot disagree.
+    """
+    probe = {"text_parts": answer["text_parts"]}
+    result = apply_connector_boundary_redaction(
+        probe,
+        connector_id=f"{connector.impl_id}-{connector.version}",
+        tenant=str(operator.tenant_id) if operator.tenant_id is not None else None,
+        op=OP_ID,
+    )
+    if result.redacted == result.raw:
+        return
+    hit = result.manifest[0] if result.manifest else None
+    where = (
+        f"rule {hit.rule!r} ({hit.reason}) fires at {hit.path}"
+        if hit is not None
+        else f"policy {result.policy_id!r} changes the text"
+    )
+    raise SsoAdminApiFileError(
+        f"{answer['path']!r} holds text that MEHO's secret redaction would change: {where}. "
+        "The stored parts would no longer match sha256, so the file was not returned. "
+        "This read never returns a changed file."
+    )
+
+
 async def sso_admin_api_file_get_impl(
     connector: VmwareRestConnector,
     operator: Operator,
@@ -304,6 +362,8 @@ async def sso_admin_api_file_get_impl(
     1. Check the path (no request goes out for a refused path).
     2. ``GET`` the file without login, without following a redirect.
     3. Read the vCenter version and build (best effort).
+    4. Refuse a file that does not fit in one stored result, or whose
+       text the stored-result redaction would change.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -328,6 +388,7 @@ async def sso_admin_api_file_get_impl(
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         _check_fits(answer, max_record_bytes)
+        _check_redaction_keeps_text(answer, connector, operator)
 
     _log.info(
         "vcenter_sso_admin_api_file_read",
@@ -435,7 +496,7 @@ SSO_ADMIN_API_FILE_WHEN_TO_USE = (
 )
 
 VCENTER_SSO_ADMIN_API_FILE_GET_OP = VmwareTypedOp(
-    op_id="vcenter.sso_admin.api_file.get",
+    op_id=OP_ID,
     handler_attr="sso_admin_api_file_get",
     summary="Read one SSO Admin API description file (WSDL or XSD) that a vCenter serves.",
     description=(

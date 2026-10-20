@@ -644,6 +644,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   - **Version and build** come from `GET /api/appliance/system/version` on
     the connector's normal login. If that read fails, the file still comes
     back, `version` and `build` are `null`, and `version_error` says why.
+    This covers an HTTP error, a vCenter login error, and the credential
+    failures that happen before any request goes out: no credentials for
+    the target, access denied, or a credential store that cannot be reached
+    (`CredentialsReadError`, `VaultClientError`).
   - **How to rebuild the file.** `text_parts` is a list of
     `{index, text}`, each at most 64 KiB of UTF-8, cut only between
     characters. Join the `text` of all parts in `index` order and encode as
@@ -658,10 +662,24 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
     stored JSON) stops with an error that names its size; the read never
     returns a cut file.
+  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+    every stored result (the dispatcher runs
+    `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
+    that fires on the file text would rewrite a part, and the joined parts
+    would no longer match `sha256`. So the read runs the same middleware, with
+    the same connector, tenant and operation labels, on the text parts before
+    it returns. When the text would change, the read stops with an error that
+    names the rule and the part, and returns no file. Redaction itself stays
+    on. The default policy's `strip-api-key` rule fires on text such as
+    `type="token:SecurityToken"`; a redaction policy registered for this
+    operation changes what the check accepts, because both use the same
+    policy lookup.
   - **Tests.** `tests/test_connectors_vmware_rest_typed_sso_admin_api_file.py`
     (respx: accepted and refused paths, no login on the `GET`, status and
-    redirect cases, large files, version failure, the result-handle round
-    trip) and the reconcile lane
+    redirect cases, large files, version failure including missing
+    credentials and a failed credential-store login, a file that a redaction
+    rule would change, and the result-handle round trip through redaction,
+    storage and read-back) and the reconcile lane
     `tests/test_connectors_vmware_rest_sso_admin_api_file_reconcile.py`
     (the SSO Admin folder is a documentation path that the pinned 8.0 and
     9.0 `vcenter.yaml` do not serve; both serve

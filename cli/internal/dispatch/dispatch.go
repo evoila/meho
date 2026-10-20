@@ -79,7 +79,8 @@ type CallRequestBody struct {
 // SearchHit mirrors the backend OperationSearchHit Pydantic model.
 // Pointer fields are nullable per the backend's frozen pydantic
 // model — preserved so JSON unmarshal keeps the null vs zero-value
-// distinction.
+// distinction. The score fields are only sent to a tenant_admin who
+// asks for them (#3668), so they are omitempty here.
 //
 // Promoted from the 9 per-vendor copies (harbor / hetzner-robot /
 // nsx / sddc-manager / vcf-automation / vcf-fleet / vcf-logs /
@@ -93,9 +94,9 @@ type SearchHit struct {
 	GroupKey         *string  `json:"group_key"`
 	SafetyLevel      string   `json:"safety_level"`
 	RequiresApproval bool     `json:"requires_approval"`
-	FusedScore       float64  `json:"fused_score"`
-	Bm25Score        *float64 `json:"bm25_score"`
-	CosineScore      *float64 `json:"cosine_score"`
+	FusedScore       float64  `json:"fused_score,omitempty"`
+	Bm25Score        *float64 `json:"bm25_score,omitempty"`
+	CosineScore      *float64 `json:"cosine_score,omitempty"`
 }
 
 // SearchResponse is the JSON envelope returned by

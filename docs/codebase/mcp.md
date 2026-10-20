@@ -408,6 +408,56 @@ The full rules, bounds, and errors are in
 `tests/test_mcp_output_schema_conformance.py`, and
 `tests/test_result_reduction_properties.py`.
 
+### `search_operations` exact-op mode, and slim hits (#3668)
+
+A ranked hit tells the caller *which* operation to use. It does not
+say *how* to call it. Exact-op mode closes that gap without a new tool:
+`search_operations` takes an optional `op_id` argument.
+
+- **With `op_id`** there is no ranking. The handler looks up that one
+  enabled operation in the caller's visible scope (the same rule the
+  dispatcher uses) and returns `{"operation": {...}}`, not `hits`.
+  `query`, `group` and `limit` are ignored. The contract carries:
+  - `parameter_schema` — the stored schema, returned as-is. The
+    ingester already bundles every referenced component into it
+    (#3095), so params that validate against it pass `call_operation`.
+  - `examples` — at most 5 small values (each at most 500 characters
+    of JSON) from the schema's `example` / `examples` and the op's
+    registered `examples` / `example_call`.
+  - `target` — `required` (true for every ingested op, and for typed
+    ops whose handler reaches a connector), and `resolves_by: "name"`:
+    pass the target's name, not the id `list_targets` returns.
+  - `result_shape` — the `call_operation` result fields, and that a
+    large result comes back as a `handle` read only through
+    `result_query`.
+  - `pagination_hint` — only when the op registered one, else `null`.
+  - `safety_level`, `requires_approval`, and `recovery` — plain retry
+    rules (fix `params` on `invalid_params`; `awaiting_approval` is a
+    success that waits for a person and must not be retried; a
+    destructive op needs `preview_operation` first).
+- **Unknown op.** A known connector with no such enabled op raises
+  `UnknownOperationError`: MCP answers `-32602` with
+  `data.reason="unknown_op"`, REST answers `404` with
+  `detail.reason="unknown_op"`. An unknown connector keeps its own
+  `unknown_connector` / `connector_not_ingested` errors. The lookup
+  is deterministic and never returns an empty list.
+- **Slim ranked hits.** A ranked hit carries `op_id`, `summary`,
+  `description`, `group_key`, `safety_level` and `requires_approval`.
+  The ranking scores (`fused_score`, `bm25_score`, `cosine_score`) are
+  added only when the caller sets `include_scores` **and** is
+  `tenant_admin` (the same role the full descriptor read needs);
+  anyone else gets the slim hit.
+
+The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
+the `outcome` fields described in the next section) and the exact-op
+shape. The `inputSchema` needs `query` or `op_id` through a
+top-level `anyOf`; that combinator is removed from the wire copy (see
+`_wire_safe_input_schema`) and still checked on the server. The REST
+twin is `GET /api/v1/operations/search?op_id=...` (and
+`include_scores=true`); the CLI twin is
+`meho operation search <connector_id> --op-id <op_id>` (and `--scores`).
+Code: `operations/_contract.py`, `operations/meta_tools.py`.
+
 ### Why a search found nothing, or nothing good (#3670)
 
 `search_operations` tells the agent why a search found no suitable
@@ -581,7 +631,7 @@ add-on-family gate.
 | `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |
 | `search_knowledge` | operator | — | Search the tenant knowledge base. |
 | `search_memory` | operator | — | Search the operator's accessible memories. |
-| `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. |
+| `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. With `op_id` (exact-op mode) it returns that one operation's call contract instead: the stored `parameter_schema`, small examples, the target-by-name rule, the result shape and retry rules (#3668). |
 
 ### Operator surface (`mcp:admin` elevation required)
 

@@ -428,15 +428,15 @@ func TestPrintSearchTable(t *testing.T) {
 	summary := "List VMs"
 	r := &searchResponse{
 		Hits: []searchHit{
-			{OpID: "GET:/vcenter/vm", Summary: &summary, FusedScore: 0.987},
-			{OpID: "POST:/vcenter/vm", Summary: nil, FusedScore: 0.413},
+			{OpID: "GET:/vcenter/vm", Summary: &summary, SafetyLevel: "safe"},
+			{OpID: "POST:/vcenter/vm", Summary: nil, SafetyLevel: "caution"},
 		},
 		QueryDurationMs: 42.0,
 	}
 	var buf bytes.Buffer
 	printSearchTable(&buf, "list vms", r)
 	out := buf.String()
-	for _, want := range []string{"vmware-rest-9.0", "list vms", "2 hit(s)", "GET:/vcenter/vm", "List VMs", "0.987"} {
+	for _, want := range []string{"vmware-rest-9.0", "list vms", "2 hit(s)", "GET:/vcenter/vm", "List VMs", "safe", "caution"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printSearchTable missing %q in:\n%s", want, out)
 		}

@@ -328,6 +328,158 @@ func TestGetSearchPassesTypedParams(t *testing.T) {
 	}
 }
 
+// TestGetSearchSendsIncludeScores — --scores maps to include_scores=true.
+func TestGetSearchSendsIncludeScores(t *testing.T) {
+	body, _ := json.Marshal(SearchResponse{Hits: nil})
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	opts := searchOptions{ConnectorID: "vault-1.x", Query: "secret", Scores: true}
+	if _, err := getSearch(context.Background(), f, opts); err != nil {
+		t.Fatalf("getSearch: %v", err)
+	}
+	p := f.lastSearchParams
+	if p.IncludeScores == nil || !*p.IncludeScores {
+		t.Fatalf("--scores should send include_scores=true; got %+v", p.IncludeScores)
+	}
+}
+
+// TestGetExactOpSendsOpIDAndDecodesContract — --op-id sends only
+// connector_id + op_id and decodes the single contract (#3668).
+func TestGetExactOpSendsOpIDAndDecodesContract(t *testing.T) {
+	body := []byte(`{"operation": {"connector_id": "vault-1.x", "op_id": "vault.kv.read",
+		"summary": "Read a secret.", "description": null, "group_key": "kv",
+		"safety_level": "safe", "requires_approval": false,
+		"parameter_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+		"examples": [{"source": "parameter_schema", "param": "path", "value": "secret/app"}],
+		"target": {"required": true, "resolves_by": "name", "guidance": "Pass the target name."},
+		"result_shape": {"envelope_fields": ["status", "handle"], "guidance": "Use result_query."},
+		"pagination_hint": null, "recovery": ["Fix params and call again."]}}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	opts := searchOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", Limit: 10, GroupKey: "kv"}
+	got, err := getExactOp(context.Background(), f, opts)
+	if err != nil {
+		t.Fatalf("getExactOp: %v", err)
+	}
+	p := f.lastSearchParams
+	if p.OpId == nil || *p.OpId != "vault.kv.read" {
+		t.Fatalf("getExactOp should send op_id; got %+v", p.OpId)
+	}
+	if p.Q != nil || p.Group != nil || p.Limit != nil {
+		t.Fatalf("getExactOp should not send q/group/limit; got %+v", p)
+	}
+	if got.Operation.OpID != "vault.kv.read" || !got.Operation.Target.Required {
+		t.Fatalf("contract not decoded; got %+v", got.Operation)
+	}
+	var buf bytes.Buffer
+	printContract(&buf, &got.Operation)
+	for _, want := range []string{"vault.kv.read", "Pass the target name.", `"path"`, "secret/app", "Use result_query.", "Fix params"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("printContract missing %q in output:\n%s", want, buf.String())
+		}
+	}
+}
+
+// TestGetExactOpRateLimitedIsAnError — a 200 that carries the
+// backplane's rate_limited envelope must not decode into an empty
+// contract; the CLI reports the wait and exits non-zero (#3668).
+func TestGetExactOpRateLimitedIsAnError(t *testing.T) {
+	body := []byte(`{"status": "rate_limited", "error_code": "rate_limited", "kind": "rate",
+		"limit": 10, "retry_after_seconds": 7,
+		"error": "rate_limited: 10 dispatches per minute for this principal; retry after 7s"}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	got, err := getExactOp(context.Background(), f, searchOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read"})
+	if err == nil {
+		t.Fatalf("expected an error for a rate_limited envelope; got contract %+v", got)
+	}
+	var limited *rateLimitedError
+	if !errors.As(err, &limited) {
+		t.Fatalf("expected *rateLimitedError; got %T: %v", err, err)
+	}
+	if limited.RetryAfterSeconds != 7 || limited.Limit != 10 {
+		t.Fatalf("retry guidance not decoded; got %+v", limited)
+	}
+	if !strings.Contains(err.Error(), "wait 7 seconds") {
+		t.Errorf("error should name the wait; got %q", err.Error())
+	}
+}
+
+// TestRunExactOpRateLimitedRendersWaitAndNoContract — end to end
+// through the verb: nothing on stdout, the wait on stderr, non-zero exit.
+func TestRunExactOpRateLimitedRendersWaitAndNoContract(t *testing.T) {
+	body := []byte(`{"status": "rate_limited", "limit": 10, "retry_after_seconds": 7,
+		"error": "rate_limited: 10 dispatches per minute for this principal; retry after 7s"}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	cmd := newSearchCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	err := runExactOp(cmd, f, "https://backplane.example", searchOptions{
+		ConnectorID: "vault-1.x", OpID: "vault.kv.read",
+	})
+	if err == nil {
+		t.Fatal("expected a non-nil error so the process exits non-zero")
+	}
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUnexpected {
+		t.Fatalf("expected exit %d; got %v", output.ExitUnexpected, err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout should stay empty; got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "wait 7 seconds") {
+		t.Errorf("stderr should carry the retry guidance; got %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "needs approval") {
+		t.Errorf("stderr must not render a blank contract; got %q", stderr.String())
+	}
+}
+
+// TestGetSearchRateLimitedIsAnError — ranked mode shares fetchSearch,
+// so the same envelope is an error there too instead of "0 hit(s)".
+func TestGetSearchRateLimitedIsAnError(t *testing.T) {
+	body := []byte(`{"status": "rate_limited", "limit": 10, "retry_after_seconds": 3, "error": "x"}`)
+	f := &fakeOperationsClient{
+		searchResponses: []*api.GetSearchApiV1OperationsSearchGetResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: body},
+		},
+	}
+	_, err := getSearch(context.Background(), f, searchOptions{ConnectorID: "vault-1.x", Query: "read", Limit: 10})
+	var limited *rateLimitedError
+	if !errors.As(err, &limited) || limited.RetryAfterSeconds != 3 {
+		t.Fatalf("expected *rateLimitedError with retry 3; got %T: %v", err, err)
+	}
+}
+
+// TestRateLimitedEnvelopeIgnoresRealResults — a normal contract or
+// hits body is never mistaken for a rate-limit refusal.
+func TestRateLimitedEnvelopeIgnoresRealResults(t *testing.T) {
+	for _, body := range []string{
+		`{"operation": {"op_id": "vault.kv.read"}}`,
+		`{"hits": [], "query_duration_ms": 1}`,
+		`{"status": "ok"}`,
+		`not json`,
+	} {
+		if got := rateLimitedEnvelope([]byte(body)); got != nil {
+			t.Errorf("body %q wrongly read as rate limited: %+v", body, got)
+		}
+	}
+}
+
 // TestGetSearchOmitsOptionalParamsWhenEmpty — Group + Limit are
 // nil-pointer when the operator didn't supply them, so the generator's
 // omitempty form keeps them out of the URL.

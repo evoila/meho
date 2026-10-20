@@ -144,7 +144,11 @@ class Settings(BaseModel):
         ``https://<host>/realms/<realm>``, for authentik
         ``https://<host>/application/o/<slug>/``. The ``iss`` claim of
         every accepted JWT must equal this value, with or without a
-        trailing slash; any other issuer is rejected. Required (no
+        trailing slash; any other issuer is rejected. Use the form the
+        login server publishes in its discovery document: the metadata
+        routes (``/.well-known/oauth-protected-resource`` and
+        ``/api/v1/auth-config``) return the value unchanged, and strict
+        clients compare it byte-for-byte (RFC 8414 §3.3). Required (no
         default); the backplane refuses to start without it.
     keycloak_audience:
         The OIDC ``aud`` claim every accepted JWT must carry. The

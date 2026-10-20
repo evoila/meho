@@ -3750,12 +3750,47 @@ type ConnectorReviewDeleteOp struct {
 // review queue; “op_count“ is the cheap precomputed length for
 // the CLI's “meho connector review“ summary view (T5).
 type ConnectorReviewGroup struct {
-	GroupKey     string              `json:"group_key"`
-	Name         string              `json:"name"`
-	OpCount      int                 `json:"op_count"`
-	Ops          []ConnectorReviewOp `json:"ops"`
-	ReviewStatus string              `json:"review_status"`
-	WhenToUse    string              `json:"when_to_use"`
+	// Advisory Advice for the operator who reviews one group (#3671).
+	//
+	// ``distribution`` is what the group's enabled ops really do.
+	// ``flags`` lists short, plain notes where the group's ``when_to_use``
+	// text does not match those ops (for example the text says
+	// "read-only" but some ops need approval). Empty when nothing looks
+	// wrong.
+	//
+	// This is advice only. It never blocks a dispatch, an ingest, or the
+	// move from ``staged`` to ``enabled``. Dispatch keeps using each op's
+	// own ``safety_level``, ``requires_approval``, and policy; the group
+	// label and its text are never part of that decision.
+	Advisory     *ConnectorReviewGroupAdvisory `json:"advisory,omitempty"`
+	GroupKey     string                        `json:"group_key"`
+	Name         string                        `json:"name"`
+	OpCount      int                           `json:"op_count"`
+	Ops          []ConnectorReviewOp           `json:"ops"`
+	ReviewStatus string                        `json:"review_status"`
+	WhenToUse    string                        `json:"when_to_use"`
+}
+
+// ConnectorReviewGroupAdvisory Advice for the operator who reviews one group (#3671).
+//
+// “distribution“ is what the group's enabled ops really do.
+// “flags“ lists short, plain notes where the group's “when_to_use“
+// text does not match those ops (for example the text says
+// "read-only" but some ops need approval). Empty when nothing looks
+// wrong.
+//
+// This is advice only. It never blocks a dispatch, an ingest, or the
+// move from “staged“ to “enabled“. Dispatch keeps using each op's
+// own “safety_level“, “requires_approval“, and policy; the group
+// label and its text are never part of that decision.
+type ConnectorReviewGroupAdvisory struct {
+	// Distribution Risk levels of the enabled ops in one group (#3671).
+	//
+	// Counts only ops with ``is_enabled=True``. One count per value of the
+	// closed ``safety_level`` set, plus how many of those ops need approval
+	// and how many ops are enabled in total. Disabled ops are not counted.
+	Distribution *GroupSafetyDistribution `json:"distribution,omitempty"`
+	Flags        *[]string                `json:"flags,omitempty"`
 }
 
 // ConnectorReviewOp One operation within a group, as rendered in the review payload.
@@ -5548,6 +5583,20 @@ type GovernedSubopsResponse struct {
 // The field is optional on the create surfaces and defaults to
 // :attr:`AGENT`, so every existing caller is unaffected.
 type GrantPrincipalKind string
+
+// GroupSafetyDistribution Risk levels of the enabled ops in one group (#3671).
+//
+// Counts only ops with “is_enabled=True“. One count per value of the
+// closed “safety_level“ set, plus how many of those ops need approval
+// and how many ops are enabled in total. Disabled ops are not counted.
+type GroupSafetyDistribution struct {
+	Caution               *int `json:"caution,omitempty"`
+	Dangerous             *int `json:"dangerous,omitempty"`
+	Destructive           *int `json:"destructive,omitempty"`
+	EnabledOpCount        *int `json:"enabled_op_count,omitempty"`
+	RequiresApprovalCount *int `json:"requires_approval_count,omitempty"`
+	Safe                  *int `json:"safe,omitempty"`
+}
 
 // GroupSummaryModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.

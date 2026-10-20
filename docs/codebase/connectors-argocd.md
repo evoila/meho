@@ -157,7 +157,7 @@ bearer token is read under the operator's identity.
 
 | op_id | endpoint | returns |
 |---|---|---|
-| `argocd.app.list` | `GET /api/v1/applications` (opt. `projects[]`, `selector`) | `{items, metadata}` — apps + sync/health status |
+| `argocd.app.list` | `GET /api/v1/applications` (opt. `projects[]`, `selector`) | `{items, metadata}` — apps + sync/health status, plus flat `health_status` / `sync_status` / `name` per app |
 | `argocd.app.get` | `GET /api/v1/applications/{name}` (opt. `project`) | one app's full spec + status |
 | `argocd.app.diff` | `GET /api/v1/applications/{name}/managed-resources` | `{items: [ResourceDiff]}` — `liveState`/`targetState` per resource |
 | `argocd.app.resource_tree` | `GET /api/v1/applications/{name}/resource-tree` | `{nodes, orphanedNodes, hosts, shardsCount}` |
@@ -171,6 +171,33 @@ against `targetState` (Git-rendered desired). The per-app ops URL-encode the
 `name` param into the path (so a slash in the name stays one segment) and
 forward the optional `project` scoping query. `app.list` serialises `projects`
 as repeated query pairs (the gRPC-gateway repeated-field shape).
+
+`argocd.app.list` (#3672) adds three flat string columns to each app, next to
+the raw fields:
+
+- `health_status` — a copy of `status.health.status` (ArgoCD 3.x values:
+  `Healthy` / `Progressing` / `Degraded` / `Suspended` / `Missing` /
+  `Unknown`).
+- `sync_status` — a copy of `status.sync.status` (`Synced` / `OutOfSync` /
+  `Unknown`).
+- `name` — a copy of `metadata.name`.
+
+Why: `result_query` can only group and count top-level columns, and ArgoCD
+keeps these values nested. With the flat columns, `result_query` with
+`aggregate: [{func: COUNT}]` and `group_by: ["health_status"]` answers "how
+many apps are unhealthy" over the result handle. No new op and no new query
+grammar are needed. An aggregate over a capped spill is still labelled
+`coverage="partial"`.
+
+When a value is missing, empty, or not a string, the column is the lowercase
+`"unknown"`, so every app lands in a group (no NULL gap). ArgoCD's own
+`"Unknown"` is kept as is, so the two stay separate. The helper
+`_augment_app_health` in `connector.py` changes the parsed body in place and
+leaves the raw `status` / `metadata` objects byte-identical. A body without an
+`items` list (ArgoCD sends `items: null` when there are no apps) is returned
+unchanged. This is the same in-place shape as the Prometheus
+`_augment_numeric_samples` helper (see
+[`connectors-prometheus.md`](connectors-prometheus.md)).
 
 `argocd.cluster.list` (#2855) inventories the Kubernetes destination clusters
 ArgoCD manages (`GET /api/v1/clusters`) with each cluster's `connectionState`

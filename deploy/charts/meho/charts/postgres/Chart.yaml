@@ -1,0 +1,32 @@
+apiVersion: v2
+name: postgres
+description: |
+  The built-in PostgreSQL 17 server of the MEHO core, with the pgvector
+  extension. One StatefulSet with one replica and one disk holds two
+  databases: `meho` (for the backplane) and `keycloak` (for the built-in
+  Keycloak). Each database is owned by a login role of the same name, and
+  neither role is a superuser. The chart creates the `vector` extension
+  itself, so MEHO's migrations never need a superuser. The Service name
+  (`<release>-postgres`) is the host in the backplane's DATABASE_URL.
+
+# Subchart version is independent of the parent chart's calver. Bump on
+# breaking subchart-values changes; rev the patch level on image bumps.
+type: application
+version: 0.1.0
+appVersion: "17"
+
+kubeVersion: ">=1.28.0-0"
+
+sources:
+  - https://github.com/evoila/meho
+  - https://github.com/pgvector/pgvector
+  - https://github.com/docker-library/postgres
+
+maintainers:
+  - name: evoila Group
+    url: https://github.com/evoila
+
+keywords:
+  - postgresql
+  - pgvector
+  - database

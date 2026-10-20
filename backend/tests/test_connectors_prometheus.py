@@ -24,6 +24,9 @@ Coverage matrix (per the Task #2234 acceptance criteria):
   envelope (``NaN`` / ``+-Inf`` / unparseable -> null); the raw ``value`` /
   ``values`` stay byte-identical; and a real result drives a threshold sensor
   end-to-end through the untouched checks evaluator (#2504).
+* **Derived target health (#3673)** — ``targets`` carries flat
+  ``target_health`` rows and ``target_health_totals``; a missing or odd
+  ``health`` counts as ``unknown``; the raw ``data`` stays byte-identical.
 
 The wire is mocked with ``respx``; the credential loader is injected so
 Vault is never touched. Handlers are invoked directly (not through the DB
@@ -55,6 +58,7 @@ from meho_backplane.connectors.prometheus.connector import (
 )
 from meho_backplane.connectors.prometheus.ops_read import (
     _augment_numeric_samples,
+    _augment_target_health,
     _numeric_sample_value,
     _sample_pair_value,
 )
@@ -345,8 +349,76 @@ async def test_targets_roundtrips_fixture() -> None:
     connector = PrometheusConnector()
     result = await connector.targets(_operator(), _target(), {"state": "active"})
     assert len(result["data"]["activeTargets"]) == 2
+    # Raw wire body is left byte-identical beside the derived members.
+    assert result["data"] == _TARGETS_FIXTURE["data"]
+    assert result["status"] == _TARGETS_FIXTURE["status"]
     assert route.calls.last.request.url.params.get("state") == "active"
     await connector.aclose()
+
+
+@respx.mock
+async def test_targets_augments_health_columns() -> None:
+    respx.get(f"{_BASE}/api/v1/targets").mock(
+        return_value=httpx.Response(200, json=_TARGETS_FIXTURE)
+    )
+    connector = PrometheusConnector()
+    result = await connector.targets(_operator(), _target(), {})
+    assert result["target_health"] == [
+        {
+            "health": "up",
+            "job": "prometheus",
+            "instance": None,
+            "scrape_pool": None,
+            "scrape_url": "http://localhost:9090/metrics",
+            "last_scrape": None,
+            "last_error": "",
+            "has_last_error": False,
+        },
+        {
+            "health": "down",
+            "job": "node",
+            "instance": None,
+            "scrape_pool": None,
+            "scrape_url": "http://node:9100/metrics",
+            "last_scrape": None,
+            "last_error": "connection refused",
+            "has_last_error": True,
+        },
+    ]
+    assert result["target_health_totals"] == {"up": 1, "down": 1, "unknown": 0}
+    await connector.aclose()
+
+
+def test_augment_target_health_buckets_missing_and_odd_health_as_unknown() -> None:
+    payload: dict[str, Any] = {
+        "status": "success",
+        "data": {
+            "activeTargets": [
+                {"health": "unknown", "labels": {"job": "a", "instance": "a:1"}},
+                {"labels": {"job": "b"}},
+                {"health": "", "lastError": None},
+                {"health": "UP"},
+                "not-a-target",
+            ],
+            "droppedTargets": [],
+        },
+    }
+    out = _augment_target_health(payload)
+    assert [row["health"] for row in out["target_health"]] == ["unknown"] * 4
+    assert out["target_health"][0]["instance"] == "a:1"
+    assert out["target_health"][2]["has_last_error"] is False
+    assert out["target_health_totals"] == {"up": 0, "down": 0, "unknown": 4}
+
+
+def test_augment_target_health_omits_rows_without_active_targets() -> None:
+    payload: dict[str, Any] = {
+        "status": "success",
+        "data": {"activeTargets": [], "droppedTargets": [{"scrapePool": "node"}]},
+    }
+    out = _augment_target_health(payload)
+    assert "target_health" not in out
+    assert out["target_health_totals"] == {"up": 0, "down": 0, "unknown": 0}
+    assert out["data"] == {"activeTargets": [], "droppedTargets": [{"scrapePool": "node"}]}
 
 
 @respx.mock

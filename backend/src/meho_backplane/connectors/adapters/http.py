@@ -984,17 +984,23 @@ class HttpConnector(Connector):
         # un-recorded dispatch pays nothing; ``record_vendor_call`` is
         # best-effort (F7) and redacts headers/bodies at capture (#3213). The
         # span is recorded before ``raise_for_status`` so a vendor 4xx/5xx is
-        # captured too.
+        # captured too. A transport fault (timeout, refused connection) has no
+        # response, so it records an error span and re-raises (#3408). Each
+        # retry attempt is its own vendor call and gets its own span.
         _fr_start = flight_recorder_capture.span_start()
-        resp = await _read_capped_json_response(
-            client,
-            method,
-            path,
-            params=params,
-            json=json,
-            headers=headers,
-            extensions=self._request_extensions(target),
-        )
+        try:
+            resp = await _read_capped_json_response(
+                client,
+                method,
+                path,
+                params=params,
+                json=json,
+                headers=headers,
+                extensions=self._request_extensions(target),
+            )
+        except httpx.TransportError as exc:
+            flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
+            raise
         flight_recorder_capture.record_vendor_call(
             _fr_start,
             method=method,
@@ -1094,17 +1100,21 @@ class HttpConnector(Connector):
         # its matching content-type; a hard-excluded (login / token / DELETE)
         # op has its body dropped by the redaction engine's family rules.
         _fr_start = flight_recorder_capture.span_start()
-        resp = await _read_capped_json_response(
-            client,
-            verb,
-            path,
-            params=params,
-            json=json,
-            data=data,
-            headers=headers,
-            extensions=self._request_extensions(target),
-            timeout=timeout,
-        )
+        try:
+            resp = await _read_capped_json_response(
+                client,
+                verb,
+                path,
+                params=params,
+                json=json,
+                data=data,
+                headers=headers,
+                extensions=self._request_extensions(target),
+                timeout=timeout,
+            )
+        except httpx.TransportError as exc:
+            flight_recorder_capture.record_vendor_call_error(_fr_start, method=verb, exc=exc)
+            raise
         flight_recorder_capture.record_vendor_call(
             _fr_start,
             method=verb,

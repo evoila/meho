@@ -1,0 +1,1253 @@
+---
+# Source: meho-chart/charts/broadcast/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-broadcast
+  labels:
+    helm.sh/chart: broadcast-0.1.0
+    app.kubernetes.io/name: broadcast
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "9.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: broadcast
+spec:
+  # Select the broadcast Pod itself. In Kubernetes a Pod is ingress-isolated
+  # only when *some* NetworkPolicy selects it; the parent chart's policy
+  # selects the backplane Pods, not this store, so without this policy the
+  # Valkey port stays reachable from every Pod in the cluster even at
+  # `networkPolicy.enabled=true`. This is the subchart's own ingress guard
+  # so the store's isolation does not depend on the umbrella chart.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: broadcast
+      app.kubernetes.io/instance: test
+  policyTypes:
+    - Ingress
+  ingress:
+    # Admit tcp/<service.port> (default 6379) only from the backplane Pods.
+    # The backplane carries `app.kubernetes.io/name: meho` (the umbrella
+    # chart's `meho.selectorLabels`) — `networkPolicy.backplanePodLabels`
+    # holds those labels so the selectors line up. `.Release.Name` scopes
+    # the instance so co-tenant MEHO installs in one namespace stay
+    # partitioned.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: meho
+              app.kubernetes.io/instance: test
+      ports:
+        - port: 6379
+          protocol: TCP
+---
+# Source: meho-chart/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-meho
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: meho
+      app.kubernetes.io/instance: test
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the ingress controller's namespace may reach the backplane.
+    # The selector matches RKE2's `ingress-nginx` namespace by default;
+    # override `networkPolicy.ingressControllerNamespace` per environment.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # PostgreSQL — locked to the operator-supplied CIDR. Defaults to a /32
+    # placeholder so the chart fails-closed on a misconfigured value rather
+    # than silently allowing a wide subnet.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Vault — operator-supplied CIDR; default-deny otherwise.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24
+      ports:
+        - port: 8200
+          protocol: TCP
+    # Keycloak — typically reached over HTTPS through the cluster ingress
+    # or an external load balancer; CIDR is operator-supplied.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24
+      ports:
+        - port: 443
+          protocol: TCP
+    # Activity-broadcast subchart (`charts/broadcast/` — Valkey per ADR
+    # 0005). Selectors match the broadcast subchart's `_helpers.tpl`
+    # `broadcast.selectorLabels` exactly so this rule lines up with the
+    # Pods the subchart renders. Egress is conditional on
+    # `broadcast.enabled` — when the operator points at an external
+    # endpoint the rule disappears and no in-cluster port-6379 traffic
+    # is permitted.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: broadcast
+              app.kubernetes.io/instance: test
+      ports:
+        - port: 6379
+          protocol: TCP
+    # DNS — UDP/53 to kube-dns / CoreDNS. Without this rule every other
+    # egress rule above fails on name resolution. The selector matches the
+    # standard `k8s-app: kube-dns` label CoreDNS ships with by default.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+---
+# Source: meho-chart/charts/broadcast/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-broadcast-auth
+  labels:
+    helm.sh/chart: broadcast-0.1.0
+    app.kubernetes.io/name: broadcast
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "9.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: broadcast
+type: Opaque
+data:
+  requirepass: "<random>"
+---
+# Source: meho-chart/charts/broadcast/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-broadcast-config
+  labels:
+    helm.sh/chart: broadcast-0.1.0
+    app.kubernetes.io/name: broadcast
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "9.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: broadcast
+data:
+  # Minimal Valkey config for the v0.1 ephemeral-streams workload.
+  #
+  # * `bind 0.0.0.0` — listen on the Pod IP. Reachability is gated at two
+  #   layers: the broadcast subchart's own ingress NetworkPolicy
+  #   (`templates/networkpolicy.yaml`, admits tcp/6379 only from the
+  #   backplane Pods) AND `requirepass` authentication (below). Neither the
+  #   ConfigMap nor this comment is the access gate — the NetworkPolicy and
+  #   the Secret-sourced password are.
+  # * `protected-mode` — Valkey refuses connections from non-loopback
+  #   addresses when protected-mode is on AND no password is set. With
+  #   `auth.enabled` (the default) a `requirepass` is layered in at start-up
+  #   (see the Deployment), so protected-mode is kept **on** as defense in
+  #   depth. When an operator disables auth, protected-mode is turned off so
+  #   the bound port still accepts the backplane's (NetworkPolicy-gated)
+  #   connections.
+  # * `requirepass` is NOT written here — it is sourced from a Kubernetes
+  #   Secret via `secretKeyRef` and appended to a runtime config file at Pod
+  #   start-up, so the password never lands in this ConfigMap.
+  # * No `save` lines / `appendonly no` — streams are ephemeral by design;
+  #   persistence is explicitly out of scope for v0.1.
+  # * `maxmemory-policy allkeys-lru` — caps memory growth without dropping
+  #   the entire stream history; tune via override when streams grow.
+  # * `dir /data` — points Valkey at the emptyDir-backed writable mount so
+  #   readOnlyRootFilesystem: true holds.
+  valkey.conf: |
+    bind 0.0.0.0
+    protected-mode yes
+    port 6379
+    dir /data
+    save ""
+    appendonly no
+    maxmemory-policy allkeys-lru
+---
+# Source: meho-chart/charts/broadcast/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-broadcast
+  labels:
+    helm.sh/chart: broadcast-0.1.0
+    app.kubernetes.io/name: broadcast
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "9.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: broadcast
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: broadcast
+    app.kubernetes.io/instance: test
+---
+# Source: meho-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-meho
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+---
+# Source: meho-chart/charts/broadcast/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-broadcast
+  labels:
+    helm.sh/chart: broadcast-0.1.0
+    app.kubernetes.io/name: broadcast
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "9.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: broadcast
+spec:
+  # Hard-capped at 1 for v0.1: streams are ephemeral, no Sentinel sidecar
+  # ships in this chart, and the parent values.schema.json rejects any
+  # value > 1. HA via Sentinel/Cluster lands at v0.2+ (ADR 0005).
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broadcast
+      app.kubernetes.io/instance: test
+  strategy:
+    # Single-replica + ephemeral data → Recreate is safer than RollingUpdate.
+    # A RollingUpdate would briefly run two pods, both binding port 6379;
+    # the second would fail readiness and the first would still be torn down
+    # by the rollout controller. Recreate avoids the dance.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broadcast
+        app.kubernetes.io/instance: test
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: broadcast
+          image: "valkey/valkey:9.0-alpine"
+          imagePullPolicy: IfNotPresent
+          # With auth on, the Secret-sourced password must reach Valkey
+          # without landing in the ConfigMap OR on the process command line
+          # (a `--requirepass "$VAR"` arg would be visible in `ps` /
+          # /proc/<pid>/cmdline). So the entrypoint copies the ConfigMap
+          # config into the writable emptyDir at `dir /data` and appends
+          # `requirepass <password>` from the env var (sourced via
+          # secretKeyRef below), then execs Valkey against that runtime
+          # file. readOnlyRootFilesystem stays true — only the /data
+          # emptyDir is written.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              cat /etc/valkey/valkey.conf > /data/valkey-runtime.conf
+              printf '\nrequirepass %s\n' "$VALKEY_REQUIREPASS" >> /data/valkey-runtime.conf
+              exec valkey-server /data/valkey-runtime.conf
+          env:
+            # Valkey `requirepass` password, sourced from the chart-managed
+            # (or operator-supplied `existingSecret`) Secret. Consumed by the
+            # start-up command above; the same Secret + key is referenced by
+            # the backplane client (umbrella chart Deployment) so both sides
+            # authenticate with one value.
+            - name: VALKEY_REQUIREPASS
+              valueFrom:
+                secretKeyRef:
+                  name: test-broadcast-auth
+                  key: requirepass
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          # TCP liveness keeps the probe surface minimal — a successful TCP
+          # accept on 6379 is sufficient evidence that the server loop is up.
+          # `redis-cli PING` would be more thorough but couples the probe to
+          # the existence of `redis-cli` in the image, which Valkey OSS does
+          # ship but not under that exact binary name in every variant.
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: 500m
+              ephemeral-storage: 512Mi
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              ephemeral-storage: 128Mi
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/valkey
+              readOnly: true
+            # Valkey writes to its data directory even with persistence
+            # disabled (PID file, ephemeral working state). With
+            # readOnlyRootFilesystem: true we mount an emptyDir at the
+            # configured `dir` path so the server can start.
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: test-broadcast-config
+        - name: data
+          emptyDir: {}
+---
+# Source: meho-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-meho
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: meho
+      app.kubernetes.io/instance: test
+  template:
+    metadata:
+      annotations:
+        # Roll the pod whenever the ConfigMap the backplane reads via
+        # `envFrom` (below) changes. Helm updates the ConfigMap object on a
+        # `config.*`-only upgrade, but the pod template is otherwise
+        # byte-identical, so without this the new environment never reaches
+        # the running pod until a manual `kubectl rollout restart` (#2586).
+        # Hashing the fully rendered configmap.yaml (the Helm howto pattern)
+        # means any change to what the pod consumes — config.*, memory.*,
+        # topology.*, or the derived MCP/backplane values — forces a rollout,
+        # while an unchanged render leaves the checksum stable (no churn).
+        checksum/config: 73bbf05ff66b94aae8e39b84e89332002bdc151c6c84333c2850c82d7558f7b0
+      labels:
+        app.kubernetes.io/name: meho
+        app.kubernetes.io/instance: test
+    spec:
+      serviceAccountName: meho-backplane
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backplane
+          # Image reference deliberately offers no `default .Chart.AppVersion`
+          # fallback: the values schema rejects empty `image.tag` so every
+          # install pins the tag explicitly. Goal #11's deploy discipline
+          # forbids any moving reference (including a chart-appVersion shadow).
+          #
+          # When `image.digest` is set (#284 / F15b), pin by the immutable
+          # manifest digest (`repository@sha256:...`) — the exact,
+          # content-addressed, scanned+signed digest the image pipeline
+          # promoted, and the reference a `cosign verify` / admission gate
+          # checks the signature against. `tag` stays the human-readable label
+          # of that release; the digest takes precedence in the rendered
+          # reference. With no digest set, fall back to the schema-required tag.
+          image: "ghcr.io/evoila/meho:fixture"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: test-meho-config
+          env:
+            # Surfaces the deployed chart's version to the backplane so
+            # GET /version reports a real `chart_version` (#631). chart.yml
+            # stamps `.Chart.Version` to the calver at package time; this
+            # is the only path that carries that value into the running
+            # container (the image build does not know its chart release).
+            - name: CHART_VERSION
+              value: "0.1.0"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: meho-postgres-url
+                  key: url
+            # BROADCAST_REDIS_URL points the backplane at the in-cluster
+            # broadcast store. The name must match the env var the
+            # backplane actually reads (`Settings.broadcast_redis_url`
+            # resolves from `BROADCAST_REDIS_URL` in
+            # backend/src/meho_backplane/settings.py); an unset var falls
+            # back to `redis://localhost:6379`, so the readiness probe's
+            # broadcast leg dials localhost inside the Pod and the healthy
+            # Service is never contacted. ADR 0005 locks the
+            # wire-protocol-compatible store as Valkey 9.x; `redis-py`
+            # (locked driver) parses the `redis://` scheme unchanged.
+            - name: BROADCAST_REDIS_URL
+              value: "redis://test-broadcast:6379/0"
+            # BROADCAST_REDIS_PASSWORD carries the Valkey `requirepass` the
+            # broadcast subchart enforces (charts/broadcast). Sourced from the
+            # same Secret + key the store reads, so the URL above stays
+            # password-free (no secret in a plaintext env `value:`) and the
+            # client authenticates via `Settings.broadcast_redis_password`.
+            - name: BROADCAST_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: test-broadcast-auth
+                  key: requirepass
+            # Other operator-supplied secrets (Keycloak client secret, Vault
+            # role bindings) come via ESO-synced Kubernetes Secrets; G2.6
+            # wires the references when each surface lands.
+            - name: APPROVAL_HANDOFF_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "meho-approval-handoff"
+                  key: "approval_handoff_encryption_key"
+            # #2642 — the in-process check-runner's service-principal
+            # identity for background dispatch. Wired only when
+            # `checkRunner.enabled: true`; the schema requires a non-empty
+            # `clientId` + `clientSecret.secretName` under that flag, so
+            # neither reference is empty here. `CHECK_RUNNER_CLIENT_ID` is
+            # plain operator config; the secret is `secretKeyRef` only.
+            # Unset → the runner dispatches with no bearer token and a
+            # Sensor whose target needs an operator-context credential read
+            # reads `unknown` (`meho_backplane.auth.runner_identity`).
+            - name: CHECK_RUNNER_CLIENT_ID
+              value: "meho-check-runner"
+            - name: CHECK_RUNNER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: "meho-check-runner"
+                  key: "client_secret"
+            # Operator-supplied extra env vars (full EnvVar shape — accepts
+            # `value` or `valueFrom`). Most common use: pointing
+            # `SSL_CERT_FILE` at a trust-manager-distributed bundle path so
+            # the Python ssl context trusts internal-CA-signed Vault /
+            # Keycloak endpoints (Issue #209).
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/extra-certs/ca.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/ssl/extra-certs/ca.crt
+            - name: UI_KEYCLOAK_CLIENT_ID
+              value: meho-web
+            - name: UI_KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: client_secret
+                  name: meho-ui-auth
+            - name: UI_SESSION_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: session_encryption_key
+                  name: meho-ui-auth
+            - name: KEYCLOAK_ADMIN_URL
+              value: https://keycloak.example.test/admin/realms/meho
+            - name: KEYCLOAK_ADMIN_CLIENT_ID
+              value: meho-admin
+            - name: KEYCLOAK_CLI_CLIENT_ID
+              value: meho-cli
+            - name: AGENT_DEFAULT_MODEL
+              value: claude-sonnet-4-6
+            - name: KEYCLOAK_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: keycloak_admin_client_secret
+                  name: meho-agent-runtime
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: anthropic_api_key
+                  name: meho-agent-runtime
+            - name: JWT_PLATFORM_ADMIN_ROLE_NAME
+              value: meho-admin
+            - name: VAULT_SCHEDULER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: vault_scheduler_token
+                  name: meho-agent-runtime
+                  optional: true
+            - name: SCHEDULER_AGENT_VAULT_PATH_PATTERN
+              value: secret/data/meho/agents/{tenant_id}_{client_id}/credentials
+            - name: CORPUS_URL
+              value: https://knowledge.meho.svc.cluster.local:8443
+            - name: VAULT_KV_TENANT_SCOPE_PREFIX
+              value: ""
+            - name: MAIL_SMTP_HOST
+              value: smtp.example.test
+            - name: MAIL_SMTP_PORT
+              value: "587"
+            - name: MAIL_SMTP_USERNAME
+              value: alerts@example.test
+            - name: MAIL_FROM
+              value: alerts@example.test
+            - name: MAIL_RECIPIENT_ALLOWLIST
+              value: example.test
+            - name: MAIL_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: meho-mail-smtp
+                  optional: true
+          # Probes target the backplane's chassis health endpoints (Task #19,
+          # `backend/src/meho_backplane/health.py`): `/healthz` for liveness
+          # (returns 200 unconditionally; failure → pod restart) and `/ready`
+          # for readiness (registry of dependency probes — 503 until G2.2 /
+          # G2.3 register concrete probes; failure → pod removed from Service
+          # endpoints, no restart). Probes always render — disabling them
+          # would mask startup deadlocks and let an unready Pod accept
+          # traffic. Every probe field is operator-tunable via
+          # `.Values.probes.<kind>.<field>`.
+          #
+          # `startupProbe` gates liveness/readiness until first boot succeeds
+          # (Issue #2393). First boot runs the full typed-op catalog
+          # registration plus the fastembed model preload before the app binds
+          # :8000 — ~2-3 min, longer on a cold install that downloads model
+          # weights into an empty cache PVC. Without this probe the kubelet
+          # starts liveness-checking mid-registration and CrashLoopBackOffs a
+          # slow-but-healthy pod. The default budget is
+          # `failureThreshold × periodSeconds` = 30 × 10s = 300s (5 min); the
+          # kubelet disables liveness/readiness until it passes, then the
+          # short-delay liveness probe takes over for fast hang detection. The
+          # `with` guard lets an operator opt out on a fast cluster by clearing
+          # `.Values.probes.startup`.
+          startupProbe:
+            failureThreshold: 30
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+          resources:
+            limits:
+              cpu: 2000m
+              ephemeral-storage: 1Gi
+              memory: 2Gi
+            requests:
+              cpu: 1000m
+              ephemeral-storage: 256Mi
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            # Operator-supplied extra VolumeMounts. Paired with
+            # `extraVolumes` below — see Issue #209 for the trust-bundle
+            # use case (mount a trust-manager ConfigMap into the Pod so
+            # `SSL_CERT_FILE` resolves to a real path).
+            - mountPath: /etc/ssl/extra-certs
+              name: trust-bundle
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Operator-supplied extra Volumes (full Volume shape). Most common
+        # use: mounting a trust-manager-distributed CA bundle ConfigMap
+        # so the backplane can connect to internal-CA-signed Vault and
+        # Keycloak (Issue #209). Paired with `extraVolumeMounts` above.
+        - configMap:
+            name: trust-bundle
+            optional: false
+          name: trust-bundle
+---
+# Source: meho-chart/templates/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: test-meho
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  tls:
+    - hosts:
+        - "meho.example.test"
+      secretName: meho-tls
+  rules:
+    - host: "meho.example.test"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: test-meho
+                port:
+                  number: 8000
+---
+# Source: meho-chart/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-meho-config
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+  # Pre-install / pre-upgrade hook so the ConfigMap exists before the
+  # migration Job's Pod is created. The migration Job (weight -10)
+  # mounts this ConfigMap via `envFrom`, so without the hook
+  # annotation the Pod hits `Error: configmap "<release>-config" not
+  # found` and the entire `helm install --atomic` rolls back before
+  # the Deployment ever renders (issue #205).
+  #
+  # Weight -20 (lower than the migration Job's -10) sequences the
+  # ConfigMap first within the pre-install phase.
+  # `before-hook-creation` means each upgrade replaces the previous
+  # ConfigMap cleanly; the Pod's envFrom is read at Pod start so the
+  # brief delete-recreate window doesn't affect a running backplane.
+  #
+  # Lifecycle implication: hook resources are not tracked by the
+  # release manifest. `helm get manifest` won't list this ConfigMap,
+  # and `helm uninstall` won't garbage-collect it. The trade-off is
+  # acceptable for v0.1 (the Deployment in the release manifest
+  # references the ConfigMap by name, which exists because the hook
+  # ran; uninstall is rare and `kubectl delete cm <release>-config`
+  # cleans up). v0.2 may split this into two ConfigMaps (a
+  # migration-only hook + a release-tracked one for the Deployment)
+  # if leak-on-uninstall becomes load-bearing.
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  # Non-secret env vars consumed by the backplane via `envFrom` in the
+  # Deployment. Keys follow `backend/src/meho_backplane/settings.py`'s
+  # `os.environ.get` mapping exactly — the env-var names are the contract.
+  # Secrets (DATABASE_URL, Keycloak client secret, Vault role bindings)
+  # live in Kubernetes Secrets and are wired via `valueFrom.secretKeyRef`
+  # in the Deployment template.
+  KEYCLOAK_ISSUER_URL: "https://keycloak.example.test/realms/meho"
+  KEYCLOAK_AUDIENCE: "meho-backplane"
+  # G0.9.1-T9 (#789, RDC Signal #16). Public OAuth client_id surfaced
+  # to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`.
+  # Unconditionally emitted so the env-var contract stays stable
+  # across deploys; when the operator hasn't wired the value the
+  # backplane sends an empty string and the CLI surfaces an
+  # actionable public-client error rather than silently misusing
+  # `KEYCLOAK_AUDIENCE` (the confidential resource-server id).
+  KEYCLOAK_CLI_CLIENT_ID: ""
+  # #2594 (Goal #336) — public client_id of the confidential `meho-web`
+  # client the operator-console browser BFF login runs its OAuth 2.1
+  # authorization-code grant against. Unconditionally emitted so the
+  # env-var contract stays stable; the console gate
+  # (`meho_backplane.features._ui_surface_block`) needs this AND the two
+  # `uiConsole` secrets (`UI_KEYCLOAK_CLIENT_SECRET` /
+  # `UI_SESSION_ENCRYPTION_KEY`, wired via secretKeyRef in the Deployment)
+  # non-empty, so an empty value here keeps the console cleanly disabled
+  # (`503 ui_oauth_not_configured`) without touching `/api/*` or the CLI's
+  # `KEYCLOAK_CLI_CLIENT_ID` device-code flow.
+  UI_KEYCLOAK_CLIENT_ID: ""
+  KEYCLOAK_JWKS_CACHE_TTL_SECONDS: "300"
+  KEYCLOAK_JWT_LEEWAY_SECONDS: "30"
+  # Emitted only for a Vault-backend install (Initiative #2227). A
+  # GCP-native (`config.credentialBackend: gsm`) deploy leaves
+  # `config.vaultAddr` empty and runs no Vault, so the key is omitted
+  # entirely — the backplane coerces a missing/blank VAULT_ADDR to None
+  # and boots Vault-free.
+  VAULT_ADDR: "https://vault.example.test"
+  VAULT_OIDC_ROLE: "meho-mcp"
+  VAULT_OIDC_MOUNT_PATH: "jwt-meho"
+  VAULT_TIMEOUT_SECONDS: "10.0"
+  # Credential backend surface (Initiative #2227). `CREDENTIAL_BACKEND`
+  # names the store a schemeless target `secret_ref` and the
+  # `/api/v1/health` federation proof resolve through (`vault` default,
+  # `gsm` for a GCP-native install). `GSM_PROJECT` / `GSM_IMPERSONATE_SA`
+  # are read by the GSM backend (`connectors/_shared/gsm_creds.py`) and are
+  # harmless empty strings on a Vault install. The env-var names are the
+  # backplane's contract (`backend/src/meho_backplane/settings.py`).
+  CREDENTIAL_BACKEND: "vault"
+  GSM_PROJECT: ""
+  GSM_IMPERSONATE_SA: ""
+  # Workload Identity Federation for the GSM backend's per-operator read
+  # path (#2232, chart-wired in #2642 — previously declared-only values no
+  # template consumed, which forced a WIF install through `extraEnv`).
+  # `GSM_WIF_AUDIENCE` is the switch: empty (the default, and every Vault
+  # install) leaves the SA-direct path running unchanged. All five are
+  # harmless empty strings otherwise — the backplane treats a blank
+  # `GSM_WIF_SUBJECT_TOKEN_TYPE` as its `urn:ietf:params:oauth:token-type:jwt`
+  # default.
+  GSM_WIF_AUDIENCE: ""
+  GSM_WIF_POOL_ID: ""
+  GSM_WIF_PROVIDER_ID: ""
+  GSM_WIF_SERVICE_ACCOUNT: ""
+  GSM_WIF_SUBJECT_TOKEN_TYPE: ""
+  DATABASE_POOL_SIZE: "10"
+  DATABASE_POOL_TIMEOUT: "30.0"
+  # G0.4-T2 (#259) — retrieval substrate fastembed model + on-disk cache
+  # path. The cache path here is the env-var contract the backplane
+  # honours. The chart default `/opt/meho/model-cache` is the image
+  # layer the default model is BAKED INTO at build time (evoila/meho#574)
+  # — no PVC, no runtime HuggingFace download for the shipped default.
+  # Only repoint this (and enable `retrieval.modelCache`) when overriding
+  # `retrievalEmbeddingModel` to a non-default model fetched at runtime;
+  # if you point it at a writable PVC mountPath, that PVC is what
+  # survives restarts (and is subject to the #574 partial-cache caveat
+  # documented on `retrieval.modelCache`).
+  RETRIEVAL_EMBEDDING_MODEL: "BAAI/bge-small-en-v1.5"
+  RETRIEVAL_MODEL_CACHE_DIR: "/opt/meho/model-cache"
+  # #101 (L8 + L14) — root the server-side kb bulk ingest
+  # (`POST /api/v1/kb/ingest`, `meho kb ingest`) is confined to. The
+  # ingest directory is resolved (symlinks followed) and rejected
+  # unless it lands within this root, so a `tenant_admin` cannot read
+  # an arbitrary `.md` elsewhere on the host (path-traversal / LFI).
+  # The chart does NOT pre-create or mount this path — mount the
+  # operator's kb content (a checked-out consumer repo / CI artefact)
+  # under it via `extraVolumes`, or repoint `config.kbIngestRoot` to
+  # wherever the content lives.
+  KB_INGEST_ROOT: "/opt/meho/kb-ingest"
+  # Issue #730 (Signal #3, RDC dogfood 2026-05-20). Restricts the
+  # connecting peers uvicorn trusts as upstream proxies when parsing
+  # `X-Forwarded-Proto` / `X-Forwarded-For`. uvicorn reads
+  # `FORWARDED_ALLOW_IPS` natively — equivalent to the
+  # `--forwarded-allow-ips` CLI flag (omitted from the Dockerfile CMD
+  # so the operator-tunable env var stays the single source of truth).
+  # See `deploy/charts/meho/values.yaml` (`config.forwardedAllowIps`)
+  # for the operator-facing override and
+  # `docs/cross-repo/reverse-proxy-contract.md` for the trust
+  # contract.
+  FORWARDED_ALLOW_IPS: "192.0.2.0/24"
+  # v0.20.0 (PR #2191) target-destination SSRF guard. The backplane
+  # refuses to register or dial a target that resolves to a non-public
+  # address; this env var is the operator's scoped opt-out. Read per
+  # request from the environment by
+  # `backend/src/meho_backplane/targets/ssrf_guard.py`
+  # (`TARGET_SSRF_ALLOWLIST_ENV`) — NOT via settings.py. Rendered
+  # unconditionally: the default `""` is a genuine no-op (the guard
+  # stays default-deny). Comma-separated CIDRs / bare IPs / hostname
+  # literals. See `deploy/charts/meho/values.yaml`
+  # (`config.targetSsrfAllowlist`) and `docs/codebase/target-ssrf-guard.md`.
+  MEHO_TARGET_SSRF_ALLOWLIST: "198.51.100.0/24,203.0.113.0/24,knowledge.meho.svc.cluster.local,automation.example.test"
+  # Initiative #2405 net.* diagnostics probe allowlist — the INVERTED
+  # sibling of the SSRF guard above: allow-only-what-is-listed, so the
+  # default `""` denies every probe (the connector is inert until an
+  # operator opts a range in). Read per probe from the environment by
+  # `backend/src/meho_backplane/connectors/net/allowlist.py`
+  # (`PROBE_ALLOWLIST_ENV`) — NOT via settings.py. Rendered
+  # unconditionally: the default `""` keeps the connector fail-closed.
+  # Comma-separated CIDRs / bare IPs / hostname literals. See
+  # `deploy/charts/meho/values.yaml` (`netdiag.probeAllowlist`) and
+  # `docs/codebase/connectors-net-diagnostics.md`.
+  MEHO_NETDIAG_PROBE_ALLOWLIST: "198.51.100.0/24,203.0.113.0/24"
+  # Per-tenant probe-scope bound for the net.* connector (#3498), layered
+  # in front of MEHO_NETDIAG_PROBE_ALLOWLIST above. Read per probe from the
+  # environment by allowlist.py (TENANT_PROBE_ALLOWLIST_ENV) — NOT via
+  # settings.py. Rendered unconditionally: the default "" means no
+  # per-tenant bounds (every tenant inherits the instance allowlist).
+  # Semicolon-separated <tenant-uuid>=<comma-separated CIDRs/IPs/hostnames>;
+  # an empty value (<uuid>=) denies every targetless net.* probe for that
+  # tenant. See deploy/charts/meho/values.yaml
+  # (netdiag.probeAllowlistTenants) and
+  # docs/codebase/connectors-net-diagnostics.md.
+  MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS: ""
+  # Async ingest-job watchdog budget (#2318, hardens #2275). #2275
+  # time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)`
+  # so a wedged pipeline can't sit at `status=running` until a pod restart;
+  # this is the operator's override for that wall-clock ceiling (seconds),
+  # read once at import by `_load_ingest_job_timeout_seconds`
+  # (`backend/src/meho_backplane/operations/ingest/jobs.py`) — NOT via
+  # settings.py. Rendered ONLY when set: the empty default omits the key so
+  # the backend's unset→default (1800 s) path runs silently. An
+  # always-rendered `""` (the SSRF-allowlist pattern above) would instead
+  # hit `float("")` and log a spurious `ingest_job_timeout_env_invalid`
+  # warning on every boot, so the timeout knob is guarded. A non-finite
+  # (`inf`/`nan`), non-positive, or malformed value is rejected at the
+  # backend and falls back to 1800 s with a warning. See
+  # `deploy/charts/meho/values.yaml` (`config.ingestJobTimeoutSeconds`)
+  # and `docs/codebase/spec-ingestion.md`.
+  # Self-approval audited break-glass switch (#1401, #2669). Rendered
+  # unconditionally: the fail-closed default `"false"` is a genuine no-op
+  # (`parse_bool_env` in settings.py reads it), and always emitting the key
+  # keeps the env-var contract stable + the flag first-class/discoverable.
+  # `"true"` lifts the requester != approver guard posture-wide — an
+  # emergency escape, not the single-operator answer (see
+  # `deploy/charts/meho/values.yaml` (`config.approvalAllowSelfApproval`)
+  # and `docs/codebase/approvals.md`).
+  APPROVAL_ALLOW_SELF_APPROVAL: "true"
+  # Lab-class switch for delegated approval decisions (#3693). Rendered
+  # unconditionally, like the self-approval switch above; the default
+  # `"false"` refuses decisions made on someone else's instruction.
+  APPROVAL_ALLOW_DELEGATED_DECISION: "false"
+  # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
+  # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
+  # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
+  # sets neither the resolved audience is empty and every /mcp request
+  # 401s with no signal. These keys are only emitted when an effective
+  # value resolves — explicit `config.backplaneUrl` / `config.mcpResourceUri`,
+  # or derived from the Ingress host for the common ingress-fronted
+  # deploy (see `meho.backplaneUrl` / `meho.mcpResourceUri` helpers).
+  # #2394 — when nothing resolves we `fail` at render time (mirroring the
+  # eso/agent guards in externalsecrets.yaml + _helpers.tpl) instead of
+  # emitting an empty audience and letting the pod crash-loop at startup on
+  # `audience_not_configured` (`_assert_mcp_resource_uri_configured` in
+  # main.py). The guard fires only on the ingress-less, nothing-set path —
+  # the ingress-derived default and explicit-value installs both resolve a
+  # non-empty URI and render unchanged. There is deliberately no
+  # `allowNoMcpResourceUri` escape hatch: an operator who wants a
+  # bring-up before ingress/DNS exists sets a placeholder
+  # `config.backplaneUrl` (the documented workaround), which keeps /mcp
+  # per-request fail-closed without a new chart tunable.
+  BACKPLANE_URL: "https://meho.example.test"
+  MCP_RESOURCE_URI: "https://meho.example.test/mcp"
+  # #3997 — most output tokens the agent asks the model for in one answer.
+  # Rendered always; it only matters when the agent runtime is in use.
+  AGENT_MAX_OUTPUT_TOKENS: "4096"
+  # G5.2-T1 (#623) — memory layer knobs. `userDefaultTtlDays` is consumed
+  # by G5.2-T2 (#624) on `POST /api/v1/memory`; `expiryTickIntervalSeconds`
+  # + `expiryEnabled` gate the in-process memory-expiry sweeper started
+  # by the FastAPI lifespan. The env-var names are the backplane's
+  # contract (`backend/src/meho_backplane/settings.py`); the chart
+  # converts the YAML values to strings via `quote` (booleans included)
+  # so the ConfigMap stays string-typed end-to-end.
+  MEMORY_USER_DEFAULT_TTL_DAYS: "7"
+  MEMORY_EXPIRY_TICK_INTERVAL_SECONDS: "86400"
+  MEMORY_EXPIRY_ENABLED: "true"
+  # G9.3-T6 (#858) — topology history retention knobs. The env-var
+  # names are the backplane's contract
+  # (`backend/src/meho_backplane/settings.py`). `historyRetentionDays: 0`
+  # is the keep-forever sentinel; `historyPruneEnabled: false` skips
+  # starting the in-process prune loop entirely.
+  TOPOLOGY_HISTORY_RETENTION_DAYS: "90"
+  TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS: "604800"
+  TOPOLOGY_HISTORY_PRUNE_ENABLED: "true"
+  # Security review S19 (#307) — audit_log.raw_payload age-off knobs. NULLs
+  # only the pre-redaction body past `retentionDays`; the redacted record of
+  # account is retained. `retentionDays: 0` keeps un-redacted bodies forever.
+  RAW_PAYLOAD_RETENTION_DAYS: "90"
+  RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS: "604800"
+  RAW_PAYLOAD_PRUNE_ENABLED: "true"
+  # Broadcast v2 T2 (#2547) — durable-announcement retention knobs. The
+  # env-var names are the backplane's contract
+  # (`backend/src/meho_backplane/settings.py`). `retentionDays: 0` is the
+  # keep-forever sentinel; `pruneEnabled: false` skips starting the
+  # in-process prune loop entirely.
+  BROADCAST_ANNOUNCEMENT_RETENTION_DAYS: "90"
+  BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS: "604800"
+  BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED: "true"
+---
+# Source: meho-chart/templates/tests/test-pgvector.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-meho-test-pgvector
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    # ``test`` hook runs only on ``helm test``; ``test-success`` (the older
+    # alias) is deprecated. ``hook-delete-policy`` removes the pod on
+    # success so a re-run starts clean; failed pods stick so the operator
+    # can ``kubectl logs`` them.
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: meho-backplane
+  # The PostgreSQL image has no USER, so name its `postgres` user (999)
+  # here; `global.openshift: true` leaves the ids to OpenShift.
+  securityContext:
+    fsGroup: 999
+    runAsGroup: 999
+    runAsNonRoot: true
+    runAsUser: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: pgvector-check
+      image: "pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: PGURL
+          valueFrom:
+            secretKeyRef:
+              name: meho-postgres-url
+              key: url
+      command:
+        # ``bash`` rather than ``sh`` because the script uses
+        # ``set -o pipefail`` which is bash-only. The image's
+        # ``/bin/sh`` is ``dash`` (no pipefail support); the Debian
+        # base ships ``/bin/bash``.
+        - bash
+        - -c
+        - |
+          set -euo pipefail
+          # libpq's URI parser (the C library `psql` links against)
+          # accepts only the bare ``postgresql://`` / ``postgres://``
+          # schemes and rejects SQLAlchemy's driver-prefix form
+          # ``postgresql+<dialect>://`` (e.g. ``postgresql+asyncpg://``)
+          # with `invalid URI scheme`. The chart-side
+          # ``postgres.credentialsSecret`` ships the canonical asyncpg
+          # DSN because the backplane Deployment + migration Job both
+          # consume it via SQLAlchemy. psql does not -- strip the
+          # driver suffix once at the top so both queries below see a
+          # libpq-parseable URI. The chart-side secret keeps its
+          # asyncpg form (single source of truth); the normalisation
+          # is local to this preflight pod. References:
+          # https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-CONNSTRING-URIS
+          PGURL_LIBPQ=$(printf '%s\n' "$PGURL" | sed -E 's|^postgresql\+[a-z0-9_-]+://|postgresql://|')
+          # Step 1: pgvector extension must be enabled. The migration
+          # 0003 runs ``CREATE EXTENSION IF NOT EXISTS vector`` so a
+          # successful install implies presence; this check is the
+          # post-deploy drift guard.
+          extversion=$(psql "$PGURL_LIBPQ" -t -A -c \
+            "SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+          if [ -z "$extversion" ]; then
+            echo "FAIL: pgvector extension is NOT enabled on the target Postgres."
+            echo "      Expected migration 0003 to have run CREATE EXTENSION vector."
+            echo "      Check the Postgres image: it must ship pgvector"
+            echo "      (the chart's corePostgres image, or an equivalent"
+            echo "      managed-PG offering with the vector extension)."
+            exit 1
+          fi
+          echo "OK: pgvector extension enabled (version $extversion)"
+          # Step 2: the documents table must exist (proves migration 0003
+          # ran end-to-end, not just the CREATE EXTENSION half).
+          count=$(psql "$PGURL_LIBPQ" -t -A -c "SELECT count(*) FROM documents")
+          if [ -z "$count" ]; then
+            echo "FAIL: documents table query returned empty result; migration may not have completed."
+            exit 1
+          fi
+          echo "OK: documents table reachable (row count: $count)"
+      resources:
+        # Tiny resource ask -- this is a 2-query smoke test, not a
+        # workload. The Pod runs once, terminates within seconds.
+        limits:
+          cpu: 100m
+          memory: 64Mi
+        requests:
+          cpu: 10m
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+---
+# Source: meho-chart/templates/migration-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-meho-migrate
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    # `component: migrate` on the Job's own metadata (in addition to the
+    # Pod template at spec.template.metadata.labels) lets the acceptance
+    # verifier locate the Job via a release-name-agnostic label selector
+    # (`-l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=$RELEASE`).
+    # Without this label here, the selector would only match the Pod, not
+    # the Job — and the verifier asserts the Job's `.status.succeeded`.
+    app.kubernetes.io/component: migrate
+    # The chassis-stage migration runner exits 0 on success / 1 on any
+    # Alembic failure (`backend/src/meho_backplane/db/migrate.py`). When the
+    # Job exhausts `backoffLimit` retries, Helm fails the release at the
+    # pre-install/pre-upgrade hook step — the Deployment is never created
+    # against an unmigrated schema. This is the contract Goal #11 spec
+    # section 6 locks: migration failure blocks rollout.
+  annotations:
+    # `pre-install,pre-upgrade` runs the Job before the Deployment is
+    # created (install) or rolled forward (upgrade). `hook-weight: "-10"`
+    # is well below the default 0 weight used by Deployment + Service +
+    # NetworkPolicy hooks (when those run as hooks; the chart's own
+    # resources are not hooks but Helm still creates them after weighted
+    # hook resources resolve). The negative weight is documentary — even
+    # at weight 0 the migration Job would precede the Deployment because
+    # only hooks weighted in this Job render at the pre-install phase.
+    # ROLLBACK CONTRACT (#1607): this hook's schema commit is a side
+    # effect Helm does NOT revert — `helm rollback` / `--atomic`
+    # restores manifests only, so after any rollback across a
+    # migration the DB stays at the *newer* revision. That is safe
+    # (not an outage) only because (a) upgrade() is additive-only
+    # (CI: scripts/ci/check_migration_compat.py) and (b) the backend's
+    # `db` readiness probe tolerates a DB ahead of the image's head.
+    # Do NOT add a pre-rollback `alembic downgrade` hook: rollback
+    # hooks render from the *previous* release's manifests (old image,
+    # which lacks the newer migration scripts) and would brick the
+    # rollback itself. See docs/codebase/migrations.md § "Rollback
+    # contract" and docs/RELEASING.md § 6b.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    # `before-hook-creation` lets a fresh `helm upgrade` retry overwrite
+    # the previous Job. `hook-succeeded` GCs the Job once it exits 0 so a
+    # successful migration doesn't accumulate in the namespace.
+    # `hook-failed` is intentionally **not** in the list: when the Job
+    # fails the operator needs the Pod logs for forensic, and Helm leaves
+    # the Job in place. `helm uninstall` cleans it up at release-removal
+    # time.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # `ttlSecondsAfterFinished` is a hard backstop on the Kubernetes side:
+  # even if the operator's `helm uninstall` is delayed (or the release is
+  # abandoned), the Job + its Pod log are garbage-collected after the
+  # configured window. Tune via `.Values.migrationJob.ttlSecondsAfterFinished`.
+  ttlSecondsAfterFinished: 600
+  # `backoffLimit` retries on non-zero exit. Alembic migrations are
+  # idempotent (a partially-applied migration leaves the database in the
+  # same logical state it started in — Alembic's transactional wrapping
+  # rolls back the half-applied step). Default 3 catches transient
+  # network blips between the Job pod and PostgreSQL without masking a
+  # real schema mismatch.
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: meho
+        app.kubernetes.io/instance: test
+        app.kubernetes.io/component: migrate
+    spec:
+      # `OnFailure` lets the Pod restart in-place on container failure
+      # (subject to `backoffLimit`), which is cheaper than re-scheduling
+      # the whole Pod for transient asyncpg connection errors.
+      restartPolicy: OnFailure
+      # Deliberately NO `serviceAccountName`. This Job is a
+      # `pre-install,pre-upgrade` hook, so Helm schedules it BEFORE it
+      # creates the chart's normal (non-hook) resources — the `meho`
+      # ServiceAccount (templates/serviceaccount.yaml) among them.
+      # Referencing that SA here deadlocks a fresh `helm install`: the
+      # apiserver rejects the migration pod with
+      # `serviceaccount "meho" not found` on every admission attempt until
+      # the hook exhausts its retries and the release times out (#2391).
+      # The migration runner needs no Kubernetes API access, so the pod
+      # falls back to the namespace `default` ServiceAccount (created by
+      # the SA controller in every namespace, hence always present at hook
+      # time) and — with the token mount disabled just below — carries no
+      # ServiceAccount token at all. Do NOT re-add `serviceAccountName`
+      # here, and do NOT annotate the shared `meho` SA as a hook: it backs
+      # the running Deployment, and any hook-delete-policy would delete it
+      # out from under that Deployment.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          # Same image as the backplane Deployment — the migration runner
+          # (`python -m meho_backplane.db.migrate`) lives in the backplane
+          # wheel and shares the chassis's Alembic config / SQLAlchemy
+          # version. A separate migration image would drift; using the
+          # same image guarantees the migrations applied are exactly the
+          # ones the rolling-out Deployment expects. That includes the
+          # digest pin (#284): when `image.digest` is set the Job runs the
+          # same content-addressed digest the Deployment does, not a tag
+          # that could resolve to different bytes.
+          image: "ghcr.io/evoila/meho:fixture"
+          imagePullPolicy: IfNotPresent
+          # The runner takes no CLI flags by design — its contract is
+          # `alembic upgrade head` against the env-supplied DATABASE_URL.
+          # Partial upgrades are deliberately not exposed (the operator
+          # cannot accidentally pin to an intermediate revision).
+          command: ["python", "-m", "meho_backplane.db.migrate"]
+          envFrom:
+            # Reuse the backplane's ConfigMap so any Alembic-relevant
+            # env vars (pool sizes, timeouts) stay in lock-step. The
+            # runner ignores the FastAPI-only keys.
+            - configMapRef:
+                name: test-meho-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: meho-postgres-url
+                  key: url
+            # Operator-supplied extra env vars (full EnvVar shape).
+            # Shared with the backplane Deployment so e.g. `SSL_CERT_FILE`
+            # points at the same trust-bundle path. Postgres with internal
+            # CA-signed TLS is the typical reason the migration Job needs
+            # this too (Issue #209).
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/extra-certs/ca.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/ssl/extra-certs/ca.crt
+            - name: UI_KEYCLOAK_CLIENT_ID
+              value: meho-web
+            - name: UI_KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: client_secret
+                  name: meho-ui-auth
+            - name: UI_SESSION_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: session_encryption_key
+                  name: meho-ui-auth
+            - name: KEYCLOAK_ADMIN_URL
+              value: https://keycloak.example.test/admin/realms/meho
+            - name: KEYCLOAK_ADMIN_CLIENT_ID
+              value: meho-admin
+            - name: KEYCLOAK_CLI_CLIENT_ID
+              value: meho-cli
+            - name: AGENT_DEFAULT_MODEL
+              value: claude-sonnet-4-6
+            - name: KEYCLOAK_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: keycloak_admin_client_secret
+                  name: meho-agent-runtime
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: anthropic_api_key
+                  name: meho-agent-runtime
+            - name: JWT_PLATFORM_ADMIN_ROLE_NAME
+              value: meho-admin
+            - name: VAULT_SCHEDULER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: vault_scheduler_token
+                  name: meho-agent-runtime
+                  optional: true
+            - name: SCHEDULER_AGENT_VAULT_PATH_PATTERN
+              value: secret/data/meho/agents/{tenant_id}_{client_id}/credentials
+            - name: CORPUS_URL
+              value: https://knowledge.meho.svc.cluster.local:8443
+            - name: VAULT_KV_TENANT_SCOPE_PREFIX
+              value: ""
+            - name: MAIL_SMTP_HOST
+              value: smtp.example.test
+            - name: MAIL_SMTP_PORT
+              value: "587"
+            - name: MAIL_SMTP_USERNAME
+              value: alerts@example.test
+            - name: MAIL_FROM
+              value: alerts@example.test
+            - name: MAIL_RECIPIENT_ALLOWLIST
+              value: example.test
+            - name: MAIL_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: meho-mail-smtp
+                  optional: true
+          resources:
+            limits:
+              cpu: 500m
+              ephemeral-storage: 256Mi
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              ephemeral-storage: 64Mi
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # Migrations don't write to the root FS, but the same libraries
+            # the backplane uses may touch /tmp on import; mounting it as
+            # emptyDir keeps readOnlyRootFilesystem: true valid.
+            - name: tmp
+              mountPath: /tmp
+            # Operator-supplied extra VolumeMounts. Shared with the
+            # backplane Deployment so the migration Pod sees the same
+            # trust bundle / sidecar config / additional secret mounts
+            # (Issue #209).
+            - mountPath: /etc/ssl/extra-certs
+              name: trust-bundle
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Operator-supplied extra Volumes. Shared with the backplane
+        # Deployment; see Issue #209 for the trust-bundle use case
+        # (internal-CA-signed Postgres often demands the same mount the
+        # backplane needs for Vault / Keycloak).
+        - configMap:
+            name: trust-bundle
+            optional: false
+          name: trust-bundle

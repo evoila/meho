@@ -72,6 +72,7 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
 from meho_backplane.connectors.kubernetes.kubeconfig import (
     CredentialLoader,
     KubeconfigCredential,
@@ -1923,6 +1924,7 @@ class KubernetesConnector(Connector):
                 api_client = await config.new_client_from_config_dict(
                     _kubeconfig_dialing_target(credential.config, target)
                 )
+            instrument_api_client(api_client)
             self._api_clients[key] = api_client
             _log.info(
                 "kubernetes_api_client_built",

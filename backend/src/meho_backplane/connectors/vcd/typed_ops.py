@@ -151,6 +151,9 @@ def _record_envelope(record_type: str, record_fields: dict[str, Any]) -> dict[st
 
 _NAME = _field("string", "The name of the object.")
 _ORG_NAME = _field("string", "The name of the organization that owns it.")
+_ORG_REF = _field(
+    "string", "The organization that owns it, as a reference or id. It is not the name."
+)
 
 _READ_TAGS = ("read-only", "vcd", "vcloud-director")
 
@@ -234,15 +237,15 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         summary="List the vApps (deployable multi-VM units).",
         description=(
             "Lists the vApps with the query service (type=adminVApp): groups of VMs that move "
-            "together in a migration. Each row has name, orgName, vdcName, status, numberOfVMs and"
-            " isDeployed. Read-only."
+            "together in a migration. Each row has name, org (a reference or id, not the name), "
+            "vdcName, status, numberOfVMs and isDeployed. Read-only."
         ),
         parameter_schema=_NO_PARAMS,
         response_schema=_record_envelope(
             "AdminVAppRecord",
             {
                 "name": _NAME,
-                "orgName": _ORG_NAME,
+                "org": _ORG_REF,
                 "vdcName": _field("string", "The VDC the vApp lives in."),
                 "status": _field("string", "The vApp state, for example POWERED_ON."),
                 "numberOfVMs": _field("integer", "How many VMs the vApp holds."),

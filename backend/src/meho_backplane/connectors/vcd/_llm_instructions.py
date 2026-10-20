@@ -67,7 +67,8 @@ _VAPP_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Query-service record envelope {record: [AdminVAppRecord, ...], total, "
-        "page, pageSize}. Each record carries name, orgName, vdcName, status "
+        "page, pageSize}. Each record carries name, org (a reference or id of "
+        "the organization, not its name), vdcName, status "
         "(e.g. POWERED_ON / POWERED_OFF), numberOfVMs, and isDeployed. A large "
         "list is reduced to a JSONFlux handle."
     ),

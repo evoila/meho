@@ -2444,8 +2444,9 @@ def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -
     outcome and the rate-limit refusal, so a spec-compliant MCP client
     validating the structured result accepts ``awaiting_approval``
     (G11.7-T1 #1401) and ``rate_limited`` (#3500) (MCP 2025-06-18 server
-    output contract). The enum stays bounded to statuses the dispatcher
-    actually emits at this boundary — no ``pending``, no ``already_resumed``.
+    output contract). The enum stays bounded to statuses the tool actually
+    emits: the dispatcher's five, plus ``pending`` / ``running`` from the
+    async mode (#3695). No ``already_resumed``.
     """
     import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
     from meho_backplane.mcp.registry import get_tool
@@ -2455,4 +2456,12 @@ def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -
     defn, _ = entry
     assert defn.outputSchema is not None
     enum = defn.outputSchema["properties"]["status"]["enum"]
-    assert set(enum) == {"ok", "error", "denied", "awaiting_approval", "rate_limited"}, enum
+    assert set(enum) == {
+        "ok",
+        "error",
+        "denied",
+        "awaiting_approval",
+        "rate_limited",
+        "pending",
+        "running",
+    }, enum

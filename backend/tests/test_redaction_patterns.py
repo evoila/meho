@@ -161,6 +161,47 @@ def test_bind_key_secret_comments_without_a_value_finish_fast(comment_run: str) 
     assert result.redacted == payload
 
 
+@pytest.mark.parametrize(
+    "resource",
+    [DEFAULT_POLICY_RESOURCE, "example.yaml"],
+    ids=["default-policy", "example-policy"],
+)
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "/* password=oldvalue*/",
+        "/* token=rotated12345 */",
+        "/* Authorization: Basic b2xkOnZhbHVl */",
+        "/* Bearer oldbearer1234 */",
+        "// password=oldvalue\n   ",
+    ],
+    ids=[
+        "password-in-block",
+        "token-in-block",
+        "header-in-block",
+        "bearer-in-block",
+        "password-in-line",
+    ],
+)
+def test_bind_key_secret_runs_before_rules_that_change_the_comment(
+    resource: str, comment: str
+) -> None:
+    """The packaged policies redact the value when the comment holds a credential.
+
+    ``api_key`` and the header rules consume a value up to the next
+    whitespace or quote. In ``/* password=oldvalue*/`` that takes the
+    closing ``*/`` with it, so a BIND rule that ran later no longer saw
+    a whole comment and left the real value visible (#4620 review).
+    The packaged policies list the BIND rule first for this reason.
+    """
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, resource)
+    line = "secret " + comment + ' "' + "exampleTsig" + 'Value==";'
+    result = redact(line, policy)
+    assert "exampleTsig" not in result.redacted
+    assert "[REDACTED:bind_key_secret];" in result.redacted
+    assert policy.rules[0].pattern == "bind_key_secret"
+
+
 def test_bind_key_secret_ignores_a_value_commented_out_on_the_same_line() -> None:
     """``secret # "..."`` is a comment to BIND, so nothing is a secret here."""
     line = 'secret # "exampleTsigValue==";'

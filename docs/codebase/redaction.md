@@ -610,6 +610,11 @@ No new runtime dependencies were added by Task #1070, #1071, or #1073.
   rules in policy order; a later rule sees the already-redacted
   output of earlier rules. Place narrow patterns (`api_key`,
   `bearer_token`) before wide ones (`fqdn`, `uuid`) in the YAML.
+  `bind_key_secret` must come first: it needs the BIND comment between
+  the `secret` keyword and the value to be whole, and `api_key` or a
+  header rule can redact a credential inside that comment and take
+  the closing `*/` with it. The packaged policies list it first and
+  `test_redaction_patterns.py` checks that order (#4620 review).
 - **Multiple matches collapse into one manifest entry per leaf.** The
   manifest tracks `count` and the span of the *first* match; if an
   audit consumer needs per-match spans, that is a Tier-1 extension

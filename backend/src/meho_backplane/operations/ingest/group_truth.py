@@ -138,6 +138,19 @@ def _level_counts(ops: Sequence[ConnectorReviewOp], levels: set[str]) -> str:
     return ", ".join(parts)
 
 
+def _read_only_detail(not_safe: Sequence[ConnectorReviewOp]) -> str:
+    """Render ``" (dangerous: 1, need approval: 2)"`` for the ops that break a read-only claim.
+
+    Empty when there is nothing to list, so the flag never ends in ``()``.
+    """
+    parts = [_level_counts(not_safe, {"caution", "dangerous", "destructive"})]
+    approval = sum(1 for op in not_safe if op.requires_approval)
+    if approval:
+        parts.append(f"need approval: {approval}")
+    detail = ", ".join(part for part in parts if part)
+    return f" ({detail})" if detail else ""
+
+
 def _posture_flags(prose: str, ops: Sequence[ConnectorReviewOp]) -> list[str]:
     """Flags where a safety claim in *prose* is broken by *ops*."""
     flags: list[str] = []
@@ -146,7 +159,7 @@ def _posture_flags(prose: str, ops: Sequence[ConnectorReviewOp]) -> list[str]:
         if not_safe:
             flags.append(
                 f"The text says read-only, but {len(not_safe)} op(s) are not safe or need "
-                f"approval ({_level_counts(not_safe, {'caution', 'dangerous', 'destructive'})})."
+                f"approval{_read_only_detail(not_safe)}."
             )
     if _NON_DESTRUCTIVE_RE.search(prose):
         destructive = sum(1 for op in ops if op.safety_level == "destructive")

@@ -2708,6 +2708,26 @@ async def test_group_advisory_prose_mismatch_read_only_claim_contradicted() -> N
 
 
 @pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_read_only_claim_safe_op_needs_approval() -> None:
+    """A safe op that needs approval breaks a read-only claim and shows its count."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Read-only VM list.",
+        ops=[
+            ("GET:/vcenter/vm", "List VMs", "safe", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    read_only = [flag for flag in advisory.flags if "read-only" in flag]
+    assert len(read_only) == 1
+    assert "1 op(s) are not safe or need approval (need approval: 1)." in read_only[0]
+    assert "()" not in read_only[0]
+
+
+@pytest.mark.asyncio
 async def test_group_advisory_prose_mismatch_all_destructive_claim_contradicted() -> None:
     """Text that says every op is destructive is flagged when some are lower."""
     tenant_id = uuid.uuid4()

@@ -56,6 +56,7 @@ nav:
       - The install trail: install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md
+      - "OpenBao unseal key: who keeps what": install/openbao-unseal-key.md
       - TLS and ingress: install/tls-ingress.md
       - Upgrades: install/upgrades.md
       - Local kind quickstart: install/kind-quickstart.md

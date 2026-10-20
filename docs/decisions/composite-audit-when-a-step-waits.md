@@ -91,7 +91,7 @@ when a check stopped it before its code ran. The `result_status` says how it end
 
 - Audit query filters (REST, console, MCP `query_audit`, CLI
   `meho audit query`): no new value. The query reads the status code, not
-  `payload.result_status` (`audit_query/query.py:314-340`, `:405-425`). It
+  `payload.result_status` (`audit_query/query.py:314-340`, `:405-423`). It
   shows 202 as `pending` and 403 as `denied`. Add
   `event_class=operation_execution` to leave out the decision rows.
 - A new filter value would not fit anyway: the filter fields take at most

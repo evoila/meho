@@ -1428,7 +1428,7 @@ workflow files, this doc, and the changelog.
 
 | Job | Surface | Steps |
 | --- | --- | --- |
-| `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on the light pool (#3251). |
+| `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
 | `python-unit-shard` (`Python unit shard N/3`) | `backend/` unit + acceptance subtree, split 3 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
@@ -1437,10 +1437,35 @@ workflow files, this doc, and the changelog.
 
 The three `python-unit-shard` legs run on `meho-runners-ci-heavy`
 (dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
-rdc-gitops#55; three shards fit the 5-pod ceiling). `python-lint`, the
-`python-unit-lane` fan-in, and the other jobs (`python-integration`,
-`go-lint-test`, `helm-lint-template`) run on the dense `meho-runners-ci`
-pool (4-core). Each `python-unit-shard` carries a 20-minute
+rdc-gitops#55; three shards fit the 5-pod ceiling). `python-integration`,
+`python-migration-tests` and the push-only `python-coverage-combine` run
+on the dense `meho-runners-ci` pool (4-core): they pull their test images
+from the internal image mirror or read the private vendor spec shelf.
+
+Since #4626 (step 1), the six small jobs that need nothing from the
+internal network run on GitHub-hosted `ubuntu-latest` runners:
+
+| Job | Runs on | Why it can leave the internal pool |
+| --- | --- | --- |
+| `changes` | `ubuntu-latest` | one `git diff`, 12 s of work |
+| `python-lint` | `ubuntu-latest` | `uv sync` from PyPI + ruff + mypy |
+| `python-unit-lane` | `ubuntu-latest` | one bash step over `needs.*.result` |
+| `go-lint-test` | `ubuntu-latest` | Go toolchain + public egress; gcc and make are preinstalled, so the "install if missing" steps are no-ops |
+| `cli-api-snapshot-freshness` | `ubuntu-latest` | Go + uv + `make`; regenerates committed artifacts offline |
+| `helm-lint-template` | `ubuntu-latest` | helm + kubeconform from public releases |
+
+Before the move, every one of these jobs waited a median of about 14
+minutes for a free slot on the 8-slot internal pool to run for seconds to
+two minutes, and the detect job at the start and the fan-in at the end of
+every run put that wait on the critical path twice. Each moved job keeps
+its name, its `if:` guard and its triggers, so the required checks are
+unchanged. GitHub-hosted runners are free for public repositories; the
+organisation shares a 20-concurrent-job limit across all its repositories
+on the current plan, so a job on a hosted runner can still wait when many
+hosted jobs run at once — measure the hosted wait before moving a long
+job such as the image build (#4626, step 3).
+
+Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
 ~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
 monolithic lane's ~15-18 min serial pytest wall); a per-shard
@@ -1724,6 +1749,15 @@ This is defence in depth on top of branch protection — the
 arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
 short-circuits on `push` events so main-branch CI is unaffected.
+
+The six jobs that moved to GitHub-hosted runners (#4626, step 1) keep the
+same guard. On a hosted runner the guard no longer protects internal
+infrastructure. It stays because the `python-unit-lane` fan-in expects
+`python-lint`, the shards and itself to skip together on a fork PR, and
+because one identical guard on every `ci.yml` job keeps the
+`test_ci_fork_runner_isolation.py` invariant simple to reason about. A
+fork PR still gets every `ci.yml` required context reported as
+success-by-skip, exactly as before.
 
 This guard is `ci.yml`'s arm of the repo-wide untrusted-PR isolation
 model — the full inventory, the disposable-runner routing pattern, and

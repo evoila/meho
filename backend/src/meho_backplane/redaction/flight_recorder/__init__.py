@@ -49,6 +49,7 @@ from meho_backplane.redaction.flight_recorder.headers import (
     HEADER_ALLOWLIST,
     redact_headers,
 )
+from meho_backplane.redaction.flight_recorder.query import QUERY_VALUE_MARKER, redact_query
 from meho_backplane.redaction.flight_recorder.span import SpanRedaction, redact_span
 from meho_backplane.redaction.flight_recorder.verdict import (
     BODY_OMITTED_MARKER,
@@ -65,6 +66,7 @@ __all__ = [
     "BODY_PATH_MARKER",
     "HEADER_ALLOWLIST",
     "OVF_PROPERTY_VALUE_MARKER",
+    "QUERY_VALUE_MARKER",
     "SECRET_FAMILY_OMITTED_MARKER",
     "SECRET_FAMILY_PATTERNS",
     "SECRET_FAMILY_TAGS",
@@ -77,5 +79,6 @@ __all__ = [
     "merge_uncertainty",
     "redact_body",
     "redact_headers",
+    "redact_query",
     "redact_span",
 ]

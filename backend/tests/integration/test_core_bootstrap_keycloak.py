@@ -11,8 +11,9 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
 1. The first run logs in with the first-start account, makes the first admin
    and the second person, sets the client secrets and removes the
    first-start account.
-2. The first admin's temporary password works, Keycloak asks for a new one,
-   and after the change a login through ``meho-cli`` gives a token the
+2. Keycloak asks the first admin for a new password before any login. Once
+   that required action is done, the password from the Secret is the one
+   Keycloak holds, and a login through ``meho-cli`` gives a token the
    backplane accepts as a ``tenant_admin`` of the first tenant with
    ``platform_admin``. The second person is an ``operator``.
 3. The second run logs in as ``meho-admin`` and changes nothing: the realm
@@ -255,6 +256,30 @@ def _password_login(kc: _Keycloak, username: str, password: str) -> httpx.Respon
     )
 
 
+def _clear_required_actions(kc: _Keycloak, username: str) -> dict[str, Any]:
+    """What the browser's first login does, minus the new password."""
+    admin = f"{kc.base_url}/admin/realms/meho"
+    headers = _admin_headers(kc)
+    user = _user(kc, username)
+    user_rep = httpx.get(f"{admin}/users/{user['id']}", headers=headers).json()
+    user_rep["requiredActions"] = []
+    httpx.put(f"{admin}/users/{user['id']}", headers=headers, json=user_rep).raise_for_status()
+    return user
+
+
+async def _operator_for(
+    kc: _Keycloak, username: str, password: str, monkeypatch: pytest.MonkeyPatch
+) -> Any:
+    resp = _password_login(kc, username, password)
+    assert resp.status_code == 200, resp.text
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{kc.base_url}/realms/meho")
+    get_settings.cache_clear()
+    clear_jwks_cache()
+    return await verify_jwt_for_audience(
+        f"Bearer {resp.json()['access_token']}", expected_audience="meho-backplane"
+    )
+
+
 async def test_first_admin_must_change_the_password_then_is_a_platform_admin(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -262,35 +287,16 @@ async def test_first_admin_must_change_the_password_then_is_a_platform_admin(
     assert first_login["admin_username"] == "admin"
     _allow_password_grant_on_cli(keycloak)
 
-    # The temporary password is right, but Keycloak wants a new one first.
+    # Keycloak wants a new password before any login with the temporary one.
     pending = _password_login(keycloak, "admin", first_login["admin_password"])
     assert pending.status_code == 400
     assert "not fully set up" in pending.json()["error_description"]
-    wrong = _password_login(keycloak, "admin", "not-the-password")
-    assert wrong.status_code == 401
 
-    # The person changes the password (what the browser does at the first login).
-    admin = f"{keycloak.base_url}/admin/realms/meho"
-    headers = _admin_headers(keycloak)
-    user = _user(keycloak, "admin")
-    new_password = secrets.token_urlsafe(18)
-    httpx.put(
-        f"{admin}/users/{user['id']}/reset-password",
-        headers=headers,
-        json={"type": "password", "value": new_password, "temporary": False},
-    ).raise_for_status()
-    user_rep = httpx.get(f"{admin}/users/{user['id']}", headers=headers).json()
-    user_rep["requiredActions"] = []
-    httpx.put(f"{admin}/users/{user['id']}", headers=headers, json=user_rep).raise_for_status()
-
-    resp = _password_login(keycloak, "admin", new_password)
-    assert resp.status_code == 200, resp.text
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
-    get_settings.cache_clear()
-    clear_jwks_cache()
-    operator = await verify_jwt_for_audience(
-        f"Bearer {resp.json()['access_token']}", expected_audience="meho-backplane"
-    )
+    # Once the required action is done, the password from the Secret is the
+    # one Keycloak holds, and the login carries the first admin's claims.
+    _clear_required_actions(keycloak, "admin")
+    assert _password_login(keycloak, "admin", "not-the-password").status_code == 401
+    operator = await _operator_for(keycloak, "admin", first_login["admin_password"], monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.TENANT_ADMIN
     assert operator.platform_admin is True
@@ -300,26 +306,12 @@ async def test_first_admin_must_change_the_password_then_is_a_platform_admin(
 async def test_second_person_is_an_operator(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    admin = f"{keycloak.base_url}/admin/realms/meho"
-    headers = _admin_headers(keycloak)
-    user = _user(keycloak, "approver")
-    new_password = secrets.token_urlsafe(18)
-    httpx.put(
-        f"{admin}/users/{user['id']}/reset-password",
-        headers=headers,
-        json={"type": "password", "value": new_password, "temporary": False},
-    ).raise_for_status()
-    user_rep = httpx.get(f"{admin}/users/{user['id']}", headers=headers).json()
-    user_rep["requiredActions"] = []
-    httpx.put(f"{admin}/users/{user['id']}", headers=headers, json=user_rep).raise_for_status()
+    first_login = keycloak.first_login
+    assert first_login["approver_username"] == "approver"
+    _clear_required_actions(keycloak, "approver")
 
-    resp = _password_login(keycloak, "approver", new_password)
-    assert resp.status_code == 200, resp.text
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
-    get_settings.cache_clear()
-    clear_jwks_cache()
-    operator = await verify_jwt_for_audience(
-        f"Bearer {resp.json()['access_token']}", expected_audience="meho-backplane"
+    operator = await _operator_for(
+        keycloak, "approver", first_login["approver_password"], monkeypatch
     )
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.OPERATOR

@@ -461,7 +461,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cache-refresh read `datastore.refresh` — + 42 dangerous/destructive
   writes + 8 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
-  implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
+  implied by the spec, not by global defaults. The AI guidance
+  (`llm_instructions`) of the VM and folder writes and the VM allocation
+  reads lives in `composites/_vm_llm_instructions.py`, one entry per op id;
+  their example calls sit under `examples` in each parameter schema. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`
@@ -2140,8 +2143,11 @@ vApp deploy, and the property read that polls them and finds such a vApp
 — ride the governed VI-JSON seam and live in the
 `_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` lane.
 
-**Item resolution.** `library_item` (an id) is a passthrough. Otherwise
-`library_item_name` is resolved to an id via
+**Item resolution.** The caller gives exactly one of `library_item` (an id)
+and `library_item_name`. The parameter schema says so with a `oneOf`, so
+MEHO refuses both or neither before the call; `vm.import_from_library`
+has the same rule. `library_item` is a passthrough. `library_item_name` is
+resolved to an id via
 `POST:/content/library/item?action=find` (a *read* — returns a bare id
 array — issued un-gated through the `_find_content_library_ids` helper,
 which rides `_post_json` since find is POST-shaped). The `FindSpec` is sent

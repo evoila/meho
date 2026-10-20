@@ -219,7 +219,11 @@ the ingested-catalog boundary.
   longer fits, the resume is refused with `unqualified_target_version`
   and the caller must make a new request. The resume skips the policy
   gate, so switching catalogs there would run an operation the approver
-  never saw. Code: `backend/src/meho_backplane/operations/_catalog_guard.py`.
+  never saw. Both resume paths use the stored catalog: the operator surface
+  reads it from the request row, and the agent waiter replaces the
+  `connector_id` in the agent's original call with it
+  (`backend/src/meho_backplane/agent/approval_wait.py`). Code:
+  `backend/src/meho_backplane/operations/_catalog_guard.py`.
 - **Safety floors.** The VMware hardware/lifecycle/power write floor
   (`dangerous` + approval) is keyed on `(product, impl_id)` and applies to the
   8.0 catalog's ingested rows exactly as it does for 9.0.

@@ -2061,7 +2061,16 @@ What the agent waiter does:
   (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to
   end).
 - **Direct request (no `resume_parent`).** It runs the agent's original
-  `call_arguments` again unchanged, as before, including the target name.
+  `call_arguments` again, including the target name, with one change: the
+  `connector_id` is the catalog the request row stored. The park may have
+  run on a sibling catalog of the one the agent named (for example the agent
+  named `vmware-rest-9.0` for an 8.0.3 vCenter, so the park stored
+  `vmware-rest-8.0`). That stored catalog is the one policy checked and the
+  approver saw. An approved call never switches catalogs, so the resume runs
+  on the stored catalog or is refused with `unqualified_target_version` when
+  the target's detected version no longer fits it. Covered by
+  `test_agent_resume_runs_on_the_stored_sibling_catalog` and
+  `test_agent_resume_is_refused_when_the_target_version_moved`.
 - **Credential-write sub-op.** The row stores only the parent `op_id`; the
   parent params live in the encrypted custody copy. For a composite sub-op
   the claim winner consumes that copy to get the parent params. For a direct

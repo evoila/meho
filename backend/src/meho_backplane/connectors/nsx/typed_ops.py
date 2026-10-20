@@ -545,7 +545,9 @@ _SEGMENT_LIST = NsxTypedOp(
                     "type": "object",
                     "properties": {
                         "gateway_address": _field(
-                            "string", "The gateway address in CIDR form, for example 10.0.0.1/24."
+                            "string",
+                            "The gateway address in CIDR form: the gateway IP, a slash, then "
+                            "the prefix length.",
                         ),
                         "network": _field("string", "The network address in CIDR form."),
                     },

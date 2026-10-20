@@ -113,6 +113,14 @@ target — coordinate via the consumer-side ticket.
 10. **Squash merge.** The PR title (which becomes the merge commit
     subject) is what shows up in `git log` on `main`.
 
+### Who approves
+
+Any maintainer with write access, or the MEHO review bot, may approve a
+pull request. A pull request that changes a decision record, the
+approval rules or a security default also needs the project owner's
+approval. Authors cannot approve their own pull request: `main` needs
+one approval from someone else, given after the last push.
+
 ## Code style
 
 Each language has a fixed toolchain. CI runs the same tools — no

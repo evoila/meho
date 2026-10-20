@@ -1304,7 +1304,8 @@ rollback (a request saved before #4217) is refused before anything runs
 (`composite_resume_unsupported`). A rolled-back `vm.create` is an
 `error` result (#3813). Its error message names the failed step, says
 what happened to the VM, and ends with the cause, which carries
-vCenter's own message (`_vsphere_fault_detail`). The `rollback` field
+vCenter's own message (`_vsphere_fault_detail`, for a REST error body
+and for a VI-JSON method fault alike). The `rollback` field
 gives the VM moid and the outcome (#4057): `removed`,
 `awaiting_approval` (the VM exists until the DELETE is approved) or
 `not_removed` (the DELETE failed or was denied; delete the VM by hand).

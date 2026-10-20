@@ -107,6 +107,8 @@ from meho_backplane.connectors.vmware_rest.ovf_import import (
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
+    fault_message,
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
     vim_moref,
@@ -5065,9 +5067,12 @@ def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
     otherwise left the surfaced detail an empty ``transport fault:`` tail
     (#3076); a non-empty ``str(exc)`` is appended after it. The helper owns
     the whole rendered detail for both fault classes, so callers interpolate
-    it directly without a redundant ``: {exc}`` suffix. Body parsing is
-    defensive — a non-JSON or unexpectedly-shaped body drops the missing parts,
-    never raises.
+    it directly without a redundant ``: {exc}`` suffix. A VI-JSON method
+    fault (HTTP 500 whose body is the fault DataObject itself: ``_typeName``
+    plus ``faultstring`` / ``faultMessage`` / ``localizedMessage``) renders
+    the same way, with the vim fault class in place of ``error_type`` (#4057).
+    Body parsing is defensive — a non-JSON or unexpectedly-shaped body drops
+    the missing parts, never raises.
     """
     if not isinstance(exc, httpx.HTTPStatusError):
         base = f"transport fault ({type(exc).__name__})"
@@ -5078,17 +5083,37 @@ def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
         body = exc.response.json()
     except (ValueError, httpx.HTTPError):
         body = None
-    if isinstance(body, dict):
-        error_type = body.get("error_type")
-        if isinstance(error_type, str) and error_type:
-            detail += f" ({error_type})"
-        for message in body.get("messages") or []:
-            if isinstance(message, dict):
-                default = message.get("default_message")
-                if isinstance(default, str) and default:
-                    detail += f": {default}"
-                    break
+    if not isinstance(body, dict):
+        return detail
+    if VIM_TYPE_NAME_KEY in body:
+        return detail + _vim_fault_suffix(body)
+    error_type = body.get("error_type")
+    if isinstance(error_type, str) and error_type:
+        detail += f" ({error_type})"
+    for message in body.get("messages") or []:
+        if isinstance(message, dict):
+            default = message.get("default_message")
+            if isinstance(default, str) and default:
+                detail += f": {default}"
+                break
     return detail
+
+
+def _vim_fault_suffix(body: dict[str, Any]) -> str:
+    """`` (<fault class>): <text>`` of a VI-JSON method-fault body.
+
+    :func:`fault_message` prefixes a flattened fault's text with its class
+    (``InvalidArgument: ...``); the class already sits in the parentheses
+    here, so that prefix is dropped to keep the REST-error shape.
+    """
+    type_name = fault_type_name(body)
+    text = fault_message(body)
+    suffix = f" ({type_name})" if type_name else ""
+    if text and type_name and text.startswith(f"{type_name}: "):
+        text = text[len(type_name) + 2 :]
+    if text and text != type_name:
+        suffix += f": {text}"
+    return suffix
 
 
 def _guest_tools_unavailable(status: int | None, error_type: str | None) -> bool:

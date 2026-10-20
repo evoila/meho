@@ -1134,6 +1134,79 @@ async def test_vm_create_nested_hv_transport_fault_rolls_back(gate: _GateRecorde
 
 
 @pytest.mark.asyncio
+async def test_vm_create_nested_hv_vim_fault_keeps_type_and_message(gate: _GateRecorder) -> None:
+    """A VI-JSON fault on the VHV reconfigure keeps vCenter's fault class and text (#4057)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-1", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-77"},
+            "/api/vcenter/vm/vm-77": {},  # DELETE rollback
+        },
+        vmomi={
+            "/VirtualMachine/vm-77/ReconfigVM_Task": _http_error_with_body(
+                500,
+                "https://vc/sdk/vim25/8.0.3.0/VirtualMachine/vm-77/ReconfigVM_Task",
+                {
+                    "_typeName": "InvalidArgument",
+                    "faultstring": "A specified parameter was not correct: nestedHVEnabled",
+                },
+            )
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "esx-nested-02",
+            "guest_os": "VMKERNEL_8",
+            "nested_hv": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "nested_hv"
+    assert out["rollback"] == {"vm_id": "vm-77", "outcome": "removed"}
+    assert out["rollback_reason"] == (
+        "nested_hv reconfigure failed: HTTP 500 (InvalidArgument): "
+        "A specified parameter was not correct: nestedHVEnabled"
+    )
+    assert out["issues"][0]["message"] == (
+        "vm.create failed at step 'nested_hv'; the rollback removed the VM it created "
+        "(vm-77). Cause: nested_hv reconfigure failed: HTTP 500 (InvalidArgument): "
+        "A specified parameter was not correct: nestedHVEnabled"
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            {"_typeName": "InvalidArgument", "faultstring": "bad guestId"},
+            "HTTP 500 (InvalidArgument): bad guestId",
+            id="flattened",
+        ),
+        pytest.param(
+            {
+                "_typeName": "LocalizedMethodFault",
+                "localizedMessage": "The operation is not allowed in the current state.",
+                "fault": {"_typeName": "InvalidState"},
+            },
+            "HTTP 500 (InvalidState): The operation is not allowed in the current state.",
+            id="wrapped",
+        ),
+        pytest.param({"_typeName": "NotAuthenticated"}, "HTTP 500 (NotAuthenticated)", id="bare"),
+    ],
+)
+def test_vsphere_fault_detail_reads_vi_json_method_faults(
+    body: dict[str, Any], expected: str
+) -> None:
+    """Both VI-JSON fault shapes render like a REST error: status, class, text (#4057)."""
+    exc = _http_error_with_body(500, "https://vc/sdk/vim25/8.0.3.0/VirtualMachine/vm-1/X", body)
+    assert _write._vsphere_fault_detail(exc) == expected
+
+
+@pytest.mark.asyncio
 async def test_vm_create_nested_hv_task_fault_rolls_back(gate: _GateRecorder) -> None:
     """A faulted ReconfigVM_Task rolls back; the vim fault message is surfaced."""
     conn = _RecordingConnector(

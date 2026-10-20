@@ -182,6 +182,35 @@
         }
       }
     },
+    "firstLogin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "User names of the two people the bootstrap Job makes at the first start. The parent chart's Job reads them; the subchart only carries them.",
+      "properties": {
+        "adminUsername": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approverUsername": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A login for automated install proofs, off by default. The parent chart's bootstrap Job reads it; the subchart only carries it.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "tenantId": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$"
+        }
+      }
+    },
     "ingress": {
       "type": "object",
       "additionalProperties": false,

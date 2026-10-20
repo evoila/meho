@@ -80,6 +80,7 @@ _CORE_NAMES = [
         "broadcast-auth",
         "tls",
         "first-login",
+        "ci-login",
         "vault-unseal",
         "vault-init",
         "vault-snapshot",

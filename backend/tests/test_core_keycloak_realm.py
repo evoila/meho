@@ -5,11 +5,12 @@
 
 The file ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` is what
 Keycloak imports at its first start. These checks pin the realm the product
-owner decided (``docs/decisions/login-role-groups.md``): five groups that
+owner decided (``docs/decisions/login-role-groups.md``): five role groups that
 carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
-the six clients, the mappers ``meho admin keycloak bootstrap-clients`` puts
-on the clients people log in with, and no secret or host name written into
-the file.
+the platform group that carries only ``platform_admin`` (#4043), the six
+clients, the mappers ``meho admin keycloak bootstrap-clients`` puts on the
+clients people log in with, and no secret or host name written into the
+file.
 Every value that differs per install is a ``${...}`` placeholder that
 Keycloak fills from the pod's environment during the import.
 """
@@ -71,7 +72,7 @@ def test_no_company_login_yet(realm: dict[str, Any]) -> None:
     assert realm["identityProviderMappers"] == []
 
 
-def test_five_groups_with_tenant_attributes(realm: dict[str, Any]) -> None:
+def test_role_groups_with_tenant_attributes_and_the_platform_group(realm: dict[str, Any]) -> None:
     groups = {g["name"]: g["attributes"] for g in realm["groups"]}
     assert groups == {
         "MEHO-Readers": {
@@ -95,6 +96,9 @@ def test_five_groups_with_tenant_attributes(realm: dict[str, Any]) -> None:
             "tenant_role": ["read_only"],
             "approver": ["true"],
         },
+        # Not a role group: it carries no tenant and no role, only the right
+        # to act across tenants. The bootstrap Job puts the first admin here.
+        "MEHO-Platform-Admins": {"platform_admin": ["true"]},
     }
 
 
@@ -118,12 +122,14 @@ def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id:
         "tenant-id",
         "tenant-role",
         "approver",
+        "platform-admin",
         "groups-claim",
     }
     for name, attribute, json_type in (
         ("tenant-id", "tenant_id", "String"),
         ("tenant-role", "tenant_role", "String"),
         ("approver", "approver", "boolean"),
+        ("platform-admin", "platform_admin", "boolean"),
     ):
         mapper = mappers[name]
         assert mapper["protocolMapper"] == "oidc-usermodel-attribute-mapper"

@@ -134,12 +134,13 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Seventeen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
+    Eighteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
     writes, the #2891 hardware trio, the two GOSC composites / #2892, the
     OVF/OVA content-library deploy / #2909, the typed HttpNfcLease import
     / #3229 — whose REST sub-ops ride the content-library find + download-session
-    actions — and the #3505 governed-allocation resource-pool create + delete,
-    all served by the pinned vcenter.yaml).
+    actions — the #3505 governed-allocation resource-pool create + delete,
+    and the 9.0+ REST arm of the #3198 vm.destroy, all served by the pinned
+    vcenter.yaml).
     ``vm.snapshot.revert`` no longer appears: both of its sub-ops moved to
     the vim surface in #2970 (the pinned vcenter.yaml serves no snapshot
     REST resource), so its manifest lives in
@@ -160,6 +161,7 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_VM_CREATE",
         "_SUB_OPS_VM_CUSTOMIZE",
         "_SUB_OPS_VM_DEPLOY_FROM_LIBRARY",
+        "_SUB_OPS_VM_DESTROY",
         "_SUB_OPS_VM_DEVICE_CDROM",
         "_SUB_OPS_VM_IMPORT_FROM_LIBRARY",
         "_SUB_OPS_VM_MIGRATE",
@@ -561,7 +563,17 @@ def test_vm_disk_grow_vi_json_paths_exist_in_the_pinned_spec() -> None:
 # the blast-radius preview reads. These are declared in
 # ``_write._VIM_SUB_OPS_VM_DESTROY`` (deliberately NOT in the ``_SUB_OPS_*``
 # namespace, so the vcenter.yaml sweep skips them). The 9.0+ arm is the
-# synchronous REST ``DELETE:/vcenter/vm/{vm}`` — a plain vcenter.yaml path.
+# synchronous REST ``DELETE:/vcenter/vm/{vm}`` — a plain vcenter.yaml path,
+# declared with its ``GET:/vcenter/vm/{vm}`` power-state read in
+# ``_write._SUB_OPS_VM_DESTROY`` and reconciled by the generic sweep above.
+
+
+def test_vm_destroy_rest_sub_op_manifest_is_the_expected_pair() -> None:
+    """Pin the destroy REST manifest so a drift can't shrink the reconcile."""
+    assert set(_write._SUB_OPS_VM_DESTROY) == {
+        "GET:/vcenter/vm/{vm}",
+        "DELETE:/vcenter/vm/{vm}",
+    }
 
 
 def test_vm_destroy_vi_json_sub_op_manifest_is_the_expected_pair() -> None:

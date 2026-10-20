@@ -35,18 +35,32 @@ fixture of the flat shape through the real parser plus the correction and pins
 the result; the shelf-gated half does the same against the pinned vendor
 8.0 U3 ``vcenter.yaml``.
 
-The 8.0 U3 ``vcenter.yaml`` is pinned on the shelf (provenance: the
-``vsphere-8.x`` artifact in ``docs/compatibility/vcf-api-contract-manifest.yaml``),
-and CI checks out ``vcenter-8.0/`` and requires the file, so the shelf-gated half
-runs in CI (``docs/decisions/vendor-spec-ci-provisioning.md``).
+**VI-JSON methods against the 8.0 U1, U2 and U3 files (#4333).** The vCenter
+connector calls VI-JSON methods (``POST /sdk/vim25/{release}/<Type>/<moId>/<Method>``)
+in its typed ops and composites. The always-on half reads the connector's source
+and collects every method it calls. The shelf-gated half checks each one against
+the vendor VI/JSON file of each 8.0 update (``vcenter-8.0/vi-json-8.0u1.yaml``,
+``-8.0u2.yaml``, ``-8.0u3.yaml``) and prints the methods a file lacks. Each
+missing method must have an entry in :data:`_NOT_IN_8_0_VI_JSON` with the reason;
+an entry that is no longer missing fails the lane too, so the list stays true.
+
+The 8.0 U3 ``vcenter.yaml`` and the three 8.0 VI/JSON files are pinned on the
+shelf (provenance: the ``vsphere-8.x`` and ``vsphere-vi-json-8.0u*`` artifacts in
+``docs/compatibility/vcf-api-contract-manifest.yaml``), and CI checks out
+``vcenter-8.0/`` and requires all four files, so the shelf-gated halves run in
+CI (``docs/decisions/vendor-spec-ci-provisioning.md``).
 """
 
 from __future__ import annotations
 
+import ast
+import functools
+import re
 from pathlib import Path
 
 import pytest
 
+import meho_backplane.connectors.vmware_rest as vmware_rest_package
 from meho_backplane.connectors.vmware_rest.ingest_corrections import TASKS_LIST_OP_PATH
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.ingest import parse_openapi
@@ -202,3 +216,184 @@ def test_8_0_tasks_list_body_shape_in_pinned_vendor_catalog() -> None:
     if not any(r.op_id == _TASKS_LIST_OP_ID for r in rows):
         pytest.fail(f"pinned vendor 8.0 U3 catalog does not serve {_TASKS_LIST_OP_ID}")
     assert _body_props(_corrected_tasks_list(rows, "8.0")) == {"filter_spec", "result_spec"}
+
+
+# ---------------------------------------------------------------------------
+# VI-JSON methods against the vendor 8.0 U1 / U2 / U3 VI/JSON files (#4333)
+# ---------------------------------------------------------------------------
+
+#: The vendor VI/JSON file of each 8.0 update, as pinned on the shelf.
+_VI_JSON_8_0_FILES: dict[str, str] = {
+    "8.0u1": "vi-json-8.0u1.yaml",
+    "8.0u2": "vi-json-8.0u2.yaml",
+    "8.0u3": "vi-json-8.0u3.yaml",
+}
+
+#: VI-JSON methods MEHO calls that an 8.0 VI/JSON file does not have. Each
+#: entry names the updates that lack it and why the call is still safe there.
+#: The lane fails when a file lacks a method that is not listed here, and when
+#: a listed method is in fact in the file.
+_NOT_IN_8_0_VI_JSON: dict[str, tuple[frozenset[str], str]] = {
+    "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary": (
+        frozenset(_VI_JSON_8_0_FILES),
+        "vSAN health service method, not a vim25 method: no 8.0 VI/JSON file has "
+        "the vSAN health service (VsanVcClusterHealthSystem) paths. "
+        "vmware.host.vsan_health calls it best-effort and returns "
+        "overall_health=null with a read_note when the call fails.",
+    ),
+}
+
+#: ``POST:/<Type>/{moId}/<Method>`` -- the governed sub-op form.
+_SUB_OP_RE = re.compile(r"^POST:/([A-Z][A-Za-z0-9]*)/\{moId\}/([A-Za-z_][A-Za-z0-9_]*)$")
+#: ``/<Type>/<moId>/<Method>`` -- the raw path given to ``_post_vmomi_json``.
+#: ``{}`` stands for an f-string placeholder.
+_RAW_PATH_RE = re.compile(r"^/([A-Z][A-Za-z0-9]*|\{\})/[^/]+/([A-Za-z_][A-Za-z0-9_]*|\{\})$")
+
+#: Call sites whose method name is only known at run time. Their methods are
+#: declared as ``POST:`` sub-op constants next to them, so the collection still
+#: sees them. A new site like this must declare its methods the same way and
+#: be added here.
+_RUNTIME_METHOD_SITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("composites/_datastore_browse.py", "/{}/{}/{}"),
+        ("composites/_host.py", "/HostServiceSystem/{}/{}"),
+        ("composites/_host.py", "/HostStorageSystem/{}/{}"),
+        ("composites/_write.py", "/{}/{}/{}"),
+    }
+)
+
+
+def _string_literals(tree: ast.AST) -> list[str]:
+    """Every string constant and f-string in *tree*; placeholders become ``{}``."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            found.append(
+                "".join(
+                    part.value if isinstance(part, ast.Constant) else "{}" for part in node.values
+                )
+            )
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found.append(node.value)
+    return found
+
+
+@functools.cache
+def _scan_vi_json_calls() -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
+    """Read the vCenter connector source; return its VI-JSON methods.
+
+    Returns the ``POST:/<Type>/{moId}/<Method>`` set, plus the raw-path
+    templates whose type or method is a placeholder (``(file, template)``).
+    """
+    package_dir = Path(vmware_rest_package.__file__).parent
+    methods: set[str] = set()
+    templates: set[tuple[str, str]] = set()
+    for source in sorted(package_dir.rglob("*.py")):
+        relative = source.relative_to(package_dir).as_posix()
+        for text in _string_literals(ast.parse(source.read_text(encoding="utf-8"))):
+            match = _SUB_OP_RE.match(text) or _RAW_PATH_RE.match(text)
+            if match is None:
+                continue
+            mo_type, method = match.groups()
+            if "{}" in (mo_type, method):
+                templates.add((relative, text))
+            else:
+                methods.add(f"POST:/{mo_type}/{{moId}}/{method}")
+    return frozenset(methods), frozenset(templates)
+
+
+def _vi_json_post_op_ids(spec_path: Path) -> set[str]:
+    """``POST:<path>`` for every path item with a POST operation.
+
+    Line-scans the ``paths`` block instead of parsing the 7-8 MB YAML: a path
+    key sits at 2-space indent, its operations at 4-space indent. The same
+    shape as the 9.0 VI-JSON lanes' check.
+    """
+    served: set[str] = set()
+    in_paths = False
+    current: str | None = None
+    for line in spec_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            in_paths = line.rstrip() == "paths:"
+            current = None
+        elif in_paths and line.startswith("  ") and not line.startswith("   "):
+            key = line.strip()
+            current = key[:-1] if key.startswith("/") and key.endswith(":") else None
+        elif current is not None and line.strip() == "post:":
+            served.add(f"POST:{current}")
+    return served
+
+
+def test_vi_json_method_collection_is_wired() -> None:
+    """The source scan finds the connector's VI-JSON calls and misses none.
+
+    A scan that finds nothing guards nothing, so anchor methods must be
+    present. A call whose type is a placeholder must use a method the scan
+    already has, and a call whose method is a placeholder must be a known
+    site whose methods are declared as ``POST:`` constants.
+    """
+    methods, templates = _scan_vi_json_calls()
+    for anchor in (
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/VirtualMachine/{moId}/ReconfigVM_Task",
+        "POST:/HostServiceSystem/{moId}/StartService",
+        "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
+    ):
+        assert anchor in methods, f"the VI-JSON source scan lost {anchor}"
+
+    method_names = {op_id.rsplit("/", 1)[-1] for op_id in methods}
+    runtime_sites = set()
+    for relative, template in templates:
+        method = template.rsplit("/", 1)[-1]
+        if method == "{}":
+            runtime_sites.add((relative, template))
+        else:
+            assert method in method_names, (
+                f"{relative} calls VI-JSON method {method!r} on a run-time type, but no "
+                f"'POST:/<Type>/{{moId}}/{method}' constant declares it"
+            )
+    assert runtime_sites == _RUNTIME_METHOD_SITES, (
+        "VI-JSON call sites with a run-time method name changed. Declare the "
+        "methods of a new site as POST: sub-op constants, then update "
+        f"_RUNTIME_METHOD_SITES. Found: {sorted(runtime_sites)}"
+    )
+
+
+def test_8_0_exclusions_name_known_updates_and_called_methods() -> None:
+    """Every exclusion names real 8.0 updates, a method MEHO calls, and a reason."""
+    methods, _ = _scan_vi_json_calls()
+    for op_id, (updates, reason) in _NOT_IN_8_0_VI_JSON.items():
+        assert op_id in methods, f"{op_id} is excluded but MEHO no longer calls it"
+        assert updates and updates <= set(_VI_JSON_8_0_FILES), op_id
+        assert reason.strip(), op_id
+
+
+@pytest.mark.parametrize("update", sorted(_VI_JSON_8_0_FILES))
+def test_vi_json_methods_exist_in_pinned_8_0_file(update: str) -> None:
+    """Each VI-JSON method MEHO calls is in the vendor 8.0 file, or is excluded."""
+    spec_path = require_shelf_spec(_SHELF_DIR, _VI_JSON_8_0_FILES[update])
+    served = _vi_json_post_op_ids(spec_path)
+    assert served, f"{spec_path.name} parsed to zero POST paths"
+    methods, _ = _scan_vi_json_calls()
+
+    missing = methods - served
+    print(f"{spec_path.name}: {len(methods)} VI-JSON methods MEHO calls, {len(missing)} missing")
+    for op_id in sorted(missing):
+        print(f"  missing: {op_id}")
+
+    expected = {
+        op_id for op_id, (updates, _reason) in _NOT_IN_8_0_VI_JSON.items() if update in updates
+    }
+    unexplained = sorted(missing - expected)
+    stale = sorted(expected - missing)
+    assert not unexplained, (
+        f"{spec_path.name} lacks VI-JSON methods MEHO calls: {unexplained}. Add a "
+        "version gate to the operation, or an entry with the reason to "
+        "_NOT_IN_8_0_VI_JSON."
+    )
+    assert not stale, (
+        f"{spec_path.name} has these excluded methods, so remove {update!r} from "
+        f"their _NOT_IN_8_0_VI_JSON entry: {stale}"
+    )

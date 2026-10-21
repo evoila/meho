@@ -659,17 +659,19 @@ class AuditLog(Base):
         server_default=sa.text("'legacy_request'"),
     )
     # Whether the instance ran in sandbox mode when it wrote the row
-    # (#4622, ``docs/decisions/sandbox-mode.md``). The one Python-side
-    # default reads the process flag set at boot, so every writer stamps
-    # the mark without naming it. The database default ``false`` covers a
-    # row written by an older build that does not know the column, and
-    # every row from before migration ``0115``. The whole database has one
-    # mode, but rows leave it (exports, log stores), and the mark goes
-    # with them.
+    # (#4622, ``docs/decisions/sandbox-mode.md``). One default sets it for
+    # every writer: the ``before_insert`` hook below reads the process flag
+    # set at boot, so no writer names the mark. It is an ORM hook, not a
+    # Core column default, on purpose: a Core default would be added to
+    # every ``insert(AuditLog)`` statement, also against a database at an
+    # older revision (the migration tests do that). The database default
+    # ``false`` covers a row written by an older build that does not know
+    # the column, and every row from before migration ``0115``. The whole
+    # database has one mode, but rows leave it (exports, log stores), and
+    # the mark goes with them.
     sandbox_mode: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
-        default=sandbox_mode_active,
         server_default=sa.false(),
     )
 
@@ -736,6 +738,18 @@ class AuditLog(Base):
             postgresql_using="btree",
         ),
     )
+
+
+@sa.event.listens_for(AuditLog, "before_insert")
+def _stamp_audit_sandbox_mode(_mapper: object, _connection: object, row: AuditLog) -> None:
+    """The one default for ``audit_log.sandbox_mode`` (#4622).
+
+    Runs for every ``AuditLog`` row the ORM inserts. A writer that set the
+    mark itself keeps its value (none does today; the writer inventory
+    test checks that).
+    """
+    if row.sandbox_mode is None:
+        row.sandbox_mode = sandbox_mode_active()
 
 
 class Tenant(Base):

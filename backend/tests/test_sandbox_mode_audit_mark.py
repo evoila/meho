@@ -70,11 +70,16 @@ def test_no_writer_names_the_mark() -> None:
 
 
 def test_model_default_is_the_process_flag() -> None:
+    """The column has no Core default; the ORM insert hook is the one default."""
+    from sqlalchemy import event
+
+    from meho_backplane.db.models import _stamp_audit_sandbox_mode
+
     column = AuditLog.__table__.c.sandbox_mode
     assert column.nullable is False
-    assert column.default is not None
-    assert column.default.arg.__name__ == "sandbox_mode_active"
+    assert column.default is None
     assert column.server_default is not None
+    assert event.contains(AuditLog, "before_insert", _stamp_audit_sandbox_mode)
 
 
 async def _marks() -> dict[str, bool]:

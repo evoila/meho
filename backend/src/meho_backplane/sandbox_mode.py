@@ -115,7 +115,7 @@ def check_sandbox_settings(settings: Settings) -> None:
 
     Raises :class:`SandboxModeConfigError` with a plain message.
     """
-    if not settings.sandbox_mode:
+    if settings.sandbox_mode is not True:
         return
     confirm = settings.sandbox_mode_confirm.strip().lower()
     host = _confirm_host(settings)
@@ -157,9 +157,9 @@ async def store_or_check_sandbox_mode(settings: Settings) -> bool:
     """
     from sqlalchemy import text
 
-    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.engine import get_engine, get_sessionmaker
 
-    wanted = bool(settings.sandbox_mode)
+    wanted = settings.sandbox_mode is True
     async with get_sessionmaker()() as session:
         await session.execute(
             text(
@@ -175,6 +175,11 @@ async def store_or_check_sandbox_mode(settings: Settings) -> bool:
                 {"id": _STATE_ROW_ID},
             )
         ).scalar_one()
+    # Close the connections this boot step made. They were opened before
+    # the app serves requests; a test client runs the boot on its own event
+    # loop, and a pooled connection must not be reused across loops. The
+    # pool is created again on first use.
+    await get_engine().dispose()
     stored_mode = bool(stored)
     if stored_mode != wanted:
         stored_word = "on" if stored_mode else "off"

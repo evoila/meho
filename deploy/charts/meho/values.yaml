@@ -994,22 +994,6 @@ keycloakAdmin:
     # opt into both don't have to reconcile names.
     secretKey: client_secret
 
-# Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
-# Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two
-# confidential values in addition to the plain `config.uiKeycloakClientId`:
-# the confidential web client's `client_secret` (carried on the
-# server-side token-endpoint POST) and a session-cookie encryption key
-# (Fernet key the BFF encrypts the session payload with). Both are
-# wired into the backplane container EXCLUSIVELY via `secretKeyRef` —
-# never a plaintext chart value — mirroring the Postgres DSN / Keycloak
-# admin-client-secret precedent. Point `secretName` at a Kubernetes
-# Secret holding both keys (a GSM/no-Vault deploy provisions it directly;
-# a Vault deploy syncs it via ESO). All rendered as env only when
-# `enabled: true`; unset (the default) leaves the console cleanly
-# disabled (`503 ui_oauth_not_configured` on `/ui/auth/login`) with no
-# effect on `/api/*` or the `meho login` CLI. See
-# `docs/cross-repo/keycloak-web-client.md` for the realm-side recipe and
-# `deploy/values-examples/README.md` for the GSM/no-Vault wiring.
 sandboxMode:
   # -- Sandbox mode (#4622, `docs/decisions/sandbox-mode.md`). Only for an
   # instance that holds disposable test systems: systems built for one
@@ -1029,6 +1013,23 @@ sandboxMode:
   # otherwise. Rendered into `MEHO_SANDBOX_MODE_CONFIRM`, which the
   # backplane checks against the host of its MCP resource URI at boot.
   confirmHost: ""
+
+# Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
+# Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two
+# confidential values in addition to the plain `config.uiKeycloakClientId`:
+# the confidential web client's `client_secret` (carried on the
+# server-side token-endpoint POST) and a session-cookie encryption key
+# (Fernet key the BFF encrypts the session payload with). Both are
+# wired into the backplane container EXCLUSIVELY via `secretKeyRef` —
+# never a plaintext chart value — mirroring the Postgres DSN / Keycloak
+# admin-client-secret precedent. Point `secretName` at a Kubernetes
+# Secret holding both keys (a GSM/no-Vault deploy provisions it directly;
+# a Vault deploy syncs it via ESO). All rendered as env only when
+# `enabled: true`; unset (the default) leaves the console cleanly
+# disabled (`503 ui_oauth_not_configured` on `/ui/auth/login`) with no
+# effect on `/api/*` or the `meho login` CLI. See
+# `docs/cross-repo/keycloak-web-client.md` for the realm-side recipe and
+# `deploy/values-examples/README.md` for the GSM/no-Vault wiring.
 uiConsole:
   # -- Whether to wire `UI_KEYCLOAK_CLIENT_SECRET` +
   # `UI_SESSION_ENCRYPTION_KEY` into the backplane Deployment. Default

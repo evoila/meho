@@ -25,7 +25,7 @@ _LIBRARY_REF_HINTS: Final[dict[str, str]] = {
 }
 
 _LIBRARY_REF_PRECONDITION: Final = (
-    "Give library_id or library_name. With neither, nothing happens (invalid_reference). "
+    "Give library_id or library_name. With neither, the call is refused before it runs. "
     "A name must match exactly one library (else library_not_found or ambiguous_library)."
 )
 
@@ -40,8 +40,8 @@ SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "The cluster has no Supervisor yet; otherwise vCenter refuses and the call "
             "fails. control_plane needs network and storage_policy, and workloads needs "
             "network.network_type and edge.provider; a missing one gives invalid_spec and "
-            "an unknown network_type or provider gives unknown_network_provider, with no "
-            "change. A second person must approve."
+            "an unknown network_type gives unknown_network_provider, with no change. A wrong "
+            "edge.provider is refused before the call. A second person must approve."
         ),
         "parameter_hints": {
             "cluster": "Cluster moid, e.g. 'domain-c7'.",

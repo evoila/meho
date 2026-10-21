@@ -5627,10 +5627,12 @@ GUEST_PROGRAM_RUN_RESPONSE_SCHEMA: dict[str, Any] = {
 #: body verbatim, so they keep ``additionalProperties: True`` (the full vendor
 #: spec -- LB config, DNS/NTP, image sync, CIDRs -- flows through unmodified).
 #: The schema pins the *structural* essentials (management network + control-
-#: plane storage policy, workload network_type + edge provider); the handler
-#: enforces the network-stack enums with a loud structured refusal
-#: (``unknown_network_provider``), so a bad provider fails closed in the
-#: composite rather than as an opaque vCenter 400.
+#: plane storage policy, workload network_type + edge provider). The edge
+#: provider has an enum (``Networks.Edges.EdgeProvider``, the same set as the
+#: handler's ``_ALLOWED_EDGE_PROVIDERS``), so a wrong provider is refused before
+#: the call. The handler still answers an unknown ``network_type`` with a loud
+#: structured refusal (``unknown_network_provider``) rather than an opaque
+#: vCenter 400.
 SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -5725,13 +5727,20 @@ SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
                     "properties": {
                         "provider": {
                             "type": "string",
+                            "enum": [
+                                "VSPHERE_FOUNDATION",
+                                "NSX",
+                                "NSX_VPC",
+                                "NSX_ADVANCED",
+                                "HAPROXY",
+                            ],
                             "description": (
                                 "Edge (load-balancer) provider (Networks.Edges."
                                 "EdgeProvider). One of VSPHERE_FOUNDATION (pairs with the "
                                 "VSPHERE stack -- no separate NSX edge cluster required), "
                                 "NSX / NSX_VPC / NSX_ADVANCED, or the deprecated HAPROXY. "
-                                "Any other value gets status='unknown_network_provider' and "
-                                "nothing changes."
+                                "Any other value is refused before the call and nothing "
+                                "changes."
                             ),
                         },
                     },
@@ -6779,7 +6788,7 @@ CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": [],
+    "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
     "additionalProperties": False,
     "examples": [{"library_name": "<library-name>"}],
 }
@@ -6850,7 +6859,7 @@ CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": [],
+    "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
     "additionalProperties": False,
     "examples": [{"library_name": "<library-name>"}],
 }
@@ -6966,7 +6975,7 @@ CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": [],
+    "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
     "additionalProperties": False,
     "examples": [{"library_name": "<library-name>"}],
 }

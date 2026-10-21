@@ -9,6 +9,7 @@ Checks what these operations tell the AI, without calling vCenter:
 * every example under ``examples`` validates against its parameter schema
   (JSON Schema Draft 2020-12, the check MEHO runs before each call);
 * the new enums refuse a wrong value before the call reaches the handler;
+* the subscribed library operations refuse a call with no library;
 * every op has ``llm_instructions`` with the keys the AI reads.
 """
 
@@ -112,3 +113,48 @@ def test_namespace_create_refuses_a_wrong_access_value_before_the_call(
     params["access_list"][0][field] = value
     errors = validate_params(schemas.NAMESPACE_CREATE_PARAMETER_SCHEMA, params)
     assert errors, (field, value)
+
+
+@pytest.mark.parametrize(
+    "provider", ["VSPHERE_FOUNDATION", "NSX", "NSX_VPC", "NSX_ADVANCED", "HAPROXY"]
+)
+def test_supervisor_enable_accepts_every_edge_provider(provider: str) -> None:
+    params = _enable_example()
+    params["workloads"]["edge"]["provider"] = provider
+    assert validate_params(schemas.SUPERVISOR_ENABLE_PARAMETER_SCHEMA, params) == []
+
+
+@pytest.mark.parametrize("provider", ["AVI", "nsx", ""])
+def test_supervisor_enable_refuses_a_wrong_edge_provider_before_the_call(provider: str) -> None:
+    params = _enable_example()
+    params["workloads"]["edge"]["provider"] = provider
+    errors = validate_params(schemas.SUPERVISOR_ENABLE_PARAMETER_SCHEMA, params)
+    assert [(e["path"], e["validator"]) for e in errors] == [("$.workloads.edge.provider", "enum")]
+
+
+_SUBSCRIBED_LIBRARY_REF_OPS = [
+    "content_library.subscribed.items.list",
+    "content_library.subscribed.status",
+    "content_library.subscribed.sync",
+]
+
+
+@pytest.mark.parametrize("short_id", _SUBSCRIBED_LIBRARY_REF_OPS)
+def test_subscribed_library_op_refuses_a_call_with_no_library(short_id: str) -> None:
+    errors = validate_params(_PARAMETER_SCHEMAS[short_id], {})
+    assert [e["validator"] for e in errors] == ["anyOf"], (short_id, errors)
+
+
+@pytest.mark.parametrize("short_id", _SUBSCRIBED_LIBRARY_REF_OPS)
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"library_id": "<library-id>"},
+        {"library_name": "<library-name>"},
+        {"library_id": "<library-id>", "library_name": "<library-name>"},
+    ],
+)
+def test_subscribed_library_op_accepts_an_id_a_name_or_both(
+    short_id: str, params: dict[str, Any]
+) -> None:
+    assert validate_params(_PARAMETER_SCHEMAS[short_id], params) == []

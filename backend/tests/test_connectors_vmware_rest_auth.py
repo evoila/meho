@@ -1018,3 +1018,44 @@ async def test_close_session_reports_a_failed_revoke_but_still_evicts() -> None:
     assert revoke.call_count == 1
     assert target_cache_key(_TARGET_A) not in connector._session_tokens
     await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_session_with_an_older_token_keeps_the_cached_session() -> None:
+    """An already replaced session is closed by its own token; the cache is untouched."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        login = mock.post("/api/session").respond(200, json="token-2")
+        revoke = mock.delete("/api/session").respond(204)
+        await connector.auth_headers(_TARGET_A, _make_operator())
+        assert connector.cached_session_token(_TARGET_A) == "token-2"
+
+        assert await connector.close_session(_TARGET_A, token="token-1") is True
+
+        assert revoke.call_count == 1
+        assert revoke.calls[0].request.headers["vmware-api-session-id"] == "token-1"
+        assert connector.cached_session_token(_TARGET_A) == "token-2"
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+    assert login.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_session_with_the_cached_token_evicts_it() -> None:
+    """Naming the cached session itself behaves like the no-token form."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="token-1")
+        revoke = mock.delete("/api/session").respond(204)
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+        assert await connector.close_session(_TARGET_A, token="token-1") is True
+
+    assert revoke.calls[0].request.headers["vmware-api-session-id"] == "token-1"
+    assert connector.cached_session_token(_TARGET_A) is None
+    await connector.aclose()

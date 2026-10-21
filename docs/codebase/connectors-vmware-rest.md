@@ -577,15 +577,24 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       logged as `vmware_tasks_history_destroy_failed`); a
       `ManagedObjectNotFound` fault counts as already gone. When the
       destroy keeps failing, the op closes the vCenter session that owns
-      the collector (`VmwareRestConnector.close_session`: evict the
-      cached token, then `DELETE` at the session path). A collector dies
-      with its session, and the next call on the target logs in again on
-      a clean session, so leaked collectors cannot pile up on the cached
-      session (`vmware_tasks_history_session_closed`). When the session
-      close fails too, the call fails with `CollectorCleanupError`
-      (`vmware_tasks_history_collector_leaked`); vCenter then drops the
-      collector when that session times out. A read error always wins
-      over a cleanup error, so cleanup never hides why the read failed.
+      the collector (`VmwareRestConnector.close_session` with the token
+      the op read right after the create call: `DELETE` at the session
+      path with that token). A collector dies with its session
+      (`vmware_tasks_history_session_closed`). When that session is still
+      the cached one, the cache entry is evicted too, so the next call on
+      the target logs in again on a clean session and leaked collectors
+      cannot pile up. When the connector has already logged in again in
+      between (the session max-age ran out, or a `NotAuthenticated` fault
+      forced a re-login), only the old session is closed and the new one
+      stays. When the session close fails too, the call fails with
+      `CollectorCleanupError` (`vmware_tasks_history_collector_leaked`);
+      vCenter then drops the collector when that session times out. A
+      read error always wins over a cleanup error, so cleanup never hides
+      why the read failed.
+    - **Cancel-safe.** The cleanup also runs when the call is cancelled
+      (for example by a timeout) while a page is being read. A cancel that
+      arrives during the cleanup waits for the cleanup to finish and is
+      raised again afterwards. So no collector survives the call.
     - **Params.** `since` (required) and `until` filter on the task's
       queued time (ISO-8601; a time without a zone is UTC). `entity` +
       `entity_type` filter on the object the task ran on;

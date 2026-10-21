@@ -3053,30 +3053,55 @@ class VmwareRestConnector(HttpConnector):
             return False
         return True
 
-    async def close_session(self, target: VsphereTargetLike) -> bool:
-        """Evict the cached session for *target* and end it on the server too.
+    def cached_session_token(self, target: VsphereTargetLike) -> str | None:
+        """Return the session token cached for *target* right now, or ``None``.
+
+        A typed op that creates server-side state tied to the session (the
+        ``TaskHistoryCollector`` of ``vmware.tasks.history``, #3701) reads
+        this right after the create call, so its cleanup can later name the
+        session that owns that state (:meth:`close_session` with ``token``).
+        A plain dict read; no lock is needed.
+        """
+        return self._session_tokens.get(target_cache_key(target))
+
+    async def close_session(self, target: VsphereTargetLike, *, token: str | None = None) -> bool:
+        """End a vCenter session for *target* on the server.
 
         :meth:`invalidate_session` only drops the cached token; the vCenter
         session itself lives on until vCenter times it out. This method also
         sends the ``DELETE`` at the recorded session path, so server-side
         objects tied to the session (a ``TaskHistoryCollector`` whose
         ``DestroyCollector`` keeps failing, #3701) are released now rather
-        than at the idle timeout. The next call on *target* logs in again,
-        on a clean session.
+        than at the idle timeout.
+
+        ``token`` names the session to close. ``None`` means the session
+        cached right now. When ``token`` is the cached session (or ``None``),
+        the cache entry is evicted too, so the next call on *target* logs in
+        again on a clean session. When ``token`` is an older session that the
+        connector already replaced (a max-age re-login, #3773, or the
+        ``NotAuthenticated`` re-login of :meth:`_post_vmomi_json` happened
+        in between), only that older session is closed: the cached session
+        stays, because the collector never lived in it.
 
         Returns ``True`` when vCenter accepted the revoke. Returns ``False``
-        when no session was cached, when the revoke failed, or for an
-        ESXi-flavored session (its SOAP ``Logout`` inside
-        :meth:`invalidate_session` is best-effort and reports no outcome).
+        when there was nothing to close (no token given and none cached),
+        when the revoke failed, or for an ESXi-flavored session (its SOAP
+        ``Logout`` inside :meth:`invalidate_session` is best-effort and
+        reports no outcome).
         """
         cache_key = target_cache_key(target)
         async with self._session_lock:
-            token = self._session_tokens.get(cache_key)
+            cached = self._session_tokens.get(cache_key)
             flavor = self._session_flavors.get(cache_key)
             revoke_path = self._session_paths.get(cache_key, SESSION_PATH_MODERN)
             extensions = dict(self._session_extensions.get(cache_key) or {})
-        await self.invalidate_session(target)
-        if token is None or flavor == HOST_FLAVOR_ESXI:
+        if token is None:
+            token = cached
+        if token is None:
+            return False
+        if token == cached:
+            await self.invalidate_session(target)
+        if flavor == HOST_FLAVOR_ESXI:
             return False
         client = self._pooled_client_for(cache_key)
         if client is None:

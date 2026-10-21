@@ -1660,6 +1660,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Install uv
@@ -1801,7 +1802,11 @@ jobs:
           # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
           # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
           # an older 1.26.x fail the build instead of shipping the CVEs.
+          # check-latest: the runner image can cache an older 1.26.x
+          # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
+          # uses a cached match unless asked to check for a newer one.
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
@@ -1955,6 +1960,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Ensure make is available

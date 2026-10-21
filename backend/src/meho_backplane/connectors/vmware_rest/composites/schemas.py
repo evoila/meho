@@ -230,6 +230,7 @@ CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7", "include_recommendations_history": True}],
 }
 
 
@@ -635,14 +636,41 @@ CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "cluster": {
             "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Cluster name."},
+                "resource_pool": {
+                    "type": "string",
+                    "description": "Moid of the cluster's root resource pool.",
+                },
+            },
             "description": (
-                "Cluster summary payload from "
-                "``GET:/vcenter/cluster/{cluster}`` (vSphere REST owns "
-                "the inner shape)."
+                "Cluster summary from ``GET:/vcenter/cluster/{cluster}`` "
+                "(``Vcenter.Cluster.Info``)."
             ),
         },
         "drs": {
             "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean", "description": "Whether DRS is on."},
+                "defaultVmBehavior": {
+                    "type": "string",
+                    "enum": ["manual", "partiallyAutomated", "fullyAutomated"],
+                    "description": "DRS automation level (``DrsBehavior_enum``).",
+                },
+                "vmotionRate": {
+                    "type": "integer",
+                    "description": "Migration threshold, 1 to 5: DRS only moves rated above it.",
+                },
+                "enableVmBehaviorOverrides": {
+                    "type": "boolean",
+                    "description": "Whether a VM may have its own automation level.",
+                },
+                "option": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Advanced DRS options, as ``{key, value}`` entries.",
+                },
+            },
             "description": (
                 "DRS configuration payload: the ``drsConfig`` field "
                 "(``ClusterDrsConfigInfo`` -- the vim API owns the inner "
@@ -653,7 +681,26 @@ CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "recommendations_history": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Recommendation key."},
+                    "rating": {
+                        "type": "integer",
+                        "description": "Confidence, 1 (lowest) to 5 (highest).",
+                    },
+                    "reason": {"type": "string", "description": "Reason code."},
+                    "reasonText": {"type": "string", "description": "Reason as text."},
+                    "migrationList": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": (
+                            "The moves (``ClusterDrsMigration``): ``vm``, ``source`` and "
+                            "``destination`` host, with their loads."
+                        ),
+                    },
+                },
+            },
             "description": (
                 "Optional list of the cluster's current DRS "
                 "recommendations (vim ``drsRecommendation`` rows) when "
@@ -1683,6 +1730,7 @@ HOST_EVACUATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["host"],
     "additionalProperties": False,
+    "examples": [{"host": "host-21"}],
 }
 
 
@@ -1717,6 +1765,7 @@ HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["host", "dvs", "fallback_network"],
     "additionalProperties": False,
+    "examples": [{"host": "host-21", "dvs": "dvs-31", "fallback_network": "network-13"}],
 }
 
 
@@ -1735,6 +1784,7 @@ CLUSTER_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7"}],
 }
 
 
@@ -1930,6 +1980,14 @@ CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster", "rule_name", "rule_type", "vms"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "cluster": "domain-c7",
+            "rule_name": "<rule-name>",
+            "rule_type": "anti_affinity",
+            "vms": ["<vm-name-1>", "<vm-name-2>"],
+        }
+    ],
 }
 
 
@@ -2015,6 +2073,18 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster", "rule_name", "vm_group_name", "host_group_name", "vms", "hosts"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "cluster": "domain-c7",
+            "rule_name": "<rule-name>",
+            "vm_group_name": "<vm-group-name>",
+            "host_group_name": "<host-group-name>",
+            "vms": ["<vm-name>"],
+            "hosts": ["<host-name>"],
+            "affine": True,
+            "mandatory": False,
+        }
+    ],
 }
 
 
@@ -2097,12 +2167,34 @@ RESOURCE_POOL_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Mutually exclusive with ``parent``."
             ),
         },
-        "cpu_allocation": _RESOURCE_ALLOCATION_SCHEMA,
-        "memory_allocation": _RESOURCE_ALLOCATION_SCHEMA,
+        "cpu_allocation": {
+            **_RESOURCE_ALLOCATION_SCHEMA,
+            "description": (
+                "CPU reservation, limit and shares of the new pool, in MHz "
+                "(``Vcenter.ResourcePool.ResourceAllocationCreateSpec``). Omitted: vCenter's "
+                "default CPU allocation."
+            ),
+        },
+        "memory_allocation": {
+            **_RESOURCE_ALLOCATION_SCHEMA,
+            "description": (
+                "Memory reservation, limit and shares of the new pool, in MB "
+                "(``Vcenter.ResourcePool.ResourceAllocationCreateSpec``). Omitted: vCenter's "
+                "default memory allocation."
+            ),
+        },
     },
     "required": ["name"],
     "oneOf": [{"required": ["parent"]}, {"required": ["cluster"]}],
     "additionalProperties": False,
+    "examples": [
+        {
+            "name": "<pool-name>",
+            "cluster": "domain-c7",
+            "cpu_allocation": {"reservation": 2000, "limit": -1},
+            "memory_allocation": {"reservation": 4096, "shares": {"level": "NORMAL"}},
+        }
+    ],
 }
 
 
@@ -2131,6 +2223,7 @@ RESOURCE_POOL_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["resource_pool"],
     "additionalProperties": False,
+    "examples": [{"resource_pool": "resgroup-42"}],
 }
 
 
@@ -3277,9 +3370,10 @@ RESOURCE_POOL_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "parent_source": {
             "type": ["string", "null"],
+            "enum": ["resource_pool", "cluster", None],
             "description": (
-                "Whether the parent came from ``parent`` (verbatim) or ``cluster`` "
-                "(root-pool resolution)."
+                "``resource_pool`` when the parent came from ``parent`` (used as given), "
+                "``cluster`` when it is the cluster's root pool; ``null`` when neither was given."
             ),
         },
         "cluster": {
@@ -4887,7 +4981,7 @@ HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Resolved via ``GET:/vcenter/host`` — a display-name lookup first, "
                 "falling back to a moref match; an ambiguous name is refused with "
                 "``status='ambiguous_host'`` before any write. **Optional / ignored "
-                "on a standalone-ESXi target** (#3332): a target whose probe "
+                "on a standalone-ESXi target**: a target whose probe "
                 "fingerprint is product=esxi has exactly one host (the target "
                 "itself, the well-known ha-host), so ``host`` is not needed and is "
                 "ignored. Required on a vCenter target (else ``status='host_required'``)."
@@ -4940,6 +5034,15 @@ HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["nfs_server", "remote_path", "datastore_name"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "host": "host-21",
+            "nfs_server": "<nfs-server>",
+            "remote_path": "/<export-path>",
+            "datastore_name": "<datastore-name>",
+            "nfs_type": "NFS41",
+        }
+    ],
 }
 
 
@@ -4957,7 +5060,7 @@ HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Host display name or moref (see host.datastore_mount_nfs). "
-                "Optional / ignored on a standalone-ESXi target (#3332); required "
+                "Optional / ignored on a standalone-ESXi target; required "
                 "on a vCenter target."
             ),
         },
@@ -4985,6 +5088,7 @@ HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["disk_uuids"],
     "additionalProperties": False,
+    "examples": [{"host": "host-21", "disk_uuids": ["<scsi-disk-uuid>"], "mode": "flash"}],
 }
 
 
@@ -5003,7 +5107,7 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Host display name or moref (see host.datastore_mount_nfs). "
-                "Optional / ignored on a standalone-ESXi target (#3332); required "
+                "Optional / ignored on a standalone-ESXi target; required "
                 "on a vCenter target."
             ),
         },
@@ -5038,6 +5142,7 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["service", "action"],
     "additionalProperties": False,
+    "examples": [{"host": "host-21", "service": "TSM-SSH", "action": "start", "policy": "off"}],
 }
 
 
@@ -5068,7 +5173,7 @@ HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
                 "are reached before any write (host name/moref did not resolve "
                 "uniquely, the host's HostDatastoreSystem was unreadable, the "
                 "target is neither vCenter nor standalone ESXi "
-                "(``unsupported_host_target``, #3332), or a vCenter target was "
+                "(``unsupported_host_target``), or a vCenter target was "
                 "given no ``host`` (``host_required``))."
             ),
         },
@@ -5089,6 +5194,27 @@ HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "summary": {
             "type": ["object", "null"],
+            "properties": {
+                "datastore": {"type": ["string", "null"], "description": "Datastore moid."},
+                "name": {"type": ["string", "null"], "description": "Datastore name."},
+                "nfs_server": {
+                    "type": ["string", "null"],
+                    "description": "NFS server (``HostNasVolumeSpec.remoteHost``).",
+                },
+                "remote_path": {
+                    "type": ["string", "null"],
+                    "description": "Export path (``HostNasVolumeSpec.remotePath``).",
+                },
+                "access_mode": {
+                    "type": ["string", "null"],
+                    "enum": ["readWrite", "readOnly", None],
+                    "description": "``HostMountMode_enum``; ``null`` on ``name_conflict``.",
+                },
+                "type": {
+                    "type": ["string", "null"],
+                    "description": "NAS volume type, like ``NFS`` or ``NFS41``.",
+                },
+            },
             "description": (
                 "Datastore summary — datastore moid, name, and mount coordinates — "
                 "on ``mounted`` / ``already_mounted`` (and the conflicting "
@@ -5127,7 +5253,7 @@ HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``'marked'`` — every disk reached SSD/HDD state; ``'partial'`` — "
                 "at least one disk faulted / timed out / errored (see per-disk "
                 "``results``); the refusal statuses (incl. ``unsupported_host_target`` "
-                "/ ``host_required``, #3332) are reached before any write."
+                "/ ``host_required``) are reached before any write."
             ),
         },
         "host": {
@@ -5137,7 +5263,11 @@ HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA: dict[str, Any] = {
                 "the input host on refusal (``null`` when none was supplied)."
             ),
         },
-        "mode": {"type": "string", "enum": ["flash", "non_flash"]},
+        "mode": {
+            "type": "string",
+            "enum": ["flash", "non_flash"],
+            "description": "The requested mode.",
+        },
         "results": {
             "type": "array",
             "items": {
@@ -5194,8 +5324,8 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``'applied'`` — the action (and optional policy update) ran; "
                 "``'service_not_allowed'`` — the service is outside the curated "
                 "allowlist (refused before any resolution or write); the remaining "
-                "refusals (incl. ``unsupported_host_target`` / ``host_required``, "
-                "#3332) are reached before any write."
+                "refusals (incl. ``unsupported_host_target`` / ``host_required``) "
+                "are reached before any write."
             ),
         },
         "host": {
@@ -5205,9 +5335,17 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
                 "the input host on refusal (``null`` when none was supplied)."
             ),
         },
-        "service": {"type": "string"},
-        "action": {"type": ["string", "null"], "enum": ["start", "stop", "restart", None]},
-        "policy": {"type": ["string", "null"], "enum": ["on", "automatic", "off", None]},
+        "service": {"type": "string", "description": "The requested service key."},
+        "action": {
+            "type": ["string", "null"],
+            "enum": ["start", "stop", "restart", None],
+            "description": "The action that was asked for.",
+        },
+        "policy": {
+            "type": ["string", "null"],
+            "enum": ["on", "automatic", "off", None],
+            "description": "The start policy that was set; ``null`` when none was given.",
+        },
         "policy_updated": {
             "type": "boolean",
             "description": "Whether ``UpdateServicePolicy`` ran (``policy`` was supplied).",
@@ -7420,6 +7558,7 @@ CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster", "rule_name"],
     "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7", "rule_name": "<rule-name>"}],
 }
 
 #: ``vmware.composite.cluster.drs_rule.delete`` response schema.
@@ -7429,6 +7568,54 @@ CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_sch
     + " Here ``'precondition_failed'`` means two or more rules have this name. "
     "``'invalid_request'`` -- the cluster moid does not exist. ``'timeout'`` -- "
     "ReconfigureComputeResource_Task outran the poll bound.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``drs_rule``."},
+        "cluster": {"type": "string", "description": "Cluster moid."},
+        "cluster_name": {"type": ["string", "null"], "description": "Cluster name."},
+        "name": {"type": "string", "description": "Rule name."},
+        "key": {"type": ["integer", "null"], "description": "Rule key (vim ``key``)."},
+        "rule_type": {
+            "type": ["string", "null"],
+            "description": (
+                "``affinity``, ``anti_affinity`` or ``vm_host``; another vim rule type by its "
+                "type name."
+            ),
+        },
+        "enabled": {"type": ["boolean", "null"], "description": "Whether the rule is on."},
+        "mandatory": {
+            "type": ["boolean", "null"],
+            "description": "Whether it is a 'must' rule.",
+        },
+        "vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string", "description": "VM moid."},
+                    "name": {"type": ["string", "null"], "description": "VM name."},
+                },
+            },
+            "description": "VMs of a VM-to-VM rule (capped at 50).",
+        },
+        "vm_count": {"type": "integer", "description": "Number of VMs in the rule."},
+        "vm_group": {
+            "type": ["string", "null"],
+            "description": "VM group of a ``vm_host`` rule.",
+        },
+        "affine_host_group": {
+            "type": ["string", "null"],
+            "description": "Host group the VMs run on (``vm_host`` rule).",
+        },
+        "anti_affine_host_group": {
+            "type": ["string", "null"],
+            "description": "Host group the VMs stay away from (``vm_host`` rule).",
+        },
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "Always ``drs_rule``."},
+        "key": {"type": ["integer", "null"], "description": "Key of a rule with this name."},
+        "rule_type": {"type": ["string", "null"], "description": "Type of that rule."},
+    },
 )
 
 _DATASTORE_MOID_PARAM: dict[str, Any] = {

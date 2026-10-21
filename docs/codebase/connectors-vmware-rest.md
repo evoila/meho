@@ -2131,6 +2131,21 @@ Code: `composites/_drs_rule_delete.py`. The governed sub-op manifest
 (`RetrievePropertiesEx` + `ReconfigureComputeResource_Task`) is in
 `_governed_subops.py`.
 
+### AI guidance of the host and cluster operations
+
+The twelve host and cluster multi-step operations (`host.evacuate`,
+`host.detach_from_vds`, `host.datastore_mount_nfs`, `host.disk_mark_flash`,
+`host.service_control`, `cluster.drs_recommendations`, `cluster.patch`, the
+three DRS rule operations and `resource_pool.create` / `.delete`) keep their
+AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
+`output_shape`, `next_step`) in `composites/_host_cluster_llm_instructions.py`,
+one entry per op id. Their descriptions in `_register.py` stay short. Each
+parameter schema has one example call under `examples`, and
+`test_connectors_vmware_rest_host_cluster_composite_contracts.py` checks that
+every example validates. `resource_pool.create` takes exactly one of `parent`
+and `cluster`; the schema says so with a `oneOf`, so MEHO refuses both or
+neither before the call.
+
 ### Governed NFS tag-based SPBM storage policy (`storage_policy.*`, #3494)
 
 NFS-principal datastores have **no default VM storage policy** (`vSAN Default

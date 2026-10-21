@@ -14,7 +14,7 @@ phases the parent Initiative names:
    (:func:`~meho_backplane.operations._lookup.parse_connector_id`).
 2. Look up :class:`EndpointDescriptor` by the natural key
    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`).
-   Unknown -> structured ``unknown_op`` error.
+   Unknown -> structured ``unknown_op`` (or ``unknown_connector``) error.
 3. Validate ``params`` against ``descriptor.parameter_schema`` via
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
@@ -71,6 +71,11 @@ form ``"<code>: <human-readable>"`` so callers can both string-match
 Detail payloads land in ``extras``. Codes:
 
 * ``unknown_op`` -- the natural key didn't resolve a descriptor.
+  ``extras["connectors_with_op"]`` lists other caller-visible connectors
+  that have the op (#4031); the message names them, or points at
+  ``search_operations`` when the list is empty.
+* ``unknown_connector`` -- the ``connector_id`` matches no connector the
+  caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
@@ -315,7 +320,6 @@ from meho_backplane.operations._errors import (
     result_preview_hash_mismatch,
     result_rate_limited,
     result_target_required,
-    result_unknown_op,
     result_unqualified_target_version,
     result_vault_credentials_read_error,
     result_write_capability_denied,
@@ -329,10 +333,10 @@ from meho_backplane.operations._handler_resolve import (
     reset_handler_cache,
 )
 from meho_backplane.operations._lookup import (
-    count_known_ops,
     lookup_descriptor,
     parse_connector_id,
 )
+from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -3078,13 +3082,13 @@ async def dispatch(
         op_id=op_id,
     )
     if descriptor is None:
-        known_op_count = await count_known_ops(
+        return await op_miss_result(
             tenant_id=operator.tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
+            connector_id=connector_id,
+            op_id=op_id,
+            triple=(product, version, impl_id),
+            started=started,
         )
-        return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
     # --- Step 3: parameter_schema validation ------------------------------
     # #293 (security review S05): for an ingested (generic-connector) op,

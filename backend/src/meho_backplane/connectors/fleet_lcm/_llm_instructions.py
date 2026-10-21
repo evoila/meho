@@ -48,10 +48,11 @@ _SYSTEM_INFO_INSTRUCTIONS: dict[str, object] = {
         "bundles can the fleet deploy'."
     ),
     "output_shape": (
-        "Object with 'upgrade' ({taskId, status e.g. PENDING}) and "
-        "'bundles' [] — each bundle carries components[] with componentType, "
-        "publicName, bundleId, bundleType, version, and status (e.g. "
-        "REQUIRED)."
+        "Object with currentVersion, targetVersion, availableTargetVersions[], "
+        "'upgrade' ({taskId, status e.g. PENDING or RUNNING}) and 'bundles' [] — "
+        "each bundle carries fdsFqdn and components[] with componentType, "
+        "publicName, bundleId, bundleType, version, and status (REQUIRED / "
+        "NOT_REQUIRED / ALREADY_UPGRADED)."
     ),
     "next_step": (
         "If upgrade.taskId is set, pass it to fleet-lcm.task.info to track "
@@ -86,9 +87,10 @@ _SDDC_LCM_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Paged envelope {pageMetadata, sddcLcms: []}. Each SddcLcm carries "
-        "fqdn, sddcGroupFqdn, isPrimary (bool), and vspClusters[] (each with "
-        "fqdn, id, type). pageMetadata carries totalElements / totalPages so "
-        "you can tell whether more pages exist."
+        "id, fqdn, sddcGroupName, sddcGroupFqdn, isPrimary (bool), vcenter "
+        "{id, fqdn}, vspClusters[] (each with fqdn, id, type) and status "
+        "(HEALTHY / OFFLINE). pageMetadata carries totalElements / totalPages "
+        "so you can tell whether more pages exist."
     ),
     "next_step": (
         "Pick an SddcLcm's id for fleet-lcm.sddc-lcm.info for full detail, "
@@ -103,9 +105,11 @@ _SDDC_LCM_INFO_INSTRUCTIONS: dict[str, object] = {
         "sddcLcmId (a UUID) obtained from fleet-lcm.sddc-lcm.list."
     ),
     "output_shape": (
-        "SddcLcm object with fqdn, sddcGroupFqdn, isPrimary (bool), and "
-        "vspClusters[] (each with fqdn, certificate, id, type)."
+        "SddcLcm object with id, fqdn, sddcGroupName, sddcGroupFqdn, isPrimary "
+        "(bool), vcenter {id, fqdn}, vspClusters[] (each with fqdn, id, type), "
+        "fleetDepot {fqdn} and status (HEALTHY / OFFLINE)."
     ),
+    "parameter_hints": {"sddcLcmId": "The SDDC LCM UUID from fleet-lcm.sddc-lcm.list."},
     "next_step": (
         "Cross-reference this SDDC's components via fleet-lcm.component.list "
         "and filter by the sddcLcmId, or check its managed status through "
@@ -121,10 +125,10 @@ _COMPONENT_LIST_INSTRUCTIONS: dict[str, object] = {
         "and the SDDC LCM it belongs to."
     ),
     "output_shape": (
-        "Object {components: [Component, ...]}. Each Component carries "
-        "componentType, fqdn, version, sddcLcmId, deploymentType (e.g. OVA), "
-        "nodes[] (size, fqdn, ipAddress, name), and vspCluster. A large "
-        "inventory is reduced to a JSONFlux handle."
+        "Object {components: [Component, ...], pageMetadata}. Each Component "
+        "carries id, componentType, fqdn, version, sddcLcmId, deploymentType "
+        "(OVA / VSP), nodes[] (name, fqdn, ipAddress, status, size), and "
+        "vspCluster. A large inventory is reduced to a JSONFlux handle."
     ),
     "next_step": (
         "Pick a component's id for fleet-lcm.component.info (full detail) or "
@@ -141,9 +145,10 @@ _COMPONENT_INFO_INSTRUCTIONS: dict[str, object] = {
         "the list view omits."
     ),
     "output_shape": (
-        "Component object with componentType, fqdn, version, sddcLcmId, "
-        "deploymentType, nodes[], and vspCluster."
+        "Component object with id, componentType, fqdn, version, sddcLcmId, "
+        "deploymentType, scope, nodes[], vcenter and vspCluster."
     ),
+    "parameter_hints": {"componentId": "The component UUID from fleet-lcm.component.list."},
     "next_step": (
         "Call fleet-lcm.component.status with the same componentId to confirm "
         "the component is Running, or check fleet-lcm.upgrade-plan.list for "
@@ -161,6 +166,7 @@ _COMPONENT_STATUS_INSTRUCTIONS: dict[str, object] = {
         "Object with id (the componentId) and status — one of 'Unknown', "
         "'NotRunning', or 'Running'."
     ),
+    "parameter_hints": {"componentId": "The component UUID from fleet-lcm.component.list."},
     "next_step": (
         "If status is NotRunning or Unknown, surface the component's fqdn "
         "(from fleet-lcm.component.info) to the operator and check "
@@ -176,7 +182,8 @@ _TASK_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Paged envelope {elements: [TaskSummary, ...], pageMetadata}. Each "
-        "TaskSummary carries resourceId, type, createTime / updateTime, "
+        "TaskSummary carries id, name, status (PENDING / SCHEDULED / RUNNING / "
+        "SUCCEEDED / FAILED / CANCELED), resourceId, type, createTime / updateTime, "
         "cancellable / retriable (bool), parentTaskId, and a description with "
         "a localizedMessage. pageMetadata.totalElements tells you whether "
         "more pages exist; a large list is reduced to a JSONFlux handle."
@@ -196,10 +203,15 @@ _TASK_INFO_INSTRUCTIONS: dict[str, object] = {
         "fleet-lcm.system.info."
     ),
     "output_shape": (
-        "Task object with resourceId, type, status, createTime / updateTime, "
-        "createdBy / updatedBy, cancellable / retriable, parentTaskId, and a "
-        "description with a localizedMessage."
+        "Task object with id, name, resourceId, type, status, createTime / "
+        "updateTime, createdBy / updatedBy, cancellable / retriable, "
+        "parentTaskId, a description with a localizedMessage, stages[] (id, "
+        "name, status), subTasks[], messages[] (timestamp, level, message) and "
+        "a result."
     ),
+    "parameter_hints": {
+        "taskId": "The task UUID from fleet-lcm.task.list or fleet-lcm.system.info.",
+    },
     "next_step": (
         "If the task failed, surface its description.localizedMessage to the "
         "operator. If retriable=true, a retry is available via the fleet's "
@@ -214,7 +226,8 @@ _UPGRADE_PLAN_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Paged envelope {elements: [UpgradePlanSummary, ...], pageMetadata}. "
-        "Each summary carries id, createTime / updateTime, createdBy, and a "
+        "Each summary carries id, status (DRAFT / SYNCING / READY / COMPLETED), "
+        "createTime / updateTime, createdBy, and a "
         "spec with componentsFilter[] and desiredSoftware.components[] "
         "(publicName, type)."
     ),
@@ -231,10 +244,13 @@ _UPGRADE_PLAN_INFO_INSTRUCTIONS: dict[str, object] = {
         "(a UUID) obtained from fleet-lcm.upgrade-plan.list."
     ),
     "output_shape": (
-        "UpgradePlan object with id, createTime / updateTime, and a spec "
+        "UpgradePlan object with id, status, createTime / updateTime, a spec "
         "carrying componentsFilter[] and desiredSoftware (the target "
-        "component versions)."
+        "component versions), executions[] (taskId, type UPGRADE / PRECHECK, "
+        "status) and components {elements: [{id, type, fqdn, version, "
+        "targetVersion, status}], pageMetadata}."
     ),
+    "parameter_hints": {"planId": "The upgrade plan UUID from fleet-lcm.upgrade-plan.list."},
     "next_step": (
         "Cross-reference the plan's componentsFilter ids against "
         "fleet-lcm.component.list to see which deployed components the plan "

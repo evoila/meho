@@ -3087,6 +3087,57 @@ every reviewer surface that renders `proposed_effect` verbatim (REST
 approvals show`), so "blast-radius unknown" is distinguishable from a
 genuinely small action. The read composites register no builder.
 
+### Version check for typed operations (`_version_gate.py`, #4316)
+
+Some vCenter calls exist only from a given version on. Examples: the
+Supervisor backup and restore jobs, the 9.1.1 Supervisor paths, and the
+vSphere 9 host settings. A typed operation that needs such a call uses
+`connectors/vmware_rest/_version_gate.py`, so every operation stops the
+same way and says the same thing.
+
+**When to use it.** Use it in a typed operation whose vendor call is
+missing on some vCenter versions that the connector serves. Do not use
+it for a call that every served version has.
+
+**In the handler.** Call `require_vcenter_version(target, op_id=...,
+minimum=..., feature=...)` first, before any vendor call. It reads the
+target's version with `resolve_target_version` (the probed version
+first, then the version the operator set). When that version is lower
+than `minimum`, it raises `NotImplementedError`. The dispatcher already
+turns this error into `connector_unsupported` (cause
+`unsupported_feature`), puts the message in `extras.detail`, and writes
+the audit row (#1627). No vendor call runs.
+
+When the version is unknown, or does not parse, the call goes on. The
+vendor's own error is then classified as usual.
+
+**The message shape.** Other connectors copy it in their own package:
+
+```
+<op_id>: <feature> needs vCenter <minimum> or newer; this target is <version>.
+```
+
+For example: `vmware.supervisor.backup.list: Supervisor backup jobs
+needs vCenter 9.0 or newer; this target is 8.0.3.`
+
+**In the approval request.** A call that waits for approval reaches the
+approval queue before the handler runs. So the approver must see the
+problem in the approval request:
+
+- A version-limited change with no preview builder registers
+  `version_gated_preview(minimum=..., feature=..., echo=(...))`. The
+  preview shows the params named in `echo` (name only params that hold
+  no secrets) and, on a target that lacks the call, a `version_problem`
+  line.
+- An operation that already has a preview builder (for example a
+  `destructive` one) calls `add_version_problem(preview, ctx.target,
+  op_id=..., minimum=..., feature=...)` on its own result.
+
+The line has the same text as the error above. The handler still
+refuses the call after approval.
+
+Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
+
 ## Dependencies
 
 - `meho_backplane.connectors.adapters.http.HttpConnector` (G0.2-T3

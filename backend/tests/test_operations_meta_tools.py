@@ -2007,6 +2007,18 @@ async def test_call_operation_unknown_op_returns_structured_error(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """Unknown op_id surfaces as an OperationResult with ``status='error'``."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler,
+        summary="Read a secret from Vault KV v2.",
+        description="Reads a secret from the KV v2 mount.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
     operator = _make_operator(tenant_id=_TENANT_A)
     result = await call_operation(
         operator,

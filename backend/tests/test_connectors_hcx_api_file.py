@@ -9,11 +9,16 @@ What is covered, with a respx-mocked HCX Manager and no ingested catalog:
   and the token on the read;
 * an accepted path: status, content type, size, SHA-256, version, parts;
 * refused paths: no HTTP request goes out;
-* a 404 reaches the answer; a redirect is not followed;
+* a 404 reaches the answer; a redirect is not followed, and a relative
+  ``Location`` is resolved against the path that was read;
 * a 401 makes a new login and the read then succeeds, through ``dispatch()``;
 * a one-line minified JSON file of a few MB and a file of more than
   10,000 lines: the joined parts give the exact file (same SHA-256);
-* a file too big for one result handle stops with an error naming its size;
+* a file too big for one result handle stops with an error naming its size,
+  also when the body is compressed and only the decoded file is too big;
+* the whole stored record is measured: a file that passes the check is read
+  back from the result store with every part, through ``dispatch()``;
+* a page the secret-redaction rules would change stops with an error;
 * content that is not text is refused with its content type;
 * no password or token in the result; registration-shape invariants.
 
@@ -22,6 +27,7 @@ Fixture values are made up; no real host, user or id appears here.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import uuid
@@ -49,6 +55,7 @@ from meho_backplane.connectors.hcx import (
 from meho_backplane.connectors.hcx.api_file import (
     PART_BYTES,
     HcxApiFilePathError,
+    HcxApiFileTooLargeError,
     check_path,
     split_parts,
 )
@@ -58,6 +65,7 @@ from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
 )
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
@@ -324,6 +332,44 @@ async def test_redirect_is_reported_and_not_followed(
     assert result.result["redirect_to"] == f"{_DOCS}/"
 
 
+@pytest.mark.parametrize(
+    ("read_path", "location", "expected"),
+    [
+        ("/hybridity/docs/index.html", "swagger.json", "/hybridity/docs/swagger.json"),
+        ("/hybridity/v2/api-docs", "?group=hybridity", "/hybridity/v2/api-docs?group=hybridity"),
+        ("/hybridity/docs/index.html", "../v2/api-docs", "/hybridity/v2/api-docs"),
+        ("/hybridity/docs/index.html", "/hybridity/docs/", "/hybridity/docs/"),
+        (
+            "/hybridity/docs/index.html",
+            "https://other-host.test.invalid/docs/x?y=1#f",
+            "https://other-host.test.invalid/docs/x",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_relative_redirect_is_resolved_against_the_read_path_and_not_followed(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    read_path: str,
+    location: str,
+    expected: str,
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        first = mock.get(read_path).respond(302, headers={"Location": location})
+        others = mock.route().respond(200, text="never")
+        result = await _dispatch(read_path)
+
+    assert result.status == "ok", result.error
+    assert first.call_count == 1
+    assert others.call_count == 0
+    assert result.result["status"] == 302
+    assert result.result["redirect_to"] == expected
+    if expected.startswith("/"):
+        check_path(expected)
+
+
 @pytest.mark.asyncio
 async def test_401_makes_a_new_login_and_the_read_then_succeeds(
     _stub_embedding: AsyncMock, session: AsyncSession
@@ -496,6 +542,164 @@ async def test_parts_that_do_not_fit_as_rows_stop_with_the_size(
 
     assert result.status == "error"
     assert "file of 990 bytes" in result.extras["exception_message"]
+
+
+@pytest.mark.asyncio
+async def test_compressed_body_is_measured_after_decoding(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A small gzip body that decodes to a file over the limit stops at the limit."""
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "4096")
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    small = b"x" * 1000
+    bomb = b"x" * 1_000_000
+    assert len(gzip.compress(bomb)) < 2048
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/hybridity/docs/small.json").respond(
+            200,
+            content=gzip.compress(small),
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+        )
+        mock.get("/hybridity/docs/bomb.json").respond(
+            200,
+            content=gzip.compress(bomb),
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+        )
+        fits = await _dispatch("/hybridity/docs/small.json")
+        too_big = await _dispatch("/hybridity/docs/bomb.json")
+
+    assert fits.status == "ok", fits.error
+    assert fits.result["size"] == len(small)
+    assert fits.result["sha256"] == hashlib.sha256(small).hexdigest()
+    assert fits.result["items"] == [{"index": 0, "text": small.decode()}]
+    assert too_big.status == "error"
+    assert "more than 4096 bytes" in too_big.extras["exception_message"]
+
+
+class _FakeValkey:
+    """In-memory stand-in for the result store's Valkey client."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: bytes, ex: int | None = None) -> None:
+        self.store[name] = value
+
+    async def get(self, name: str) -> bytes | None:
+        return self.store.get(name)
+
+
+def _largest_file_that_passes_the_check(limit: int) -> bytes:
+    """The largest ``x``-file (in steps of 16 bytes) whose stored record fits *limit*."""
+    import meho_backplane.connectors.hcx.api_file as api_file
+
+    answer = {
+        "path": "/hybridity/docs/fit.json",
+        "status": 200,
+        "content_type": "application/json",
+        "size": 0,
+        "sha256": "0" * 64,
+        "version": "9.1.0.0.12345678",
+        "build": "12345678",
+        "version_error": None,
+        "redirect_to": None,
+        "parts": 0,
+    }
+    size = limit
+    while size > 0:
+        data = b"x" * size
+        items = [{"index": i, "text": p.decode()} for i, p in enumerate(split_parts(data))]
+        answer.update(size=size, sha256=hashlib.sha256(data).hexdigest(), parts=len(items))
+        try:
+            api_file._assert_fits_result_handle(
+                answer, items, operator_sub="op-reads-hcx", max_bytes=limit
+            )
+        except HcxApiFileTooLargeError:
+            size -= 16
+            continue
+        return data
+    raise AssertionError("no file size passes the check")
+
+
+@pytest.mark.asyncio
+async def test_every_part_of_a_file_that_passes_the_check_is_read_back_from_storage(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The size check counts the whole stored record, so storage keeps every part."""
+    limit = 131_072
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", str(limit))
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    data = _largest_file_that_passes_the_check(limit)
+    assert len(data) > PART_BYTES
+    store = ResultHandleStore(_FakeValkey(), read_max_record_bytes=limit)  # type: ignore[arg-type]
+    set_default_reducer(JsonFluxReducer(store=store))
+    target = _HcxTarget()
+    operator = _make_operator()
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/hybridity/docs/fit.json").respond(
+            200, content=data, headers={"Content-Type": "application/json"}
+        )
+        mock.get("/hybridity/docs/over.json").respond(
+            200, content=data + b"x" * 200, headers={"Content-Type": "application/json"}
+        )
+        result = await dispatch(
+            operator=operator,
+            connector_id=HCX_CONNECTOR_ID,
+            op_id="hcx.api_file.get",
+            target=target,
+            params={"path": "/hybridity/docs/fit.json"},
+        )
+        over = await _dispatch("/hybridity/docs/over.json")
+
+    assert result.status == "ok", result.error
+    assert result.handle is not None
+    assert result.result["parts"] == result.result["row_count"]
+    assert operator.tenant_id is not None
+    stored = await store.fetch_rows(
+        tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=result.handle.handle_id
+    )
+    assert stored is not None
+    assert stored.stored_rows == stored.total_rows == result.result["parts"]
+    joined = "".join(row["text"] for row in sorted(stored.rows, key=lambda r: r["index"]))
+    assert joined.encode() == data
+    assert hashlib.sha256(joined.encode()).hexdigest() == result.result["sha256"]
+
+    assert over.status == "error"
+    message = over.extras["exception_message"]
+    assert f"file of {len(data) + 200} bytes" in message
+    assert "as a stored result record" in message
+
+
+@pytest.mark.asyncio
+async def test_page_the_redaction_rules_would_change_stops_with_an_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A documentation example that looks like a secret cannot come back as an exact file."""
+    await _register_and_resolve(_stub_embedding)
+    set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
+    page = (
+        "<pre>GET /hybridity/api/sessions HTTP/1.1\n"
+        "Authorization: Bearer example-token-value-0123456789\n</pre>"
+    )
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/hybridity/docs/auth.html").respond(
+            200, text=page, headers={"Content-Type": "text/html"}
+        )
+        result = await _dispatch("/hybridity/docs/auth.html")
+
+    assert result.status == "error"
+    message = result.extras["exception_message"]
+    assert "strip-authorization-header" in message
+    assert "1 place(s)" in message
+    assert "exact file cannot be returned" in message
+    assert "example-token-value" not in json.dumps(result.result) + json.dumps(
+        result.extras, default=str
+    )
 
 
 @pytest.mark.asyncio

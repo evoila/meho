@@ -102,13 +102,29 @@ A refused path stops with an error and sends no HTTP request.
 Then the read sends one `GET` to the target's own address with the
 target's own login. It does not follow a redirect: a `3xx` answer is
 reported with its status, and `redirect_to` holds the path to read next
-(the same rule applies to that path). Only a `401` is raised, so the
-dispatcher can log in again; every other status (for example `404`) is
-reported in `status` with the body as text.
+(the same rule applies to that path). A relative `Location`, such as
+`swagger.json` or `?group=x`, is resolved against the path that was read,
+so `redirect_to` is always a full path. A `Location` on another host is
+reported as `scheme://host/path`, so the caller sees it cannot be read
+through this target. Only a `401` is raised, so the dispatcher can log in
+again; every other status (for example `404`) is reported in `status`
+with the body as text.
+
+The body is read in a stream and counted after decoding, so a small
+compressed answer that decodes to a file over the limit is refused at the
+limit and never held whole in memory.
 
 Only UTF-8 text comes back. A content type that is not text (anything
 other than `text/*`, JSON, YAML, XML or JavaScript) or a body that is not
 valid UTF-8 is refused, and the error names the content type.
+
+The dispatcher runs the shared secret-redaction rules on every answer
+before the caller sees it. A documentation page can hold an example that
+looks like a secret (for example an `Authorization` header line). Such a
+page would come back changed while `sha256` still names the original.
+The read runs the same rules on its answer first and stops with an error
+that names the rules and the number of places. Redaction stays on; the
+read just never claims an exact file it cannot return.
 
 The answer:
 
@@ -140,9 +156,12 @@ parts with `result_query` in `index` order and join them.
 Why parts and not lines: a served file can be one long line. One result
 handle keeps at most 10,000 rows (`result_handle_max_spill_rows`) and
 16 MiB (`result_handle_max_record_bytes`), and one `result_query` answer
-is at most 256 KiB (`result_query_max_output_bytes`). A file whose parts
-do not fit in one result handle stops with an error that names its size.
-The read never returns a cut file.
+is at most 256 KiB (`result_query_max_output_bytes`). The byte limit
+applies to the whole stored record: the parts, the record's own fields
+and the answer's scalars. The read measures that record with
+`rows_record_bytes` from the result store before it answers. A file whose
+record does not fit stops with an error that names the file's size and
+the record's size. The read never returns a cut file.
 
 ### Shutdown
 
@@ -156,6 +175,10 @@ is sent.
 - `connectors/_shared/vault_creds.py`: the operator-context credential
   read.
 - `connectors/_shared/vcf_auth.py`: `session_establish_auth_error`.
+- `connectors/result_handle_store.py`: `rows_record_bytes`, the size of
+  the stored record the read checks against the limit.
+- `redaction/middleware.py`: `apply_connector_boundary_redaction`, the
+  rules the read runs on its answer before it returns.
 - `operations/typed_register.py`: the typed-op registrar.
 - `settings.py`: the result-handle limits the read checks against.
 

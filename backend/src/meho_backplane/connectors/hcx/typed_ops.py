@@ -117,7 +117,10 @@ _API_FILE_GET = HcxTypedOp(
             },
             "redirect_to": {
                 "type": ["string", "null"],
-                "description": "Path of a redirect answer; read that path next. Not followed.",
+                "description": (
+                    "Path of a redirect answer, resolved against the path that was read; "
+                    "read that path next. Not followed."
+                ),
             },
             "parts": {"type": "integer", "description": "How many text parts there are."},
             "items": {
@@ -147,7 +150,9 @@ _API_FILE_GET = HcxTypedOp(
             "If redirect_to is set, call again with that path. If status is not 200, "
             "read the text for the Manager's message. To rebuild the file, page the "
             "result handle with result_query in index order and join the text fields. "
-            "A refused path means the path is outside the rule; fix the path."
+            "A refused path means the path is outside the rule; fix the path. A read that "
+            "stops because the secret-redaction rules would change the file cannot return "
+            "that file exactly; report it instead of retrying."
         ),
         "result_scalars": {
             "keys": [

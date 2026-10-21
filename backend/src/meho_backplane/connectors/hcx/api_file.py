@@ -29,24 +29,29 @@ control character. A query string may hold only ``group`` and ``apiVersion``.
 
 The read sends one ``GET`` to the target's own address with the target's
 own login. It does not follow a redirect: the answer carries the
-redirect's path in ``redirect_to`` and the caller reads that path next.
-Only UTF-8 text comes back; other content is refused with its content
-type. A file that does not fit in one result handle stops with an error
-that names its size -- the read never returns a cut file.
+redirect's path in ``redirect_to``, resolved against the path that was
+read, and the caller reads that path next. Only UTF-8 text comes back;
+other content is refused with its content type. A compressed body is
+measured after decoding. A file whose stored record does not fit in one
+result handle stops with an error that names its size -- the read never
+returns a cut file. A file that the secret-redaction rules would change
+stops too, so the read never claims an exact file it cannot return.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl
 
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.hcx import HCX_CONNECTOR_ID
 from meho_backplane.connectors.hcx.session import HcxTargetLike
+from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -56,6 +61,7 @@ __all__ = [
     "PART_BYTES",
     "HcxApiFileNotTextError",
     "HcxApiFilePathError",
+    "HcxApiFileRedactedError",
     "HcxApiFileTooLargeError",
     "check_path",
     "hcx_api_file_get_impl",
@@ -108,6 +114,19 @@ class HcxApiFileTooLargeError(ValueError):
 
 class HcxApiFileNotTextError(ValueError):
     """The body is not UTF-8 text."""
+
+
+class HcxApiFileRedactedError(ValueError):
+    """The secret-redaction rules would change the file; the read stopped."""
+
+
+#: The operation id the dispatcher labels this read with. The redaction
+#: check and the stored-record estimate use the same label.
+_OP_ID = "hcx.api_file.get"
+
+#: Headers that describe the wire body, not the decoded file. Dropped from the
+#: answer that is built from the decoded bytes, so httpx does not decode twice.
+_WIRE_BODY_HEADERS = frozenset({"content-encoding", "content-length"})
 
 
 def check_path(raw: Any) -> tuple[str, str]:
@@ -187,18 +206,21 @@ def _is_text_content_type(content_type: str | None) -> bool:
 def _redirect_target(location: str | None, request_url: httpx.URL) -> str | None:
     """Reduce a ``Location`` header to the path the caller should read next.
 
-    A relative ``Location``, or an absolute one on the target's own host,
-    gives its path (plus query). An absolute ``Location`` on another host
-    gives ``scheme://host/path`` so the caller sees it cannot be read
-    through this target. Fragments and user info are dropped.
+    The header is resolved against *request_url* first (RFC 3986), so
+    ``swagger.json`` read from ``/hybridity/docs/index.html`` gives
+    ``/hybridity/docs/swagger.json`` and ``?group=x`` keeps the path that
+    was read. A result on the target's own host gives its path (plus
+    query). A result on another host gives ``scheme://host/path`` so the
+    caller sees it cannot be read through this target. Fragments and user
+    info are dropped.
     """
     if not location:
         return None
     try:
-        url = httpx.URL(location)
+        url = request_url.join(location)
     except httpx.InvalidURL:
         return None
-    if not url.host or url.host == request_url.host:
+    if url.host == request_url.host:
         return url.copy_with(fragment=None).raw_path.decode("ascii", "replace")
     return str(url.copy_with(query=None, fragment=None, username=None, password=None))
 
@@ -211,25 +233,38 @@ async def _fetch_without_redirects(
     extensions: dict[str, Any],
     max_bytes: int,
 ) -> httpx.Response:
-    """Send one ``GET`` and read the body, capped at *max_bytes*.
+    """Send one ``GET`` and read the body, capped at *max_bytes* after decoding.
 
     The request goes through :meth:`httpx.AsyncClient.send` on the base
     class on purpose: the pooled client follows same-site redirects, and
-    this read must not follow any. The body is streamed so an oversized
-    file is refused before it is held in memory.
+    this read must not follow any. The body is streamed and counted as
+    httpx decodes it (:meth:`~httpx.Response.aiter_bytes`), so a small
+    compressed body that decodes to a large file is refused at the cap and
+    never held whole in memory. The ``Content-Length`` fast reject applies
+    only to a body that is not compressed, where the header names the
+    file's own size.
+
+    The answer is rebuilt from the decoded bytes, without the wire-body
+    headers, so the flight recorder and the caller see the file once.
     """
     request = client.build_request("GET", url, headers=headers, extensions=extensions)
     response = await httpx.AsyncClient.send(client, request, stream=True, follow_redirects=False)
     try:
+        encoding = response.headers.get("content-encoding", "identity").strip().lower()
         declared = response.headers.get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+        if (
+            encoding in ("", "identity")
+            and declared is not None
+            and declared.isdigit()
+            and int(declared) > max_bytes
+        ):
             raise HcxApiFileTooLargeError(
                 f"file of {declared} bytes does not fit in one result handle "
                 f"(limit {max_bytes} bytes)"
             )
         chunks: list[bytes] = []
         total = 0
-        async for chunk in response.aiter_raw():
+        async for chunk in response.aiter_bytes():
             total += len(chunk)
             if total > max_bytes:
                 raise HcxApiFileTooLargeError(
@@ -238,29 +273,67 @@ async def _fetch_without_redirects(
             chunks.append(chunk)
     finally:
         await response.aclose()
+    kept_headers = [
+        (name, value)
+        for name, value in response.headers.multi_items()
+        if name.lower() not in _WIRE_BODY_HEADERS
+    ]
     return httpx.Response(
         status_code=response.status_code,
-        headers=response.headers,
+        headers=kept_headers,
         content=b"".join(chunks),
         request=request,
         extensions=response.extensions,
     )
 
 
-def _assert_fits_result_handle(size: int, items: list[dict[str, Any]], max_bytes: int) -> None:
-    """Stop with the file's size when its parts would not fit in one result handle."""
+def _assert_fits_result_handle(
+    answer: dict[str, Any], items: list[dict[str, Any]], *, operator_sub: str, max_bytes: int
+) -> None:
+    """Stop with the file's size when its stored record would not fit in one result handle.
+
+    The size is the complete record the result store writes: the parts plus
+    the record's own fields and the answer's scalars. Counting only the
+    parts lets the store keep all but the last one and still answer; this
+    read must return every part or none.
+    """
     settings = get_settings()
+    size = answer["size"]
     if len(items) > settings.result_handle_max_spill_rows:
         raise HcxApiFileTooLargeError(
             f"file of {size} bytes needs {len(items)} parts; one result handle keeps at "
             f"most {settings.result_handle_max_spill_rows}"
         )
-    encoded = len(json.dumps(items, ensure_ascii=False).encode("utf-8"))
-    if encoded > max_bytes:
+    record = rows_record_bytes(items, operator_sub=operator_sub, op_id=_OP_ID, document=answer)
+    if record > max_bytes:
         raise HcxApiFileTooLargeError(
-            f"file of {size} bytes ({encoded} bytes as result rows) does not fit in one "
-            f"result handle (limit {max_bytes} bytes)"
+            f"file of {size} bytes ({record} bytes as a stored result record) does not fit in "
+            f"one result handle (limit {max_bytes} bytes)"
         )
+
+
+def _assert_not_redacted(answer: dict[str, Any], operator: Operator) -> None:
+    """Stop when the shared redaction step would change the file's text.
+
+    The dispatcher redacts every answer before the caller sees it. A file
+    that holds, for example, an ``Authorization`` header as a documentation
+    example would come back changed while ``sha256`` still names the
+    original. Running the same rules here, with the same labels, finds that
+    case before the answer leaves the read. Redaction stays on; the error
+    names the rules and the places, never the matched text.
+    """
+    tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
+    outcome = apply_connector_boundary_redaction(
+        answer, connector_id=HCX_CONNECTOR_ID, tenant=tenant, op=_OP_ID
+    )
+    if outcome.redacted == outcome.raw:
+        return
+    rules = sorted({entry.rule for entry in outcome.manifest})
+    places = sum(entry.count for entry in outcome.manifest)
+    raise HcxApiFileRedactedError(
+        f"GET {answer['path']}: the secret-redaction rules {rules} would change the text in "
+        f"{places} place(s), so the exact file cannot be returned; the read stopped"
+    )
 
 
 def _text_items(response: httpx.Response, path: str) -> list[dict[str, Any]]:
@@ -316,9 +389,8 @@ async def hcx_api_file_get_impl(
 
     items = _text_items(response, path)
     body = response.content
-    _assert_fits_result_handle(len(body), items, max_bytes)
     version = await connector.manager_version(target, operator)
-    return {
+    answer: dict[str, Any] = {
         "path": url,
         "status": response.status_code,
         "content_type": response.headers.get("content-type"),
@@ -329,5 +401,8 @@ async def hcx_api_file_get_impl(
         "version_error": version.error,
         "redirect_to": _redirect_target(response.headers.get("location"), response.request.url),
         "parts": len(items),
-        "items": items,
     }
+    _assert_fits_result_handle(answer, items, operator_sub=operator.sub, max_bytes=max_bytes)
+    answer["items"] = items
+    _assert_not_redacted(answer, operator)
+    return answer

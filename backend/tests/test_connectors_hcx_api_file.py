@@ -16,9 +16,13 @@ What is covered, with a respx-mocked HCX Manager and no ingested catalog:
   10,000 lines: the joined parts give the exact file (same SHA-256);
 * a file too big for one result handle stops with an error naming its size,
   also when the body is compressed and only the decoded file is too big;
+  a streamed gzip or deflate body that would decode to many MiB is
+  refused while the decoded bytes are still near the limit; an encoding
+  the read cannot decode in bounded steps is refused;
 * the whole stored record is measured: a file that passes the check is read
   back from the result store with every part, through ``dispatch()``;
-* a page the secret-redaction rules would change stops with an error;
+* a page the secret-redaction rules would change stops with an error, also
+  when the secret's label ends one part and its value starts the next;
 * content that is not text is refused with its content type;
 * no password or token in the result; registration-shape invariants.
 
@@ -30,7 +34,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import tracemalloc
 import uuid
+import zlib
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -74,6 +80,7 @@ from meho_backplane.operations._handler_resolve import (
     reset_handler_cache,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
 _HOST = "hcx-typed.test.invalid"
@@ -578,6 +585,83 @@ async def test_compressed_body_is_measured_after_decoding(
     assert "more than 4096 bytes" in too_big.extras["exception_message"]
 
 
+class _ChunkedStream(httpx.AsyncByteStream):
+    """A wire body that arrives in fixed chunks, as a server would send it."""
+
+    def __init__(self, data: bytes, chunk: int) -> None:
+        self._data = data
+        self._chunk = chunk
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for start in range(0, len(self._data), self._chunk):
+            yield self._data[start : start + self._chunk]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("encoding", "compress"),
+    [("gzip", gzip.compress), ("deflate", zlib.compress)],
+)
+async def test_streamed_compressed_body_is_refused_before_it_grows_past_the_limit(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+    compress: Any,
+) -> None:
+    """Decoding stops at the limit: the decoded bytes never fill memory first.
+
+    A 32 MiB file of one byte compresses to about 32 KiB. The old read
+    let httpx decode each wire chunk whole, so one chunk could expand to
+    many MiB before anything was counted. The peak memory of the whole
+    dispatch now stays far below the decoded size.
+    """
+    limit = 4096
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", str(limit))
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    bomb_size = 32 * 1024 * 1024
+    wire = compress(b"x" * bomb_size)
+    assert len(wire) < 64 * 1024
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/hybridity/docs/bomb.json").mock(
+            return_value=httpx.Response(
+                200,
+                stream=_ChunkedStream(wire, 4096),
+                headers={"Content-Encoding": encoding, "Content-Type": "application/json"},
+            )
+        )
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            result = await _dispatch("/hybridity/docs/bomb.json")
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+    assert result.status == "error"
+    assert f"more than {limit} bytes" in result.extras["exception_message"]
+    assert peak < bomb_size // 8, f"peak {peak} bytes while decoding a {bomb_size} byte file"
+
+
+@pytest.mark.asyncio
+async def test_content_encoding_the_read_cannot_bound_is_refused(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        route = mock.get("/hybridity/docs/br.json").respond(
+            200, content=b"\x0b\x00\x80", headers={"Content-Encoding": "br"}
+        )
+        result = await _dispatch("/hybridity/docs/br.json")
+
+    assert result.status == "error"
+    assert "content encoding 'br'" in result.extras["exception_message"]
+    assert route.calls.last.request.headers["accept-encoding"] == "gzip, deflate"
+
+
 class _FakeValkey:
     """In-memory stand-in for the result store's Valkey client."""
 
@@ -698,6 +782,44 @@ async def test_page_the_redaction_rules_would_change_stops_with_an_error(
     assert "1 place(s)" in message
     assert "exact file cannot be returned" in message
     assert "example-token-value" not in json.dumps(result.result) + json.dumps(
+        result.extras, default=str
+    )
+
+
+@pytest.mark.asyncio
+async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """``password=`` ends the first part and the value starts the second.
+
+    Neither part alone matches the rule, so a check per part would let the
+    secret through. The whole text is checked first, so the read stops.
+    """
+    await _register_and_resolve(_stub_embedding)
+    set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
+    label = b" password="
+    page = b"x" * (PART_BYTES - len(label)) + label + b"example-secret-value-0123456789 tail\n"
+    parts = [part.decode() for part in split_parts(page)]
+    assert parts[0].endswith("password=")
+    assert parts[1].startswith("example-secret-value")
+    for index, text in enumerate(parts):
+        alone = apply_connector_boundary_redaction(
+            {"index": index, "text": text}, connector_id=HCX_CONNECTOR_ID, tenant=None, op=None
+        )
+        assert alone.redacted == alone.raw, "a part alone must not match; the gap is real"
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/hybridity/docs/split.html").respond(
+            200, content=page, headers={"Content-Type": "text/html"}
+        )
+        result = await _dispatch("/hybridity/docs/split.html")
+
+    assert result.status == "error"
+    message = result.extras["exception_message"]
+    assert "exact file cannot be returned" in message
+    assert "1 place(s)" in message
+    assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
     )
 

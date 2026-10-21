@@ -31,16 +31,22 @@ The read sends one ``GET`` to the target's own address with the target's
 own login. It does not follow a redirect: the answer carries the
 redirect's path in ``redirect_to``, resolved against the path that was
 read, and the caller reads that path next. Only UTF-8 text comes back;
-other content is refused with its content type. A compressed body is
-measured after decoding. A file whose stored record does not fit in one
+other content is refused with its content type. A compressed body
+(``gzip`` or ``deflate``; any other encoding is refused) is decoded in
+bounded steps and measured as it decodes, so the decoded bytes never
+grow past the limit. A file whose stored record does not fit in one
 result handle stops with an error that names its size -- the read never
 returns a cut file. A file that the secret-redaction rules would change
-stops too, so the read never claims an exact file it cannot return.
+stops too, so the read never claims an exact file it cannot return; the
+rules run on the whole text and on the answer, so a secret that spans
+two parts is found as well.
 """
 
 from __future__ import annotations
 
 import hashlib
+import zlib
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl
 
@@ -127,6 +133,71 @@ _OP_ID = "hcx.api_file.get"
 #: Headers that describe the wire body, not the decoded file. Dropped from the
 #: answer that is built from the decoded bytes, so httpx does not decode twice.
 _WIRE_BODY_HEADERS = frozenset({"content-encoding", "content-length"})
+
+#: The only content encodings the read asks for and decodes. Both go through
+#: :mod:`zlib`, whose ``max_length`` bounds the decoded bytes of every step.
+_ACCEPT_ENCODING = "gzip, deflate"
+_IDENTITY_ENCODINGS = frozenset({"", "identity"})
+
+#: Largest wire chunk read from the stream before it is decoded.
+_RAW_CHUNK_BYTES = 64 * 1024
+
+
+class _BoundedDecoder:
+    """Decode a ``gzip`` or ``deflate`` body in steps of at most the room left.
+
+    :meth:`zlib.Decompress.decompress` is called with ``max_length`` set to
+    the bytes still allowed plus one, so no step allocates more than that,
+    however small the compressed input is. Input that did not fit in a step
+    waits in ``unconsumed_tail`` and is decoded on the next loop. A step
+    that crosses the limit stops the read; the one extra byte is what
+    shows the file is over the limit.
+    """
+
+    def __init__(self, encoding: str, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        self._total = 0
+        self._first_step = True
+        self._raw_deflate_retry = encoding == "deflate"
+        wbits = zlib.MAX_WBITS | 16 if encoding == "gzip" else zlib.MAX_WBITS
+        self._zlib = zlib.decompressobj(wbits)
+
+    @property
+    def total(self) -> int:
+        return self._total
+
+    def _count(self, out: bytes) -> bytes:
+        self._total += len(out)
+        if self._total > self._max_bytes:
+            raise HcxApiFileTooLargeError(
+                f"file of more than {self._max_bytes} bytes does not fit in one result handle"
+            )
+        return out
+
+    def _step(self, data: bytes) -> bytes:
+        room = self._max_bytes - self._total + 1
+        try:
+            return self._zlib.decompress(data, max_length=room)
+        except zlib.error as exc:
+            if self._first_step and self._raw_deflate_retry:
+                # Some servers send raw deflate under ``Content-Encoding: deflate``.
+                self._raw_deflate_retry = False
+                self._zlib = zlib.decompressobj(-zlib.MAX_WBITS)
+                return self._step(data)
+            raise httpx.DecodingError(str(exc)) from exc
+        finally:
+            self._first_step = False
+
+    def feed(self, data: bytes) -> Iterator[bytes]:
+        while data:
+            yield self._count(self._step(data))
+            data = self._zlib.unconsumed_tail
+
+    def finish(self) -> bytes:
+        try:
+            return self._count(self._zlib.flush())
+        except zlib.error as exc:  # pragma: no cover - zlib flush does not fail on short input
+            raise httpx.DecodingError(str(exc)) from exc
 
 
 def check_path(raw: Any) -> tuple[str, str]:
@@ -237,40 +308,24 @@ async def _fetch_without_redirects(
 
     The request goes through :meth:`httpx.AsyncClient.send` on the base
     class on purpose: the pooled client follows same-site redirects, and
-    this read must not follow any. The body is streamed and counted as
-    httpx decodes it (:meth:`~httpx.Response.aiter_bytes`), so a small
-    compressed body that decodes to a large file is refused at the cap and
-    never held whole in memory. The ``Content-Length`` fast reject applies
-    only to a body that is not compressed, where the header names the
-    file's own size.
+    this read must not follow any. The wire body is streamed in chunks
+    (:meth:`~httpx.Response.aiter_raw`) and decoded here, not by httpx:
+    httpx decodes each wire chunk whole, so a few KiB of ``gzip`` could
+    expand to many MiB before any count. :class:`_BoundedDecoder` never
+    decodes more than the room left, so the decoded bytes stay within the
+    cap at every step. The ``Content-Length`` fast reject applies only to
+    a body that is not compressed, where the header names the file's own
+    size.
 
     The answer is rebuilt from the decoded bytes, without the wire-body
     headers, so the flight recorder and the caller see the file once.
     """
-    request = client.build_request("GET", url, headers=headers, extensions=extensions)
+    request = client.build_request(
+        "GET", url, headers={**headers, "accept-encoding": _ACCEPT_ENCODING}, extensions=extensions
+    )
     response = await httpx.AsyncClient.send(client, request, stream=True, follow_redirects=False)
     try:
-        encoding = response.headers.get("content-encoding", "identity").strip().lower()
-        declared = response.headers.get("content-length")
-        if (
-            encoding in ("", "identity")
-            and declared is not None
-            and declared.isdigit()
-            and int(declared) > max_bytes
-        ):
-            raise HcxApiFileTooLargeError(
-                f"file of {declared} bytes does not fit in one result handle "
-                f"(limit {max_bytes} bytes)"
-            )
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > max_bytes:
-                raise HcxApiFileTooLargeError(
-                    f"file of more than {max_bytes} bytes does not fit in one result handle"
-                )
-            chunks.append(chunk)
+        chunks = await _read_body_bounded(response, url, max_bytes=max_bytes)
     finally:
         await response.aclose()
     kept_headers = [
@@ -285,6 +340,41 @@ async def _fetch_without_redirects(
         request=request,
         extensions=response.extensions,
     )
+
+
+async def _read_body_bounded(response: httpx.Response, url: str, *, max_bytes: int) -> list[bytes]:
+    """Read and decode the streamed body; stop as soon as it passes *max_bytes*."""
+    encoding = response.headers.get("content-encoding", "identity").strip().lower()
+    declared = response.headers.get("content-length")
+    if encoding in _IDENTITY_ENCODINGS:
+        if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+            raise HcxApiFileTooLargeError(
+                f"file of {declared} bytes does not fit in one result handle "
+                f"(limit {max_bytes} bytes)"
+            )
+        decoder: _BoundedDecoder | None = None
+    elif encoding in _ACCEPT_ENCODING.split(", "):
+        decoder = _BoundedDecoder(encoding, max_bytes)
+    else:
+        raise HcxApiFileNotTextError(
+            f"GET {url} returned content encoding {encoding!r}; only {_ACCEPT_ENCODING} or "
+            "no encoding can be decoded"
+        )
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_raw(_RAW_CHUNK_BYTES):
+        if decoder is None:
+            total += len(chunk)
+            if total > max_bytes:
+                raise HcxApiFileTooLargeError(
+                    f"file of more than {max_bytes} bytes does not fit in one result handle"
+                )
+            chunks.append(chunk)
+            continue
+        chunks.extend(decoder.feed(chunk))
+    if decoder is not None:
+        chunks.append(decoder.finish())
+    return chunks
 
 
 def _assert_fits_result_handle(
@@ -312,7 +402,7 @@ def _assert_fits_result_handle(
         )
 
 
-def _assert_not_redacted(answer: dict[str, Any], operator: Operator) -> None:
+def _assert_not_redacted(answer: dict[str, Any], text: str, operator: Operator) -> None:
     """Stop when the shared redaction step would change the file's text.
 
     The dispatcher redacts every answer before the caller sees it. A file
@@ -321,35 +411,48 @@ def _assert_not_redacted(answer: dict[str, Any], operator: Operator) -> None:
     original. Running the same rules here, with the same labels, finds that
     case before the answer leaves the read. Redaction stays on; the error
     names the rules and the places, never the matched text.
+
+    The rules run twice: on the whole *text*, because a secret whose label
+    ends one part and whose value starts the next is not seen in either
+    part alone; and on the *answer* itself, the document the dispatcher
+    will redact.
     """
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
-    outcome = apply_connector_boundary_redaction(
-        answer, connector_id=HCX_CONNECTOR_ID, tenant=tenant, op=_OP_ID
-    )
-    if outcome.redacted == outcome.raw:
-        return
-    rules = sorted({entry.rule for entry in outcome.manifest})
-    places = sum(entry.count for entry in outcome.manifest)
-    raise HcxApiFileRedactedError(
-        f"GET {answer['path']}: the secret-redaction rules {rules} would change the text in "
-        f"{places} place(s), so the exact file cannot be returned; the read stopped"
-    )
+    for document in ({"path": answer["path"], "text": text}, answer):
+        outcome = apply_connector_boundary_redaction(
+            document, connector_id=HCX_CONNECTOR_ID, tenant=tenant, op=_OP_ID
+        )
+        if outcome.redacted == outcome.raw:
+            continue
+        rules = sorted({entry.rule for entry in outcome.manifest})
+        places = sum(entry.count for entry in outcome.manifest)
+        raise HcxApiFileRedactedError(
+            f"GET {answer['path']}: the secret-redaction rules {rules} would change the text in "
+            f"{places} place(s), so the exact file cannot be returned; the read stopped"
+        )
 
 
-def _text_items(response: httpx.Response, path: str) -> list[dict[str, Any]]:
-    """Split the body into text parts; refuse anything that is not UTF-8 text."""
+def _decode_text(response: httpx.Response, path: str) -> str:
+    """Return the body as text; refuse anything that is not UTF-8 text."""
     content_type = response.headers.get("content-type")
     if not _is_text_content_type(content_type):
         raise HcxApiFileNotTextError(
             f"GET {path} returned content type {content_type!r}; only text comes back"
         )
     try:
-        parts = [part.decode("utf-8") for part in split_parts(response.content)]
+        return response.content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise HcxApiFileNotTextError(
             f"GET {path} returned content type {content_type!r} that is not UTF-8 text"
         ) from exc
-    return [{"index": index, "text": text} for index, text in enumerate(parts)]
+
+
+def _text_items(body: bytes) -> list[dict[str, Any]]:
+    """Split a UTF-8 *body* into text parts of at most :data:`PART_BYTES`."""
+    return [
+        {"index": index, "text": part.decode("utf-8")}
+        for index, part in enumerate(split_parts(body))
+    ]
 
 
 async def hcx_api_file_get_impl(
@@ -387,8 +490,9 @@ async def hcx_api_file_get_impl(
     if response.status_code == httpx.codes.UNAUTHORIZED:
         response.raise_for_status()
 
-    items = _text_items(response, path)
+    text = _decode_text(response, path)
     body = response.content
+    items = _text_items(body)
     version = await connector.manager_version(target, operator)
     answer: dict[str, Any] = {
         "path": url,
@@ -404,5 +508,5 @@ async def hcx_api_file_get_impl(
     }
     _assert_fits_result_handle(answer, items, operator_sub=operator.sub, max_bytes=max_bytes)
     answer["items"] = items
-    _assert_not_redacted(answer, operator)
+    _assert_not_redacted(answer, text, operator)
     return answer

@@ -110,9 +110,12 @@ through this target. Only a `401` is raised, so the dispatcher can log in
 again; every other status (for example `404`) is reported in `status`
 with the body as text.
 
-The body is read in a stream and counted after decoding, so a small
-compressed answer that decodes to a file over the limit is refused at the
-limit and never held whole in memory.
+The body is read in a stream. The read asks for `gzip` or `deflate` only
+and decodes the wire chunks itself with `zlib`, in steps that never
+produce more than the room left under the limit. So a small compressed
+answer that decodes to a file over the limit is refused at the limit, and
+the decoded bytes never grow past it, not even for one step. An answer
+with any other content encoding is refused with the encoding named.
 
 Only UTF-8 text comes back. A content type that is not text (anything
 other than `text/*`, JSON, YAML, XML or JavaScript) or a body that is not
@@ -122,9 +125,12 @@ The dispatcher runs the shared secret-redaction rules on every answer
 before the caller sees it. A documentation page can hold an example that
 looks like a secret (for example an `Authorization` header line). Such a
 page would come back changed while `sha256` still names the original.
-The read runs the same rules on its answer first and stops with an error
-that names the rules and the number of places. Redaction stays on; the
-read just never claims an exact file it cannot return.
+The read runs the same rules first, on the whole text and then on its
+answer, and stops with an error that names the rules and the number of
+places. The whole text is checked because a secret whose label ends one
+part and whose value starts the next is not seen in either part alone.
+Redaction stays on; the read just never claims an exact file it cannot
+return.
 
 The answer:
 

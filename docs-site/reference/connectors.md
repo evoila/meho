@@ -19,6 +19,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `gcloud-rest-1.0` | `gcloud` | — | — |
 | `gh-rest-3` | `gh` | — | generic |
 | `harbor-rest-2.x` | `harbor` | >=2.0,<3.0 | generic |
+| `hcx-rest-9.0` | `hcx` | >=4.7,<10.0 | — |
 | `hetzner-rest-2026.04` | `hetzner` | — | — |
 | `holodeck-ssh-9.0` | `holodeck` | — | — |
 | `hyperv-ssh-2022.x` | `hyperv` | — | — |

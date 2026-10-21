@@ -664,6 +664,7 @@ const (
 	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
 	TargetCreateProductGh         TargetCreateProduct = "gh"
 	TargetCreateProductHarbor     TargetCreateProduct = "harbor"
+	TargetCreateProductHcx        TargetCreateProduct = "hcx"
 	TargetCreateProductHetzner    TargetCreateProduct = "hetzner"
 	TargetCreateProductHolodeck   TargetCreateProduct = "holodeck"
 	TargetCreateProductHyperv     TargetCreateProduct = "hyperv"

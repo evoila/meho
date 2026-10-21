@@ -471,6 +471,7 @@ DATASTORE_REFRESH_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["datastore"],
     "additionalProperties": False,
+    "examples": [{"datastore": "datastore-17", "storage_info": False}],
 }
 
 
@@ -568,6 +569,7 @@ DATASTORE_USAGE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"filter_names": ["<datastore-name>"]}],
 }
 
 
@@ -602,6 +604,7 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"filter_dvs": "dvs-31"}],
 }
 
 
@@ -896,7 +899,7 @@ DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
                             "(status code + URL where the sub-op carried them); for "
                             "the identical-sets guard it records that the VM set was "
                             "identical across every datastore, so the upstream "
-                            "per-datastore filter was not applied (#2975)."
+                            "per-datastore filter was not applied."
                         ),
                     },
                 },
@@ -950,7 +953,11 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                     "vlan": {
                         "type": ["object", "null"],
                         "properties": {
-                            "mode": {"type": "string", "enum": ["access", "trunk"]},
+                            "mode": {
+                                "type": "string",
+                                "enum": ["access", "trunk"],
+                                "description": "One access VLAN, or a trunk of VLAN ranges.",
+                            },
                             "vlan_id": {
                                 "type": "integer",
                                 "minimum": 0,
@@ -962,8 +969,14 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "start": {"type": "integer"},
-                                        "end": {"type": "integer"},
+                                        "start": {
+                                            "type": "integer",
+                                            "description": "First VLAN id.",
+                                        },
+                                        "end": {
+                                            "type": "integer",
+                                            "description": "Last VLAN id (inclusive).",
+                                        },
                                     },
                                     "required": ["start", "end"],
                                 },
@@ -2307,7 +2320,8 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 #: portgroup/switch REST list exists to resolve a name against — the moid comes
 #: from the ``networking`` group's ``portgroup.audit`` read). Exactly one VLAN
 #: mode: ``vlan_trunk_ranges`` (trunk — the nested-ESXi substrate case) OR
-#: ``vlan_id`` (a single access VLAN); both set → ``status='invalid_vlan_spec'``.
+#: ``vlan_id`` (a single access VLAN), never both: the ``not`` clause makes MEHO
+#: refuse both before the call. Neither keeps the switch's default VLAN.
 NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -2331,8 +2345,18 @@ NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "start": {"type": "integer", "minimum": 0, "maximum": 4094},
-                    "end": {"type": "integer", "minimum": 0, "maximum": 4094},
+                    "start": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "First VLAN id of the range.",
+                    },
+                    "end": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "Last VLAN id of the range (inclusive).",
+                    },
                 },
                 "required": ["start", "end"],
                 "additionalProperties": False,
@@ -2376,7 +2400,15 @@ NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["vds", "name"],
+    "not": {"required": ["vlan_trunk_ranges", "vlan_id"]},
     "additionalProperties": False,
+    "examples": [
+        {
+            "vds": "dvs-31",
+            "name": "<portgroup-name>",
+            "vlan_trunk_ranges": [{"start": 0, "end": 4094}],
+        }
+    ],
 }
 
 
@@ -2426,6 +2458,14 @@ NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["portgroup"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "portgroup": "dvportgroup-42",
+            "allow_promiscuous": True,
+            "forged_transmits": True,
+            "mac_changes": True,
+        }
+    ],
 }
 
 
@@ -2436,7 +2476,8 @@ NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
 #: vcenter.yaml serves no VLAN write). ``portgroup`` is the moid (obtain it
 #: from the networking group's ``portgroup.audit`` read), and exactly one VLAN
 #: mode -- ``vlan_trunk_ranges`` (a NumericRange[] trunk) XOR ``vlan_id`` (a
-#: single access VLAN). The spec **REPLACES** the current VLAN config; there is
+#: single access VLAN); the ``oneOf`` makes MEHO refuse both or neither before
+#: the call. The spec **REPLACES** the current VLAN config; there is
 #: no merge, so to add the untagged/native VLAN 0 to an existing trunk band the
 #: operator passes the full desired range list (e.g.
 #: ``[{start:0,end:0},{start:3251,end:3271}]``). Idempotent -- a request that
@@ -2459,8 +2500,18 @@ NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "start": {"type": "integer", "minimum": 0, "maximum": 4094},
-                    "end": {"type": "integer", "minimum": 0, "maximum": 4094},
+                    "start": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "First VLAN id of the range.",
+                    },
+                    "end": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "Last VLAN id of the range (inclusive).",
+                    },
                 },
                 "required": ["start", "end"],
                 "additionalProperties": False,
@@ -2496,7 +2547,14 @@ NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["portgroup"],
+    "oneOf": [{"required": ["vlan_trunk_ranges"]}, {"required": ["vlan_id"]}],
     "additionalProperties": False,
+    "examples": [
+        {
+            "portgroup": "dvportgroup-42",
+            "vlan_trunk_ranges": [{"start": 0, "end": 0}, {"start": 100, "end": 200}],
+        }
+    ],
 }
 
 
@@ -3512,6 +3570,44 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+#: A security triple of ``network.portgroup.security.set``; ``null`` = not set.
+_PORTGROUP_SECURITY_FIELDS: dict[str, Any] = {
+    "allow_promiscuous": {
+        "type": ["boolean", "null"],
+        "description": "Promiscuous mode (``DVSSecurityPolicy.allowPromiscuous``).",
+    },
+    "forged_transmits": {
+        "type": ["boolean", "null"],
+        "description": "Forged transmits (``DVSSecurityPolicy.forgedTransmits``).",
+    },
+    "mac_changes": {
+        "type": ["boolean", "null"],
+        "description": "MAC address changes (``DVSSecurityPolicy.macChanges``).",
+    },
+}
+
+#: The normalised VLAN view of ``network.portgroup.vlan.set``.
+_PORTGROUP_VLAN_VIEW_FIELDS: dict[str, Any] = {
+    "mode": {
+        "type": "string",
+        "enum": ["trunk", "access"],
+        "description": "A trunk of VLAN ranges, or one access VLAN.",
+    },
+    "ranges": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "start": {"type": "integer", "description": "First VLAN id."},
+                "end": {"type": "integer", "description": "Last VLAN id (inclusive)."},
+            },
+        },
+        "description": "Trunk ranges (mode 'trunk'), sorted, touching ranges merged.",
+    },
+    "vlan_id": {"type": "integer", "description": "The access VLAN id (mode 'access')."},
+}
+
+
 NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -3543,6 +3639,33 @@ NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "observed": {
             "type": ["object", "null"],
+            "properties": {
+                "name": {"type": ["string", "null"], "description": "``config.name``."},
+                "vlan": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "_typeName": {
+                            "type": "string",
+                            "description": (
+                                "``VmwareDistributedVirtualSwitchTrunkVlanSpec`` or "
+                                "``VmwareDistributedVirtualSwitchVlanIdSpec``."
+                            ),
+                        },
+                        "inherited": {
+                            "type": "boolean",
+                            "description": "Whether the VLAN comes from the switch.",
+                        },
+                        "vlanId": {
+                            "type": ["integer", "array"],
+                            "items": {"type": "object"},
+                            "description": (
+                                "One VLAN id, or ``NumericRange`` entries ``{start, end}``."
+                            ),
+                        },
+                    },
+                    "description": "``config.defaultPortConfig.vlan`` as the switch reports it.",
+                },
+            },
             "description": (
                 "Read-back verification: the created portgroup's config.name and the "
                 "raw config.defaultPortConfig.vlan spec the switch reports. ``null`` "
@@ -3576,6 +3699,7 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         "portgroup": {"type": "string", "description": "The portgroup moid whose policy was set."},
         "requested": {
             "type": "object",
+            "properties": _PORTGROUP_SECURITY_FIELDS,
             "description": (
                 "The three security booleans as requested; a ``null`` field was not "
                 "changed (only supplied booleans are written)."
@@ -3583,6 +3707,7 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "previous": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_SECURITY_FIELDS,
             "description": (
                 "Read-back of the effective security triple BEFORE the change (the "
                 "four-eyes reviewer's before-state); ``null`` on a no-change refusal."
@@ -3590,6 +3715,7 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "observed": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_SECURITY_FIELDS,
             "description": (
                 "Read-back of the effective security triple AFTER the change; "
                 "``null`` on a refusal / timeout."
@@ -3628,6 +3754,7 @@ NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         "portgroup": {"type": "string", "description": "The portgroup moid whose VLAN was set."},
         "requested": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_VLAN_VIEW_FIELDS,
             "description": (
                 "The requested VLAN config as a normalised view "
                 "(``{mode:'trunk', ranges:[{start,end}]}`` or ``{mode:'access', vlan_id}``); "
@@ -3636,6 +3763,7 @@ NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "before": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_VLAN_VIEW_FIELDS,
             "description": (
                 "Read-back of the portgroup's VLAN config BEFORE the change (the "
                 "four-eyes reviewer's before-state), normalised; ``null`` on a refusal or "
@@ -3644,6 +3772,7 @@ NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "after": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_VLAN_VIEW_FIELDS,
             "description": (
                 "Read-back of the VLAN config AFTER the change, normalised; equals "
                 "``before`` on ``'unchanged'``; ``null`` on a refusal / timeout."
@@ -6242,6 +6371,7 @@ STORAGE_POLICY_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"policy_ids": ["<policy-id>"]}],
 }
 
 #: ``vmware.composite.storage_policy.list`` response schema.
@@ -6322,6 +6452,14 @@ STORAGE_POLICY_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["policy_name", "category_name", "tag_name", "datastore_names"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "policy_name": "<policy-name>",
+            "category_name": "<category-name>",
+            "tag_name": "<tag-name>",
+            "datastore_names": ["<datastore-name>"],
+        }
+    ],
 }
 
 #: ``vmware.composite.storage_policy.create`` response schema.
@@ -6358,7 +6496,7 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "The created or adopted PBM policy id (the vCenter StoragePolicy identifier)."
             ),
         },
-        "policy_name": {"type": "string"},
+        "policy_name": {"type": "string", "description": "The requested policy name."},
         "category_id": {
             "type": ["string", "null"],
             "description": "The created or adopted tag category id.",
@@ -6367,15 +6505,15 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "The created or adopted tag id.",
         },
-        "tag_name": {"type": "string"},
+        "tag_name": {"type": "string", "description": "The requested tag name."},
         "datastores": {
             "type": "array",
             "description": "Resolved datastores the tag was attached to.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "moid": {"type": "string"},
+                    "name": {"type": "string", "description": "Datastore name."},
+                    "moid": {"type": "string", "description": "Datastore moid."},
                 },
                 "required": ["name", "moid"],
                 "additionalProperties": False,
@@ -6389,12 +6527,12 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": (
                 "Per sub-step, whether an existing object was reused rather than "
-                "created (the #3826 resolve-before-create idempotency)."
+                "created (so a second run after a partial run goes on)."
             ),
             "properties": {
-                "category": {"type": "boolean"},
-                "tag": {"type": "boolean"},
-                "policy": {"type": "boolean"},
+                "category": {"type": "boolean", "description": "The tag category existed."},
+                "tag": {"type": "boolean", "description": "The tag existed."},
+                "policy": {"type": "boolean", "description": "The policy existed."},
             },
             "required": ["category", "tag", "policy"],
             "additionalProperties": False,
@@ -6417,7 +6555,7 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {"type": ["string", "null"], "description": "Next-step hint."},
     },
     "required": ["status", "policy_id", "policy_name"],
     "additionalProperties": True,
@@ -6443,6 +6581,7 @@ STORAGE_POLICY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["policy_id"],
     "additionalProperties": False,
+    "examples": [{"policy_id": "<policy-id>", "policy_name": "<policy-name>"}],
 }
 
 #: ``vmware.composite.storage_policy.delete`` response schema.
@@ -6461,12 +6600,12 @@ STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "read-back still lists the id."
             ),
         },
-        "policy_id": {"type": "string"},
+        "policy_id": {"type": "string", "description": "The policy id from the call."},
         "fault": {
             "type": ["string", "null"],
             "description": "The per-id PbmDelete fault type, when status='delete_failed'.",
         },
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {"type": ["string", "null"], "description": "Next-step hint."},
     },
     "required": ["status", "policy_id"],
     "additionalProperties": True,
@@ -7463,12 +7602,52 @@ NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["portgroup"],
     "additionalProperties": False,
+    "examples": [{"portgroup": "dvportgroup-42"}],
 }
 
 #: ``vmware.composite.network.portgroup.delete`` response schema.
 NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "precondition_failed", "still_present", "timeout"],
     _DELETE_STATUS_COMMON + " ``'timeout'`` -- Destroy_Task outran the poll bound.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``distributed_portgroup``."},
+        "moid": {"type": "string", "description": "Portgroup moid."},
+        "name": {"type": ["string", "null"], "description": "Portgroup name."},
+        "dvs": {"type": ["string", "null"], "description": "Moid of the distributed switch."},
+        "vlan": {
+            "type": ["object", "null"],
+            "description": "``{mode: trunk, ranges}`` or ``{mode: access, vlan_id}``.",
+        },
+        "num_ports": {"type": ["integer", "null"], "description": "``config.numPorts``."},
+        "port_binding": {
+            "type": ["string", "null"],
+            "description": "``config.type``: earlyBinding, lateBinding or ephemeral.",
+        },
+        "uplink": {"type": "boolean", "description": "Whether it is the uplink portgroup."},
+        "backing_type": {
+            "type": ["string", "null"],
+            "description": "``config.backingType``; ``nsx`` for an NSX segment.",
+        },
+        "port_check": {
+            "type": "string",
+            "description": "``ok``, or why the connected ports could not be read.",
+        },
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "``vm`` or ``port``."},
+        "moid": {"type": "string", "description": "VM moid (kind ``vm``)."},
+        "name": {"type": ["string", "null"], "description": "VM name (kind ``vm``)."},
+        "id": {"type": ["string", "null"], "description": "Port key (kind ``port``)."},
+        "connectee_type": {
+            "type": ["string", "null"],
+            "description": "What uses the port, e.g. ``vmVnic`` or ``hostVmkVnic``.",
+        },
+        "connected_entity": {
+            "type": ["string", "null"],
+            "description": "Moid of the VM or host on the port.",
+        },
+        "nic": {"type": ["string", "null"], "description": "NIC key on that VM or host."},
+    },
 )
 
 #: ``vmware.composite.host.standard_portgroup.delete`` parameter schema.
@@ -7489,12 +7668,33 @@ HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["host", "portgroup_name"],
     "additionalProperties": False,
+    "examples": [{"host": "host-21", "portgroup_name": "<portgroup-name>"}],
 }
 
 #: ``vmware.composite.host.standard_portgroup.delete`` response schema.
 HOST_STANDARD_PORTGROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present"],
     _DELETE_STATUS_COMMON + " ``'invalid_request'`` -- the host moid does not exist.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``host_standard_portgroup``."},
+        "host": {"type": "string", "description": "Host moid."},
+        "name": {"type": "string", "description": "Port group name."},
+        "host_name": {"type": ["string", "null"], "description": "Host name."},
+        "vswitch": {"type": ["string", "null"], "description": "Standard switch name."},
+        "vlan": {
+            "type": ["object", "null"],
+            "description": (
+                "``{mode, vlan_id}``; mode is ``untagged`` (0), ``access`` or ``trunk_all`` (4095)."
+            ),
+        },
+        "active_ports": {"type": "integer", "description": "Ports in use on the port group."},
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "``vm`` or ``vmkernel_adapter``."},
+        "moid": {"type": "string", "description": "VM moid (kind ``vm``)."},
+        "id": {"type": ["string", "null"], "description": "Adapter, e.g. ``vmk1``."},
+        "name": {"type": ["string", "null"], "description": "VM name; null for an adapter."},
+    },
 )
 
 #: ``vmware.composite.folder.delete`` parameter schema.
@@ -7646,6 +7846,7 @@ DATASTORE_FILE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["datastore", "path"],
     "additionalProperties": False,
+    "examples": [{"datastore": "datastore-17", "path": "<folder-name>"}],
 }
 
 #: ``vmware.composite.datastore.file.delete`` response schema.
@@ -7654,6 +7855,46 @@ DATASTORE_FILE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schem
     _DELETE_STATUS_COMMON
     + " ``'invalid_request'`` -- the path or datastore reference is unacceptable; "
     "``'timeout'`` -- DeleteDatastoreFile_Task outran the poll bound.",
+    object_properties={
+        "kind": {
+            "type": "string",
+            "description": (
+                "``datastore_file`` or ``datastore_directory``; ``datastore_path`` when "
+                "the path was not found."
+            ),
+        },
+        "datastore": {"type": ["string", "null"], "description": "Datastore moid."},
+        "path": {"type": ["string", "null"], "description": "The path from the call."},
+        "datastore_name": {"type": "string", "description": "Datastore name."},
+        "datastore_type": {"type": "string", "description": "Datastore type, e.g. ``NFS``."},
+        "datastore_path": {
+            "type": "string",
+            "description": "The full datastore path, ``[<datastore>] <path>``.",
+        },
+        "resolved_path": {
+            "type": "string",
+            "description": "The datastore path as vSphere found it; this is what is deleted.",
+        },
+        "file_type": {
+            "type": ["string", "null"],
+            "description": "vSphere ``FileInfo`` type, e.g. ``FolderFileInfo``.",
+        },
+        "size_bytes": {"type": ["integer", "null"], "description": "``FileInfo.fileSize``."},
+        "modified": {
+            "type": ["string", "null"],
+            "description": "``FileInfo.modification`` (date and time).",
+        },
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "``vm``."},
+        "moid": {"type": "string", "description": "VM moid."},
+        "name": {"type": ["string", "null"], "description": "VM name."},
+        "files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Files of that VM under the path (at most 10).",
+        },
+    },
 )
 
 #: ``vmware.composite.datastore.dir.create`` parameter schema.
@@ -7670,6 +7911,7 @@ DATASTORE_DIR_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["datastore", "path"],
     "additionalProperties": False,
+    "examples": [{"datastore": "datastore-17", "path": "<folder-name>", "create_parents": False}],
 }
 
 #: ``vmware.composite.datastore.dir.create`` response schema.
@@ -7682,6 +7924,17 @@ DATASTORE_DIR_CREATE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema
         "parent is missing without create_parents; ``'not_verified'`` -- MakeDirectory "
         "returned but the directory does not read back. A vSphere fault raises."
     ),
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``datastore_directory``."},
+        "datastore": {"type": ["string", "null"], "description": "Datastore moid."},
+        "path": {"type": ["string", "null"], "description": "The path from the call."},
+        "datastore_name": {"type": "string", "description": "Datastore name."},
+        "datastore_type": {"type": "string", "description": "Datastore type, e.g. ``NFS``."},
+        "datastore_path": {
+            "type": "string",
+            "description": "The full datastore path, ``[<datastore>] <path>``.",
+        },
+    },
 )
 
 #: ``vmware.composite.content_library.delete`` parameter schema.

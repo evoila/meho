@@ -186,7 +186,8 @@ _API_FILE_GET_INSTRUCTIONS: dict[str, object] = {
         "On a landing page, find the file paths the page loads and read each one "
         "with this same operation. On a 3xx status, read redirect_path next. On 403 "
         "or 404 the file is not served at that path; report the status. A file too "
-        "big for one stored result, or text that MEHO's redaction would change, stops "
+        "big for one stored result, text that MEHO's redaction would change, or a "
+        "clear-text secret such as a quoted password field or a private key, stops "
         "with an error that says why."
     ),
 }

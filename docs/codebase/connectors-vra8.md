@@ -308,10 +308,13 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   (one row per part) and keeps the scalar fields (`sha256`, `size`, `parts`,
   `build`, ...) in the inline summary. Page the handle with `result_query`
   (`offset` / `limit`, a small `limit` such as 2, because one answer is at
-  most 256 KiB). A file that does not fit in one stored result
-  (`result_handle_max_record_bytes`, 16 MiB by default, measured as stored
-  JSON) stops with an error that names its size; the read never returns a
-  cut file.
+  most 256 KiB). A file that does not fit in one stored result stops with
+  an error that names its size; the read never returns a cut file. Two
+  limits apply: the store keeps at most `result_handle_max_spill_rows`
+  rows (10,000 by default), so a file with more parts than that is refused;
+  and the stored record, measured as the store writes it with
+  `rows_record_bytes` (the parts, the scalar fields and the record's own
+  fields), must fit `result_handle_max_record_bytes` (16 MiB by default).
 - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
   every stored result (the dispatcher runs
   `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
@@ -322,12 +325,25 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   secret that the part cut splits in two). When the text would change, the
   read stops with an error that names the rule and the place, and returns no
   file. Redaction itself stays on.
+- **Secret shapes the redaction misses.** The redaction rule for labelled
+  secrets wants the label right before `=` or `:`, so it does not see a
+  quoted JSON key (`"password": "..."`, `"token": "..."`) or a PEM private
+  key block. The read looks for both shapes itself (`SECRET_SHAPES` in
+  `api_file.py`) in the whole file text, so a secret cut in two by a part
+  boundary is found too. A quoted credential field is a key that is, or
+  ends in, a secret label with a quoted value of at least 8 characters; a
+  schema property named `password` (an object value) or a placeholder such
+  as `"string"` does not count. A file that holds one of the shapes stops
+  with an error that names the shape and how often it occurs, never the
+  text.
 - **Tests.**
   [`test_connectors_vra8_api_file.py`](../../backend/tests/test_connectors_vra8_api_file.py)
   (respx: accepted and refused paths with no request, the login on the
   `GET`, status and redirect cases, large files, version failures, a file
   that a redaction rule would change, a secret split across the part cut,
-  and the result-handle round trip);
+  quoted JSON credentials and a private key block, whole and split across
+  the part cut, a file with more parts than the row limit, and the
+  result-handle round trip);
   [`test_connectors_vra8_typed_reads.py`](../../backend/tests/test_connectors_vra8_typed_reads.py)
   (zero-catalog dispatch, the 401 re-login, and `invalid_params` for a data
   path); and the reconcile lane below (`GET /vco/api/about` in the manifest,

@@ -29,12 +29,18 @@ The read is narrow on purpose:
   ``status``.
 * The file comes back as text parts of at most 64 KiB each. Joining the
   parts in order gives the exact file; ``sha256`` is the hash of the
-  file bytes. A file that does not fit in one stored result is refused
-  with its size, never cut. Only UTF-8 text comes back.
+  file bytes. A file that does not fit in one stored result, as bytes
+  or as rows, is refused with its size, never cut. Only UTF-8 text comes
+  back.
 * MEHO redacts secret-shaped text in every stored result. The read runs
   the same redaction rules the dispatcher will apply, on the whole file
   text and on each part, and refuses a file whose text they would
   change, naming the rule. So the stored parts always match ``sha256``.
+* Two secret shapes pass those rules unchanged: a quoted JSON credential
+  field (``"password": "..."``, ``"token": "..."``) and a PEM private
+  key block. The read looks for them in the whole file text and refuses
+  a file that holds one (:data:`SECRET_SHAPES`), so no clear-text secret
+  reaches a stored result.
 
 The version and build come from the Orchestrator inside the appliance
 (``GET /vco/api/about``: ``version`` and ``build-number``); the IaaS API
@@ -50,12 +56,12 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
-import msgspec
 import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
+from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH, _VCO_ABOUT_PATH
 from meho_backplane.connectors.vra8.session import Vra8TargetLike
 from meho_backplane.redaction import apply_connector_boundary_redaction
@@ -69,6 +75,7 @@ __all__ = [
     "OP_ID",
     "PART_MAX_BYTES",
     "PATH_PATTERN",
+    "SECRET_SHAPES",
     "SERVICE_SWAGGER_FOLDER",
     "Vra8ApiFileError",
     "check_api_file_path",
@@ -98,8 +105,34 @@ SERVICE_SWAGGER_FOLDER = "/{service}/api/swagger"
 #: most 256 KiB, so a 64 KiB part fits even after JSON escaping.
 PART_MAX_BYTES = 64 * 1024
 
-#: Room kept free in one stored result for the record's own fields.
-_RECORD_OVERHEAD_BYTES = 4096
+# The secret labels of the stored-result redaction (``strip-api-key``),
+# repeated here because that rule wants the label right before ``=`` or
+# ``:``. In a JSON file the label sits in quotes, so the rule never sees
+# ``"password": "..."``.
+_SECRET_LABELS = (
+    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token"
+    r"|session[_-]?token|secret(?:[_-]?(?:key|id))?|private[_-]?key"
+    r"|password|passwd|pwd|client[_-]?secret|token)"
+)
+
+#: Secret shapes the stored-result redaction passes through unchanged, each
+#: with a name for the error. A quoted credential field is a JSON or YAML
+#: key that is, or ends in, a secret label (``"password"``,
+#: ``"refreshToken"``, ``"x-api-key"``) with a quoted value of at least 8
+#: characters; a key with an object or short placeholder value, as in a
+#: schema, does not match. A private key block is matched by its PEM
+#: header, whatever the key type. Both run on the whole file text, so a
+#: secret the part cut splits in two is found as well.
+SECRET_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "a quoted credential field",
+        re.compile(
+            r"""(["'])[A-Za-z0-9_.-]*""" + _SECRET_LABELS + r"""\1\s*:\s*(["'])[^"']{8,}\2""",
+            re.IGNORECASE,
+        ),
+    ),
+    ("a private key block", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
+)
 
 # The path rule, built from named pieces. One path part holds letters,
 # digits and . _ ~ -, so no backslash, percent sign (an encoded dot or
@@ -322,19 +355,52 @@ def _file_fields(path: str, content_type: str | None, body: bytes) -> dict[str, 
     }
 
 
-def _check_fits(answer: dict[str, Any], max_record_bytes: int) -> None:
-    """Refuse an answer too big to keep whole in one stored result."""
-    encoded = len(msgspec.json.encode(answer))
-    if encoded + _RECORD_OVERHEAD_BYTES > max_record_bytes:
+def _check_fits(answer: dict[str, Any], operator: Operator) -> None:
+    """Refuse an answer too big to keep whole in one stored result.
+
+    The store keeps the text parts as rows and the other fields beside
+    them. It keeps at most ``result_handle_max_spill_rows`` rows and one
+    record of at most ``result_handle_max_record_bytes``; the record is
+    measured as the store writes it (:func:`rows_record_bytes`), with the
+    record's own fields, so a file that passes here is stored whole.
+    """
+    settings = get_settings()
+    rows = answer["text_parts"]
+    max_rows = settings.result_handle_max_spill_rows
+    if len(rows) > max_rows:
         raise Vra8ApiFileError(
-            f"{answer['path']!r} is {answer['size']} bytes ({encoded} bytes as a stored "
+            f"{answer['path']!r} is {answer['size']} bytes in {len(rows)} parts. One stored "
+            f"result keeps at most {max_rows} parts (result_handle_max_spill_rows), so the "
+            "file was not returned. This read never returns a cut file."
+        )
+    document = {key: value for key, value in answer.items() if key != "text_parts"}
+    record = rows_record_bytes(rows, operator_sub=operator.sub, op_id=OP_ID, document=document)
+    max_record_bytes = settings.result_handle_max_record_bytes
+    if record > max_record_bytes:
+        raise Vra8ApiFileError(
+            f"{answer['path']!r} is {answer['size']} bytes ({record} bytes as a stored "
             f"result). One stored result holds at most {max_record_bytes} bytes, so the "
             "file was not returned. This read never returns a cut file."
         )
 
 
+def _check_no_secret_shape(path: str, file_text: str) -> None:
+    """Refuse a file that holds a secret the stored-result redaction would miss.
+
+    The error names the shape and how often it occurs, never the text.
+    """
+    for name, pattern in SECRET_SHAPES:
+        count = sum(1 for _ in pattern.finditer(file_text))
+        if count:
+            raise Vra8ApiFileError(
+                f"{path!r} holds {name} in {count} place(s). MEHO's secret redaction does "
+                "not cover that shape, so the file was not returned. This read never "
+                "returns a clear-text secret."
+            )
+
+
 def _check_redaction_keeps_text(
-    answer: dict[str, Any], connector: Vra8Connector, operator: Operator
+    answer: dict[str, Any], file_text: str, connector: Vra8Connector, operator: Operator
 ) -> None:
     """Refuse a file whose text the stored-result redaction would change.
 
@@ -346,10 +412,7 @@ def _check_redaction_keeps_text(
     secret that a part cut splits in two is invisible to the per-part
     check, and the dispatcher would store it in clear text.
     """
-    probe = {
-        "text_parts": answer["text_parts"],
-        "file_text": "".join(part["text"] for part in answer["text_parts"]),
-    }
+    probe = {"text_parts": answer["text_parts"], "file_text": file_text}
     result = apply_connector_boundary_redaction(
         probe,
         connector_id=f"{connector.impl_id}-{connector.version}",
@@ -383,8 +446,9 @@ async def vra8_api_file_get_impl(
     2. ``GET`` the file with the connector's login, without following a
        redirect.
     3. Read the version, build and IaaS API label (best effort).
-    4. Refuse a file that does not fit in one stored result, or whose
-       text the stored-result redaction would change.
+    4. Refuse a file that does not fit in one stored result, whose text
+       the stored-result redaction would change, or that holds a secret
+       shape the redaction would miss.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -407,8 +471,10 @@ async def vra8_api_file_get_impl(
         answer.update(_file_fields(path, fetched["content_type"], fetched["body"]))
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
-        _check_fits(answer, max_record_bytes)
-        _check_redaction_keeps_text(answer, connector, operator)
+        file_text = "".join(part["text"] for part in answer["text_parts"])
+        _check_fits(answer, operator)
+        _check_redaction_keeps_text(answer, file_text, connector, operator)
+        _check_no_secret_shape(path, file_text)
 
     _log.info(
         "vra8_api_file_read",

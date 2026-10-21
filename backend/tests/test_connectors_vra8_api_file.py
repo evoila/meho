@@ -34,6 +34,7 @@ from meho_backplane.connectors.vra8 import VRA8_TYPED_OPS, Vra8Connector, api_fi
 from meho_backplane.connectors.vra8.api_file import (
     OP_ID,
     PART_MAX_BYTES,
+    SECRET_SHAPES,
     Vra8ApiFileError,
     split_text_parts,
 )
@@ -133,6 +134,14 @@ async def _call(connector: Vra8Connector, path: str) -> dict[str, Any]:
 def _joined(answer: dict[str, Any]) -> bytes:
     parts = sorted(answer["text_parts"], key=lambda part: part["index"])
     return "".join(part["text"] for part in parts).encode("utf-8")
+
+
+def _settings(*, max_record_bytes: int = 16 * 1024 * 1024, max_spill_rows: int = 10_000) -> Any:
+    """The two stored-result limits the read checks, as the settings object."""
+    return SimpleNamespace(
+        result_handle_max_record_bytes=max_record_bytes,
+        result_handle_max_spill_rows=max_spill_rows,
+    )
 
 
 def _redact_like_the_dispatcher(answer: dict[str, Any]) -> Any:
@@ -462,9 +471,7 @@ async def test_file_too_big_for_one_result_stops_with_its_size(
     # The file fits the read cap, but not once it is stored as JSON text
     # (line ends are escaped, and the record needs room).
     cap = len(body) + 2_000
-    monkeypatch.setattr(
-        api_file, "get_settings", lambda: SimpleNamespace(result_handle_max_record_bytes=cap)
-    )
+    monkeypatch.setattr(api_file, "get_settings", lambda: _settings(max_record_bytes=cap))
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_login_and_version(mock)
@@ -475,9 +482,7 @@ async def test_file_too_big_for_one_result_stops_with_its_size(
 
 
 async def test_file_over_the_byte_cap_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        api_file, "get_settings", lambda: SimpleNamespace(result_handle_max_record_bytes=10_000)
-    )
+    monkeypatch.setattr(api_file, "get_settings", lambda: _settings(max_record_bytes=10_000))
     body = _many_line_yaml(2_000)
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
@@ -486,6 +491,41 @@ async def test_file_over_the_byte_cap_is_not_read(monkeypatch: pytest.MonkeyPatc
         with pytest.raises(Vra8ApiFileError, match=f"{len(body)} bytes"):
             await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
+
+
+async def test_file_with_more_parts_than_the_row_limit_stops_with_its_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store keeps at most ``result_handle_max_spill_rows`` parts; three do not fit in two."""
+    monkeypatch.setattr(api_file, "get_settings", lambda: _settings(max_spill_rows=2))
+    body = _one_line_json(150 * 1024)
+    assert len(split_text_parts(body)) == 3
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": "text/plain"})
+        with pytest.raises(Vra8ApiFileError) as excinfo:
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert f"is {len(body)} bytes in 3 parts" in message
+    assert "at most 2 parts" in message
+    assert "not returned" in message
+
+
+async def test_two_parts_fit_the_row_limit_of_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_file, "get_settings", lambda: _settings(max_spill_rows=2))
+    body = _one_line_json(100 * 1024)
+    assert len(split_text_parts(body)) == 2
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": "text/plain"})
+        answer = await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+    assert answer["parts"] == 2
+    assert hashlib.sha256(_joined(answer)).hexdigest() == answer["sha256"]
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +622,120 @@ async def test_secret_split_across_the_part_cut_is_refused() -> None:
     assert "file_text" in message
     assert "not returned" in message
     assert "made-up-pass-value" not in message
+
+
+# ---------------------------------------------------------------------------
+# Secret shapes the stored-result redaction misses
+# ---------------------------------------------------------------------------
+
+# Built from two strings so the repository's private-key scan does not see a key.
+_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE KEY-----"
+_PEM_BLOCK = f"{_PEM_HEADER}\nMIIEmadeupmadeupmadeup\n-----END RSA PRIVATE KEY-----\n"
+
+
+def _swagger_with(field: str, value: str) -> str:
+    return _SWAGGER.replace('"swagger": "2.0"', f'"swagger": "2.0", "{field}": "{value}"')
+
+
+@pytest.mark.parametrize(
+    ("body", "shape"),
+    [
+        (_swagger_with("password", "made-up-pass-value-0123"), "a quoted credential field"),
+        (_swagger_with("token", "made-up-token-value-0123"), "a quoted credential field"),
+        (_swagger_with("refreshToken", "made-up-token-value-0123"), "a quoted credential field"),
+        (_PEM_BLOCK, "a private key block"),
+    ],
+    ids=["json-password", "json-token", "json-refresh-token", "private-key"],
+)
+async def test_secret_shape_the_redaction_misses_is_refused(body: str, shape: str) -> None:
+    # The stored-result redaction leaves these shapes as they are; that is why
+    # the read looks for them itself.
+    redaction = _redact_like_the_dispatcher({"text": body})
+    assert redaction.manifest == () and redaction.redacted == redaction.raw
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body.encode(), headers={"Content-Type": "application/json"}
+        )
+        with pytest.raises(Vra8ApiFileError) as excinfo:
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert _SWAGGER_PATH in message
+    assert shape in message
+    assert "in 1 place(s)" in message
+    assert "not returned" in message
+    assert "made-up-" not in message and "MIIE" not in message
+
+
+async def test_schema_fields_named_like_a_secret_are_not_a_secret() -> None:
+    """A Swagger schema names ``password`` as a property and as an OAuth flow; both come back."""
+    body = _SWAGGER.replace(
+        '"paths"',
+        '"definitions": {"Login": {"properties": {"password": {"type": "string"}, '
+        '"token": {"type": "string", "example": "string"}}}}, '
+        '"securityDefinitions": {"oauth": {"flow": "password", '
+        '"tokenUrl": "https://example.invalid/token"}}, "paths"',
+    )
+    assert not any(pattern.search(body) for _, pattern in SECRET_SHAPES)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body.encode(), headers={"Content-Type": "application/json"}
+        )
+        answer = await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+    assert _joined(answer) == body.encode()
+
+
+def _json_with_text_across_the_part_cut(text: str, before_cut: int) -> bytes:
+    """Valid one-line JSON where *text* starts *before_cut* bytes before the first part cut.
+
+    All characters are ASCII, so the cut falls exactly at ``PART_MAX_BYTES``.
+    """
+    head = '{"pad":"'
+    joint = '","note":"'
+    before = head + "a" * (PART_MAX_BYTES - before_cut - len(head) - len(joint)) + joint
+    assert len(before) == PART_MAX_BYTES - before_cut
+    return (before + text + '"}').encode()
+
+
+@pytest.mark.parametrize(
+    ("text", "before_cut", "shape"),
+    [
+        ('", "password": "made-up-pass-value-0123', 8, "a quoted credential field"),
+        (_PEM_HEADER, 14, "a private key block"),
+    ],
+    ids=["json-password", "private-key-header"],
+)
+async def test_secret_shape_split_across_the_part_cut_is_refused(
+    text: str, before_cut: int, shape: str
+) -> None:
+    body = _json_with_text_across_the_part_cut(text, before_cut)
+    parts = split_text_parts(body)
+    assert parts[0].endswith(text[:before_cut]) and parts[1].startswith(text[before_cut:])
+    # No part alone holds the shape; the whole text does.
+    assert not any(pattern.search(part) for part in parts for _, pattern in SECRET_SHAPES)
+    assert any(pattern.search(body.decode()) for _, pattern in SECRET_SHAPES)
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body, headers={"Content-Type": "application/json"}
+        )
+        with pytest.raises(Vra8ApiFileError) as excinfo:
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert shape in message
+    assert "not returned" in message
+    assert "made-up-" not in message
 
 
 # ---------------------------------------------------------------------------

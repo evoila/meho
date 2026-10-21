@@ -181,17 +181,21 @@ def _classify_refresh_failure(exc: Exception) -> tuple[str, dict[str, str]]:
     exception class and, for IdP rejections, the RFC 6749 § 5.2
     ``error`` code authlib parsed off the response.
 
-    The residual branch also absorbs ``ValueError`` --
-    ``json.JSONDecodeError`` is a subclass -- because authlib 1.7.2's
-    ``parse_response_token`` runs ``resp.json()`` on every response
-    below 500 (200 included), so a non-JSON body from a misbehaving
-    proxy or captive portal surfaces as a decode error, not as an
-    HTTP or OAuth exception. That is "the IdP answered with something
-    that is not a token": ``malformed_response``.
+    A non-JSON body below 500 from a misbehaving proxy or captive
+    portal is "the IdP answered with something that is not a token":
+    ``malformed_response``. authlib 1.9 surfaces it as a ``ValueError``
+    on a 200 and as an ``HTTPStatusError`` on a 4xx (it calls
+    ``raise_for_status()`` when the body is not a JSON object), so both
+    map here.
     """
     fields = {"error_class": type(exc).__name__}
     if isinstance(exc, (httpx.TimeoutException, httpx2.TimeoutException)):
         return "timeout", fields
+    if (
+        isinstance(exc, (httpx.HTTPStatusError, httpx2.HTTPStatusError))
+        and exc.response.status_code < 500
+    ):
+        return "malformed_response", fields
     if isinstance(exc, (httpx.HTTPError, httpx2.HTTPError)):
         return "network_error", fields
     if isinstance(exc, OAuthError):

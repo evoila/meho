@@ -14,11 +14,18 @@ phases the parent Initiative names:
    (:func:`~meho_backplane.operations._lookup.parse_connector_id`).
 2. Look up :class:`EndpointDescriptor` by the natural key
    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`).
-   Unknown -> structured ``unknown_op`` error.
-3. Validate ``params`` against ``descriptor.parameter_schema`` via
+   Unknown -> structured ``unknown_op`` (or ``unknown_connector``) error.
+3. For an ingested op whose catalog opts into a target check, the
+   catalog must accept the target, or a sibling catalog of the same
+   implementation that does must have the same op enabled; the dispatch
+   then runs on that sibling
+   (:mod:`meho_backplane.operations._catalog_guard`, #3600). Otherwise ->
+   structured ``unqualified_target_version`` error. Then validate
+   ``params`` against the chosen ``descriptor.parameter_schema`` via
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
-   Invalid -> structured ``invalid_params`` error.
+   Invalid -> structured ``invalid_params`` error. So for a guarded op a
+   target the catalogs cannot serve is reported before bad params.
 4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
@@ -71,6 +78,11 @@ form ``"<code>: <human-readable>"`` so callers can both string-match
 Detail payloads land in ``extras``. Codes:
 
 * ``unknown_op`` -- the natural key didn't resolve a descriptor.
+  ``extras["connectors_with_op"]`` lists other caller-visible connectors
+  that have the op (#4031); the message names them, or points at
+  ``search_operations`` when the list is empty.
+* ``unknown_connector`` -- the ``connector_id`` matches no connector the
+  caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
@@ -262,7 +274,6 @@ from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
     ResultHandle,
-    get_connector_v2,
     resolve_connector_or_label,
     resolve_target_version,
 )
@@ -285,6 +296,7 @@ from meho_backplane.operations._branches import (
     dispatch_ingested,
     dispatch_typed,
 )
+from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
     is_auth_failed_status,
     is_probe_refused,
@@ -315,8 +327,6 @@ from meho_backplane.operations._errors import (
     result_preview_hash_mismatch,
     result_rate_limited,
     result_target_required,
-    result_unknown_op,
-    result_unqualified_target_version,
     result_vault_credentials_read_error,
     result_write_capability_denied,
     wrap_ok_result,
@@ -329,10 +339,10 @@ from meho_backplane.operations._handler_resolve import (
     reset_handler_cache,
 )
 from meho_backplane.operations._lookup import (
-    count_known_ops,
     lookup_descriptor,
     parse_connector_id,
 )
+from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -3049,6 +3059,37 @@ async def _handle_needs_approval(
         )
 
 
+def _params_error(
+    descriptor: EndpointDescriptor,
+    op_id: str,
+    params: dict[str, Any],
+    started: float,
+) -> OperationResult | None:
+    """Validate *params* against the descriptor's schema; ``None`` when they pass.
+
+    #293 (security review S05): for an ingested (generic-connector) op,
+    validate against a schema that forbids undeclared params. Freshly
+    ingested descriptors already carry ``additionalProperties: false``
+    (openapi._build_parameter_schema); this backstop applies the same
+    clause to descriptors ingested before that fix, so an undeclared
+    param is rejected as ``invalid_params`` here rather than defaulting
+    onto the vendor query string in ``_split_ingested_params``.
+    """
+    schema_to_validate = descriptor.parameter_schema
+    if descriptor.source_kind == "ingested":
+        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
+    try:
+        validation_errors = validate_params(schema_to_validate, params)
+    except InvalidOpSchemaError as exc:
+        # #3095: the stored schema itself is broken (dangling $ref) --
+        # the descriptor is at fault, not the caller. Structured error
+        # instead of letting PointerToNowhere escape as a 500.
+        return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
+    if validation_errors:
+        return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
+    return None
+
+
 # code-quality-allow: 8-phase orchestrator -- phases stay linear so the
 # 8-numbered-steps contract in the module docstring stays grep-visible;
 # splitting would scatter structured-error returns + obscure never-raises.
@@ -3122,78 +3163,47 @@ async def dispatch(
         op_id=op_id,
     )
     if descriptor is None:
-        known_op_count = await count_known_ops(
+        return await op_miss_result(
             tenant_id=operator.tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
+            connector_id=connector_id,
+            op_id=op_id,
+            triple=(product, version, impl_id),
+            started=started,
         )
-        return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
-    # --- Step 3: parameter_schema validation ------------------------------
-    # #293 (security review S05): for an ingested (generic-connector) op,
-    # validate against a schema that forbids undeclared params. Freshly
-    # ingested descriptors already carry ``additionalProperties: false``
-    # (openapi._build_parameter_schema); this backstop applies the same
-    # clause to descriptors ingested before that fix, so an undeclared
-    # param is rejected as ``invalid_params`` here rather than defaulting
-    # onto the vendor query string in ``_split_ingested_params``.
-    schema_to_validate = descriptor.parameter_schema
-    if descriptor.source_kind == "ingested":
-        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
-    try:
-        validation_errors = validate_params(schema_to_validate, params)
-    except InvalidOpSchemaError as exc:
-        # #3095: the stored schema itself is broken (dangling $ref) --
-        # the descriptor is at fault, not the caller. Structured error
-        # instead of letting PointerToNowhere escape as a 500.
-        return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
-    if validation_errors:
-        return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
-
+    # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility
-    # guard. The owner lookup is exact: it names the catalog the caller
-    # selected, while the resolver answers which connector class the target
-    # would use. Resolve only for an advertised guard so existing descriptor
-    # kinds retain their policy and targetless dispatch behaviour.
-    pre_resolved_connector_class: type[Connector] | None = None
-    owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
-    if (
-        descriptor.source_kind == "ingested"
-        and owner_class is not None
-        and owner_class.enforces_catalog_target_compatibility
-    ):
-        pre_resolved_connector_class, _resolution_label, _resolution_message = (
-            resolve_connector_or_label(target)
-        )
-        target_product = getattr(target, "product", None)
-        if not isinstance(target_product, str) or not target_product:
-            target_product = None
-        target_version = resolve_target_version(target)
-        incompatibility = owner_class.catalog_target_incompatibility(
-            descriptor_source_kind=descriptor.source_kind,
-            target_product=target_product,
-            target_version=target_version,
-            selected_target_connector=pre_resolved_connector_class,
-        )
-        if incompatibility is not None:
-            duration_ms = _elapsed_ms(started)
-            await audit_rejection_safe(
-                audit_id=uuid.uuid4(),
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params_hash=params_hash,
-                result_status="unqualified_target_version",
-                duration_ms=duration_ms,
-            )
-            return result_unqualified_target_version(
-                op_id,
-                reason=incompatibility,
-                target_product=target_product,
-                target_version=target_version,
-                duration_ms=duration_ms,
-            )
+    # guard. When the named catalog cannot serve the target but a sibling
+    # catalog of the same implementation can and has the same op enabled,
+    # the dispatch moves to that sibling (#3600): its descriptor, its
+    # connector_id (so policy, approval and audit name what really runs),
+    # and its parameter schema. The params are checked once, after this
+    # choice, against the descriptor that will run -- so for a guarded
+    # ingested op, ``unqualified_target_version`` comes before
+    # ``invalid_params``. An approval resume (``_approved``) never
+    # switches: the approver saw and the gate checked the stored catalog,
+    # and this path skips both. If the target's detected version moved
+    # while the request waited, the resume is refused and the caller
+    # must make a new request.
+    selection = await select_catalog_for_target(
+        operator=operator,
+        descriptor=descriptor,
+        connector_id=connector_id,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+        allow_sibling=not _approved,
+    )
+    if isinstance(selection, OperationResult):
+        return selection
+    pre_resolved_connector_class = selection.connector_class
+    if selection.descriptor is not descriptor:
+        descriptor = selection.descriptor
+        connector_id = selection.connector_id
+        product, version = descriptor.product, descriptor.version
+    params_error = _params_error(descriptor, op_id, params, started)
+    if params_error is not None:
+        return params_error
 
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced

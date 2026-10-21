@@ -336,8 +336,8 @@ async def nsx_transport_zone_list_impl(
     (vendor template), always instantiated at the ``default`` site and
     ``default`` enforcement point -- the transport-zone inventory under
     the default enforcement point. Returns ``{"results": [...]}`` where
-    each zone carries ``id``, ``display_name``, ``tz_type``
-    (OVERLAY / VLAN), and ``host_switch_name``.
+    each zone carries ``id``, ``display_name``, ``path``, and ``tz_type``
+    (``OVERLAY_BACKED`` / ``VLAN_BACKED``).
     """
     del params  # schema declares the param object empty
     path = _TRANSPORT_ZONES_PATH.format(**{"site-id": "default", "enforcementpoint-id": "default"})
@@ -394,7 +394,7 @@ async def nsx_transport_node_list_impl(
     Returns the transport-node fabric inventory -- the edge and host nodes
     that carry the NSX overlay. ``{"results": [...], "result_count": N}``
     where each node carries ``id``, ``display_name``, and
-    ``node_deployment_info.resource_type`` (``EdgeNode`` / ``EsxiNode`` --
+    ``node_deployment_info.resource_type`` (``EdgeNode`` / ``HostNode`` --
     the field that distinguishes an edge node from a host node). This list
     row does **not** carry live health: NSX exposes per-node
     fabric/tunnel/realization state on the separate ``.../state``

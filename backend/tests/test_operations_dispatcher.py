@@ -46,6 +46,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from packaging.version import Version
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,6 +75,7 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
     set_default_reducer,
 )
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
 from meho_backplane.operations.ingest import (
@@ -640,14 +642,28 @@ def test_import_handler_caches_resolved_handler() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_returns_unknown_op_when_descriptor_missing() -> None:
+async def test_dispatch_returns_unknown_op_when_descriptor_missing(
+    stub_embedding_service: AsyncMock,
+) -> None:
     """No descriptor -> ``OperationResult.error`` starts with ``"unknown_op:"``."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
     operator = _make_operator()
     target = _FakeTarget(product="vault")
 
     result = await dispatch(
         operator=operator,
-        connector_id="vault",
+        connector_id="vault-1.x",
         op_id="vault.kv.read.notpresent",
         target=target,
         params={},
@@ -1743,6 +1759,9 @@ async def _add_vmware_guard_descriptor(
     source_kind: str = "ingested",
     requires_approval: bool = True,
     version: str = "9.0",
+    is_enabled: bool = True,
+    parameter_schema: dict[str, Any] | None = None,
+    safety_level: str = "dangerous",
 ) -> None:
     descriptor = EndpointDescriptor(
         id=uuid.uuid4(),
@@ -1762,12 +1781,12 @@ async def _add_vmware_guard_descriptor(
         summary="VMware guard test",
         description="VMware guard test.",
         tags=[],
-        parameter_schema={"type": "object", "properties": {}},
+        parameter_schema=parameter_schema or {"type": "object", "properties": {}},
         response_schema=None,
         llm_instructions=None,
-        safety_level="dangerous",
+        safety_level=safety_level,
         requires_approval=requires_approval,
-        is_enabled=True,
+        is_enabled=is_enabled,
         embedding=[0.1] * 384,
         custom_description=None,
         custom_notes=None,
@@ -1952,6 +1971,444 @@ async def test_vmware_8_0_catalog_serves_fingerprinted_8_0_x_target(
     )
 
     assert result.extras.get("error_code") != "unqualified_target_version"
+
+
+# ---------------------------------------------------------------------------
+# #3600 -- sibling-catalog fallback for ingested ops
+# ---------------------------------------------------------------------------
+
+
+class _RecordingVmwareTransport:
+    """Transport-free seam that records which catalog class sent the request."""
+
+    sent: ClassVar[list[tuple[str, str]]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        del target, operator
+        return path
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        del target, operator, verb, params, json, extra_headers
+        _RecordingVmwareTransport.sent.append((cast(Connector, self).version, path))
+        return {"ok": True}
+
+
+class _RecordingVmware90Connector(_RecordingVmwareTransport, VmwareRestConnector):  # type: ignore[misc]
+    """9.0 catalog class with the recording transport."""
+
+
+class _RecordingVmware80Connector(_RecordingVmwareTransport, VmwareRest80Connector):  # type: ignore[misc]
+    """8.0 catalog class with the recording transport."""
+
+
+def _register_vmware_sibling_catalogs() -> None:
+    """Register the 9.0 and 8.0 catalogs (plus the wildcard) like production does."""
+    _RecordingVmwareTransport.sent = []
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_RecordingVmware90Connector
+    )
+    register_connector_v2(
+        product="vmware", version="8.0", impl_id="vmware-rest", cls=_RecordingVmware80Connector
+    )
+    register_connector("vmware", _RecordingVmware90Connector)
+
+
+async def _audit_rows_for_guard_op() -> list[AuditLog]:
+    async with get_sessionmaker()() as fresh:
+        rows = await fresh.execute(
+            select(AuditLog).where(AuditLog.path == "POST:/api/vcenter/vm/example")
+        )
+        return list(rows.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_vmware_9_0_pin_falls_back_to_8_0_sibling_for_8_0_x_target(
+    session: AsyncSession,
+) -> None:
+    """A ``vmware-rest-9.0`` call for an 8.0.x target runs on the 8.0 catalog (#3600)."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert len(audits) == 1
+    assert audits[0].payload["result_status"] == "ok"
+    assert audits[0].payload["connector_version"] == "8.0"
+    assert audits[0].payload["connector_impl_id"] == "vmware-rest"
+
+
+@pytest.mark.asyncio
+async def test_vmware_8_0_pin_falls_back_to_9_0_sibling_for_9_x_target(
+    session: AsyncSession,
+) -> None:
+    """The fallback works in both directions: an 8.0 pin for a 9.x target runs on 9.0."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="9.0.1"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("9.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert [a.payload["connector_version"] for a in audits] == ["9.0"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_state", ["absent", "disabled"])
+async def test_vmware_sibling_fallback_keeps_rejection_when_op_not_enabled_there(
+    sibling_state: str,
+    session: AsyncSession,
+) -> None:
+    """No fallback when the qualified sibling lacks the op or has it disabled."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    if sibling_state == "disabled":
+        await _add_vmware_guard_descriptor(
+            session, requires_approval=False, version="8.0", is_enabled=False
+        )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert result.extras["reason"] == (
+        "target version is outside the supported 9.x catalog boundary"
+        "; use connector vmware-rest-8.0 for this target"
+    )
+    assert result.extras["target_product"] == "vmware"
+    assert result.extras["target_version"] == "8.0.3"
+    assert _RecordingVmwareTransport.sent == []
+    audits = await _audit_rows_for_guard_op()
+    assert len(audits) == 1
+    assert audits[0].payload["result_status"] == "unqualified_target_version"
+    assert audits[0].payload["connector_version"] == "9.0"
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_not_taken_when_named_catalog_qualifies(
+    session: AsyncSession,
+) -> None:
+    """A target the named catalog serves runs on that catalog, even if a sibling has the op."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="9.0.1"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("9.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert [a.payload["connector_version"] for a in audits] == ["9.0"]
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_skips_typed_descriptors(
+    session: AsyncSession,
+) -> None:
+    """A typed descriptor in the sibling catalog is never a fallback target."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(
+        session, source_kind="typed", requires_approval=False, version="8.0"
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert _RecordingVmwareTransport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_parks_approval_under_resolved_connector_id(
+    session: AsyncSession,
+) -> None:
+    """A parked fallback call names the sibling catalog, so the resume runs there."""
+    from meho_backplane.db.models import ApprovalRequest
+
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, version="9.0")
+    await _add_vmware_guard_descriptor(session, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    assert _RecordingVmwareTransport.sent == []
+    async with get_sessionmaker()() as fresh:
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_resume_stays_on_the_approved_catalog(
+    session: AsyncSession,
+) -> None:
+    """An approved request never switches catalogs when the target version moved.
+
+    The request parked under ``vmware-rest-8.0`` (the sibling chosen for an
+    8.0.3 target). By the time it resumes, the target reports 9.0.1. The
+    resume runs with the policy gate skipped, so running the 9.0 catalog's
+    op here would be an operation the approver never saw. The resume is
+    refused instead; the caller must make a new request.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, version="9.0")
+    await _add_vmware_guard_descriptor(session, version="8.0")
+
+    parked = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    async with get_sessionmaker()() as fresh:
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
+
+    resumed = await dispatch(
+        operator=_make_operator(),
+        connector_id=approvals[0].connector_id,
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="9.0.1"),
+        params={},
+        _approved=True,
+    )
+
+    assert resumed.status == "error"
+    assert resumed.extras["error_code"] == "unqualified_target_version"
+    assert resumed.extras["reason"] == (
+        "target version is outside the supported 8.0.x catalog boundary"
+        "; use connector vmware-rest-9.0 for this target"
+    )
+    assert resumed.extras["target_product"] == "vmware"
+    assert resumed.extras["target_version"] == "9.0.1"
+    assert _RecordingVmwareTransport.sent == []
+    audits = await _audit_rows_for_guard_op()
+    assert len(audits) == 1
+    assert audits[0].payload["result_status"] == "unqualified_target_version"
+    assert audits[0].payload["connector_version"] == "8.0"
+
+
+class _RecordingVmware80WideConnector(_RecordingVmwareTransport, VmwareRest80Connector):  # type: ignore[misc]
+    """A second 8.x catalog whose band overlaps the 8.0 catalog's band."""
+
+    version = "8.x"
+    supported_version_range = ">=8.0,<9.0"
+    _catalog_version_floor = Version("8.0")
+    _catalog_version_ceiling = Version("9.0")
+    _catalog_version_band_label = "8.x"
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_uses_resolver_tie_break_when_two_siblings_qualify(
+    session: AsyncSession,
+) -> None:
+    """If two sibling catalogs qualify a target, the resolver's tie-break picks one.
+
+    Both the ``8.0`` band (``>=8.0,<8.1``) and the wider ``8.x`` band
+    (``>=8.0,<9.0``) qualify an 8.0.3 target. The resolver's
+    most-specific-range step picks ``8.0``, so the fallback runs there.
+    """
+    _register_vmware_sibling_catalogs()
+    register_connector_v2(
+        product="vmware",
+        version="8.x",
+        impl_id="vmware-rest",
+        cls=_RecordingVmware80WideConnector,
+    )
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.x")
+    target = _FakeTarget(product="vmware", version="8.0.3")
+    assert resolve_connector(target) is _RecordingVmware80Connector
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert [a.payload["connector_version"] for a in audits] == ["8.0"]
+
+
+_NAME_ONLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}},
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_checks_params_against_the_sibling_schema(
+    session: AsyncSession,
+) -> None:
+    """Params are checked against the catalog that runs, not the one the caller named.
+
+    The 9.0 schema has no ``name`` param and refuses undeclared params; the
+    8.0 schema accepts ``name``. An 8.0.3 target runs on 8.0, so the call
+    passes.
+    """
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(
+        session, requires_approval=False, version="8.0", parameter_schema=_NAME_ONLY_SCHEMA
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={"name": "vm-a"},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
+
+
+@pytest.mark.asyncio
+async def test_vmware_catalog_guard_reports_target_before_bad_params(
+    session: AsyncSession,
+) -> None:
+    """With no sibling to run on, the target error comes before the params error."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={"not_declared": 1},
+    )
+
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert _RecordingVmwareTransport.sent == []
+
+
+async def _sibling_blast_radius_builder(ctx: Any) -> dict[str, Any]:
+    del ctx
+    return {
+        "blast_radius": {
+            "object": {"kind": "vm", "id": "vm-1"},
+            "children": [],
+            "irreversibility": "permanent",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_destructive_preview_hash_binds_the_sibling(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preview taken with the named catalog binds the call that runs on the sibling.
+
+    Preview with ``vmware-rest-9.0`` for an 8.0.3 target, then call with that
+    ``preview_hash``: the destructive op waits for approval under
+    ``vmware-rest-8.0`` instead of failing with ``preview_hash_mismatch``.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+
+    monkeypatch.setitem(
+        _PREVIEW_BUILDERS, "POST:/api/vcenter/vm/example", _sibling_blast_radius_builder
+    )
+    _register_vmware_sibling_catalogs()
+    for version in ("9.0", "8.0"):
+        await _add_vmware_guard_descriptor(
+            session,
+            version=version,
+            safety_level="destructive",
+            parameter_schema=_NAME_ONLY_SCHEMA if version == "8.0" else None,
+        )
+    target = _FakeTarget(product="vmware", version="8.0.3")
+    params = {"name": "vm-a"}
+
+    preview = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params=params,
+    )
+    assert preview["status"] == "ok", preview
+    assert preview["connector_id"] == "vmware-rest-8.0"
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params=params,
+        preview_hash=preview["preview_hash"],
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    assert _RecordingVmwareTransport.sent == []
+    async with get_sessionmaker()() as fresh:
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
+    assert [a.preview_hash for a in approvals] == [preview["preview_hash"]]
 
 
 class _VmwareTasksList80Connector(VmwareRest80Connector):

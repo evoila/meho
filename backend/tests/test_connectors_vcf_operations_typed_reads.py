@@ -560,6 +560,7 @@ def test_typed_ops_are_read_only_and_well_formed() -> None:
         )
         assert op.group_key, f"{op.op_id} must declare a group_key"
         assert op.llm_instructions, f"{op.op_id} must carry llm_instructions"
-        assert op.llm_instructions.get("when_to_use", "").strip(), (
-            f"{op.op_id} llm_instructions.when_to_use must be non-empty"
-        )
+        for key in ("when_to_call", "output_shape", "next_step"):
+            assert op.llm_instructions.get(key, "").strip(), (
+                f"{op.op_id} llm_instructions.{key} must be non-empty"
+            )

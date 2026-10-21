@@ -126,12 +126,15 @@ sends the `GET` with its own `vRealizeOpsToken` login header.
   `buildNumber` of `GET /suite-api/api/versions/current`; if that read
   fails, the file still comes back and `version_error` says why.
 - **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
-  each at most 64 KiB of UTF-8. A large answer is a result handle whose
+  each at most 64 KiB, measured as JSON text, so a part always fits one
+  `result_query` answer. A large answer is a result handle whose
   rows are the parts; page them with `result_query` (`offset`, small
   `limit`). Join the `text` of all parts in `index` order and encode as
   UTF-8; the SHA-256 of the result equals `sha256`. A file too big for one
   stored result stops with an error that names its size; the read never
-  returns a cut file.
+  returns a cut file. A file that holds a quoted JSON password, token or
+  Authorization field or a PEM private key is refused; the read never
+  returns a secret.
 
 Details (the path rule, redirects, redaction, limits):
 [`connectors-vcf-operations.md`](connectors-vcf-operations.md).

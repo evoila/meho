@@ -273,10 +273,13 @@ registrar is queued via `register_typed_op_registrar` in the package
     comes back, `version` and `build` are `null`, and `version_error` says
     why.
   - **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
-    each at most 64 KiB of UTF-8, cut only between characters. Join the
-    `text` of all parts in `index` order and encode as UTF-8; the SHA-256
-    of the result equals `sha256`. A part is a fixed byte size, not a line,
-    because a served file can be one long line. `text_parts` is the only
+    each at most 64 KiB, cut only between characters. The size is measured
+    as JSON text (a quote, a backslash or a control character counts as
+    its escaped form), so a part always fits one `result_query` answer,
+    and a part is never more than 64 KiB of UTF-8 either. Join the `text`
+    of all parts in `index` order and encode as UTF-8; the SHA-256 of the
+    result equals `sha256`. A part is a fixed size, not a line, because a
+    served file can be one long line. `text_parts` is the only
     list in the answer, so JSONFlux stores a large answer as rows (one row
     per part) behind a result handle and keeps the scalar fields
     (`sha256`, `size`, `parts`, `build`, ...) inline. Page the rows with
@@ -286,6 +289,18 @@ registrar is queued via `register_typed_op_registrar` in the package
     `result_handle_max_record_bytes`, 16 MiB, measured as stored JSON)
     stops with an error that names its size; the read never returns a cut
     file.
+  - **No secret comes back.** The read refuses a file that holds a quoted
+    JSON password, token or Authorization field (`"password": "..."`,
+    `'token': '...'`, `"Authorization": "Basic ..."`, also with a prefix in
+    the label such as `"x-auth-token"`) or a PEM private key
+    (`-----BEGIN ... PRIVATE KEY`). These shapes are checked in
+    `typed_ops_api_file_secrets.py`, on the whole file text, because the
+    stored-result redaction below finds a labelled secret only when the
+    label sits directly before `=` or `:`. A schema entry such as
+    `"password": {"type": "string"}` or a stub such as `"token": "string"`
+    is not refused: the value must be at least 8 characters, the same
+    bound the redaction rules use. The error names the shape and where it
+    starts, never the text.
   - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
     every stored result. A rule that fires on the file text would rewrite a
     part, and the joined parts would no longer match `sha256`. So the read
@@ -298,8 +313,11 @@ registrar is queued via `register_typed_op_registrar` in the package
     (respx: accepted and refused paths with no request, the login header on
     both connectors, status and redirect cases, large files, version
     failures, a login failure, a file that a redaction rule would change, a
-    secret split across the part cut, the result-handle round trip, and the
-    operation-contract rules) and the reconcile lane below.
+    file with a quoted secret field or a PEM private key, a secret split
+    across the part cut in both forms, parts bounded by their JSON size,
+    the result-handle round trip for a one-line file and for a file of
+    control characters, and the operation-contract rules) and the
+    reconcile lane below.
 
 All five are `safety_level="safe"`, `requires_approval=False`,
 read-only. Each rides the connector's `OpsToken` session; `authSource`

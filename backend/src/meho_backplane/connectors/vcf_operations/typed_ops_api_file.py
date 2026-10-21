@@ -24,16 +24,19 @@ The read is narrow on purpose:
 * It sends one ``GET`` to the target's own address with the target's own
   login (the connector's token session), on the pooled client.
 * It does not follow a redirect. The answer names the redirect's path.
-* The file comes back as text parts of at most 64 KiB each. Joining the
-  parts in order gives the exact file; ``sha256`` is the hash of the
+* The file comes back as text parts of at most 64 KiB each, measured as
+  JSON text, so a part always fits one ``result_query`` answer. Joining
+  the parts in order gives the exact file; ``sha256`` is the hash of the
   file bytes. A file that does not fit in one stored result is refused
   with its size, never cut.
-* MEHO redacts secret-shaped text in every stored result. The read runs
-  the same redaction rules the dispatcher will apply, on the whole file
-  text and on each part, and refuses a file whose text they would
-  change, naming the rule. So the stored parts always match ``sha256``,
-  no secret that a part cut would hide gets through, and redaction
-  stays active.
+* The read never returns a secret. It refuses a file that holds a quoted
+  JSON password, token or Authorization field or a PEM private key
+  (:mod:`.typed_ops_api_file_secrets`), shapes the stored-result
+  redaction does not see. It also runs the redaction rules the
+  dispatcher will apply, on the whole file text and on each part, and
+  refuses a file whose text they would change, naming the rule. So the
+  stored parts always match ``sha256``, no secret that a part cut would
+  hide gets through, and redaction stays active.
 
 The appliance version and build come from
 ``GET /suite-api/api/versions/current`` (``releaseName``, ``buildNumber``),
@@ -45,6 +48,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from bisect import bisect_right
+from itertools import accumulate
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -57,6 +62,7 @@ from meho_backplane.connectors._shared.credential_backend import CredentialsRead
 from meho_backplane.connectors.vcf_operations.connector import _VERSIONS_CURRENT_PATH
 from meho_backplane.connectors.vcf_operations.session import VcfOperationsTargetLike
 from meho_backplane.connectors.vcf_operations.typed_ops import VropsTypedOp
+from meho_backplane.connectors.vcf_operations.typed_ops_api_file_secrets import find_secret_shape
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
@@ -89,9 +95,18 @@ API_START_PAGE = "/suite-api/"
 #: files under it. A folder covers every path under it.
 DOC_FOLDER = "/suite-api/doc/"
 
-#: Largest text part, in UTF-8 bytes. One ``result_query`` answer holds at
-#: most 256 KiB, so a 64 KiB part fits even after JSON escaping.
+#: Largest text part, in bytes of JSON text (the part as a JSON string,
+#: without the quotes). One ``result_query`` answer holds at most 256 KiB
+#: of JSON, so a part always fits, whatever it escapes.
 PART_MAX_BYTES = 64 * 1024
+
+#: How many bytes one byte of UTF-8 takes as JSON text: ``"`` and ``\``
+#: take 2, the controls with a short escape (``\b \t \n \f \r``) take
+#: 2, the other controls take 6 (``\u00XX``), every other byte takes 1.
+_JSON_BYTE_COST = bytes(
+    2 if byte in (0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D) else 6 if byte < 0x20 else 1
+    for byte in range(256)
+)
 
 #: Room kept free in one stored result for the record's own fields.
 _RECORD_OVERHEAD_BYTES = 4096
@@ -147,20 +162,35 @@ def check_api_file_path(path: Any) -> str:
     return path
 
 
+def _character_start(data: bytes, end: int) -> int:
+    """Step *end* back off UTF-8 continuation bytes (``10xxxxxx``)."""
+    while end < len(data) and (data[end] & 0xC0) == 0x80:
+        end -= 1
+    return end
+
+
+def _json_fit(chunk: bytes) -> int:
+    """How many leading bytes of *chunk* take at most :data:`PART_MAX_BYTES` as JSON."""
+    sizes = list(accumulate(chunk.translate(_JSON_BYTE_COST)))
+    return bisect_right(sizes, PART_MAX_BYTES)
+
+
 def split_text_parts(data: bytes) -> list[str]:
     """Split UTF-8 *data* into text parts of at most :data:`PART_MAX_BYTES` bytes.
 
-    A cut never falls inside a multi-byte character, so each part decodes
-    on its own and ``"".join(parts).encode("utf-8") == data``.
+    The bound is on the part as JSON text, so a part full of quotes,
+    backslashes or control characters stays small enough for one
+    ``result_query`` answer. A cut never falls inside a multi-byte
+    character, so each part decodes on its own and
+    ``"".join(parts).encode("utf-8") == data``.
     """
     parts: list[str] = []
     start = 0
     total = len(data)
     while start < total:
-        end = min(start + PART_MAX_BYTES, total)
-        # Step back off UTF-8 continuation bytes (10xxxxxx).
-        while end < total and (data[end] & 0xC0) == 0x80:
-            end -= 1
+        end = _character_start(data, min(start + PART_MAX_BYTES, total))
+        if len(msgspec.json.encode(data[start:end].decode("utf-8"))) - 2 > PART_MAX_BYTES:
+            end = _character_start(data, start + _json_fit(data[start:end]))
         parts.append(data[start:end].decode("utf-8"))
         start = end
     return parts
@@ -324,6 +354,20 @@ def _check_fits(answer: dict[str, Any], max_record_bytes: int, max_rows: int) ->
         )
 
 
+def _check_no_secret_shape(answer: dict[str, Any]) -> None:
+    """Refuse a file that holds a secret the stored-result redaction would not see.
+
+    The whole file text is checked, so a secret that a part cut splits in
+    two is found as well. The error names the shape, never the text.
+    """
+    found = find_secret_shape("".join(part["text"] for part in answer["text_parts"]))
+    if found is not None:
+        raise VropsApiFileError(
+            f"{answer['path']!r} holds {found}. This read never returns a secret, "
+            "so the file was not returned."
+        )
+
+
 def _check_redaction_keeps_text(
     answer: dict[str, Any], connector: VcfOperationsConnector, operator: Operator
 ) -> None:
@@ -374,8 +418,8 @@ async def api_file_get_impl(
     1. Check the path (no request goes out for a refused path).
     2. ``GET`` the file with the target's login, without following a redirect.
     3. Read the appliance version and build (best effort).
-    4. Refuse a file that does not fit in one stored result, or whose
-       text the stored-result redaction would change.
+    4. Refuse a file that does not fit in one stored result, that holds a
+       secret shape, or whose text the stored-result redaction would change.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -400,6 +444,7 @@ async def api_file_get_impl(
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         _check_fits(answer, max_record_bytes, settings.result_handle_max_spill_rows)
+        _check_no_secret_shape(answer)
         _check_redaction_keeps_text(answer, connector, operator)
 
     _log.info(
@@ -423,7 +468,6 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "path": {
             "type": "string",
-            "minLength": len(API_START_PAGE),
             "maxLength": 512,
             "pattern": PATH_PATTERN,
             "description": (
@@ -471,7 +515,10 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "index": {"type": "integer", "description": "Position of the part."},
-                    "text": {"type": "string", "description": "At most 64 KiB of the file."},
+                    "text": {
+                        "type": "string",
+                        "description": "At most 64 KiB of the file (as JSON text).",
+                    },
                 },
                 "required": ["index", "text"],
             },

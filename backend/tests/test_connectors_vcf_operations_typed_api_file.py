@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
+import msgspec
 import pytest
 import respx
 
@@ -40,6 +41,9 @@ from meho_backplane.connectors.vcf_operations.typed_ops_api_file import (
     VROPS_API_FILE_GET_OP,
     VropsApiFileError,
     split_text_parts,
+)
+from meho_backplane.connectors.vcf_operations.typed_ops_api_file_secrets import (
+    find_secret_shape,
 )
 from meho_backplane.connectors.vrops8 import Vrops8Connector
 from meho_backplane.operations._validate import validate_params
@@ -144,6 +148,11 @@ def _redact_like_the_dispatcher(answer: dict[str, Any]) -> Any:
         tenant=str(_TENANT),
         op=VROPS_API_FILE_GET_OP.op_id,
     )
+
+
+def _json_text_size(text: str) -> int:
+    """Size of *text* as a JSON string, without the quotes."""
+    return len(msgspec.json.encode(text)) - 2
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +281,8 @@ def test_refused_path_fails_parameter_validation(path: str) -> None:
         "/openapi.yaml",
         "/x/y/swagger.json",
         "/suite-api/doc/v2/api-docs?group=internal&apiVersion=1.0",
+        "/api-docs",
+        "/api-docs/",
     ],
 )
 def test_accepted_paths_pass_parameter_validation(path: str) -> None:
@@ -423,6 +434,28 @@ def test_split_never_cuts_a_multi_byte_character() -> None:
     assert split_text_parts(b"") == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "\x0b" * (3 * PART_MAX_BYTES),
+        '"' * 200_000 + "é" * 3_000,
+        ("a" * 5_000 + "\x01" * 5_000 + "\U0001f600" * 3_000 + '\\"' * 2_000) * 7,
+        "x" * (5 * PART_MAX_BYTES),
+    ],
+    ids=["vertical-tabs", "quotes", "mixed-escapes", "plain"],
+)
+def test_split_bounds_each_part_by_its_json_size(text: str) -> None:
+    """A part full of escaped characters still fits one result_query answer."""
+    data = text.encode("utf-8")
+    parts = split_text_parts(data)
+    assert "".join(parts).encode("utf-8") == data
+    assert all(_json_text_size(part) <= PART_MAX_BYTES for part in parts)
+    assert all(len(part.encode("utf-8")) <= PART_MAX_BYTES for part in parts)
+    # The parts are as full as the bound allows: every part but the last
+    # is within one escape of the bound.
+    assert all(_json_text_size(part) > PART_MAX_BYTES - 6 for part in parts[:-1])
+
+
 def _settings_with(**caps: int) -> Any:
     values = {
         "result_handle_max_record_bytes": 16 * 1024 * 1024,
@@ -536,21 +569,21 @@ async def test_file_whose_text_redaction_would_change_is_refused() -> None:
     assert "made-up-pass-value" not in message
 
 
-def _json_with_a_secret_across_the_part_cut() -> bytes:
-    """Valid one-line JSON whose ``password=...`` label straddles the first part cut.
+def _json_with_a_secret_across_the_part_cut(tail: str) -> bytes:
+    """Valid one-line JSON whose secret label straddles the first part cut.
 
-    All characters are ASCII, so the cut falls exactly at ``PART_MAX_BYTES``:
-    ``pass`` ends part 0 and ``word=...`` starts part 1.
+    The padding is sized by JSON text, the measure the split uses, so the
+    first part ends exactly with ``pass`` and the second starts with
+    ``word`` and the rest of *tail*.
     """
     head = '{"pad":"'
     joint = '","note":"'
-    before = head + "a" * (PART_MAX_BYTES - 4 - len(head) - len(joint)) + joint
-    assert len(before) == PART_MAX_BYTES - 4
-    return (before + 'password=made-up-pass-value-0123"}').encode()
+    padding = "a" * (PART_MAX_BYTES - _json_text_size(head + joint) - len("pass"))
+    return (head + padding + joint + "pass" + tail).encode()
 
 
 async def test_secret_split_across_the_part_cut_is_refused() -> None:
-    body = _json_with_a_secret_across_the_part_cut()
+    body = _json_with_a_secret_across_the_part_cut('word=made-up-pass-value-0123"}')
     parts = split_text_parts(body)
     assert parts[0].endswith("pass") and parts[1].startswith("word=")
     # The per-part check alone misses the split label; the whole text trips it.
@@ -576,6 +609,102 @@ async def test_secret_split_across_the_part_cut_is_refused() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Secret shapes the stored-result redaction does not see
+# ---------------------------------------------------------------------------
+
+# Built in pieces so that the test file itself holds no key header.
+_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE" + " KEY-----"
+
+_SECRET_SHAPED_FILES = {
+    "quoted-json-password": (
+        '{"openapi":"3.0.1","x-login":{"password": "made-up-pass-value-0123"}}',
+        "a quoted password or token field",
+    ),
+    "quoted-json-token": (
+        '{"openapi":"3.0.1","x-session":{"token":"made-up-token-value-0123"}}',
+        "a quoted password or token field",
+    ),
+    "quoted-json-prefixed-label": (
+        '{"openapi":"3.0.1","x-login":{"x-auth-token": "made-up-token-value-0123"}}',
+        "a quoted password or token field",
+    ),
+    "single-quoted-yaml": (
+        "openapi: 3.0.1\nx-login:\n  'password': 'made-up-pass-value-0123'\n",
+        "a quoted password or token field",
+    ),
+    "quoted-authorization": (
+        '{"openapi":"3.0.1","x-headers":{"Authorization": "Basic bWFkZS11cDpwYXNz"}}',
+        "a quoted Authorization field",
+    ),
+    "pem-private-key": (
+        "openapi: 3.0.1\nx-key: |\n  " + _PEM_HEADER + "\n  MADEUPMADEUPMADEUP\n",
+        "a PEM private key",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("text", "shape"), list(_SECRET_SHAPED_FILES.values()), ids=list(_SECRET_SHAPED_FILES)
+)
+async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> None:
+    # The stored-result redaction leaves these forms as they are; the
+    # read's own check must refuse them.
+    redaction = _redact_like_the_dispatcher({"text": text})
+    assert redaction.manifest == () and redaction.redacted == redaction.raw
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_FILE_PATH).respond(200, content=text.encode())
+        with pytest.raises(VropsApiFileError) as excinfo:
+            await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert _FILE_PATH in message
+    assert shape in message
+    assert "not returned" in message
+    assert "made-up-" not in message and "MADEUP" not in message and "bWFkZS" not in message
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"properties":{"password":{"type":"string","format":"password"}}}',
+        '{"password": "string", "token": "string", "max_tokens": 12345678901}',
+        '{"type": "apiKey", "name": "Authorization", "in": "header"}',
+        '{"passwordPolicy": {"minimum": "eight-or-more"}}',
+    ],
+    ids=["schema-property", "short-stubs", "security-scheme", "label-prefix-of-a-name"],
+)
+def test_ordinary_api_description_text_is_not_a_secret_shape(text: str) -> None:
+    assert find_secret_shape(text) is None
+
+
+async def test_quoted_secret_split_across_the_part_cut_is_refused() -> None:
+    body = _json_with_a_secret_across_the_part_cut('word": "made-up-pass-value-0123"}')
+    parts = split_text_parts(body)
+    assert parts[0].endswith('"pass') and parts[1].startswith('word": ')
+    # Neither part alone shows the shape; the whole text does.
+    assert all(find_secret_shape(part) is None for part in parts)
+    assert find_secret_shape(body.decode()) is not None
+    assert _redact_like_the_dispatcher({"text": body.decode()}).manifest == ()
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_FILE_PATH).respond(200, content=body)
+        with pytest.raises(VropsApiFileError) as excinfo:
+            await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert "a quoted password or token field" in message
+    assert "not returned" in message
+    assert "made-up-pass-value" not in message
+
+
+# ---------------------------------------------------------------------------
 # JSONFlux: a large answer is kept whole behind a result handle
 # ---------------------------------------------------------------------------
 
@@ -592,20 +721,28 @@ class _FakeRedis:
         return self.values.get(name)
 
 
+@pytest.mark.parametrize(
+    ("body", "content_type", "limit"),
+    [
+        (_one_line_json(1024 * 1024), "application/json", 2),
+        # Every vertical tab is six bytes as JSON text. The parts are bounded
+        # by that size, so each row still fits the result_query byte budget.
+        (("\x0b" * (3 * PART_MAX_BYTES)).encode(), "text/plain", 1),
+    ],
+    ids=["one-line-json", "vertical-tabs"],
+)
 async def test_large_answer_is_read_back_part_by_part_through_result_query(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, body: bytes, content_type: str, limit: int
 ) -> None:
     store = ResultHandleStore(_FakeRedis())  # type: ignore[arg-type]
     monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
-    body = _one_line_json(1024 * 1024)
     connector = _connector()
     async with respx.mock(base_url=_BASE) as mock:
         _mock_session_and_version(mock)
-        mock.get(_FILE_PATH).respond(
-            200, content=body, headers={"Content-Type": "application/json"}
-        )
+        mock.get(_FILE_PATH).respond(200, content=body, headers={"Content-Type": content_type})
         answer = await _call(connector, _FILE_PATH)
     await connector.aclose()
+    assert all(_json_text_size(part["text"]) <= PART_MAX_BYTES for part in answer["text_parts"])
 
     redaction = _redact_like_the_dispatcher(answer)
     assert redaction.manifest == ()
@@ -623,8 +760,8 @@ async def test_large_answer_is_read_back_part_by_part_through_result_query(
     assert summary["parts"] == answer["parts"]
     assert summary["build"] == "24000000"
     texts: list[str] = []
-    for offset in range(0, answer["parts"], 2):
-        page = await read_result_window(_operator(), handle.handle_id, offset=offset, limit=2)
+    for offset in range(0, answer["parts"], limit):
+        page = await read_result_window(_operator(), handle.handle_id, offset=offset, limit=limit)
         texts.extend(row["text"] for row in page["rows"])
     assert len(texts) == answer["parts"]
     assert hashlib.sha256("".join(texts).encode("utf-8")).hexdigest() == answer["sha256"]

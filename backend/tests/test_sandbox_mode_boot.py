@@ -22,7 +22,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import re
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -164,6 +166,37 @@ async def test_new_database_stores_the_mode_at_first_start(monkeypatch: pytest.M
     assert await _stored() is True
     # A second start with the same setting passes.
     assert await store_or_check_sandbox_mode(get_settings()) is True
+
+
+@pytest.mark.asyncio
+async def test_boot_write_passes_a_stale_cursor_from_an_earlier_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read cursor left in a reference cycle must not block the boot write.
+
+    When the app stops, a background read cancelled half-way leaves its
+    cursor alive inside the cancellation traceback, a reference cycle. A
+    closed SQLite connection keeps its shared lock until that cursor is
+    freed, so a test that starts the app twice in one process would fail
+    at the first write of the second start. The cycle is built by hand
+    here so the test does not depend on cancellation timing. Automatic
+    garbage collection is off, so only the boot step itself can free it.
+    """
+    turn_sandbox_mode_off(monkeypatch)
+    settings = get_settings()
+    stale = sqlite3.connect(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    # Many rows, none fetched: the statement stays half-way and holds a shared lock.
+    cursor = stale.execute("SELECT name FROM sqlite_master")
+    cycle: list[object] = [cursor]
+    cycle.append(cycle)
+    del cursor, cycle
+    stale.close()  # the lock stays until the cursor is freed
+    gc.disable()
+    try:
+        assert await store_or_check_sandbox_mode(settings) is False
+    finally:
+        gc.enable()
+    assert await _stored() is False
 
 
 @pytest.mark.asyncio

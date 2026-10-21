@@ -35,6 +35,7 @@ models module can import the flag.
 
 from __future__ import annotations
 
+import gc
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
@@ -171,6 +172,13 @@ async def store_or_check_sandbox_mode(
     if engine is None:
         engine = get_engine()
     wanted = settings.sandbox_mode is True
+    # This is the first database write of the boot. When an earlier run of
+    # the app in this process stopped (tests start the app more than once),
+    # a background read cancelled half-way leaves its cursor alive inside
+    # the cancellation traceback, which is a reference cycle. A closed
+    # SQLite connection keeps its shared lock until that cursor is freed,
+    # so the commit below would wait on it and fail. Free the cycle first.
+    gc.collect()
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         await session.execute(
             text(

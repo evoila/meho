@@ -14,7 +14,7 @@ phases the parent Initiative names:
    (:func:`~meho_backplane.operations._lookup.parse_connector_id`).
 2. Look up :class:`EndpointDescriptor` by the natural key
    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`).
-   Unknown -> structured ``unknown_op`` error.
+   Unknown -> structured ``unknown_op`` (or ``unknown_connector``) error.
 3. For an ingested op whose catalog opts into a target check, the
    catalog must accept the target, or a sibling catalog of the same
    implementation that does must have the same op enabled; the dispatch
@@ -78,6 +78,11 @@ form ``"<code>: <human-readable>"`` so callers can both string-match
 Detail payloads land in ``extras``. Codes:
 
 * ``unknown_op`` -- the natural key didn't resolve a descriptor.
+  ``extras["connectors_with_op"]`` lists other caller-visible connectors
+  that have the op (#4031); the message names them, or points at
+  ``search_operations`` when the list is empty.
+* ``unknown_connector`` -- the ``connector_id`` matches no connector the
+  caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
@@ -322,7 +327,6 @@ from meho_backplane.operations._errors import (
     result_preview_hash_mismatch,
     result_rate_limited,
     result_target_required,
-    result_unknown_op,
     result_vault_credentials_read_error,
     result_write_capability_denied,
     wrap_ok_result,
@@ -335,10 +339,10 @@ from meho_backplane.operations._handler_resolve import (
     reset_handler_cache,
 )
 from meho_backplane.operations._lookup import (
-    count_known_ops,
     lookup_descriptor,
     parse_connector_id,
 )
+from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -2772,9 +2776,12 @@ async def _audit_denied_and_return(
 ) -> OperationResult:
     """Write the ``denied`` audit row for a refused park, then return the result.
 
-    The one audit path for a ``write_capability_denied`` refusal (#3542),
-    shared by the dispatcher park (:func:`_handle_needs_approval`) and the
-    composite sub-op gate (``composite.enforce_subop_policy``). The row lands
+    The one audit path for every refusal that stops a park before an approval
+    row exists: the destructive-tier binding checks (#3197, #4647), a
+    ``write_capability_denied`` preflight (#3542) and an idempotency-key
+    conflict (#3486). Shared by the dispatcher park
+    (:func:`_handle_needs_approval`) and the composite sub-op gate
+    (``composite.enforce_subop_policy``). The row lands
     on the refused op's own path with the refusal details under
     ``payload["error"]``, like an ordinary policy denial. For a sub-op the
     row carries the parent operation's audit id through
@@ -2826,11 +2833,20 @@ async def _handle_needs_approval(
     operation audit trail.
 
     For a ``destructive``-tier op (#3197) the park is gated first by
-    :func:`_destructive_binding_refusal`: it refuses (fail-closed, no row
-    written) unless the caller presented a matching ``preview_hash`` and the
-    ``proposed_effect`` carries a blast-radius statement. The verified
-    ``preview_hash`` is then persisted on the row for approve-time
-    re-verification.
+    :func:`_destructive_binding_refusal`: it refuses (fail-closed, no
+    approval row written) unless the caller presented a matching
+    ``preview_hash`` and the ``proposed_effect`` carries a blast-radius
+    statement. The refusal is recorded as a ``denied`` audit row like the
+    preflight refusal above (#4647). The verified ``preview_hash`` is then
+    persisted on the row for approve-time re-verification.
+
+    Two refusals write no audit row on purpose. Neither is a decision about
+    the call; both are a MEHO-side fault, and no audit event class describes
+    them. A missing or malformed approval encryption key
+    (``ApprovalHandoffKeyError``) only returns a ``denied`` result whose
+    message names the key setting; nothing is logged. A failure while saving
+    the approval request is logged as ``approval_queue_create_failed`` and
+    returns a ``denied`` result.
 
     On success returns :func:`~meho_backplane.operations._errors.result_awaiting_approval`
     with the pending row's id in ``extras["approval_request_id"]``.
@@ -2883,10 +2899,11 @@ async def _handle_needs_approval(
         params=params,
     )
 
-    # #3197: the destructive tier refuses to park (fail-closed, no durable
+    # #3197: the destructive tier refuses to park (fail-closed, no approval
     # row) unless the caller presented a matching preview_hash and the
     # blast-radius statement is present. Non-destructive ops skip this
-    # entirely and park exactly as before.
+    # entirely and park exactly as before. #4647: the refused attempt is
+    # still audited as a denial, like a policy denial.
     if descriptor.safety_level == "destructive":
         refusal = await _destructive_binding_refusal(
             op_id=op_id,
@@ -2899,7 +2916,15 @@ async def _handle_needs_approval(
             duration_ms=duration_ms,
         )
         if refusal is not None:
-            return refusal
+            return await _audit_denied_and_return(
+                refusal,
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
 
     # #3542: a preflight that says the write will be denied refuses the
     # park (no approval row written) instead of asking a person to approve
@@ -3094,13 +3119,13 @@ async def dispatch(
         op_id=op_id,
     )
     if descriptor is None:
-        known_op_count = await count_known_ops(
+        return await op_miss_result(
             tenant_id=operator.tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
+            connector_id=connector_id,
+            op_id=op_id,
+            triple=(product, version, impl_id),
+            started=started,
         )
-        return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

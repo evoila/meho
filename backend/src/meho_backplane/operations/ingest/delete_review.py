@@ -14,8 +14,10 @@ the posture a fresh ingest would assign today -- the parser default
 (:func:`~meho_backplane.operations.ingest.openapi.default_safety_posture`),
 then the connector floor and the catalog overlay
 (:func:`~meho_backplane.operations.ingest.safety_floors.apply_safety_floor`)
--- and keeps the row when it is delete-shaped: a ``DELETE`` verb, or a write
-the floor treats as a removal (the vCenter tag detach actions). A row is
+-- and keeps the row when it is delete-shaped: a ``DELETE`` verb, a write
+the floor treats as a removal (the vCenter tag detach actions), or a vendor
+action name that means delete (``POST:/VirtualMachine/{moId}/Destroy_Task``;
+the word list in :mod:`meho_backplane.delete_names`, #4632). A row is
 flagged ``needs_correction`` when it is weaker than that recomputed posture.
 """
 
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.operations.ingest.openapi import default_safety_posture
 from meho_backplane.operations.ingest.payload import ConnectorReviewDeleteOp
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
@@ -89,7 +92,11 @@ def build_delete_review(
         if not method or not path:
             continue
         expected_level, expected_approval = _expected_posture(row, scope, method, path)
-        if method != "DELETE" and expected_level != "destructive":
+        if (
+            method != "DELETE"
+            and expected_level != "destructive"
+            and destructive_action_name_in_op_id(row.op_id) is None
+        ):
             continue
         needs_correction, reason = _reason(
             safety_level=row.safety_level,

@@ -990,6 +990,106 @@ def test_settings_tenant_claim_name_defaults() -> None:
     assert settings.jwt_tenant_role_claim_name == "tenant_role"
 
 
+# ---------------------------------------------------------------------------
+# One login group per person (#4594)
+# ---------------------------------------------------------------------------
+
+
+def _whoami_with_groups(groups: list[str] | None) -> httpx.Response:
+    """Mint a user token carrying *groups* (``None`` omits the claim) and call ``/whoami``."""
+    clear_jwks_cache()  # each call mints a fresh key under the same kid
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    extra = {"groups": groups} if groups is not None else None
+    token = _mint_token(key, extra_claims=extra)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_app())
+        return client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
+
+
+def test_two_role_groups_returns_401_naming_the_groups(log_buffer: io.StringIO) -> None:
+    """A person in two of the five groups is refused, and the message names both."""
+    response = _whoami_with_groups(["MEHO-Operators", "MEHO-Readers"])
+
+    assert response.status_code == 401
+    detail = response.json()["detail"]
+    assert detail.startswith("multiple_role_groups: ")
+    assert "MEHO-Readers" in detail
+    assert "MEHO-Operators" in detail
+    assert "exactly one" in detail
+    _assert_event_logged(
+        log_buffer,
+        "multiple_role_groups",
+        claim_name="groups",
+        groups=["MEHO-Readers", "MEHO-Operators"],
+    )
+
+
+def test_one_role_group_logs_in_as_before() -> None:
+    """One MEHO group plus any number of other groups passes."""
+    response = _whoami_with_groups(["Staff", "MEHO-Operators", "/Office/Vienna"])
+
+    assert response.status_code == 200
+    assert response.json()["sub"] == "op-42"
+
+
+def test_token_without_groups_claim_is_not_checked() -> None:
+    """Service-account tokens carry no ``groups`` claim and are unaffected."""
+    response = _whoami_with_groups(None)
+
+    assert response.status_code == 200
+
+
+def test_group_path_and_group_name_count_as_one_group() -> None:
+    """``/MEHO-Operators`` and ``MEHO-Operators`` are the same group."""
+    response = _whoami_with_groups(["/MEHO-Operators", "MEHO-Operators"])
+
+    assert response.status_code == 200
+
+
+def test_two_role_groups_as_full_paths_are_refused() -> None:
+    """The one-group rule also holds when the mapper sends full group paths."""
+    response = _whoami_with_groups(["/MEHO-Admins", "/MEHO-Approvers"])
+
+    assert response.status_code == 401
+    assert response.json()["detail"].startswith("multiple_role_groups: ")
+
+
+def test_jwt_role_groups_env_override_replaces_the_default_list() -> None:
+    """``JWT_ROLE_GROUPS`` renames the groups the check looks for."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("JWT_ROLE_GROUPS", "Team-A, /Team-B")
+        get_settings.cache_clear()
+        renamed = _whoami_with_groups(["Team-A", "Team-B"])
+        default_names = _whoami_with_groups(["MEHO-Operators", "MEHO-Readers"])
+
+    assert renamed.status_code == 401
+    assert "Team-A, Team-B" in renamed.json()["detail"]
+    assert default_names.status_code == 200
+
+
+def test_settings_jwt_role_groups_defaults_to_the_five_groups() -> None:
+    """The default list is the five groups of the login-group decision; blank keeps it."""
+    expected = (
+        "MEHO-Readers",
+        "MEHO-Operators",
+        "MEHO-SA-Operators",
+        "MEHO-Admins",
+        "MEHO-Approvers",
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("JWT_ROLE_GROUPS", raising=False)
+        get_settings.cache_clear()
+        unset = get_settings().jwt_role_groups
+        mp.setenv("JWT_ROLE_GROUPS", "  ")
+        get_settings.cache_clear()
+        blank = get_settings().jwt_role_groups
+    assert unset == expected
+    assert blank == expected
+
+
 def test_operator_requires_both_tenant_fields_at_construction() -> None:
     """Constructing an :class:`Operator` without tenant fields must fail.
 

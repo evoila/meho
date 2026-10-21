@@ -629,6 +629,37 @@ in the same pull request.
 Both lanes passed against the pinned files before this change was merged
 (9 tests, none skipped). There are no known gaps.
 
+### Extension: the vSphere 8.0 U1, U2 and U3 VI/JSON files (#4333)
+
+This change adds no new shelf folder. `vcenter-8.0` is already in both Python
+jobs' checkout list. The verify step now also requires the three vendor
+VI/JSON files in that folder, so the new VI-JSON check of
+`backend/tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` cannot skip
+in CI.
+
+| File the verify step requires | What it is |
+|---|---|
+| `vcenter-8.0/vi-json-8.0u1.yaml` | vendor VI/JSON file of vSphere 8.0 U1 (`info.version` 8.0.1.0) |
+| `vcenter-8.0/vi-json-8.0u2.yaml` | vendor VI/JSON file of vSphere 8.0 U2 (8.0.2.0) |
+| `vcenter-8.0/vi-json-8.0u3.yaml` | vendor VI/JSON file of vSphere 8.0 U3 (8.0.3.0) |
+
+- The files come from the vendor's
+  [vSphere Management SDK 8.0 page](https://developer.broadcom.com/sdks/vsphere-management-sdk/8.0)
+  (no login), under the vendor's SDK licence. They are byte for byte the
+  vendor files. Provenance and sha256: the `vsphere-vi-json-8.0u1`, `-8.0u2`
+  and `-8.0u3` entries of `docs/compatibility/vcf-api-contract-manifest.yaml`
+  and the shelf's `vcenter-8.0/MANIFEST.md`.
+- These are vendor-licensed files pinned on the operator's shelf for a
+  reconcile lane. So this extension records a reference to the **wave-3
+  blanket determination** in the NSX section above
+  (<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>)
+  instead of a fresh attestation. The same rules apply: read-only checkout,
+  the runner is deleted when the job ends, never committed, never in
+  artifacts or logs, no secret for fork PRs or Dependabot.
+
+The lane passed against the pinned files before this change was opened
+(10 tests, none skipped).
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

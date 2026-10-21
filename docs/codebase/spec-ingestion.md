@@ -531,7 +531,11 @@ methods as `POST /<Type>/{moId}/<Method>`, so its HTTP verb alone would
 otherwise classify an object destroy as `caution`. This is a raise-only rule:
 it never weakens a stricter existing classification. The vocabulary is narrow
 by design; connector-owned safety floors remain the explicit scoped overlay
-for vendor- and version-specific rules.
+for vendor- and version-specific rules. The word list and the rule live in
+one module, `meho_backplane/delete_names.py`, and the standing-grant checks,
+the governed-step list, the flight recorder and the stored-delete review use
+the same list, so an op id such as `POST:/VirtualMachine/{moId}/Destroy_Task`
+counts as a delete everywhere MEHO makes that decision (#4632).
 
 #### Connector safety floors
 
@@ -584,6 +588,17 @@ matches counts as governed in `has_safety_floor`, so re-ingest uses the
 same raise-only update for existing rows. The overlay is keyed on the
 catalog `(product, version)`, like `op_allowlist`. Operator guide:
 `docs/cross-repo/connector-catalog.md`, "Safety overlay".
+
+An ingested read whose answer holds credentials gets two guards, the same
+as its hand-written twin (#4617): a `safety_overlay` rule on its catalog
+row (`caution`, with approval) and an entry in `_CREDENTIAL_READ_OPS` in
+`broadcast/events.py`, so the dispatcher replaces every secret field in
+the answer with `[REDACTED:param_name]`. That list stays the only list of
+secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
+the `/v1/credentials` reads, the depot, backup and proxy settings, host
+prechecks, VASA providers, the management-component task spec, users and
+identity providers. Stored rows change at the next ingest (see "Applying
+corrected floors to existing rows" below).
 
 #### Applying corrected floors to existing rows
 

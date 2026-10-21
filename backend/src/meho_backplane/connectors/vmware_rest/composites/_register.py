@@ -319,7 +319,11 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
-__all__ = ["register_vmware_composite_operations"]
+__all__ = [
+    "COMPOSITES_NOT_ON_8_0",
+    "register_vmware_composite_operations",
+    "register_vmware_composite_operations_8_0",
+]
 
 
 # Natural-key shorthand. Every composite registers against
@@ -330,6 +334,32 @@ __all__ = ["register_vmware_composite_operations"]
 _PRODUCT = "vmware"
 _VERSION = "9.0"
 _IMPL_ID = "vmware-rest"
+
+#: The second versioned catalog of the same implementation
+#: (``connector_id="vmware-rest-8.0"``, served by ``VmwareRest80Connector``).
+#: The resolver sends a fingerprinted 8.0.x target there, so the composites
+#: are registered there too (#3789). The handlers already pick the right
+#: path per vCenter release (VI-JSON for writes REST cannot do, the 8.0.x
+#: arms in ``_write.py``), so the same handler serves both catalogs.
+_VERSION_8_0 = "8.0"
+
+#: Composites NOT registered on the 8.0 catalog, each with the reason.
+#: ``tests/test_connectors_vmware_rest_catalog_parity.py`` checks that every
+#: composite on the 9.0 catalog is either on the 8.0 catalog or listed here,
+#: so a new composite cannot silently skip the 8.0 catalog.
+_SUPERVISOR_9X_REASON = (
+    "built and checked against the vSphere 9.x Supervisor and namespace API "
+    "(the 9.x enable path, the 9.x network type enums and the namespaces v2 "
+    "instances API); the vCenter 8.0 shape of this API is not checked yet"
+)
+COMPOSITES_NOT_ON_8_0: dict[str, str] = {
+    "vmware.composite.supervisor.enable": _SUPERVISOR_9X_REASON,
+    "vmware.composite.supervisor.disable": _SUPERVISOR_9X_REASON,
+    "vmware.composite.supervisor.status": _SUPERVISOR_9X_REASON,
+    "vmware.composite.namespace.create": _SUPERVISOR_9X_REASON,
+    "vmware.composite.namespace.delete": _SUPERVISOR_9X_REASON,
+    "vmware.composite.namespace.status": _SUPERVISOR_9X_REASON,
+}
 
 
 #: Curated agent-actionable group selectors for the vmware-rest
@@ -768,8 +798,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "8.0.x; resource_pool and datastore are required there. "
             "Partial-failure rollback: if any step after the create "
             "succeeds fails, the half-created VM is removed via "
-            "DELETE:/vcenter/vm/{vm} so the caller knows the VM did not "
-            "persist. Equivalent of 'govc vm.create' for operator-facing "
+            "DELETE:/vcenter/vm/{vm}. The result is then an error that "
+            "names the failed step and carries vCenter's message; its "
+            "rollback field says whether the VM was removed. Equivalent "
+            "of 'govc vm.create' for operator-facing "
             "dispatch."
         ),
         parameter_schema=VM_CREATE_PARAMETER_SCHEMA,
@@ -2722,10 +2754,47 @@ async def register_vmware_composite_operations(
     it ``None`` and each registration resolves the process-wide
     singleton.
     """
-    for spec in _COMPOSITES:
+    await _register_specs(_COMPOSITES, version=_VERSION, embedding_service=embedding_service)
+
+    # #3349: publish each write composite's governed child-op set into the
+    # discovery registry the GET /api/v1/operations/governed-subops surface
+    # reads, so an operator assembles a composite's grant set without reading
+    # the ``_SUB_OPS_*`` / ``_VIM_SUB_OPS_*`` manifests in source.
+    register_vmware_governed_subops()
+
+
+async def register_vmware_composite_operations_8_0(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Upsert the composites into the ``vmware-rest-8.0`` catalog (#3789).
+
+    A fingerprinted 8.0.x target resolves to the 8.0 catalog, so an agent
+    that picks that catalog must find the composites there too. Same rows,
+    handlers and policy as the 9.0 catalog, minus
+    :data:`COMPOSITES_NOT_ON_8_0`.
+
+    The governed child ops of a composite keep their ``vmware-rest-9.0``
+    keys on both catalogs (``_CONNECTOR_ID`` in ``_write.py`` /
+    ``_guest.py``). One grant set covers a composite on either catalog, and
+    the approval resume of a parked child op re-runs the composite on the
+    9.0 catalog, where it is also registered.
+    """
+    specs = tuple(spec for spec in _COMPOSITES if spec.op_id not in COMPOSITES_NOT_ON_8_0)
+    await _register_specs(specs, version=_VERSION_8_0, embedding_service=embedding_service)
+
+
+async def _register_specs(
+    specs: tuple[_CompositeSpec, ...],
+    *,
+    version: str,
+    embedding_service: EmbeddingService | None,
+) -> None:
+    """Upsert *specs* under ``(vmware, version, vmware-rest)``."""
+    for spec in specs:
         await register_composite_operation(
             product=_PRODUCT,
-            version=_VERSION,
+            version=version,
             impl_id=_IMPL_ID,
             op_id=spec.op_id,
             handler=spec.handler,
@@ -2741,9 +2810,3 @@ async def register_vmware_composite_operations(
             llm_instructions=spec.llm_instructions,
             embedding_service=embedding_service,
         )
-
-    # #3349: publish each write composite's governed child-op set into the
-    # discovery registry the GET /api/v1/operations/governed-subops surface
-    # reads, so an operator assembles a composite's grant set without reading
-    # the ``_SUB_OPS_*`` / ``_VIM_SUB_OPS_*`` manifests in source.
-    register_vmware_governed_subops()

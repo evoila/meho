@@ -368,17 +368,20 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
             "name": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
+                "maxItems": 1,
                 "description": (
                     "Match resources whose name equals the listed value. The vendor "
-                    "supports one name only. Do not send it with regex."
+                    "supports one name only. MEHO rejects a call that sends name "
+                    "together with regex."
                 ),
             },
             "regex": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
                 "description": (
-                    "Match resource names against any listed Java regex. If name is "
-                    "also sent, vROps uses name and ignores regex."
+                    "Match resource names against any listed Java regex. vROps "
+                    "would ignore regex when name is also sent, so MEHO rejects "
+                    "a call that sends both."
                 ),
             },
             "adapterKind": {
@@ -430,6 +433,9 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
             },
         },
         "additionalProperties": False,
+        # The vendor uses name and ignores regex when both are sent. Reject
+        # the pair so no requested filter is dropped without notice.
+        "not": {"required": ["name", "regex"]},
         "examples": [
             {
                 "adapterKind": ["VMWARE"],
@@ -453,7 +459,10 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
         ),
         "parameter_hints": {
             "resourceKind": "e.g. 'VirtualMachine' / 'HostSystem' / 'Datastore'.",
-            "name": "One exact name, as a list of one; use regex for patterns, not both.",
+            "name": (
+                "One exact name, as a list of one. Use regex for patterns. A call "
+                "with both name and regex is rejected."
+            ),
             "adapterKind": "e.g. 'VMWARE'.",
         },
         "output_shape": (

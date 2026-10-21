@@ -244,7 +244,9 @@ live in `_response_schemas.py` and use the field names of the pinned
 parameter schema has one example call under `examples`, and each
 `llm_instructions` blob has `when_to_call`, `output_shape` and `next_step`. The
 `resourceState`, `resourceStatus` and `resourceHealth` filters of
-`vrops.resource.query` take only the values of the vendor enums. The 9.0 file
+`vrops.resource.query` take only the values of the vendor enums. Its `name`
+filter takes one value, and a call that sends `name` together with `regex` is
+rejected before the call (the vendor would use `name` and drop `regex`). The 9.0 file
 lists only `id`, `resourceId`, `page` and `pageSize` as filters on
 `GET /api/alerts`; `vrops.alert.list` still sends `activeOnly`,
 `alertCriticality` and `alertStatus` (no handler change here), and its guidance

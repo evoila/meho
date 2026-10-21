@@ -95,3 +95,14 @@ def test_resource_query_rejects_a_value_outside_the_vendor_enum() -> None:
     assert list(validator.iter_errors({"resourceHealth": ["PURPLE"]}))
     assert list(validator.iter_errors({"resourceState": ["RUNNING"]}))
     assert list(validator.iter_errors({"resourceStatus": ["RECEIVING"]}))
+
+
+def test_resource_query_takes_one_name_and_not_name_with_regex() -> None:
+    """The vendor supports one name, and uses name over regex when both are sent."""
+    op = next(op for op in VROPS_TYPED_OPS if op.op_id == "vrops.resource.query")
+    validator = Draft202012Validator(op.parameter_schema)
+    assert list(validator.iter_errors({"name": ["<vm-name>"]})) == []
+    assert list(validator.iter_errors({"regex": ["<vm-name>.*"]})) == []
+    assert list(validator.iter_errors({"resourceKind": ["VirtualMachine"]})) == []
+    assert list(validator.iter_errors({"name": ["<vm-name>", "<other-vm-name>"]}))
+    assert list(validator.iter_errors({"name": ["<vm-name>"], "regex": ["<vm-name>.*"]}))

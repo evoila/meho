@@ -530,32 +530,6 @@ vmware-rest:
     - summary
     - llm_instructions
     - examples
-  vmware.composite.content_library.delete:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.content_library.item.delete:
-    - summary
-    - field_descriptions
-    - llm_instructions
-    - examples
-  vmware.composite.content_library.subscribed.create:
-    - summary
-    - llm_instructions
-    - examples
-    - no_ticket_numbers
-  vmware.composite.content_library.subscribed.items.list:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.content_library.subscribed.status:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.content_library.subscribed.sync:
-    - summary
-    - llm_instructions
-    - examples
   vmware.composite.datastore.dir.create:
     - summary
     - llm_instructions
@@ -585,11 +559,6 @@ vmware-rest:
     - summary
     - llm_instructions
     - examples
-  vmware.composite.guest.customization_spec.create:
-    - summary
-    - llm_instructions
-    - examples
-    - no_ticket_numbers
   vmware.composite.host.datastore_mount_nfs:
     - summary
     - llm_instructions
@@ -616,21 +585,6 @@ vmware-rest:
     - examples
     - no_ticket_numbers
   vmware.composite.host.standard_portgroup.delete:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.namespace.create:
-    - summary
-    - field_descriptions
-    - llm_instructions
-    - examples
-    - no_ticket_numbers
-  vmware.composite.namespace.delete:
-    - summary
-    - llm_instructions
-    - examples
-    - no_ticket_numbers
-  vmware.composite.namespace.status:
     - summary
     - llm_instructions
     - examples
@@ -683,19 +637,6 @@ vmware-rest:
     - summary
     - llm_instructions
     - examples
-  vmware.composite.supervisor.disable:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.supervisor.enable:
-    - summary
-    - field_descriptions
-    - llm_instructions
-    - examples
-  vmware.composite.supervisor.status:
-    - summary
-    - llm_instructions
-    - examples
   vmware.composite.vm.clone:
     - summary
     - llm_instructions
@@ -705,10 +646,6 @@ vmware-rest:
     - llm_instructions
     - examples
   vmware.composite.vm.create:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.vm.customize:
     - summary
     - llm_instructions
     - examples

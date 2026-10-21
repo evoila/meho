@@ -110,6 +110,9 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
+    HOST_CLUSTER_LLM_INSTRUCTIONS,
+)
 from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_create_composite,
     content_library_subscribed_items_list_composite,
@@ -623,14 +626,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.cluster.drs_recommendations",
         handler=cluster_drs_recommendations_composite,
-        summary="Read DRS state + active recommendations for a cluster.",
+        summary="Read the DRS settings of a cluster and, if asked, the moves DRS recommends now.",
         description=(
-            "Orchestrates a cluster summary read plus a DRS-config read, "
-            "returning a single aggregated payload. Equivalent of "
-            "'govc cluster.recommendations' for the operator-facing "
-            "workflow: one composite call replaces a raw vCenter REST "
-            "GET plus a vim property read (DRS state is vim-only in "
-            "vSphere 9.0). Read-only -- never mutates cluster state."
+            "Reads the cluster summary and its DRS settings (on or off, automation level, "
+            "migration threshold) in one call. With include_recommendations_history it also "
+            "returns the DRS recommendations that are pending. Read-only."
         ),
         parameter_schema=CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
@@ -638,6 +638,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "cluster", "drs"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS[
+            "vmware.composite.cluster.drs_recommendations"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.event.tail",
@@ -1116,20 +1119,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.host.evacuate",
         handler=host_evacuate_composite,
-        summary="Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.",
+        summary="Move every VM off a host with DRS, then put the host into maintenance mode.",
         description=(
-            "Lists VMs on the host via "
-            "GET:/vcenter/vm?filter.hosts=..., then dispatches "
-            "vmware.composite.vm.migrate per VM (recursive composite "
-            "call -- first production composite that calls another "
-            "composite). On full migration success, the host enters "
-            "maintenance via the vim "
-            "HostSystem.EnterMaintenanceMode_Task (polled to a terminal "
-            "state -- the pinned REST spec serves no host-maintenance "
-            "path, #2970). "
-            "tolerate_partial_failure=True lets maintenance-enter fire "
-            "even with VMs left behind. Equivalent of 'govc host.evacuate' "
-            "operator workflow."
+            "Moves each VM on the host to where DRS recommends (vm.migrate), then puts the host "
+            "into maintenance mode. If a VM cannot move, it stops before maintenance mode, unless "
+            "tolerate_partial_failure is set."
         ),
         parameter_schema=HOST_EVACUATE_PARAMETER_SCHEMA,
         response_schema=HOST_EVACUATE_RESPONSE_SCHEMA,
@@ -1137,26 +1131,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "host", "maintenance", "recursive"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.evacuate"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.host.detach_from_vds",
         handler=host_detach_from_vds_composite,
-        summary="Migrate host VM NICs off a DVS to a fallback network, then remove host from DVS.",
+        summary="Move the VM NICs on a host to a standard network, then take the host off a DVS.",
         description=(
-            "Lists DVS portgroups on the host and VMs on the host, "
-            "migrates each VM's NICs to the supplied fallback_network "
-            "per adapter (GET + "
-            "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}), and then "
-            "removes the host via the vim "
-            "DistributedVirtualSwitch.ReconfigureDvs_Task host-member "
-            "remove (polled to a terminal state -- the pinned REST spec "
-            "serves no DVS write path, #2970). "
-            "vSphere refuses the host detach when any VM still has "
-            "active NICs on the DVS -- the composite verifies every NIC "
-            "migrated before attempting the detach; on partial NIC "
-            "migration the composite returns status='incomplete' and "
-            "skips the DVS detach. Replaces "
-            "scripts/host-detach-from-vds.py."
+            "Moves every NIC of every VM on the host to fallback_network, then removes the host "
+            "from the distributed switch. If a VM could not be moved, the host stays on the "
+            "switch (status incomplete)."
         ),
         parameter_schema=HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
         response_schema=HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
@@ -1164,6 +1148,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "host", "networking"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.detach_from_vds"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.create",
@@ -1256,21 +1241,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.cluster.patch",
         handler=cluster_patch_composite,
-        summary="Sequentially patch every host in a cluster: maintenance + patch + exit.",
+        summary="Update every host of a cluster in turn: maintenance mode, apply image, exit.",
         description=(
-            "Lists cluster hosts via GET:/vcenter/host?clusters=..., "
-            "then iterates each host sequentially: vim "
-            "EnterMaintenanceMode_Task -> vLCM "
-            "POST:/esx/settings/hosts/{host}/software?action=apply"
-            "&vmw-task=true (cis task polled to terminal) -> vim "
-            "ExitMaintenanceMode_Task, every task polled before the "
-            "next step. "
-            "Sequential by design -- concurrent host patches would "
-            "force every VM in the cluster to vMotion at once, "
-            "overwhelming DRS. Per-host failure stops the loop; the "
-            "composite returns status='stopped' with patched_hosts + "
-            "remaining_hosts so the operator can manually finish or "
-            "roll back the partial patch."
+            "Updates the hosts of a cluster one at a time: maintenance mode on, apply the host's "
+            "vSphere Lifecycle Manager image, maintenance mode off. The first failure stops the "
+            "run and lists the hosts not yet done."
         ),
         parameter_schema=CLUSTER_PATCH_PARAMETER_SCHEMA,
         response_schema=CLUSTER_PATCH_RESPONSE_SCHEMA,
@@ -1278,6 +1253,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "cluster", "patch", "long-running"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.patch"],
     ),
     # ----------------------------------------------------------------
     # vim cluster / inventory writes (#2895) -- dangerous / requires approval
@@ -1285,19 +1261,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.cluster.drs_rule.create",
         handler=cluster_drs_rule_create_composite,
-        summary="Add a DRS affinity / anti-affinity rule to a cluster by explicit VM list.",
+        summary="Add a DRS rule that keeps listed VMs together or apart.",
         description=(
-            "Adds a classic DRS affinity ('keep these VMs together') or "
-            "anti-affinity ('keep these VMs apart') rule by explicit VM "
-            "list. No cluster-rules REST path exists and the tag-based "
-            "compute-policies surface is semantically wrong (tag-scoped, not "
-            "an explicit VM list), so the add goes through vim "
-            "ClusterComputeResource.ReconfigureComputeResource_Task with a "
-            "single-rule ClusterConfigSpecEx.rulesSpec delta (modify=true) "
-            "and polls the returned task to a terminal state. Resolves the VM "
-            "names to MoRefs scoped to the cluster; rule names are the "
-            "idempotence key, so a duplicate returns status='rule_exists' "
-            "before any write. Equivalent of 'govc cluster.rule.create'."
+            "Adds a DRS affinity rule (keep the VMs on one host) or anti-affinity rule (keep them "
+            "on different hosts) for VMs of a cluster, given by name. A rule name that already "
+            "exists changes nothing. Like 'govc cluster.rule.create'."
         ),
         parameter_schema=CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA,
@@ -1305,26 +1273,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "cluster", "drs", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_rule.create"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.cluster.drs_vm_host_rule.create",
         handler=cluster_drs_vm_host_rule_create_composite,
-        summary="Add a DRS VM-Host affinity rule (VM group + host group + run-on rule).",
+        summary="Add a DRS rule that runs a VM group on, or away from, a host group.",
         description=(
-            "Pins the VMs of a named VM group onto (affine) or away from "
-            "(anti-affine) the hosts of a named host group — a VM-Host DRS "
-            "rule (ClusterVmHostRuleInfo), the placement primitive that binds "
-            "an estate's nested ESXi to a chosen subset of a cluster's hosts. "
-            "A sibling of cluster.drs_rule.create (which is VM-VM only, by "
-            "explicit VM list) that leaves that op's contract unchanged. No "
-            "REST path exists, so one vim "
-            "ClusterComputeResource.ReconfigureComputeResource_Task carries "
-            "both a ClusterConfigSpecEx.groupSpec delta (adds the VM + host "
-            "groups) and a rulesSpec delta (adds the rule), polled to a "
-            "terminal state. VM + host names resolve to MoRefs scoped to the "
-            "cluster; rule + group names are the idempotence keys "
-            "(status='rule_exists' / 'group_exists' before any write). "
-            "'mandatory' picks a 'must' vs a 'should' rule."
+            "Creates a VM group, a host group and a DRS rule that keeps those VMs on those hosts, "
+            "or away from them, in one cluster change. A rule or group name that already exists "
+            "changes nothing. mandatory makes it a 'must' rule instead of a 'should' rule."
         ),
         parameter_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
@@ -1332,29 +1290,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "cluster", "drs", "vi-json"],
         safety_level="caution",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS[
+            "vmware.composite.cluster.drs_vm_host_rule.create"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.cluster.drs_rule.delete",
         handler=cluster_drs_rule_delete_composite,
         summary="Delete one DRS rule from a cluster, by name. Any rule type.",
         description=(
-            "Deletes one DRS rule from a cluster (the opposite of "
-            "cluster.drs_rule.create and cluster.drs_vm_host_rule.create). A DRS "
-            "rule tells vCenter where to run VMs: keep them together, keep them "
-            "apart, or run them on (or away from) a group of hosts. It works for "
-            "every rule type. VM groups and host groups are not deleted. First it "
-            "reads the cluster's rules. If no rule has that name, nothing is "
-            "changed and the result is status='unchanged'. If two or more rules "
-            "have that name, nothing is changed and the result is "
-            "status='precondition_failed' with the rules listed in 'blockers'. An "
-            "unknown cluster moid gives status='invalid_request'. Otherwise it "
-            "runs ClusterComputeResource.ReconfigureComputeResource_Task with one "
-            "rule removal (modify=true, nothing else on the cluster changes), "
-            "waits for it and reads the rules again: status='deleted' only when "
-            "the rule is gone. If vSphere reports an error, the call fails. "
-            "Destructive: a second person must always approve it, after seeing "
-            "the rule (type, enabled, required or not, its VMs or groups). Like "
-            "'govc cluster.rule.remove'."
+            "Deletes one DRS rule of any type from a cluster, found by name. VM and host groups "
+            "stay. No match or several matches change nothing. Destructive: a second person must "
+            "always approve it, after seeing the rule. Like 'govc cluster.rule.remove'."
         ),
         parameter_schema=CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA,
@@ -1362,40 +1309,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "cluster", "drs", "vi-json", "teardown", "destructive"],
         safety_level="destructive",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Use it to remove a DRS rule that an environment created, for example "
-                "a keep-apart rule for VMs that were deleted."
-            ),
-            "parameter_hints": {
-                "cluster": "Cluster moid, e.g. 'domain-c7'.",
-                "rule_name": "Exact rule name, as given to cluster.drs_rule.create.",
-            },
-            "output_shape": (
-                "{status: deleted|unchanged|invalid_request|precondition_failed|"
-                "still_present|timeout, object: {kind, cluster, cluster_name, name, key, "
-                "rule_type, enabled, mandatory, vms, vm_count, vm_group, "
-                "affine_host_group, anti_affine_host_group}, blockers: "
-                "[{kind: drs_rule, key, rule_type}], task, task_state, guidance}. "
-                "A vSphere error makes the call fail; it is not a status."
-            ),
-        },
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_rule.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.resource_pool.create",
         handler=resource_pool_create_composite,
         summary="Create a resource pool under a parent pool or a cluster's root pool.",
         description=(
-            "Creates a resource pool via the REST POST /vcenter/resource-pool "
-            "(Vcenter.ResourcePool.CreateSpec: name + parent + optional cpu / "
-            "memory allocation) and returns the new pool moid — the governed "
-            "allocation step a nested-lab estate is built on. Parent selection "
-            "is either an explicit 'parent' ResourcePool moid (nesting) or a "
-            "'cluster' moid whose root resource pool is resolved for you "
-            "(ClusterComputeResource.resourcePool) — the estate convenience, "
-            "since operators have a cluster, not a root-pool moid. Read-back "
-            "confirms the new pool lists under the resolved parent. Equivalent "
-            "of 'govc pool.create'."
+            "Creates a resource pool inside a parent pool, or at the top of a cluster, with "
+            "optional CPU and memory reservations, limits and shares. Returns the new pool moid "
+            "and checks that it lists under the parent. Like 'govc pool.create'."
         ),
         parameter_schema=RESOURCE_POOL_CREATE_PARAMETER_SCHEMA,
         response_schema=RESOURCE_POOL_CREATE_RESPONSE_SCHEMA,
@@ -1403,20 +1326,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "cluster", "resource-pool"],
         safety_level="caution",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.resource_pool.create"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.resource_pool.delete",
         handler=resource_pool_delete_composite,
         summary="Delete a resource pool; refuse a non-empty pool unless force.",
         description=(
-            "Deletes a resource pool via the REST DELETE "
-            "/vcenter/resource-pool/{resourcePool}, which reparents the pool's "
-            "child pools + VMs up to its parent (it does not destroy them). A "
-            "non-empty pool is refused (status='not_empty') unless force=true "
-            "is passed; the delete then read-backs through the listing to "
-            "confirm the pool is absent (status='deleted'). safety_level="
-            "'dangerous' — the reparent, not a destroy. Equivalent of 'govc "
-            "pool.destroy'."
+            "Deletes a resource pool. vCenter moves its child pools and VMs up to the parent "
+            "pool; they are not deleted. A pool that is not empty is refused unless force is "
+            "true. Like 'govc pool.destroy'."
         ),
         parameter_schema=RESOURCE_POOL_DELETE_PARAMETER_SCHEMA,
         response_schema=RESOURCE_POOL_DELETE_RESPONSE_SCHEMA,
@@ -1424,6 +1343,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "cluster", "resource-pool"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.resource_pool.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.folder.create",
@@ -1688,27 +1608,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.host.datastore_mount_nfs",
         handler=datastore_mount_nfs_composite,
-        summary="Mount an NFS export as a datastore on a host via CreateNasDatastore.",
+        summary="Mount an NFS export as a datastore on one ESXi host.",
         description=(
-            "Mounts an NFS v3/v4.1 export as a datastore on one host via the "
-            "synchronous vim HostDatastoreSystem.CreateNasDatastore — the pinned "
-            "vcenter.yaml serves no host NAS-mount REST path, so vim is the sole "
-            "governed path (#3182). Resolves the host by display name or moref "
-            "(GET:/vcenter/host), then reads the host's "
-            "HostSystem.configManager.datastoreSystem MoRef and mounts the method "
-            "on it, building a HostNasVolumeSpec from nfs_server / remote_path / "
-            "datastore_name / access_mode / nfs_type. Idempotent: it reads the "
-            "host's mounted datastores first, so re-mounting an already-mounted "
-            "export (matched on nfs_server + remote_path) returns "
-            "status='already_mounted' with the existing datastore moid and no "
-            "write — safe to retry — while a datastore_name already used for a "
-            "different export returns status='name_conflict' (a structured "
-            "refusal, no write). A genuinely new export mounts: the 200 body is "
-            "the new Datastore MoRef directly (no task poll), so the composite "
-            "returns status='mounted' with the datastore moid + a mount summary. "
-            "A host that does not resolve uniquely refuses before any write "
-            "(status='host_not_found' / 'ambiguous_host'). Nested-VCF hosts mount "
-            "a base-layer NFS export as principal storage this way."
+            "Mounts an NFS v3 or v4.1 export as a datastore on one host. Safe to run twice: an "
+            "export that is already mounted returns already_mounted, and a name used by another "
+            "export returns name_conflict, both without a change."
         ),
         parameter_schema=HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA,
         response_schema=HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA,
@@ -1716,23 +1620,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "host", "storage", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.datastore_mount_nfs"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.host.disk_mark_flash",
         handler=disk_mark_flash_composite,
-        summary="Mark host disks as flash (SSD) or non-flash (HDD) via MarkAs*_Task.",
+        summary="Mark host disks as flash (SSD) or non-flash (HDD).",
         description=(
-            "Marks one or more host disks as flash (SSD) or non-flash (HDD) via vim "
-            "HostStorageSystem.MarkAsSsd_Task (mode='flash') / MarkAsNonSsd_Task "
-            "(mode='non_flash') — the inverse is the same op keyed on the mode "
-            "param, not a second op (#3182). Nested labs present virtual disks as "
-            "HDD; vSAN-ready bring-up validation needs cache/capacity disks "
-            "flash-marked. Resolves the host by display name or moref, reads its "
-            "HostSystem.configManager.storageSystem MoRef, then per scsiDiskUuid "
-            "issues the mark task through the governed vmomi seam and polls it to a "
-            "terminal state. Set-shaped: one results row per disk (a per-disk fault "
-            "/ timeout / transport error is captured, not aborted), aggregated into "
-            "summary counts. Equivalent of 'govc host.storage.mark -ssd'."
+            "Marks one or more disks of a host as flash (SSD) or as non-flash (HDD), one task per "
+            "disk. One failed disk does not stop the others; each disk gets its own result row. "
+            "Like 'govc host.storage.mark -ssd'."
         ),
         parameter_schema=HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA,
         response_schema=HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA,
@@ -1740,24 +1637,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "host", "storage", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.disk_mark_flash"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.host.service_control",
         handler=service_control_composite,
-        summary="Start/stop/restart a bounded host service + optionally set its policy.",
+        summary="Start, stop or restart an allowed host service; optionally set its start policy.",
         description=(
-            "Starts / stops / restarts a host service and optionally sets its "
-            "startup policy via vim HostServiceSystem (synchronous StartService / "
-            "StopService / RestartService + UpdateServicePolicy) — e.g. enabling "
-            "host SSH (TSM-SSH) for a diagnostic / upgrade arc, then disabling it, "
-            "leaving an audit row each time (#3182). Bounded to a curated "
-            "server-side allowlist (TSM-SSH / TSM / ntpd / ptpd): an out-of-list "
-            "service is refused with status='service_not_allowed' before any host "
-            "resolution or write, never passed through (the no-arbitrary-exec "
-            "posture). Resolves the host by display name or moref, reads its "
-            "HostSystem.configManager.serviceSystem MoRef, applies the action "
-            "through the governed vmomi seam, then (when policy is supplied) "
-            "UpdateServicePolicy. Equivalent of 'govc host.service'."
+            "Starts, stops or restarts one ESXi host service and can set when it starts. Only "
+            "TSM-SSH, TSM, ntpd and ptpd are allowed; any other service is refused before "
+            "anything changes. Like 'govc host.service'."
         ),
         parameter_schema=HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
         response_schema=HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
@@ -1765,6 +1654,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "host", "service", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.service_control"],
     ),
     # ----------------------------------------------------------------
     # Guest-operations channel (#3100 / #3255) -- 3 safe reads + 1 caution

@@ -62,6 +62,7 @@ from meho_backplane.operations.service_grant_schemas import (
     ServiceGrantRead,
 )
 from meho_backplane.operations.service_grants import (
+    DeleteGrantConsoleOnlyError,
     GrantValidationError,
     ServicePrincipalGrantService,
 )
@@ -157,7 +158,10 @@ async def create_grant(
     ``human_principal_required`` before this runs.
     Returns 422 when the op is delete-shaped, a scope field carries a
     wildcard, ``expires_at`` is in the past, or an active grant for the
-    same fully-scoped key already exists. Audited via the audit middleware.
+    same fully-scoped key already exists. On an instance in sandbox mode
+    (#4622) a delete-shaped op is a delete grant, which only the web
+    console creates: this route answers 403 ``delete_grant_console_only``.
+    Audited via the audit middleware.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_GRANT_OP_IDS["create"],
@@ -167,6 +171,11 @@ async def create_grant(
     service = ServicePrincipalGrantService()
     try:
         entry = await service.create(operator.tenant_id, operator.sub, payload)
+    except DeleteGrantConsoleOnlyError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"delete_grant_console_only: {exc.message}",
+        ) from exc
     except GrantValidationError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,

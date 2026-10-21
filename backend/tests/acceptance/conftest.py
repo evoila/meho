@@ -340,6 +340,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # test errors at setup with ``cannot truncate a table referenced in a
     # foreign key constraint``.
     "service_principal_grant",
+    # ``sandbox_delete_grant.tenant_id`` is a real ``REFERENCES tenant(id)``
+    # FK from migration ``0115`` (#4622 sandbox mode delete grants), the
+    # same shape as ``service_principal_grant`` above.
+    "sandbox_delete_grant",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects
     # truncating ``tenant`` unless every referencing table is listed in the

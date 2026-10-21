@@ -994,6 +994,26 @@ keycloakAdmin:
     # opt into both don't have to reconcile names.
     secretKey: client_secret
 
+sandboxMode:
+  # -- Sandbox mode (#4622, `docs/decisions/sandbox-mode.md`). Only for an
+  # instance that holds disposable test systems: systems built for one
+  # test and deleted after it. When on, a tenant admin may give a service
+  # principal a standing grant that also covers deletes, made in the web
+  # console and expiring within 30 days, so an automated test run deletes
+  # its own systems with no wait for a person. Every other instance keeps
+  # today's rules. Default false renders no sandbox setting at all.
+  #
+  # The mode is set at install time and fixed for the life of the
+  # database: MEHO stores it at the first start and refuses to start when
+  # the stored mode differs. To change it, install a new instance with a
+  # new database. The backplane also refuses to start when the host name
+  # has no dot-separated part that is exactly `sandbox`.
+  enabled: false
+  # -- Must equal `ingress.host` when `enabled` is true; the render fails
+  # otherwise. Rendered into `MEHO_SANDBOX_MODE_CONFIRM`, which the
+  # backplane checks against the host of its MCP resource URI at boot.
+  confirmHost: ""
+
 # Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
 # Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two
 # confidential values in addition to the plain `config.uiKeycloakClientId`:

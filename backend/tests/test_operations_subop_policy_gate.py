@@ -768,10 +768,10 @@ async def test_destructive_subop_refusal_writes_one_denied_audit_row(
 ) -> None:
     """A refused destructive step is recorded as one ``denied`` audit row (#4647).
 
-    The parent composite returns the step's result as is and the dispatcher
-    writes no audit row for a handler-returned ``denied`` result, so the gate
-    records the refusal itself on the step's path, through the same writer the
-    dispatcher park uses.
+    The refusal is the step's own decision, so the gate records it on the
+    step's path, through the same writer the dispatcher park uses. The parent
+    composite returns the step's result as is and gets its own ``denied``
+    execution row from the dispatcher (#4275).
     """
     from meho_backplane.db.models import AuditLog
     from meho_backplane.operations._audit import parent_audit_id_var

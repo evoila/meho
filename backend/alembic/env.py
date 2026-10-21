@@ -96,6 +96,13 @@ def do_run_migrations(connection: Connection) -> None:
     the migration scripts.
     """
     context.configure(connection=connection, target_metadata=target_metadata)
+    # #4622: record the revisions the database is at BEFORE any script
+    # runs. Migration ``0115`` reads it to tell a database that existed
+    # before it (seed the stored sandbox mode as ``false``) from one being
+    # created from empty (no seed; MEHO stores its setting at the first
+    # start). Alembic updates ``alembic_version`` after every step, so a
+    # script cannot read this by itself.
+    config.attributes["starting_heads"] = context.get_context().get_current_heads()
     with context.begin_transaction():
         context.run_migrations()
 

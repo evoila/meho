@@ -175,6 +175,10 @@ class ServiceGrantRead(BaseModel):
     # itself; ``orphan_remediation`` tells the operator what to do.
     orphaned: bool = False
     orphan_remediation: str | None = None
+    # True for a delete grant (sandbox mode, #4622): a grant stored in the
+    # ``sandbox_delete_grant`` table, which covers an operation with a
+    # delete sign. False for every ordinary grant.
+    delete_grant: bool = False
 
 
 class ServiceGrantListResponse(BaseModel):

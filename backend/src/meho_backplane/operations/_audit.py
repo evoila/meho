@@ -216,7 +216,10 @@ def resolve_agent_session_id() -> uuid.UUID | None:
       inbound ``Mcp-Session-Id`` header (stored as the canonical UUID
       string). This is how a *direct* operator dispatch over MCP carries
       the same session anchor its envelope rows get from
-      :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`.
+      :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`. Since #4672
+      :func:`write_audit_row` reads it too, so the operation row of a
+      direct MCP ``call_operation`` (ok, error or denied) and every
+      operation an MCP tool runs inside carry the MCP session id.
 
     A client-credential service principal that dispatches over the REST
     chassis with a ``work_ref`` reaches the first source too:
@@ -388,8 +391,9 @@ def _build_audit_payload(
     ``payload["error"]`` so a failed dispatch's durable audit row records
     *why* it failed rather than only ``result_status='error'``, closing
     the forensics gap where the approver's ephemeral surface saw the real
-    error but the ledger did not. ``None`` (and ``{}``) on every non-error
-    write, so success / denied / pending rows are unchanged. The envelope
+    error but the ledger did not. ``None`` (and ``{}``) on a success write;
+    the row of a run that stopped because a step waits or was denied (#4275)
+    carries that result's extras here too. The envelope
     is already Tier-1-redacted + capped by the ``operations/_errors.py``
     builders, so persisting it to the durable ledger adds no leak surface;
     it is threaded to the audit row only.
@@ -441,10 +445,13 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
     broadcast-event surface, whose consumers parse ``payload`` rather than
     the columns. Each key is present only when its contextvar is bound:
 
-    * agent-run attribution (G11.4-T5 #1074) -- ``agent_session_id`` plus
-      the ``model`` / ``provider`` / ``cost`` from the active
-      :class:`AgentRunAuditMeta` snapshot (the ``agent_run`` row holds the
-      durable copy; this is the per-row attribution slice);
+    * session attribution -- ``agent_session_id``, the same value the
+      row's column gets from :func:`resolve_agent_session_id` (the agent
+      run id inside MEHO's own agent loop, G11.4-T5 #1074, else the MCP
+      session id of a direct MCP call, #4672), plus the ``model`` /
+      ``provider`` / ``cost`` from the active :class:`AgentRunAuditMeta`
+      snapshot (the ``agent_run`` row holds the durable copy; this is the
+      per-row attribution slice);
     * runbook correlation (G12.1-T2 #1294) -- ``run_id`` / ``step_id``,
       ``None`` outside a runbook step execution;
     * credential_read reveal choice (#2467) -- ``reveal_secret`` (bool),
@@ -456,7 +463,7 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
       written (:mod:`meho_backplane.operations.caller_gone`). The operation
       still ran to the end.
     """
-    agent_session_id = agent_session_id_var.get()
+    agent_session_id = resolve_agent_session_id()
     if agent_session_id is not None:
         payload["agent_session_id"] = str(agent_session_id)
     meta = agent_run_audit_meta_var.get()
@@ -563,11 +570,12 @@ async def write_audit_row(
 
     *error_extras* (#2680) is the error row's structured envelope,
     forwarded to :func:`_build_audit_payload` where it lands under
-    ``payload["error"]``. ``None`` on every non-error write.
+    ``payload["error"]``. ``None`` on a success write.
 
     *event_class* (#3733) is declared by the caller, which knows what
-    happened: ``operation_execution`` when the operation ran (``ok`` or
-    ``error``), ``policy_decision`` when a gate refused it before it ran.
+    happened: ``operation_execution`` when the operation ran (``ok``,
+    ``error``, or stopped part-way because a step waits for approval or was
+    denied, #4275), ``policy_decision`` when a gate refused it before it ran.
     """
     sessionmaker = get_sessionmaker()
     payload = _build_audit_payload(
@@ -581,11 +589,12 @@ async def write_audit_row(
     _apply_principal_name(payload, operator)
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
-    # G11.4-T5 #1074 -- read the agent-session lineage key off the
-    # contextvar the invoker bound around the loop. ``None`` outside
-    # an agent run (the chassis HTTP / MCP dispatch path), which is
-    # the correct value for the nullable column.
-    agent_session_id = agent_session_id_var.get()
+    # The session this row belongs to (#4672): the agent run's id inside
+    # MEHO's own agent loop (G11.4-T5 #1074), else the ``Mcp-Session-Id``
+    # of a direct MCP call, so the operation row carries the same session
+    # as its MCP tool row and the session replay finds it. ``None`` only
+    # for a call with neither (REST / CLI, system sweeps).
+    agent_session_id = resolve_agent_session_id()
     # G12.1-T2 #1294 -- read the runbook correlation contextvars. The
     # columns (``run_id`` / ``step_id``) are added by migration ``0034``
     # (G12.1-T1 #1292). We pass them only when the model carries the
@@ -668,7 +677,8 @@ async def audit_safe(
       recorded via ``dispatch_audit_failed`` and swallowed. The caller
       keeps the outcome it already decided.
     * ``require_audit=True`` (the success path of every completed
-      handler, read or write) -- the durable DISPATCH row is a hard
+      handler, read or write, and the row of a multi-step operation that
+      stopped because a step waits or was denied, #4275) -- the durable DISPATCH row is a hard
       precondition of a successful return (CLAUDE.md postulate 7 /
       v0.1-spec §6). An audit-insert failure is still logged, and then
       :exc:`AuditCommitError` is raised so the caller fails the

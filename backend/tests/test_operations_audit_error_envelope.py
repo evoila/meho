@@ -730,45 +730,5 @@ async def test_handler_returned_error_result_writes_one_execution_row(
     assert result.model_dump(exclude={"audit_id"}) == returned.model_dump(exclude={"audit_id"})
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "returned",
-    [
-        OperationResult(
-            status="awaiting_approval",
-            op_id="demo.thing.returns",
-            duration_ms=0.0,
-            extras={"approval_request_id": "00000000-0000-0000-0000-000000000001"},
-        ),
-        OperationResult(
-            status="denied",
-            op_id="demo.thing.returns",
-            error="denied: policy denied",
-            duration_ms=0.0,
-        ),
-    ],
-    ids=["awaiting_approval", "denied"],
-)
-async def test_handler_returned_non_error_result_is_unchanged(
-    stub_embedding_service: AsyncMock,
-    returned: OperationResult,
-) -> None:
-    """Waiting and denied results stay as before: passed through, no new row."""
-    _returned_result[:] = [returned]
-    await _register_op(
-        "demo.thing.returns",
-        safety_level="safe",
-        embedding=stub_embedding_service,
-        handler=_module_returning_handler,
-    )
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="demo-1.x",
-        op_id="demo.thing.returns",
-        target=_FakeTarget(),
-        params={},
-    )
-
-    assert result == returned
-    assert await _committed_rows_for("demo.thing.returns") == []
+# A handler that returns a waiting or denied result gets the operation's own
+# row too (#4275). Those tests live in ``test_operations_composite_wait_audit.py``.

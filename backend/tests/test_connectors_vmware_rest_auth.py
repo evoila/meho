@@ -961,3 +961,127 @@ async def test_establish_omits_sni_extension_when_unset() -> None:
     assert post_route.called
     assert "sni_hostname" not in post_route.calls[0].request.extensions
     await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# close_session — evict the cached session and end it on vCenter (#3701)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_close_session_deletes_the_cached_session_and_evicts_it() -> None:
+    """The DELETE carries the cached token; the next call logs in again."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        login = mock.post("/api/session").respond(200, json="token-1")
+        revoke = mock.delete("/api/session").respond(204)
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+        assert await connector.close_session(_TARGET_A) is True
+
+        assert revoke.call_count == 1
+        assert revoke.calls[0].request.headers["vmware-api-session-id"] == "token-1"
+        assert target_cache_key(_TARGET_A) not in connector._session_tokens
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+    assert login.call_count == 2
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_session_without_a_cached_session_is_a_no_op() -> None:
+    """No cached token: nothing to revoke, no request is sent."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid"):
+        assert await connector.close_session(_TARGET_A) is False
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_session_reports_a_failed_revoke_but_still_evicts() -> None:
+    """A 500 on the DELETE reads as 'not confirmed'; the cache slot is gone anyway."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="token-1")
+        revoke = mock.delete("/api/session").respond(500)
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+        assert await connector.close_session(_TARGET_A) is False
+
+    assert revoke.call_count == 1
+    assert target_cache_key(_TARGET_A) not in connector._session_tokens
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [302, 307])
+async def test_close_session_treats_an_unfollowed_redirect_as_not_closed(status: int) -> None:
+    """A 3xx the shared client did not follow is not a closed session.
+
+    The client refuses cross-origin redirects and hands the 3xx back
+    unfollowed, so the DELETE never reached a session endpoint. Only a 2xx
+    confirms the close; the cache slot is evicted anyway.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="token-1")
+        revoke = mock.delete("/api/session").respond(
+            status, headers={"Location": "https://elsewhere.test.invalid/api/session"}
+        )
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+        assert await connector.close_session(_TARGET_A) is False
+
+    assert revoke.call_count == 1
+    assert target_cache_key(_TARGET_A) not in connector._session_tokens
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_session_with_an_older_token_keeps_the_cached_session() -> None:
+    """An already replaced session is closed by its own token; the cache is untouched."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        login = mock.post("/api/session").respond(200, json="token-2")
+        revoke = mock.delete("/api/session").respond(204)
+        await connector.auth_headers(_TARGET_A, _make_operator())
+        assert connector._session_tokens.get(target_cache_key(_TARGET_A)) == "token-2"
+
+        assert await connector.close_session(_TARGET_A, token="token-1") is True
+
+        assert revoke.call_count == 1
+        assert revoke.calls[0].request.headers["vmware-api-session-id"] == "token-1"
+        assert connector._session_tokens.get(target_cache_key(_TARGET_A)) == "token-2"
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+    assert login.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_session_with_the_cached_token_evicts_it() -> None:
+    """Naming the cached session itself behaves like the no-token form."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="token-1")
+        revoke = mock.delete("/api/session").respond(204)
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+        assert await connector.close_session(_TARGET_A, token="token-1") is True
+
+    assert revoke.calls[0].request.headers["vmware-api-session-id"] == "token-1"
+    assert connector._session_tokens.get(target_cache_key(_TARGET_A)) is None
+    await connector.aclose()

@@ -51,14 +51,15 @@ resolution matrix is pinned in
 ## Scope: typed read core (#3058)
 
 The connector ships a curated **6-op typed read core** — the migration-inventory
-surface — registered as `source_kind="typed"` and **enabled at register time**, so
-a vRA 8 target dispatches an inventory read on a **fresh boot with zero catalog
-ingest**.
+surface — plus one API description read, all registered as `source_kind="typed"`
+and **enabled at register time**, so a vRA 8 target dispatches an inventory read
+on a **fresh boot with zero catalog ingest**.
 
 | Group | Ops |
 |---|---|
 | `vcfa-vra8-inventory` | `vcfa.vra8.project.list`, `.deployment.list`, `.deployment.get`, `.about` |
 | `vcfa-vra8-content` | `vcfa.vra8.blueprint.list`, `.catalog-item.list` |
+| `vcfa-vra8-api-files` | `vcfa.vra8.api_file.get` (see [API description files](#api-description-files-vcfavra8api_fileget) below) |
 
 Op ids are namespaced `vcfa.vra8.*` (distinct from the modern impl's
 `vcfa.provider.*` / `vcfa.tenant.*`): the two impls publish different read surfaces
@@ -203,8 +204,11 @@ The read core follows the `vcd` / `fleet-lcm` layout:
   `odata_list_query` helper. The reconcile lane introspects the `_*_PATH` constants.
 - **`_auth.py`** — `vra8_login` (the two-step wire POSTs) + the CSP / IaaS step
   helpers.
-- **`connector.py`** — 6 thin bound-method shims (`project_list`, `deployment_list`,
-  …) that lazily import and delegate to their `_impl` body.
+- **`api_file.py`** — the `vcfa.vra8.api_file.get` read: the path rule
+  (`PATH_PATTERN`), the file fetch, the version read and the result checks.
+  Described in the next section.
+- **`connector.py`** — 7 thin bound-method shims (`project_list`, `deployment_list`,
+  …, `api_file_get`) that lazily import and delegate to their `_impl` body.
 
 `register_typed_operation` creates each `OperationGroup` (`review_status=
 "enabled"`) and inserts each descriptor `source_kind="typed"`, `is_enabled=True`,
@@ -221,10 +225,105 @@ server-side sort/filter over a handle is not available, and `$orderby` is
 deliberately not forwarded to the vendor either (vRA 8's casing for it is not
 uniform across services: IaaS `$orderBy` vs `$orderby`).
 
+## API description files (`vcfa.vra8.api_file.get`)
+
+`vcfa.vra8.api_file.get` (`api_file.py`, handler `api_file_get`) reads one
+documentation page or API description file that an Aria Automation 8
+appliance serves: the API landing pages, the Swagger file of one service, or
+the reference of the Orchestrator inside the appliance. No vendor download
+has the 8.18 files, so a running appliance is the only place to get them.
+With this read the lab pins them, with their size, SHA-256 and the build that
+served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
+
+| Versions | Catalog |
+|---|---|
+| Aria Automation 8.x (built for 8.18, with the Orchestrator inside it) | `vcfa-vra8-8.0` |
+
+- **Which paths it reads.** Only documentation paths:
+  - the API landing pages `/automation/api-docs` (one page for all Swagger
+    files) and `/automation-ui/api-docs` (one card per service), and every
+    path under them;
+  - `/{service}/api/swagger` and every path under it, where `{service}` is
+    one path part of small letters and hyphens (for example the Swagger file
+    of the IaaS or deployment service, with `?apiVersion=<date>` or
+    `?group=<date>`);
+  - the Orchestrator reference `/vco/api/docs` and every path under it;
+  - a Swagger or OpenAPI file at its usual place: a path with a part named
+    `api-docs`, `swagger-resources` or `swagger-config`, or a file named
+    `swagger.json`, `swagger.yaml`, `openapi.json` or `openapi.yaml`.
+
+  A path part holds only letters, digits and `. _ ~ -`; the query may hold
+  only `group` and `apiVersion`. So `..`, `//`, a backslash, a `%` (an
+  encoded dot or slash), a scheme or a host is refused. The same rule is the
+  `pattern` of the `path` parameter, so the dispatcher refuses a bad path as
+  `invalid_params`, and the handler checks it again. A refused path sends no
+  request. The vendor names the pages but not always the file a page loads;
+  if a page loads a file from a path this rule refuses, the lab files a bug
+  and a small change adds it.
+- **How it reads.** One `GET` on the pooled client with the connector's
+  login (`Authorization: Bearer`; the Orchestrator inside Aria Automation 8
+  takes the same token). The request goes through
+  `httpx.AsyncClient.send(..., follow_redirects=False)`, so a redirect is
+  not followed (the pooled client class would follow a same-origin redirect
+  by itself). A `3xx` returns `redirect_path`; a `403`, `404` or `5xx`
+  returns its `status` with no text. A `401` is raised instead, so the
+  dispatcher's session-recovery arm drops the cached bearer, logs in again
+  and retries once, like every other read of this connector.
+- **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
+  `size` (bytes), `sha256` (of the file bytes), `parts`, `text_parts`,
+  `version`, `build`, `iaas_api_version`, `version_error`. Only UTF-8 text
+  (text, JSON, XML or YAML content types) comes back; other content is
+  refused and the error names its content type.
+- **Version and build.** `version` and `build` come from the Orchestrator
+  inside the appliance, `GET /vco/api/about` (`version` and `build-number`;
+  checked against the vendor's Orchestrator API reference, not proven on
+  8.18). `iaas_api_version` is the `latestApiVersion` date label of
+  `GET /iaas/api/about`, which is not the build. Both reads are best effort:
+  if either fails (an HTTP error, a login error, or a credential store that
+  cannot serve the login), the file still comes back, the field is `null`,
+  and `version_error` says why.
+- **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
+  each at most 64 KiB of UTF-8, cut only between characters. Join the `text`
+  of all parts in `index` order and encode as UTF-8; the SHA-256 of the
+  result equals `sha256`. A part is a fixed byte size, not a line, because a
+  served file can be one long line. The text parts are the one list in the
+  answer, so JSONFlux stores a large answer as rows behind a result handle
+  (one row per part) and keeps the scalar fields (`sha256`, `size`, `parts`,
+  `build`, ...) in the inline summary. Page the handle with `result_query`
+  (`offset` / `limit`, a small `limit` such as 2, because one answer is at
+  most 256 KiB). A file that does not fit in one stored result
+  (`result_handle_max_record_bytes`, 16 MiB by default, measured as stored
+  JSON) stops with an error that names its size; the read never returns a
+  cut file.
+- **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+  every stored result (the dispatcher runs
+  `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
+  that fires on the file text would rewrite a part, and the joined parts
+  would no longer match `sha256`. So the read runs the same middleware, with
+  the same connector, tenant and operation labels, on the text parts and on
+  the whole file text before it returns (the whole-file pass catches a
+  secret that the part cut splits in two). When the text would change, the
+  read stops with an error that names the rule and the place, and returns no
+  file. Redaction itself stays on.
+- **Tests.**
+  [`test_connectors_vra8_api_file.py`](../../backend/tests/test_connectors_vra8_api_file.py)
+  (respx: accepted and refused paths with no request, the login on the
+  `GET`, status and redirect cases, large files, version failures, a file
+  that a redaction rule would change, a secret split across the part cut,
+  and the result-handle round trip);
+  [`test_connectors_vra8_typed_reads.py`](../../backend/tests/test_connectors_vra8_typed_reads.py)
+  (zero-catalog dispatch, the 401 re-login, and `invalid_params` for a data
+  path); and the reconcile lane below (`GET /vco/api/about` in the manifest,
+  the documentation paths pinned apart).
+
 ## Spec reconcile lane
 
 [`backend/tests/test_connectors_vra8_spec_reconcile.py`](../../backend/tests/test_connectors_vra8_spec_reconcile.py)
-is a **manifest pin + evidenced exclusion** (not a served-op-id compare). A
+is a **manifest pin + evidenced exclusion** (not a served-op-id compare). It
+also pins `GET /vco/api/about` (the version read of `vcfa.vra8.api_file.get`,
+checked against the vendor's Orchestrator API reference; no 8.18 API file
+exists) and, apart from the manifest, the documentation paths that read
+fetches — an API file never lists the path that serves it. A
 committable spec *does* exist (`vra-sdk-go` Swagger 2.0), but MEHO's ingest is
 OA3-only (#2090) so it is not operator-ingestable, and the CSP login endpoint is
 not in the SDK at all. The lane sweeps the connector's live `_*_PATH` constants
@@ -267,6 +366,12 @@ Full evidence + activation trigger live in the `vcfa-vra8` entry of
   standalone requests surface (vRA 8 has no list-all-requests endpoint — read via
   `deployment.get`), and any write surface are out of scope — a list-focused
   inventory core for migration discovery.
+- **The API file paths are not proven on 8.18.** The vendor names the landing
+  pages and `/vco/api/docs/`, but not the files they load; the per-service
+  Swagger paths come from VMware's `vra-sdk-go` build file for the old cloud
+  service. The lab's 8.18 file pins are the first live use of
+  `vcfa.vra8.api_file.get`. If a page loads a file from a path the rule
+  refuses, the lab files a bug with the exact path.
 - **Unfingerprinted targets resolve to modern.** Because the modern impl owns the
   `("vcfa","","")` wildcard, a `vcfa` target with no operator-asserted version
   resolves to `vcfa-rest`, not this legacy impl. A vRA 8 source must be onboarded

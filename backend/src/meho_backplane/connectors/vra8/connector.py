@@ -85,6 +85,11 @@ surface: ``vcfa.vra8.project.list`` / ``.deployment.list`` / ``.deployment.get``
 ``llm_instructions`` in :mod:`._llm_instructions`) so they dispatch on a fresh boot
 with **zero catalog ingest**. Set-shaped results are reduced to a JSONFlux handle by
 the dispatcher. A write surface is deliberately out of scope for this read core.
+
+One more read, ``vcfa.vra8.api_file.get`` (:mod:`.api_file`, group ``api-files``),
+reads one API description page or file the appliance serves, so the 8.18 files can be
+pinned with their size, SHA-256 and the build the Orchestrator reports
+(``GET /vco/api/about``).
 """
 
 from __future__ import annotations
@@ -438,6 +443,19 @@ class Vra8Connector(HttpConnector):
         from meho_backplane.connectors.vra8.typed_reads import vra8_about_impl
 
         return await vra8_about_impl(self, operator, target, params)
+
+    async def api_file_get(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.api_file.get`` shim -- read one API description page or file.
+
+        Sends one ``GET`` with the bearer to a documentation path and reads
+        the version and build. Delegates to
+        :func:`~meho_backplane.connectors.vra8.api_file.vra8_api_file_get_impl`.
+        """
+        from meho_backplane.connectors.vra8.api_file import vra8_api_file_get_impl
+
+        return await vra8_api_file_get_impl(self, operator, target, params)
 
     # ------------------------------------------------------------------
     # Dispatch-path session-recovery hooks (#2067 / #2396)

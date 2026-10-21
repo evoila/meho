@@ -105,6 +105,14 @@ _BLUEPRINTS_PATH = "/blueprint/api/blueprints"
 # contract: see everything, like vCD's admin* query types.
 _CATALOG_ITEMS_PATH = "/catalog/api/admin/items"
 
+# -- Version and build ------------------------------------------------------
+# The Orchestrator inside the appliance reports the product version and build
+# ({version, build-number, build-date, api-version}). Read by
+# ``vcfa.vra8.api_file.get`` (``.api_file``) with the connector's bearer, because
+# /iaas/api/about gives only an API date label, not the build. Checked against
+# the vendor's Orchestrator 8.x API reference; no 8.18 API file exists.
+_VCO_ABOUT_PATH = "/vco/api/about"
+
 #: The OData pagination params the list reads forward — ``$top`` / ``$skip``, which
 #: every vRA 8 list surface accepts with identical (lowercase) casing and which bound
 #: the fetch size before the dispatcher reduces the result to a JSONFlux handle.

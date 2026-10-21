@@ -395,16 +395,17 @@ dual-impl** of `product="vcfa"` (initiative
 [#3056](https://github.com/evoila/meho/issues/3056), task #3058; the
 modern `vcfa-rest` provider/tenant lane is `vcf-automation-9.0` above).
 Its lane (`backend/tests/test_connectors_vra8_spec_reconcile.py`) is a
-**manifest pin only** — it sweeps the eight hand-coded op_ids
+**manifest pin only** — it sweeps the nine hand-coded op_ids
 unconditionally so the enumeration is proven on every run, with no
 served-op-id compare. **This exclusion differs from `vcd` above: a
 committable spec _does_ exist — it just isn't ingestable.**
 
-- **Excluded (8 op_ids: `POST:/csp/gateway/am/api/login`,
+- **Excluded (9 op_ids: `POST:/csp/gateway/am/api/login`,
   `POST:/iaas/api/login`, `GET:/iaas/api/about`, `GET:/iaas/api/projects`,
   `GET:/deployment/api/deployments`,
   `GET:/deployment/api/deployments/{deployment_id}`,
-  `GET:/blueprint/api/blueprints`, `GET:/catalog/api/admin/items`).**
+  `GET:/blueprint/api/blueprints`, `GET:/catalog/api/admin/items`,
+  `GET:/vco/api/about`).**
   What was checked: (1) **the five `/iaas` + `/deployment` + `/blueprint`
   + `/catalog` read paths** are served by the Apache-2.0
   [`vmware/vra-sdk-go`](https://github.com/vmware/vra-sdk-go) swaggers
@@ -418,8 +419,15 @@ committable spec _does_ exist — it just isn't ingestable.**
   and `POST /csp/gateway/am/api/login` is the **CSP identity service**,
   which no vra-sdk-go spec covers (CSP identity is a separate vIDM
   surface). So no single artifact can serve a reconcile authority for the
-  full eight without false reds. **Residual risk, named** (the nsx
-  lesson): this task ran no live probe of a vRA 8 appliance — live
+  full nine without false reds. (3) **`GET /vco/api/about`** (the
+  version and build read of `vcfa.vra8.api_file.get`) is served by the
+  Orchestrator inside the appliance, not by any Automation service; it is
+  checked against the vendor's Orchestrator API reference (8.x on the
+  vendor's site, 9.0 on the spec shelf) — no 8.18 API file exists. The
+  documentation paths that read fetches (`/automation/api-docs`,
+  `/automation-ui/api-docs`, `/vco/api/docs`, `/{service}/api/swagger`)
+  are pinned apart, as paths no API file lists. **Residual risk, named**
+  (the nsx lesson): this task ran no live probe of a vRA 8 appliance — live
   end-to-end verification against a vRA 8.x source appliance is the
   deferred tail (the same unit-tested-first posture `vcd` / `fleet-lcm`
   shipped with).

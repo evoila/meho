@@ -289,18 +289,24 @@ registrar is queued via `register_typed_op_registrar` in the package
     `result_handle_max_record_bytes`, 16 MiB, measured as stored JSON)
     stops with an error that names its size; the read never returns a cut
     file.
-  - **No secret comes back.** The read refuses a file that holds a quoted
-    JSON password, token or Authorization field (`"password": "..."`,
-    `'token': '...'`, `"Authorization": "Basic ..."`, also with a prefix in
-    the label such as `"x-auth-token"`) or a PEM private key
-    (`-----BEGIN ... PRIVATE KEY`). These shapes are checked in
-    `typed_ops_api_file_secrets.py`, on the whole file text, because the
-    stored-result redaction below finds a labelled secret only when the
-    label sits directly before `=` or `:`. A schema entry such as
-    `"password": {"type": "string"}` or a stub such as `"token": "string"`
-    is not refused: the value must be at least 8 characters, the same
-    bound the redaction rules use. The error names the shape and where it
-    starts, never the text.
+  - **No secret comes back.** The read refuses a file that holds a
+    password, token, licence key or Authorization field with a value, or a
+    PEM private key (`-----BEGIN ... PRIVATE KEY`). A field is a quoted key
+    anywhere in the text (`"password": "..."`, `'token': '...'`,
+    `"Authorization": "Basic ..."`, `"licenseKey": "..."`, also with a
+    prefix in the key such as `"x-auth-token"`) or a bare key at the start
+    of a line (`password: ...` in YAML). The complete value counts, so a
+    short password or one made of words is found too. These shapes are
+    checked in `typed_ops_api_file_secrets.py`, on the whole file text,
+    because the stored-result redaction below finds a labelled secret only
+    when a bare label sits directly before `=` or `:`, the value is at
+    least 8 characters with no spaces, and the label is one it knows.
+    A schema entry such as `"password": {"type": "string"}`, a stub such
+    as `"token": "string"` or `"password": ""`, and a placeholder such as
+    `"licenseKey": "<licence key>"` are not refused. A bare label in
+    running text (`Use password: ...`) keeps the redaction's own bound, so
+    a sentence about passwords is not refused. The error names the shape
+    and the field and where it starts, never the value.
   - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
     every stored result. A rule that fires on the file text would rewrite a
     part, and the joined parts would no longer match `sha256`. So the read
@@ -313,7 +319,8 @@ registrar is queued via `register_typed_op_registrar` in the package
     (respx: accepted and refused paths with no request, the login header on
     both connectors, status and redirect cases, large files, version
     failures, a login failure, a file that a redaction rule would change, a
-    file with a quoted secret field or a PEM private key, a secret split
+    file with a secret field (quoted, short, of words, a licence key) or a
+    PEM private key, schema text that stays accepted, a secret split
     across the part cut in both forms, parts bounded by their JSON size,
     the result-handle round trip for a one-line file and for a file of
     control characters, and the operation-contract rules) and the

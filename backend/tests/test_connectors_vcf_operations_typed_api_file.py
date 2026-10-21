@@ -618,23 +618,51 @@ _PEM_HEADER = "-----BEGIN " + "RSA PRIVATE" + " KEY-----"
 _SECRET_SHAPED_FILES = {
     "quoted-json-password": (
         '{"openapi":"3.0.1","x-login":{"password": "made-up-pass-value-0123"}}',
-        "a quoted password or token field",
+        "a secret field named 'password'",
     ),
     "quoted-json-token": (
         '{"openapi":"3.0.1","x-session":{"token":"made-up-token-value-0123"}}',
-        "a quoted password or token field",
+        "a secret field named 'token'",
     ),
     "quoted-json-prefixed-label": (
         '{"openapi":"3.0.1","x-login":{"x-auth-token": "made-up-token-value-0123"}}',
-        "a quoted password or token field",
+        "a secret field named 'auth-token'",
     ),
     "single-quoted-yaml": (
         "openapi: 3.0.1\nx-login:\n  'password': 'made-up-pass-value-0123'\n",
-        "a quoted password or token field",
+        "a secret field named 'password'",
     ),
     "quoted-authorization": (
         '{"openapi":"3.0.1","x-headers":{"Authorization": "Basic bWFkZS11cDpwYXNz"}}',
-        "a quoted Authorization field",
+        "a secret field named 'Authorization'",
+    ),
+    "quoted-json-licence-key": (
+        '{"openapi":"3.0.1","x-licence":{"licenseKey": "MADEUP-MADEUP-MADEUP-MADEUP"}}',
+        "a secret field named 'licenseKey'",
+    ),
+    "yaml-licence-key": (
+        "openapi: 3.0.1\nx-licence:\n  licence_key: MADEUP-MADEUP-MADEUP-MADEUP\n",
+        "a secret field named 'licence_key'",
+    ),
+    "licence-key-in-running-text": (
+        '{"openapi":"3.0.1","info":{"description":"Send licenseKey: MADEUP-MADEUP-MADEUP"}}',
+        "a secret field named 'licenseKey'",
+    ),
+    "short-quoted-password": (
+        '{"openapi":"3.0.1","x-login":{"password": "made-up"}}',
+        "a secret field named 'password'",
+    ),
+    "short-yaml-password": (
+        "openapi: 3.0.1\nx-login:\n  password: made-up\n",
+        "a secret field named 'password'",
+    ),
+    "password-of-words": (
+        '{"openapi":"3.0.1","x-login":{"password": "made up pass of words"}}',
+        "a secret field named 'password'",
+    ),
+    "yaml-password-of-words": (
+        "openapi: 3.0.1\nx-login:\n  - password: made up pass of words\n",
+        "a secret field named 'password'",
     ),
     "pem-private-key": (
         "openapi: 3.0.1\nx-key: |\n  " + _PEM_HEADER + "\n  MADEUPMADEUPMADEUP\n",
@@ -664,7 +692,8 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
     assert _FILE_PATH in message
     assert shape in message
     assert "not returned" in message
-    assert "made-up-" not in message and "MADEUP" not in message and "bWFkZS" not in message
+    assert "made-up" not in message and "made up" not in message
+    assert "MADEUP" not in message and "bWFkZS" not in message
 
 
 @pytest.mark.parametrize(
@@ -673,9 +702,33 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
         '{"properties":{"password":{"type":"string","format":"password"}}}',
         '{"password": "string", "token": "string", "max_tokens": 12345678901}',
         '{"type": "apiKey", "name": "Authorization", "in": "header"}',
+        '{"securitySchemes": {"apiKey": {"type": "apiKey", "name": "Authorization"}}}',
         '{"passwordPolicy": {"minimum": "eight-or-more"}}',
+        '{"tokenUrl": "https://login.example/token", "authorizationUrl": "https://a.example/"}',
+        '{"info": {"license": {"name": "Apache 2.0", "url": "https://www.apache.org/"}}}',
+        '{"password": "<password>", "token": "${TOKEN}", "licenseKey": "{{ licence_key }}"}',
+        '{"password": "", "token": null, "secret": true}',
+        '{"description": "Use password: must be at least 8 characters"}',
+        "components:\n  schemas:\n    Login:\n      properties:\n        password:\n"
+        "          type: string\n        token: {type: string}\n        pwd: |\n          text\n",
+        "password: string\ntoken: null\nlicenseKey: <licence key>\nsecret: # set later\n",
+        _PAGE,
     ],
-    ids=["schema-property", "short-stubs", "security-scheme", "label-prefix-of-a-name"],
+    ids=[
+        "schema-property",
+        "short-stubs",
+        "security-scheme",
+        "security-scheme-name",
+        "label-prefix-of-a-name",
+        "label-prefix-of-url-names",
+        "licence-object",
+        "placeholders",
+        "empty-and-literals",
+        "sentence-about-a-password",
+        "yaml-schema",
+        "yaml-stubs-and-placeholder",
+        "swagger-page",
+    ],
 )
 def test_ordinary_api_description_text_is_not_a_secret_shape(text: str) -> None:
     assert find_secret_shape(text) is None
@@ -699,7 +752,7 @@ async def test_quoted_secret_split_across_the_part_cut_is_refused() -> None:
     await connector.aclose()
 
     message = str(excinfo.value)
-    assert "a quoted password or token field" in message
+    assert "a secret field named 'password'" in message
     assert "not returned" in message
     assert "made-up-pass-value" not in message
 

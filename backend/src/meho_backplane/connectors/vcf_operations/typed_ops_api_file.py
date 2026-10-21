@@ -29,14 +29,13 @@ The read is narrow on purpose:
   the parts in order gives the exact file; ``sha256`` is the hash of the
   file bytes. A file that does not fit in one stored result is refused
   with its size, never cut.
-* The read never returns a secret. It refuses a file that holds a quoted
-  JSON password, token or Authorization field or a PEM private key
-  (:mod:`.typed_ops_api_file_secrets`), shapes the stored-result
-  redaction does not see. It also runs the redaction rules the
+* The read never returns a secret. It runs the redaction rules the
   dispatcher will apply, on the whole file text and on each part, and
-  refuses a file whose text they would change, naming the rule. So the
-  stored parts always match ``sha256``, no secret that a part cut would
-  hide gets through, and redaction stays active.
+  refuses a file whose text they would change, naming the rule. It also
+  refuses a file with a password, token, licence key or Authorization
+  field with a value, or a PEM private key, shapes the redaction does not
+  see (:mod:`.typed_ops_api_file_secrets`). So the stored parts always
+  match ``sha256`` and no secret a part cut would hide gets through.
 
 The appliance version and build come from
 ``GET /suite-api/api/versions/current`` (``releaseName``, ``buildNumber``),
@@ -358,7 +357,7 @@ def _check_no_secret_shape(answer: dict[str, Any]) -> None:
     """Refuse a file that holds a secret the stored-result redaction would not see.
 
     The whole file text is checked, so a secret that a part cut splits in
-    two is found as well. The error names the shape, never the text.
+    two is found as well. The error names the shape and field, never the value.
     """
     found = find_secret_shape("".join(part["text"] for part in answer["text_parts"]))
     if found is not None:
@@ -418,8 +417,8 @@ async def api_file_get_impl(
     1. Check the path (no request goes out for a refused path).
     2. ``GET`` the file with the target's login, without following a redirect.
     3. Read the appliance version and build (best effort).
-    4. Refuse a file that does not fit in one stored result, that holds a
-       secret shape, or whose text the stored-result redaction would change.
+    4. Refuse a file that does not fit in one stored result, whose text the
+       stored-result redaction would change, or that holds a secret shape.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -444,8 +443,8 @@ async def api_file_get_impl(
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         _check_fits(answer, max_record_bytes, settings.result_handle_max_spill_rows)
-        _check_no_secret_shape(answer)
         _check_redaction_keeps_text(answer, connector, operator)
+        _check_no_secret_shape(answer)
 
     _log.info(
         "vrops_api_file_read",

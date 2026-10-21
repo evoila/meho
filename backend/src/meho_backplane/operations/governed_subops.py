@@ -142,14 +142,21 @@ def classify_subop_grantability(op_id: str) -> SubopGrantability:
     identically to how it would be refused at grant-create time. Op-id only
     here (no descriptor lookup): a configured pattern or a vendor delete
     action name such as ``POST:/VirtualMachine/{moId}/Destroy_Task`` (#4632).
-    The caller layers a best-effort descriptor ``safety_level`` on top.
+    The caller layers a best-effort descriptor ``safety_level`` on top. On
+    an instance in sandbox mode (#4622) a delete-shaped child is grantable
+    (with a delete grant, made in the web console), so it is not flagged.
     """
     from meho_backplane.operations.service_grants import delete_shaped_refusal_reason
+    from meho_backplane.sandbox_mode import sandbox_mode_active
     from meho_backplane.settings import get_settings
 
     reason = delete_shaped_refusal_reason(
         op_id, get_settings().service_grant_delete_shaped_patterns
     )
+    if reason is not None and sandbox_mode_active():
+        # #4622: on a sandbox instance a delete step takes a delete grant,
+        # made in the web console. The step is grantable there.
+        return SubopGrantability(op_id=op_id, grantable=True, ungrantable_reason=None)
     return SubopGrantability(op_id=op_id, grantable=reason is None, ungrantable_reason=reason)
 
 

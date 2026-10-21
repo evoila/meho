@@ -204,6 +204,7 @@ from meho_backplane.request_usage.retention import (
     stop_request_usage_retention_sweeper,
 )
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
@@ -406,6 +407,13 @@ async def _run_lifespan_startup() -> None:
     # Eager engine construction (G2.3-T2 #258); validates ``DATABASE_URL``
     # at startup so first-request latency doesn't absorb the pool build.
     get_engine()
+    # Sandbox mode (#4622): check the two settings against the host name,
+    # then store or check the mode in the database, before MEHO serves a
+    # request or starts a background task. A wrong setting or a stored
+    # mode that differs from the setting refuses the start with a plain
+    # message. The first database step of the boot, so a mismatch is
+    # found before any other work writes to the database.
+    await assert_sandbox_mode_consistent(get_settings())
     # Eager broadcast client construction (G6.1-T1 #307); URL parse
     # failures surface here, not on first /ready.
     get_broadcast_client()

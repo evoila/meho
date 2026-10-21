@@ -74,6 +74,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from meho_backplane.connectors.vcf_operations._response_schemas import (
+    VROPS_ALERT_LIST_RESPONSE,
+    VROPS_LIVENESS_RESPONSE,
+    VROPS_RESOURCE_QUERY_RESPONSE,
+    VROPS_RESOURCE_STATS_RESPONSE,
+)
+
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -118,6 +125,38 @@ VROPS_RESOURCE_QUERY_BODY_FIELDS: tuple[str, ...] = (
     "parentId",
     "statKey",
 )
+
+
+#: The complete value lists of the ``resourceState`` / ``resourceStatus`` /
+#: ``resourceHealth`` query fields, from the ``resource-state``,
+#: ``resource-data-collection-status`` and ``resource-health`` enums of the
+#: pinned VCF Operations 9.0 Suite API file.
+_RESOURCE_STATES: tuple[str, ...] = (
+    "STOPPED",
+    "STARTING",
+    "STARTED",
+    "STOPPING",
+    "UPDATING",
+    "FAILED",
+    "MAINTAINED",
+    "MAINTAINED_MANUAL",
+    "REMOVING",
+    "NOT_EXISTING",
+    "NONE",
+    "UNKNOWN",
+)
+_RESOURCE_STATUSES: tuple[str, ...] = (
+    "NONE",
+    "ERROR",
+    "UNKNOWN",
+    "DOWN",
+    "DATA_RECEIVING",
+    "OLD_DATA_RECEIVING",
+    "NO_DATA_RECEIVING",
+    "NO_PARENT_MONITORING",
+    "COLLECTOR_DOWN",
+)
+_RESOURCE_HEALTHS: tuple[str, ...] = ("GREEN", "YELLOW", "ORANGE", "RED", "GREY")
 
 
 @dataclass(frozen=True)
@@ -201,46 +240,36 @@ VROPS_LIVENESS_OP = VropsTypedOp(
     handler_attr="liveness",
     summary="vROps appliance liveness and identity (release name + build number).",
     description=(
-        "Reads GET /suite-api/api/versions/current directly on the "
-        "connector's OpsToken session — the same "
-        "surface the connector's reachability probe uses — so it works with "
-        "zero catalog ingest. Returns the appliance's releaseName and "
-        "buildNumber (and humanlyReadableReleaseName when the build emits "
-        "it). The cheap pre-flight liveness/identity probe before any "
-        "heavier vROps read. vROps exposes no public dedicated health "
-        "endpoint distinct from the version surface (the CaSA API is "
-        "private/undocumented), so this documented endpoint is the "
-        "liveness check. safety_level=safe, read-only."
+        "Reads GET /suite-api/api/versions/current, the same call the connector's "
+        "reachability check uses. Returns releaseName and buildNumber. vROps has no "
+        "public health call apart from this one, so this is the liveness check. "
+        "Read-only."
     ),
     parameter_schema={
         "type": "object",
         "properties": {},
         "additionalProperties": False,
+        "examples": [{}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "releaseName": {"type": ["string", "null"]},
-            "buildNumber": {"type": ["integer", "string", "null"]},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=VROPS_LIVENESS_RESPONSE,
     group_key=_LIVENESS_GROUP_KEY,
     tags=("read-only", "vrops", "vmware", "liveness", "probe"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call first to confirm a vROps appliance is reachable and to "
-            "read which version/build it runs, before any alert or resource "
-            "query. Supersedes the older vrops.about op."
+        "when_to_call": (
+            "Call first to check that a vROps appliance answers and to read which "
+            "version and build it runs, before any alert or resource query."
         ),
         "parameter_hints": {},
         "output_shape": (
-            "{releaseName: '9.0.0.1.23456789', buildNumber: 23456789, "
-            "humanlyReadableReleaseName?: '...'}. A returned payload means "
-            "the appliance answered; the dispatcher surfaces transport "
-            "failures as a connector_error instead."
+            "{releaseName, buildNumber, major, minor, minorMinor, releasedDate, "
+            "humanlyReadableReleaseDate, description?}. A returned payload means the "
+            "appliance answered; a transport failure comes back as a connector_error."
+        ),
+        "next_step": (
+            "If it answers, go on with vrops.alert.list or vrops.resource.query. If "
+            "not, check the target's address and credentials."
         ),
     },
 )
@@ -251,17 +280,10 @@ VROPS_ALERT_LIST_OP = VropsTypedOp(
     handler_attr="alert_list",
     summary="List vROps alerts (currently firing or recently resolved) for triage.",
     description=(
-        "Reads GET /suite-api/api/alerts directly on the connector session "
-        "(no catalog ingest). Optional filters: activeOnly (bool, default "
-        "false — server-side false lists resolved alerts too), "
-        "alertCriticality (CRITICAL / IMMEDIATE / WARNING / INFORMATION / "
-        "UNKNOWN), alertStatus (ACTIVE / CANCELED / SUSPENDED / UPDATED), "
-        "resourceId (one or more resource UUIDs to scope to), and page / "
-        "pageSize pagination. Each alert carries alertId, "
-        "alertDefinitionId, alertDefinitionName, alertLevel, alertImpact, "
-        "resourceId, startTimeUTC, cancelTimeUTC, status and controlState. "
-        "Large alert sets are reduced to a JSONFlux handle with a bounded "
-        "inline sample. safety_level=safe, read-only."
+        "Reads GET /suite-api/api/alerts. Optional filters: activeOnly, "
+        "alertCriticality, alertStatus and resourceId (resource UUIDs), plus page "
+        "and pageSize. Each alert has alertId, alertDefinitionName, alertLevel, "
+        "resourceId, status and the start and cancel times. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -303,21 +325,15 @@ VROPS_ALERT_LIST_OP = VropsTypedOp(
             },
         },
         "additionalProperties": False,
+        "examples": [{"resourceId": ["<resource-uuid>"], "pageSize": 100}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "alerts": {"type": "array"},
-            "pageInfo": {"type": "object"},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=VROPS_ALERT_LIST_RESPONSE,
     group_key=_ALERT_TRIAGE_GROUP_KEY,
     tags=("read-only", "vrops", "vmware", "alerts"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call when the operator asks what is alerting in vROps, wants "
             "the critical/active alerts, or wants alerts firing on a "
             "specific resource. Filter with activeOnly / alertCriticality / "
@@ -332,8 +348,14 @@ VROPS_ALERT_LIST_OP = VropsTypedOp(
             "{alerts: [{alertId, alertDefinitionId, alertDefinitionName, "
             "alertLevel, alertImpact, resourceId, startTimeUTC, "
             "cancelTimeUTC, status, controlState}, ...], pageInfo, links}. "
-            "Cross-reference resourceId with vrops.resource.query for "
-            "affected-object detail. Large sets return a JSONFlux handle."
+            "Large sets come back as a result handle. The 9.0 vendor API file lists "
+            "only id, resourceId, page and pageSize as filters on this call, so "
+            "check alertLevel and status on each row."
+        ),
+        "next_step": (
+            "Look up the affected objects with vrops.resource.query(resourceId=...). "
+            "Read the metric values behind an alert with vrops.resource.stats. Read "
+            "more rows with result_query on the handle."
         ),
     },
 )
@@ -344,19 +366,10 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
     handler_attr="resource_query",
     summary="Look up vROps-monitored resources by a structured query (body POST).",
     description=(
-        "Issues POST /suite-api/api/resources/query with a typed "
-        "ResourceQuerySpec request body directly on the connector session "
-        "(no catalog ingest). Match resources by any combination of: "
-        "resourceId (UUIDs), name, regex, adapterKind (e.g. 'VMWARE'), "
-        "resourceKind (e.g. 'VirtualMachine', 'HostSystem', 'Datastore'), "
-        "resourceState, resourceStatus, resourceHealth, parentId, and "
-        "statKey; page / pageSize paginate. The POST query surface is the "
-        "richer counterpart of the GET /suite-api/api/resources list (each "
-        "array field is OR-matched within, AND-matched across fields). "
-        "Returns resourceList[] with identifier (UUID), resourceKey (name "
-        "+ resourceKindKey + adapterKindKey + resourceIdentifiers[]), "
-        "resourceStatusStates[], plus pageInfo. Large sets are reduced to "
-        "a JSONFlux handle. safety_level=safe, read-only."
+        "Sends POST /suite-api/api/resources/query with a ResourceQuerySpec body. "
+        "Match by resourceId, name or regex, adapterKind, resourceKind, "
+        "resourceState, resourceStatus, resourceHealth, parentId or statKey. Values "
+        "in one field are OR-ed; fields are AND-ed. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -369,12 +382,21 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
             "name": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
-                "description": "Match resources whose name equals any listed value.",
+                "maxItems": 1,
+                "description": (
+                    "Match resources whose name equals the listed value. The vendor "
+                    "supports one name only. MEHO rejects a call that sends name "
+                    "together with regex."
+                ),
             },
             "regex": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
-                "description": "Match resource names against any listed regex.",
+                "description": (
+                    "Match resource names against any listed Java regex. vROps "
+                    "would ignore regex when name is also sent, so MEHO rejects "
+                    "a call that sends both."
+                ),
             },
             "adapterKind": {
                 "type": "array",
@@ -390,17 +412,17 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
             },
             "resourceState": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1},
+                "items": {"type": "string", "enum": list(_RESOURCE_STATES)},
                 "description": "Match by resource state (e.g. 'STARTED', 'STOPPED').",
             },
             "resourceStatus": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1},
+                "items": {"type": "string", "enum": list(_RESOURCE_STATUSES)},
                 "description": "Match by resource status (e.g. 'DATA_RECEIVING').",
             },
             "resourceHealth": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1},
+                "items": {"type": "string", "enum": list(_RESOURCE_HEALTHS)},
                 "description": "Match by health (e.g. 'GREEN', 'YELLOW', 'RED').",
             },
             "parentId": {
@@ -425,21 +447,24 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
             },
         },
         "additionalProperties": False,
+        # The vendor uses name and ignores regex when both are sent. Reject
+        # the pair so no requested filter is dropped without notice.
+        "not": {"required": ["name", "regex"]},
+        "examples": [
+            {
+                "adapterKind": ["VMWARE"],
+                "resourceKind": ["VirtualMachine"],
+                "regex": ["<vm-name>.*"],
+            }
+        ],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "resourceList": {"type": "array"},
-            "pageInfo": {"type": "object"},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=VROPS_RESOURCE_QUERY_RESPONSE,
     group_key=_RESOURCE_QUERY_GROUP_KEY,
     tags=("read-only", "vrops", "vmware", "resources", "query"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call to find vROps-monitored resources matching a structured "
             "query — by name/regex, adapterKind, resourceKind, state, "
             "status, health, or parent. Prefer this over browsing the "
@@ -448,16 +473,21 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
         ),
         "parameter_hints": {
             "resourceKind": "e.g. 'VirtualMachine' / 'HostSystem' / 'Datastore'.",
-            "name": "Exact-name matches (list); use regex for patterns.",
+            "name": (
+                "One exact name, as a list of one. Use regex for patterns. A call "
+                "with both name and regex is rejected."
+            ),
             "adapterKind": "e.g. 'VMWARE'.",
         },
         "output_shape": (
             "{resourceList: [{identifier, resourceKey: {name, "
             "resourceKindKey, adapterKindKey, resourceIdentifiers}, "
-            "resourceStatusStates, creationTime}, ...], pageInfo, links}. "
-            "Feed identifier UUIDs into vrops.alert.list(resourceId=...) to "
-            "find alerts on a matched resource. Large sets return a "
-            "JSONFlux handle."
+            "resourceStatusStates, resourceHealth, creationTime}, ...], pageInfo, "
+            "links}. Large sets come back as a result handle."
+        ),
+        "next_step": (
+            "Pass the identifier UUIDs to vrops.alert.list(resourceId=...) for the "
+            "alerts on a resource, or to vrops.resource.stats for its metric values."
         ),
     },
 )
@@ -468,22 +498,10 @@ VROPS_RESOURCE_STATS_OP = VropsTypedOp(
     handler_attr="resource_stats",
     summary="Read the latest vROps stat/metric values for named resources (sizing input).",
     description=(
-        "Reads GET /suite-api/api/resources/stats/latest directly on the "
-        "connector's OpsToken session (no catalog ingest) to return the "
-        "latest metric *values* vROps computed for one or more resources — "
-        "the sizing / resource-pressure answer vROps exists to give (current "
-        "CPU demand, memory workload, capacity-remaining). resourceId is a "
-        "required list of resource UUIDs (typically from a prior "
-        "vrops.resource.query); an unbounded all-resource stats read is "
-        "refused at the schema layer. Optional statKey restricts to specific "
-        "stat keys (e.g. 'cpu|demandmhz', 'mem|workload'); omit to return "
-        "every stat the named resources report. Optional currentOnly reports "
-        "only current values. resourceId and statKey serialise to repeated "
-        "query params. Unlike vrops.resource.query (which filters resources "
-        "by whether they report a statKey but never returns the value), this "
-        "op returns the value. Large stat sets are reduced to a JSONFlux "
-        "handle, the same posture vrops.alert.list / vrops.resource.query "
-        "take. safety_level=safe, read-only."
+        "Reads GET /suite-api/api/resources/stats/latest: the latest metric values "
+        "vROps computed for one or more resources, such as CPU demand, memory "
+        "workload or capacity remaining. resourceId (resource UUIDs) is required. "
+        "statKey limits the stats; currentOnly skips stale ones. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -514,20 +532,15 @@ VROPS_RESOURCE_STATS_OP = VropsTypedOp(
         },
         "required": ["resourceId"],
         "additionalProperties": False,
+        "examples": [{"resourceId": ["<resource-uuid>"], "statKey": ["cpu|demandmhz"]}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "values": {"type": "array"},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=VROPS_RESOURCE_STATS_RESPONSE,
     group_key=_RESOURCE_STATS_GROUP_KEY,
     tags=("read-only", "vrops", "vmware", "stats", "metrics"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call when the operator is sizing a cluster / VM or diagnosing "
             "resource pressure and needs vROps's own computed metric values "
             "— current CPU demand, memory workload, capacity-remaining — for "
@@ -541,14 +554,14 @@ VROPS_RESOURCE_STATS_OP = VropsTypedOp(
             "currentOnly": "true to report only current values.",
         },
         "output_shape": (
-            "{values: [{resourceId, stats: {stat: [{statKey: {key}, data: "
-            "[number], timestamps: [epoch_ms], ...}, ...]}}, ...]}. Each stat "
-            "entry carries the metric's latest data point(s) and timestamp(s) "
-            "for one statKey on one resource. Large sets return a JSONFlux "
-            "handle — page it with result_query(handle_id, offset, limit). Field "
-            "names follow the VCF Operations 9.0 Suite API stats-of-resources "
-            "shape; confirm against a live target if exact-shape parsing is "
-            "ever needed (the handler passes the payload through unparsed)."
+            "{values: [{resourceId, stat-list: {stat: [{statKey: {key}, timestamps: "
+            "[epoch_ms], data: [number], ...}]}}]}. One stat row per statKey per "
+            "resource, with its latest sample(s). Large sets come back as a result "
+            "handle."
+        ),
+        "next_step": (
+            "Report the values next to their statKey and resource. Page a large set "
+            "with result_query(handle_id, offset, limit)."
         ),
     },
 )

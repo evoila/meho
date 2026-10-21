@@ -83,6 +83,7 @@ from meho_backplane.connectors._shared.pwsh import (
     ps_single_quote,
     pwsh_run,
 )
+from meho_backplane.connectors.holodeck._response_schemas import HOLODECK_RESPONSE_SCHEMAS
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
@@ -816,54 +817,38 @@ HOLODECK_DEPLOY_CREDENTIAL_OPS: frozenset[str] = frozenset({"holodeck.router.pat
 
 
 # ---------------------------------------------------------------------------
-# Curated when_to_use blurbs (one per deploy op group)
+# Group texts (one per deploy op group)
 # ---------------------------------------------------------------------------
 
 _WHEN_TO_USE_DEPLOY_CONFIG = (
-    "Use to lay down a Holodeck deploy configuration before launching an "
-    "instance: ``holodeck.config.apply`` runs ``New-HoloDeckConfig`` (never "
-    "-Default) + ``Import-HoloDeckConfig`` on the HoloRouter, capturing the "
-    "VCF version, variant, external IP, master CIDR/VLAN, placement, and (for "
-    "9.x only) the offline-depot connection. Approval-gated. Depot params are "
-    "refused for a VCF 5.2.x deploy (5.2 uses Cloud Builder, no offline "
-    "depot). The vCenter deploy-target credentials are read on the appliance "
-    "from its staged environment -- they are never a parameter. Pair with "
-    "``holodeck.instance.start`` to launch. " + SSH_TRANSPORT_NOTE
+    "Step 1 of a new Holodeck deploy: holodeck.config.apply creates and loads a "
+    "deploy config on the HoloRouter (New-HoloDeckConfig + Import-HoloDeckConfig). "
+    "A person must approve each call. Then start the deploy with "
+    "holodeck.instance.start."
 )
 
 _WHEN_TO_USE_DEPLOY_LIFECYCLE = (
-    "Use to launch a nested-VCF deploy from a config already applied by "
-    "``holodeck.config.apply``: ``holodeck.instance.start`` runs a single-shot "
-    "fail-fast ``Connect-VIServer`` precheck (so a stale/locked deploy-target "
-    "credential can't storm-lock the SSO account via Holodeck's retry loop), "
-    "then launches ``New-HoloDeckInstance`` detached (survives the call "
-    "returning) and returns the instance id + start marker immediately. "
-    "Approval-gated. Poll progress with ``holodeck.instance.status``. " + SSH_TRANSPORT_NOTE
+    "Step 2 of a new Holodeck deploy: holodeck.instance.start checks the vCenter "
+    "login once, then starts New-HoloDeckInstance in the background. A person "
+    "must approve each call. Follow it with holodeck.instance.status."
 )
 
 _WHEN_TO_USE_DEPLOY_STATUS = (
-    "Use to read a Holodeck deploy's progress: ``holodeck.instance.status`` "
-    "maps ``Get-HoloDeckInstance`` into a flat envelope (status "
-    "running|completed|failed, current step, timestamps). Safe / no approval, "
-    "so it doubles as a runbook OperationCallVerify target and a "
-    "deploy-in-progress Sensor op. It treats the benign VCF 5.2.x terminal "
-    "quirk (final Sync-HolodeckComponents 'No route to host', VCF Ops absent "
-    "in 5.2) as a structured note, not a failure. " + SSH_TRANSPORT_NOTE
+    "Progress of a Holodeck deploy: holodeck.instance.status reads "
+    "Get-HoloDeckInstance into a flat status (running, completed, failed, "
+    "unknown) with the current step. Read-only, so it fits a runbook check or a "
+    "sensor."
 )
 
 _WHEN_TO_USE_DEPLOY_PATCH = (
-    "Use to bring a HoloRouter's three mandatory per-appliance patches into "
-    "the applied state before a fresh deploy: ``holodeck.router.patch`` "
-    "verify-then-applies C1 (bundle-count -eq 7 -> -ge 7), C2 "
-    "(BroadcomBuildToken SecureString) and C3 (Auth.psm1 PSCredential), "
-    "reporting per-patch state (already_applied|applied|not_applicable). It is "
-    "idempotent -- a second run reports all already_applied -- and runs "
-    "verify-only on a 9.1 HoloRouter (patches fixed upstream). Approval-gated; "
-    "no token or credential value ever appears in the result. " + SSH_TRANSPORT_NOTE
+    "Preparing a HoloRouter before its first deploy: holodeck.router.patch "
+    "checks the three known module fixes (C1, C2, C3) and applies the missing "
+    "ones. Safe to run twice. On a 9.1 appliance it only checks. A person must "
+    "approve each call."
 )
 
-#: Curated ``when_to_use`` per deploy op group. Keys carry a ``deploy-``
-#: prefix so they never collide with the read/write group keys the connector's
+#: Group text per deploy op group. Keys carry a ``deploy-`` prefix so they
+#: never collide with the read/write group keys the connector's
 #: ``register_operations`` walk merges alongside them.
 HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP: dict[str, str] = {
     "deploy-config": _WHEN_TO_USE_DEPLOY_CONFIG,
@@ -877,79 +862,113 @@ HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP: dict[str, str] = {
 # Op metadata
 # ---------------------------------------------------------------------------
 
+_VERSION_TEXT = (
+    "VCF version to deploy. 5.2.x deploys with Cloud Builder and has no offline "
+    "depot; 9.x deploys with the VCF Installer."
+)
+_VARIANT_TEXT = (
+    "Deploy profile: management_only (management domain only), vvf or full "
+    "(management and workload domain)."
+)
+
 _CONFIG_APPLY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "version": {
             "type": "string",
             "enum": list(_DEPLOY_VERSION_ENUM),
-            "description": (
-                "VCF version to deploy. 5.2.x uses Cloud Builder (no depot); "
-                "9.x uses VCF Installer + offline depot."
-            ),
+            "description": _VERSION_TEXT + " Used in the default description.",
         },
         "variant": {
             "type": "string",
             "enum": ["management_only", "vvf", "full"],
-            "description": (
-                "Deploy profile: management_only (mgmt domain only), vvf, or "
-                "full (mgmt + workload)."
-            ),
+            "description": _VARIANT_TEXT + " Used in the default description.",
         },
         "external_ip": {
             "type": "string",
-            "description": "Deploy-target vCenter host/IP (New-HoloDeckConfig -TargetHost).",
+            "description": (
+                "Host name or IP of the target vCenter or ESX host, sent as "
+                "New-HoloDeckConfig -TargetHost. Leave it out to use $env:VC_HOST "
+                "on the appliance."
+            ),
         },
         "master_cidr": {
             "type": "string",
-            "description": "Master management CIDR for the nested lab network.",
+            "description": (
+                "Network range for the lab. Echoed back only; not sent to the appliance."
+            ),
         },
         "vlan_range": {
             "type": "string",
-            "description": "VLAN range for the nested lab fabric (e.g. 3000-3010).",
+            "description": (
+                "VLAN range for the lab, for example 3000-3010. Echoed back only; "
+                "not sent to the appliance."
+            ),
         },
         "placement": {
             "type": "object",
             "properties": {
-                "host": {"type": "string"},
-                "cluster": {"type": "string"},
-                "datastore": {"type": "string"},
+                "host": {"type": "string", "description": "Target ESX host name."},
+                "cluster": {"type": "string", "description": "Target vSphere cluster name."},
+                "datastore": {"type": "string", "description": "Target datastore name."},
             },
             "additionalProperties": False,
-            "description": "vSphere placement refs for the HoloRouter + nested ESXi.",
+            "description": (
+                "Where the nested lab goes in vSphere. Echoed back only; not sent to the appliance."
+            ),
         },
         "depot": {
             "type": "object",
             "properties": {
-                "host": {"type": "string", "minLength": 1},
-                "port": {"type": "integer", "minimum": 1, "maximum": 65535},
-                "protocol": {"type": "string", "enum": ["http", "https"]},
-                "username": {"type": "string"},
+                "host": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Host name of the offline depot.",
+                },
+                "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "TCP port of the offline depot.",
+                },
+                "protocol": {
+                    "type": "string",
+                    "enum": ["http", "https"],
+                    "description": "Protocol of the offline depot: http or https.",
+                },
+                "username": {
+                    "type": "string",
+                    "description": "User name for the offline depot.",
+                },
                 "credential_ref": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Vault path (NOT a plaintext password) for the offline-depot credential."
+                        "Vault path of the depot password (never the password itself)."
                     ),
                 },
             },
             "required": ["host"],
             "additionalProperties": False,
             "description": (
-                "Offline-depot connection (9.x only). Rejected for a 5.2.x "
-                "version. Credentials are referenced by Vault path, never inline."
+                "Offline depot (9.x only; refused for 5.2.x). Echoed back without "
+                "credential_ref; not sent to the appliance."
             ),
         },
         "instance_id": {
             "type": "string",
             "pattern": r"^[A-Za-z0-9]{1,8}$",
             "description": (
-                "Optional 8-char alphanumeric instance id to embed in the config description."
+                "Instance id, 1 to 8 letters or digits. Echoed back only; pass it "
+                "to holodeck.instance.start."
             ),
         },
         "description": {
             "type": "string",
-            "description": "Human description persisted onto the Holodeck config.",
+            "description": (
+                "Text saved on the config (New-HoloDeckConfig -Description). "
+                "Default: 'MEHO holodeck deploy (<version> <variant>)'."
+            ),
         },
     },
     "required": ["version", "variant"],
@@ -964,6 +983,14 @@ _CONFIG_APPLY_SCHEMA: dict[str, Any] = {
             "then": {"not": {"required": ["depot"]}},
         }
     ],
+    "examples": [
+        {
+            "version": "9.0.2.0",
+            "variant": "management_only",
+            "external_ip": "vcenter.example.com",
+            "description": "<config-description>",
+        }
+    ],
 }
 
 _INSTANCE_START_SCHEMA: dict[str, Any] = {
@@ -972,25 +999,58 @@ _INSTANCE_START_SCHEMA: dict[str, Any] = {
         "config_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The New-HoloDeckConfig configID from holodeck.config.apply.",
+            "description": "The config_id that holodeck.config.apply returned.",
         },
         "instance_id": {
             "type": "string",
             "pattern": r"^[A-Za-z0-9]{1,8}$",
-            "description": "8-char alphanumeric InstanceID for New-HoloDeckInstance.",
+            "description": (
+                "Instance id, 1 to 8 letters or digits (New-HoloDeckInstance "
+                "-InstanceID). It starts the name of every nested VM."
+            ),
         },
-        "version": {"type": "string", "enum": list(_DEPLOY_VERSION_ENUM)},
-        "variant": {"type": "string", "enum": ["management_only", "vvf", "full"]},
-        "site": {"type": "string", "enum": ["a", "b"], "description": "Holodeck site (default a)."},
+        "version": {
+            "type": "string",
+            "enum": list(_DEPLOY_VERSION_ENUM),
+            "description": _VERSION_TEXT + " Sent as -Version.",
+        },
+        "variant": {
+            "type": "string",
+            "enum": ["management_only", "vvf", "full"],
+            "description": (
+                _VARIANT_TEXT + " Default management_only. MEHO sends -ManagementOnly "
+                "only for management_only; for vvf and full it sends no profile flag."
+            ),
+        },
+        "site": {
+            "type": "string",
+            "enum": ["a", "b"],
+            "description": "Holodeck site, a or b (default a).",
+        },
         "vsan_mode": {
             "type": "string",
             "enum": ["OSA", "ESA"],
-            "description": "Nested vSAN mode (default OSA).",
+            "description": "Nested vSAN mode, OSA or ESA (default OSA).",
         },
-        "depot_type": {"type": "string", "enum": ["Offline", "Online", "CloudBuilder"]},
+        "depot_type": {
+            "type": "string",
+            "enum": ["Offline", "Online", "CloudBuilder"],
+            "description": (
+                "Depot type, sent as -DepotType for 9.x only (default Offline). "
+                "The vendor documents Online and Offline."
+            ),
+        },
     },
     "required": ["config_id", "instance_id", "version"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "config_id": "<config-id>",
+            "instance_id": "lab01",
+            "version": "9.0.2.0",
+            "variant": "management_only",
+        }
+    ],
 }
 
 _INSTANCE_STATUS_SCHEMA: dict[str, Any] = {
@@ -999,178 +1059,206 @@ _INSTANCE_STATUS_SCHEMA: dict[str, Any] = {
         "instance_id": {
             "type": "string",
             "description": (
-                "Optional InstanceID to scope Get-HoloDeckInstance to a single instance."
+                "Optional instance id. Leave it out to read the instance of the appliance."
             ),
         },
     },
     "additionalProperties": False,
+    "examples": [{"instance_id": "<instance-id>"}],
 }
 
 _ROUTER_PATCH_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
     "additionalProperties": False,
+    "examples": [{}],
 }
-
-_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "status": {"type": "string", "enum": ["running", "completed", "failed", "unknown"]},
-        "current_step": {"type": ["string", "null"]},
-        "started_at": {"type": ["string", "null"]},
-        "updated_at": {"type": ["string", "null"]},
-        "instance_id": {"type": ["string", "null"]},
-        "notes": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["status", "notes"],
-    "additionalProperties": True,
-}
-
-_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {"type": "object", "additionalProperties": True}
 
 
 DEPLOY_OPS: tuple[HolodeckOp, ...] = (
     HolodeckOp(
         op_id="holodeck.config.apply",
         handler_attr="config_apply",
-        summary=(
-            "Apply a Holodeck deploy config (New-HoloDeckConfig, never -Default) "
-            "+ import it (approval-gated)."
-        ),
+        summary="Create and load a Holodeck deploy config on the HoloRouter.",
         description=(
-            "Runs New-HoloDeckConfig (WITHOUT -Default -- the flag triggers a "
-            "buggy internal Set-HoloDeckConfig) + Import-HoloDeckConfig on the "
-            "HoloRouter to lay down a deploy configuration: VCF version, variant, "
-            "external IP, master CIDR/VLAN, placement, and (9.x only) the offline "
-            "depot connection. Depot params are REFUSED for a VCF 5.2.x version "
-            "(5.2 uses Cloud Builder, no offline depot) -- the schema rejects the "
-            "combination before the approval park. The vCenter deploy-target "
-            "credentials are read on the appliance from its staged environment "
-            "($env:VC_USER/$env:VC_PW); they are never a parameter and never "
-            "appear in the result. safety_level=dangerous, requires_approval=True."
+            "Runs New-HoloDeckConfig (never with -Default) and "
+            "Import-HoloDeckConfig on the HoloRouter. The vCenter login comes "
+            "from the appliance environment, never from a parameter. Depot "
+            "settings are refused for VCF 5.2.x. A person must approve each call."
         ),
         parameter_schema=_CONFIG_APPLY_SCHEMA,
-        response_schema=_WRITE_RESPONSE_SCHEMA,
+        response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.config.apply"],
         group_key="deploy-config",
         tags=("write", "deploy", "config", "holodeck"),
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
-            "when_to_use": _WHEN_TO_USE_DEPLOY_CONFIG,
+            "when_to_call": (
+                "Call as the first step of a new Holodeck deploy, to create the "
+                "deploy config on the HoloRouter. MEHO sends only the "
+                "description and the target host (external_ip) to "
+                "New-HoloDeckConfig. master_cidr, vlan_range, placement, depot "
+                "and instance_id are checked and echoed back, but not sent to "
+                "the appliance. MEHO never uses -Default, because that flag "
+                "starts a faulty internal step. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. The appliance must have the "
+                "vCenter login in $env:VC_USER and $env:VC_PW (and $env:VC_HOST "
+                "when you leave out external_ip). On an appliance older than 9.1, "
+                "run holodeck.router.patch first. Do not send depot for 5.2.x."
+            ),
             "parameter_hints": {
-                "version": "5.2.x -> Cloud Builder (omit depot); 9.x -> VCF Installer + depot.",
-                "depot": "9.x only; credential_ref is a Vault path, never a plaintext password.",
+                "version": "5.2.x: Cloud Builder, leave out depot. 9.x: VCF Installer.",
+                "depot": "9.x only; credential_ref is a Vault path, never a password.",
+                "external_ip": "Target vCenter or ESX host. Leave it out to use $env:VC_HOST.",
             },
             "output_shape": (
-                "{applied, config_id, deploy: {version, variant, ...non-secret echo}}. "
-                "applied is true ONLY with a non-null config_id verified on disk; "
-                "a bound violation or an unwritten config returns {applied: false, "
-                "config_id, error}."
+                "{applied, config_id, deploy}. 'applied' is true only when the "
+                "cmdlet returned a config id and the config file exists on the "
+                "appliance. 'deploy' echoes the non-secret parameters. On failure: "
+                "{applied: false, config_id, error}."
+            ),
+            "next_step": (
+                "Call holodeck.instance.start with the returned config_id, an "
+                "instance_id and the same version."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.instance.start",
         handler_attr="instance_start",
-        summary=(
-            "Launch New-HoloDeckInstance detached after a fail-fast "
-            "Connect-VIServer precheck (approval-gated)."
-        ),
+        summary="Start a Holodeck deploy in the background, after one vCenter login check.",
         description=(
-            "Launches a nested-VCF deploy from a config already applied by "
-            "holodeck.config.apply. FIRST runs a single-shot fail-fast "
-            "Connect-VIServer precheck (reads the persisted config on the "
-            "appliance, one attempt, ErrorAction Stop) so a stale/locked "
-            "deploy-target credential can't storm-lock the SSO account via "
-            "Holodeck's 4-retry-in-13s loop; on any precheck failure the "
-            "instance is NEVER launched. On a green precheck, New-HoloDeckInstance "
-            "runs under tmux new-session -d (survives the call returning) and the "
-            "op returns immediately with the instance id + start marker. Poll with "
-            "holodeck.instance.status. safety_level=dangerous, requires_approval=True."
+            "Checks the vCenter login of the config once, then starts "
+            "New-HoloDeckInstance in a tmux session on the HoloRouter and returns "
+            "at once. If the login check fails, nothing starts. A person must "
+            "approve each call."
         ),
         parameter_schema=_INSTANCE_START_SCHEMA,
-        response_schema=_WRITE_RESPONSE_SCHEMA,
+        response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.instance.start"],
         group_key="deploy-lifecycle",
         tags=("write", "deploy", "lifecycle", "holodeck"),
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
-            "when_to_use": _WHEN_TO_USE_DEPLOY_LIFECYCLE,
+            "when_to_call": (
+                "Call to start a nested VCF deploy from a config that "
+                "holodeck.config.apply created. MEHO first tries the vCenter "
+                "login once. This stops Holodeck's own retries from locking the "
+                "SSO account when the password is wrong. Then the deploy runs in "
+                "the background and the call returns. MEHO always adds "
+                "-DeveloperMode. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. holodeck.config.apply must have "
+                "returned applied: true and a config_id. No other deploy may run "
+                "on the appliance; check with holodeck.instance.status. The "
+                "appliance must have the deploy settings and the build token in "
+                "its environment."
+            ),
             "parameter_hints": {
-                "config_id": "The configID returned by holodeck.config.apply.",
-                "instance_id": "8-char alphanumeric; mirror the cluster name where possible.",
+                "config_id": "The config_id from holodeck.config.apply.",
+                "instance_id": "1 to 8 letters or digits; it starts every nested VM name.",
+                "variant": "For vvf, MEHO sends no -VVF flag today; check the result.",
             },
             "output_shape": (
-                "{started, detached, instance_id, config_id, precheck: {ok, ...}, "
-                "start_marker: {tmux_session, log_path}}. On precheck fail: "
-                "{started: false, precheck, error} and nothing is launched."
+                "{started, detached, instance_id, version, config_id, precheck: "
+                "{ok, server | message}, start_marker: {tmux_session, log_path}}. "
+                "When the login check fails: {started: false, precheck, error} and "
+                "nothing was started."
+            ),
+            "next_step": (
+                "Poll holodeck.instance.status until status is completed or "
+                "failed. Read the log at start_marker.log_path with "
+                "holodeck.logs.tail component=<instance_id>."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.instance.status",
         handler_attr="instance_status",
-        summary="Read Get-HoloDeckInstance into a structured deploy-status envelope (safe).",
+        summary="Show the progress of a Holodeck deploy.",
         description=(
-            "Reads Get-HoloDeckInstance and maps it into a flat, deterministic "
-            "envelope: status (running|completed|failed|unknown), current_step, "
-            "started_at, updated_at, instance_id, notes. The flat status field is "
-            "a runbook OperationCallVerify target and a deploy-in-progress Sensor "
-            "assertion target. The benign VCF 5.2.x terminal quirk (final "
-            "Sync-HolodeckComponents 'No route to host' -- VCF Operations absent in "
-            "5.2) is surfaced as a structured note with status=completed, NOT a "
-            "failure. safety_level=safe, no approval."
+            "Reads Get-HoloDeckInstance on the HoloRouter and returns a flat "
+            "status (running, completed, failed, unknown), the current step and "
+            "the times. Read-only. The known harmless last-step message on VCF "
+            "5.2 counts as completed."
         ),
         parameter_schema=_INSTANCE_STATUS_SCHEMA,
-        response_schema=_STATUS_RESPONSE_SCHEMA,
+        response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.instance.status"],
         group_key="deploy-status",
         tags=("read-only", "deploy", "status", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": _WHEN_TO_USE_DEPLOY_STATUS,
+            "when_to_call": (
+                "Call to follow a deploy that holodeck.instance.start started, "
+                "or to check that no deploy runs before you start one. It fits a "
+                "runbook check or a sensor. On VCF 5.2 the last step "
+                "(Sync-HolodeckComponents) reports 'No route to host' because VCF "
+                "Operations is not part of 5.2; MEHO reports that as completed "
+                "with a note. " + SSH_TRANSPORT_NOTE
+            ),
             "parameter_hints": {
-                "instance_id": "Optional; omit to read the appliance's current/only instance.",
+                "instance_id": "Optional; leave it out to read the instance of the appliance.",
             },
             "output_shape": (
-                "{status, current_step, started_at, updated_at, instance_id, notes[]}. "
-                "status is the verify/Sensor target; notes[] carries the benign 5.2 quirk."
+                "{status, current_step, started_at, updated_at, instance_id, "
+                "notes[]}. 'status' is running, completed, failed or unknown. "
+                "'error' is set when the cmdlet failed (status unknown)."
+            ),
+            "next_step": (
+                "While running, call again later. When failed, read the deploy "
+                "log with holodeck.logs.tail component=<instance_id>."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.router.patch",
         handler_attr="router_patch",
-        summary=(
-            "Idempotently verify-then-apply the three per-appliance HoloRouter "
-            "patches (approval-gated)."
-        ),
+        summary="Check and apply the three known HoloRouter module fixes. Safe to run twice.",
         description=(
-            "Verify-then-applies the three mandatory per-appliance patches on a "
-            "HoloRouter: C1 (bundle-count -eq 7 -> -ge 7), C2 (BroadcomBuildToken "
-            "SecureString wrap) and C3 (Auth.psm1 Connect-VIServer PSCredential). "
-            "For each patch it greps the applied marker (present -> already_applied), "
-            "else greps the unpatched marker (present -> backup + sed + re-verify -> "
-            "applied), else not_applicable. Idempotent: a second run reports all "
-            "already_applied. On a 9.1 HoloRouter it runs VERIFY-ONLY (patches fixed "
-            "upstream) -- greps but never seds. The patch strings are fixed constants "
-            "(C2 references $env:brcm_build_token by NAME, never a token value) and "
-            "the result carries only patch id/state/counts -- no token or credential "
-            "reaches any governance surface. safety_level=dangerous, requires_approval=True."
+            "Checks three known fixes (C1, C2, C3) in the Holodeck PowerShell "
+            "modules on the HoloRouter and applies each missing one, after a "
+            "backup. On a 9.1 appliance it only checks. A person must approve "
+            "each call."
         ),
         parameter_schema=_ROUTER_PATCH_SCHEMA,
-        response_schema=_WRITE_RESPONSE_SCHEMA,
+        response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.router.patch"],
         group_key="deploy-patch",
         tags=("write", "deploy", "patch", "holodeck"),
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
-            "when_to_use": _WHEN_TO_USE_DEPLOY_PATCH,
+            "when_to_call": (
+                "Call before the first deploy on a HoloRouter. The three fixes "
+                "are: C1 bundle count (-eq 7 to -ge 7), C2 build token as "
+                "SecureString, C3 Auth.psm1 login with a PSCredential. For each "
+                "fix MEHO looks for the fixed text; if it is missing and the old "
+                "text is there, MEHO makes a backup and changes the file. On "
+                "9.1 the fixes are already in the product, so MEHO only checks. "
+                "No token or password appears in the result. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. No deploy may run at the same "
+                "time; check with holodeck.instance.status."
+            ),
             "parameter_hints": {},
             "output_shape": (
                 "{patched, verify_only, hr_version, patches: [{patch_id, label, "
-                "state: already_applied|applied|not_applicable}]}."
+                "state}]}. 'state' is already_applied, applied or not_applicable "
+                "(the file does not look as expected)."
             ),
+            "next_step": (
+                "When every patch is already_applied or applied, call "
+                "holodeck.config.apply. For not_applicable, check the module "
+                "version by hand before you deploy."
+            ),
+            # The op is credential-class for broadcast, so the reducer copies
+            # no scalar by default; keep these non-secret flags next to
+            # ``patches[]`` when that list is reduced.
+            "result_scalars": {"keys": ["patched", "verify_only", "hr_version"]},
         },
     ),
 )

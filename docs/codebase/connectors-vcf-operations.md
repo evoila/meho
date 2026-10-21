@@ -336,6 +336,22 @@ encodes its `page`/`pageSize` pagination onto the request path (the base
 stat / alert / resource sets reduce to a JSONFlux handle at the dispatch
 layer.
 
+**Operation contracts.** The four ops meet the VMware operation-contract check
+(`backend/tests/test_vmware_operation_contracts.py`). Their response schemas
+live in `_response_schemas.py` and use the field names of the pinned
+`vcf-operations-9.0` Suite API file (`version`, `alerts`, `resources`,
+`stats-of-resources`; note the stats rows sit under `stat-list.stat[]`). Each
+parameter schema has one example call under `examples`, and each
+`llm_instructions` blob has `when_to_call`, `output_shape` and `next_step`. The
+`resourceState`, `resourceStatus` and `resourceHealth` filters of
+`vrops.resource.query` take only the values of the vendor enums. Its `name`
+filter takes one value, and a call that sends `name` together with `regex` is
+rejected before the call (the vendor would use `name` and drop `regex`). The 9.0 file
+lists only `id`, `resourceId`, `page` and `pageSize` as filters on
+`GET /api/alerts`; `vrops.alert.list` still sends `activeOnly`,
+`alertCriticality` and `alertStatus` (no handler change here), and its guidance
+tells the AI to check each row.
+
 The remaining 6 ingested-browse ops (resource list/get, alert definitions,
 symptoms, recommendations, super metrics) stay browsable until Initiative
 #2266 T7 retires the apparatus.

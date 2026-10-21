@@ -388,6 +388,8 @@ def test_happy_path_returns_full_federation_response(
         "db": {"migrated": True},
         "mcp_session_id_capture": "when_negotiated",
         "mcp_protocol_version": PROTOCOL_VERSION,
+        # #4622: the instance's sandbox mode; off on every ordinary instance.
+        "sandbox_mode": "off",
         # #2763: the runner is enabled by default but this TestClient never
         # runs the lifespan, so no tick has stamped and no baseline is set —
         # the facet reads unknown-not-stalled (the enabled-but-not-started

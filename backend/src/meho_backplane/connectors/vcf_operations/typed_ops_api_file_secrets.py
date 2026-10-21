@@ -25,11 +25,17 @@ properties). Its complete value counts: a quoted value up to its closing
 quote, whitespace included, or an unquoted value to the end of the line.
 Only a schema stub is let through: an empty value, a JSON schema type
 word such as ``string``, ``null``, ``true`` or ``false``, a placeholder in
-angle brackets or template braces, or a value that starts a YAML or JSON
-structure (``{``, ``[``, a block scalar, an anchor, an alias, a tag or a
-comment). So ``"password": {"type": "string"}`` and ``"token": "string"``
-stay accepted. A bare label in running text (``Use password: ...``) keeps
-the redaction's own bound, so a sentence about passwords is not refused.
+angle brackets or template braces, or a JSON or YAML object or list
+(``{``, ``[``, or a nested mapping on the next lines). So
+``"password": {"type": "string"}`` and ``"token": "string"`` stay
+accepted. YAML can also write the value after a tag (``!!str``), an
+anchor (``&name``), as a block scalar (``|`` or ``>``, the value on the
+next lines), as a plain scalar on the next line, or as an alias
+(``*name``) of an anchored value elsewhere in the file. The check reads
+through each of these to the value it marks and judges that value, so a
+password in a block scalar or behind a tag is refused like a plain one.
+A bare label in running text (``Use password: ...``) keeps the
+redaction's own bound, so a sentence about passwords is not refused.
 
 The check names the shape and where it starts; it never repeats the
 matched value.
@@ -100,22 +106,93 @@ _STUB_WORDS: Final[frozenset[str]] = frozenset(
     {"string", "integer", "number", "boolean", "object", "array", "null", "true", "false"}
 )
 
-#: First characters of an unquoted value that starts a structure, not a
-#: secret: a JSON or YAML flow object or list, a YAML block scalar, an
-#: anchor, an alias, a tag, or a comment.
-_STRUCTURE_STARTS: Final[str] = "{[|>&*!#"
+#: A YAML block scalar indicator (``|``, ``>-``, ``|+2``), with an
+#: optional trailing comment: the value is on the lines below.
+_BLOCK_INDICATOR: Final[re.Pattern[str]] = re.compile(r"[|>][-+0-9]*(?:[ \t]+#.*)?$")
+
+#: A line that opens a nested YAML structure: a mapping entry or a list
+#: item. The lines below an empty value are a structure when the first
+#: one looks like this, and a plain scalar otherwise.
+_MAPPING_OR_ITEM: Final[re.Pattern[str]] = re.compile(r"""^(?:-(?:\s|$)|[\w"'.\-]+\s*:(?:\s|$))""")
+
+#: The anchor *name* and the value on its line, if any.
+_ANCHOR_VALUE: Final[str] = r"(?<![\w-])&{name}(?:[ \t]+(?P<value>[^\n]*))?$"
 
 
-def _is_stub(value: str, *, quoted: bool) -> bool:
-    """Return whether a field *value* is a schema stub, not a secret."""
+def _is_stub(value: str) -> bool:
+    """Return whether a scalar *value* is a schema stub, not a secret."""
     stripped = value.strip()
     if not stripped or stripped.lower() in _STUB_WORDS:
         return True
     if stripped[0] == "<" and stripped[-1] == ">":
         return True
-    if stripped.startswith(("{{", "${")) and stripped.endswith("}"):
+    return stripped.startswith(("{{", "${")) and stripped.endswith("}")
+
+
+def _block_body(text: str, pos: int) -> list[str]:
+    """Return the first lines indented deeper than the line that holds *pos*.
+
+    Blank lines are dropped. A stub is one word, so two lines are enough
+    to decide; the scan stops there, or at the next line that is not
+    indented deeper than the key line.
+    """
+    line_start = text.rfind("\n", 0, pos) + 1
+    line_end = text.find("\n", pos)
+    if line_end < 0:
+        return []
+    key_line = text[line_start:line_end]
+    indent = len(key_line) - len(key_line.lstrip(" \t"))
+    body: list[str] = []
+    for line in text[line_end + 1 :].split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if len(line) - len(line.lstrip(" \t")) <= indent:
+            break
+        body.append(stripped)
+        if len(body) == 2:
+            break
+    return body
+
+
+def _unquoted_is_stub(text: str, pos: int, value: str, *, follow_alias: bool = True) -> bool:
+    """Return whether the unquoted *value* found at *pos* in *text* is a stub.
+
+    The value is the rest of the key line. A tag or an anchor in front is
+    skipped; a quoted string, a block scalar, an alias, a comment and an
+    empty value are read through to the value they stand for.
+    """
+    stripped = value.strip()
+    while stripped[:1] in ("!", "&"):
+        stripped = stripped.partition(" ")[2].strip()
+    if stripped[:1] in ('"', "'"):
+        return _is_stub(stripped[1:].partition(stripped[0])[0])
+    if stripped[:1] in ("{", "["):
         return True
-    return not quoted and stripped[0] in _STRUCTURE_STARTS
+    if _BLOCK_INDICATOR.match(stripped):
+        return _is_stub(" ".join(_block_body(text, pos)))
+    if stripped[:1] == "*":
+        return follow_alias and _anchor_is_stub(text, stripped[1:].strip())
+    if not stripped or stripped[0] == "#":
+        body = [line for line in _block_body(text, pos) if line[0] != "#"]
+        if not body or _MAPPING_OR_ITEM.match(body[0]):
+            return True
+        return _is_stub(" ".join(body))
+    return _is_stub(stripped)
+
+
+def _anchor_is_stub(text: str, name: str) -> bool:
+    """Return whether the value anchored as *name* in *text* is a stub.
+
+    A missing anchor, or one on a structure, is not a secret here. A
+    chained alias is not followed.
+    """
+    if not name:
+        return True
+    anchor = re.search(_ANCHOR_VALUE.format(name=re.escape(name)), text, re.MULTILINE)
+    if anchor is None:
+        return True
+    return _unquoted_is_stub(text, anchor.start(), anchor.group("value") or "", follow_alias=False)
 
 
 def _first_field_hit(text: str) -> re.Match[str] | None:
@@ -129,9 +206,12 @@ def _first_field_hit(text: str) -> re.Match[str] | None:
     fields = [match for pattern in (_QUOTED_FIELD, _LINE_FIELD) for match in pattern.finditer(text)]
     hits = []
     for match in fields:
-        quoted = match.group("line") is None
-        value = match.group("dq") or match.group("sq") or match.group("line") or ""
-        if not _is_stub(value, quoted=quoted):
+        line_value = match.group("line")
+        if line_value is None:
+            stub = _is_stub(match.group("dq") or match.group("sq") or "")
+        else:
+            stub = _unquoted_is_stub(text, match.start("line"), line_value)
+        if not stub:
             hits.append(match)
     for match in _BARE_FIELD.finditer(text):
         if not any(field.start() <= match.start() < field.end() for field in fields):

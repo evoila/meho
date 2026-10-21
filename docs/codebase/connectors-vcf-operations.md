@@ -303,7 +303,11 @@ registrar is queued via `register_typed_op_registrar` in the package
     least 8 characters with no spaces, and the label is one it knows.
     A schema entry such as `"password": {"type": "string"}`, a stub such
     as `"token": "string"` or `"password": ""`, and a placeholder such as
-    `"licenseKey": "<licence key>"` are not refused. A bare label in
+    `"licenseKey": "<licence key>"` are not refused. In YAML the value may
+    sit after a tag (`!!str`) or an anchor (`&name`), in a block scalar
+    (`password: |`, the value on the lines below), on the next line, or
+    behind an alias (`*name`) of a value anchored elsewhere; the check
+    reads through each of these to the value and judges that. A bare label in
     running text (`Use password: ...`) keeps the redaction's own bound, so
     a sentence about passwords is not refused. The error names the shape
     and the field and where it starts, never the value.

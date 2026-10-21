@@ -664,6 +664,14 @@ _SECRET_SHAPED_FILES = {
         "openapi: 3.0.1\nx-login:\n  - password: made up pass of words\n",
         "a secret field named 'password'",
     ),
+    "yaml-block-password": (
+        "openapi: 3.0.1\nx-login:\n  password: |\n    made-up-pass-value\n",
+        "a secret field named 'password'",
+    ),
+    "yaml-tagged-password": (
+        "openapi: 3.0.1\nx-login:\n  password: !!str made-up-pass-value\n",
+        "a secret field named 'password'",
+    ),
     "pem-private-key": (
         "openapi: 3.0.1\nx-key: |\n  " + _PEM_HEADER + "\n  MADEUPMADEUPMADEUP\n",
         "a PEM private key",
@@ -710,8 +718,12 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
         '{"password": "", "token": null, "secret": true}',
         '{"description": "Use password: must be at least 8 characters"}',
         "components:\n  schemas:\n    Login:\n      properties:\n        password:\n"
-        "          type: string\n        token: {type: string}\n        pwd: |\n          text\n",
+        "          type: string\n        token: {type: string}\n"
+        "        pwd: |\n          <password>\n",
         "password: string\ntoken: null\nlicenseKey: <licence key>\nsecret: # set later\n",
+        "password:\n  # the schema\n  type: string\ntoken: !!null\nsecret: !!str string\n",
+        "- password: &pw\n    type: string\n- token: *pw\n- pwd: *missing\n",
+        "s: &s {type: string}\npassword: *s\ntoken: |\nnext: 1\n",
         _PAGE,
     ],
     ids=[
@@ -727,11 +739,51 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
         "sentence-about-a-password",
         "yaml-schema",
         "yaml-stubs-and-placeholder",
+        "yaml-comment-tag-and-tagged-stub",
+        "yaml-anchored-schema-and-aliases",
+        "yaml-flow-anchor-and-empty-block",
         "swagger-page",
     ],
 )
 def test_ordinary_api_description_text_is_not_a_secret_shape(text: str) -> None:
     assert find_secret_shape(text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password: |\n  made-up-pass-value\n",
+        "password: >-\n  made up\n  words\n",
+        "password: | # keep\n  made-up-pass-value\n",
+        '"password": |\n  made-up-pass-value\n',
+        "- password: |\n    made-up-pass-value\n",
+        "password: !!str made-up-pass-value\n",
+        'password: !!str "made-up-pass-value"\n',
+        "password: &pw made-up-pass-value\n",
+        "defaults:\n  pw: &pw made-up-pass-value\nlogin:\n  password: *pw\n",
+        "login:\n  password:\n    made-up-pass-value\n",
+        "password: # set\n  made-up-pass-value\n",
+    ],
+    ids=[
+        "literal-block",
+        "folded-block-of-words",
+        "block-with-comment",
+        "quoted-key-block",
+        "list-item-block",
+        "tagged",
+        "tagged-quoted",
+        "anchored",
+        "alias-of-an-anchored-value",
+        "plain-scalar-on-the-next-line",
+        "comment-then-next-line",
+    ],
+)
+def test_yaml_block_tagged_and_anchored_secrets_are_a_secret_shape(text: str) -> None:
+    # The value sits after a YAML marker or on the lines below the key;
+    # the check must read through to it, not take the marker for a stub.
+    shape = find_secret_shape(text)
+    assert shape is not None and shape.startswith("a secret field named 'password'")
+    assert "made" not in shape
 
 
 async def test_quoted_secret_split_across_the_part_cut_is_refused() -> None:

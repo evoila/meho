@@ -1566,7 +1566,12 @@ completes CI in minutes.
   `\.md$` (any Markdown file anywhere). Anything else — a `.py`, a workflow, a
   config, a `cli/` or `deploy/` file — sets `docs_only=false` and forces the
   full matrix. The diff is taken with `git diff --name-only --no-renames
-  <base>...HEAD`: `--no-renames` makes a rename appear as delete(old) +
+  HEAD^1 HEAD`. On a PR, HEAD is the test merge (the PR on top of the newest
+  `main`) and `HEAD^1` is that `main` commit, so the list holds exactly what
+  the PR changes. The detector does not use `github.event.pull_request.base.sha`:
+  that is `main` as of when the PR was opened, and once `main` moves a diff
+  against it also lists other PRs' files, which cost docs-only PRs the fast
+  path (#4657). `--no-renames` makes a rename appear as delete(old) +
   add(new) so a code→`*.md` (or `*.md`→code) rename can never smuggle a
   non-docs path past the allow-list. The step is written to always exit `0`
   and emit both outputs — an unresolvable diff or an empty diff keeps the

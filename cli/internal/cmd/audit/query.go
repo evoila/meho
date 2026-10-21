@@ -27,7 +27,7 @@ import (
 //	  [--principal P]              # operator sub or partial match
 //	  [--op-id PATTERN]            # glob: vsphere.vm.*
 //	  [--op-class C]               # read | write | credential_read | audit_query | other
-//	  [--result-status S]          # ok | error | denied
+//	  [--result-status S]          # ok | error | denied | pending
 //	  [--since DUR]                # 24h | 7d | ISO-8601
 //	  [--until DUR]
 //	  [--limit N]                  # 1..1000, default 100 (server-side)
@@ -107,7 +107,9 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opClass, "op-class", "",
 		"narrow to one op-class (read|write|credential_read|audit_query|other)")
 	cmd.Flags().StringVar(&resultStatus, "result-status", "",
-		"narrow to one result-status (ok|error|denied)")
+		"narrow to one result-status (ok|error|denied|pending); pending is history: "+
+			"the run stopped to wait for approval and the row stays pending after the "+
+			"decision; use `meho approvals list` to see what waits now")
 	cmd.Flags().StringVar(&since, "since", "",
 		"earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601")
 	cmd.Flags().StringVar(&until, "until", "",

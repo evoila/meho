@@ -4466,15 +4466,15 @@ async def test_composite_parent_row_keeps_its_own_verdict_after_step_gate(
 async def test_composite_with_refused_step_writes_one_denied_audit_row(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A parent operation with a refused step leaves one denial audit record (#3542).
+    """A parent operation with a refused step leaves the step's denial record (#3542).
 
     The composite's gated step has a permission preflight that says the write
     will be denied. The sub-op gate refuses the park and the parent returns
-    that result as is. The dispatcher writes no audit row for a
-    handler-returned result, so the gate records the refusal itself: exactly
-    one ``denied`` audit row, on the step's path, linked to the parent
-    operation's audit id. No approval request and no approval-request audit
-    row are written.
+    that result as is. The gate records the refusal itself: exactly one
+    ``denied`` decision row on the step's path, linked to the parent
+    operation's audit id. Since #4275 the parent operation gets its own
+    ``denied`` execution row under that id too. No approval request and no
+    approval-request audit row are written.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._preview import (
@@ -4527,16 +4527,22 @@ async def test_composite_with_refused_step_writes_one_denied_audit_row(
         )
     assert approval_count == 0
     assert request_rows == []
-    # Exactly one denial record for the whole parent operation.
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.path == "vault.kv.gated_step"
+    # Two rows: the step's decision row and the parent operation's own row (#4275).
+    assert len(rows) == 2
+    (row,) = [r for r in rows if r.path == "vault.kv.gated_step"]
+    (parent,) = [r for r in rows if r.path == "vault.composite.gated_write"]
+    assert row.event_class == "policy_decision"
     assert row.status_code == 403
     assert row.payload["result_status"] == "denied"
     assert row.payload["error"]["error_code"] == "write_capability_denied"
     assert row.payload["error"]["required"] == ["create", "update"]
-    # The step's row points at the parent operation's audit id.
-    assert row.parent_audit_id is not None
+    # The step's row points at the parent operation's row.
+    assert row.parent_audit_id == parent.id
+    assert parent.event_class == "operation_execution"
+    assert parent.status_code == 403
+    assert parent.payload["result_status"] == "denied"
+    assert parent.payload["error"]["error_code"] == "write_capability_denied"
+    assert result.audit_id == parent.id
 
 
 # ---------------------------------------------------------------------------

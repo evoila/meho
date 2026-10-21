@@ -618,13 +618,20 @@ def result_receipt_too_large(
     )
 
 
-def result_audit_commit_failed(op_id: str, duration_ms: float) -> OperationResult:
+def result_audit_commit_failed(
+    op_id: str,
+    duration_ms: float,
+    *,
+    approval_request_id: str | None = None,
+) -> OperationResult:
     """The handler finished, but its audit record could not be saved.
 
     An operation does not return success unless its audit row commits
     (CLAUDE.md postulate 7 / v0.1-spec §6). This applies to every completed
-    handler: safe reads, writes, and approved runs. When the commit fails
-    after the handler returned, MEHO cannot prove what happened, so:
+    handler: safe reads, writes, and approved runs, and to a multi-step
+    operation that stopped because a step waits for approval or was denied
+    (#4275). When the commit fails after the handler returned, MEHO cannot
+    prove what happened, so:
 
     * ``status`` is ``error``, but the error is not a connector error -- the
       connector call itself worked.
@@ -632,7 +639,28 @@ def result_audit_commit_failed(op_id: str, duration_ms: float) -> OperationResul
       hold the change.
     * ``extras.retry`` is ``False``: running it again could repeat a change.
     * ``audit_id`` stays ``None``: there is no committed record to point at.
+
+    *approval_request_id* is set when the run stopped because a step waits
+    for approval. That request was saved before the row and still waits, so
+    the caller keeps its id under ``extras.approval_request_id``.
     """
+    remediation = (
+        "The operation may have changed the target. Do not run it again. "
+        "Check the target's current state, and ask an operator to check "
+        "the audit database."
+    )
+    extras: dict[str, Any] = {
+        "error_code": "audit_commit_failed",
+        "execution_outcome": "uncertain",
+        "retry": False,
+    }
+    if approval_request_id is not None:
+        extras["approval_request_id"] = approval_request_id
+        remediation += (
+            f" A step of this run waits for approval (request {approval_request_id}); "
+            "that request is saved. Check the approval queue before you do anything else."
+        )
+    extras["remediation"] = remediation
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -641,16 +669,7 @@ def result_audit_commit_failed(op_id: str, duration_ms: float) -> OperationResul
             "audit record. Do not run it again."
         ),
         duration_ms=duration_ms,
-        extras={
-            "error_code": "audit_commit_failed",
-            "execution_outcome": "uncertain",
-            "retry": False,
-            "remediation": (
-                "The operation may have changed the target. Do not run it again. "
-                "Check the target's current state, and ask an operator to check "
-                "the audit database."
-            ),
-        },
+        extras=extras,
     )
 
 

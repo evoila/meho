@@ -1338,8 +1338,9 @@ the same writer a policy denial and the #3542 preflight refusal use:
 `payload.error.error_code`. No approval row is written and nothing reaches
 the vendor. A refused `destructive` step inside a multi-step operation
 (`composite.enforce_subop_policy`) writes the same row on the step's path,
-linked to the parent operation's audit id in `parent_audit_id`, because the
-dispatcher writes no row for a `denied` result a handler returns.
+linked to the parent operation's audit id in `parent_audit_id`. The parent
+operation gets its own `denied` execution row from the dispatcher when the
+handler returns the refusal (#4275).
 
 Two system faults in `_handle_needs_approval` write no audit row on
 purpose. Neither is a decision about the call; both are a MEHO-side fault
@@ -1576,9 +1577,10 @@ ride under `payload["error"]`) and publish one `denied` broadcast event, the
 same as an ordinary policy denial. They share one writer,
 `dispatcher._audit_denied_and_return`. For a refused step inside a
 multi-step operation the row is written by the sub-op gate and carries the
-parent operation's audit id in `parent_audit_id`. This matters because the
-parent returns the step's result as is, and the dispatcher writes no audit
-row for a result a handler returns. Every row the step gate writes (this
+parent operation's audit id in `parent_audit_id`. The parent returns the
+step's result as is and gets its own `denied` execution row from the
+dispatcher (#4275); the step's row records the step's decision. A plain
+policy "no" for a step writes the same step row. Every row the step gate writes (this
 `denied` row and the `approval.request` row of a step that waits) carries
 the step's own policy result in `policy_decision`, `needs-approval`, not
 the parent's (#4646). The gate binds the step's result for its own call
@@ -1904,14 +1906,17 @@ service principal whose composite parked a child on the direct seam wrote
 `parent_audit_id = NULL` — an orphan approval the replay walk could not
 tie back to its composite.
 
-Note that a composite which returns the child's `awaiting_approval`
-result **verbatim** (the usual write-composite shape) writes no composite
-DISPATCH row of its own — the dispatcher passes a handler-returned
-`OperationResult` straight through. The child's row still records the
-composite's `audit_id` as its parent; whether that parent row is later
-persisted (a composite that continues past the park) is orthogonal to the
-lineage stamp. Reproducing the whole composite step on approve is a
-separate concern (#3351, below).
+A composite which returns the child's `awaiting_approval` result
+**verbatim** (the usual write-composite shape) gets its own DISPATCH row
+from the dispatcher since #4275: an `operation_execution` row with
+`result_status="awaiting_approval"` under the composite's `audit_id`,
+saved last, after the handler returns. The child's `approval.request` row
+records that id as its parent, so the parent row exists once the call
+returns. The composite's row keeps `awaiting_approval` forever; the
+approved work gets the second run's row, whose parent is the
+`approval.request` row. See "Results a handler returns" in
+[`audit_query.md`](audit_query.md). Reproducing the whole composite step
+on approve is a separate concern (#3351, below).
 
 ### Composite-child resume: re-enter the parent, not the child key (#3351)
 

@@ -222,6 +222,30 @@ Two-step shape:
 query, not a filtered list. It reuses `query._build_audit_entry` so a replay
 node and a `query_audit` row for the same audit id agree field-for-field.
 
+### Direct MCP calls (#4672)
+
+What anchors the rows of an agent or operator that calls MEHO over MCP
+without MEHO's own agent loop (Claude Code, Claude Desktop, any MCP
+client).
+
+- The client sends its `Mcp-Session-Id` header on every request. The MCP
+  server stores it as the `mcp_session_id` contextvar for that request.
+- The MCP tool row (`method=MCP`, for example
+  `/mcp/tools/call/call_operation`) carries it as `agent_session_id`.
+- The operation rows of that request carry the **same** session id
+  (`operations/_audit.py:write_audit_row` reads
+  `resolve_agent_session_id()`, which falls back to the MCP session id
+  when no agent run is bound). That covers the `DISPATCH` row of a direct
+  `call_operation` (`ok`, `error` and `denied` alike) and every operation
+  an MCP tool runs inside, for example the `vault.kv.read` of
+  `meho_status`. Before #4672 these rows had a NULL `agent_session_id`,
+  so the replay showed the tool calls but not what ran against the
+  targets.
+- The MCP tool row and the operation rows of one request also share one
+  `request_id`.
+- A call without the header (REST, CLI, an MCP client that sends none)
+  still lands with a NULL `agent_session_id` (#3623).
+
 ### Client-credential runs (#3446)
 
 What anchors the rows of a run by a client-credential service principal

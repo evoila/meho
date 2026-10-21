@@ -349,10 +349,24 @@ What the code does:
   (no request field, header or token claim can set it; otherwise
   `DeleteGrantConsoleOnlyError`, HTTP 403 `delete_grant_console_only` on
   REST), and an expiry within 30 days (`SANDBOX_DELETE_GRANT_MAX_DAYS`).
-  The CLI refuses a delete op before it calls the server. Ordinary grants
-  keep today's rules in every mode. List, get, revoke, the orphan check and
-  the console page cover both tables; a read entry carries
-  `delete_grant=True` for a delete grant.
+  The CLI refuses a delete op before it calls the server. The console
+  route itself runs only for a tenant admin who is a person
+  (`is_human_principal`): a console session that holds an agent, service
+  or runner token gets 403 `human_principal_required`, as on REST.
+  Ordinary grants keep today's rules in every mode. List, get, revoke, the
+  orphan check and the console page cover both tables; a read entry
+  carries `delete_grant=True` for a delete grant.
+- **Renewing a set.** `ServicePrincipalGrantService.renew_delete_grants(...,
+  from_console=True)` renews the live delete grants (not revoked, not
+  expired) of one service principal together, with one new expiry. Each
+  grant passes the same review as a new grant (`_review`): the mode is
+  on, the call comes from the console, the op still has a delete sign,
+  and the expiry is within 30 days. One failed check renews nothing. Then,
+  in one transaction, each old row is revoked with the reason `renewed`
+  and a new row takes its place. The console grant page shows the form
+  (`grants/_renew.html`, `POST /ui/grants/service/renew-delete-grants`)
+  only with the mode on; there is no REST or CLI path. MEHO never renews
+  a grant by itself.
 - **Using one.** `consult_and_record_grant` gets the call's `preview_hash`
   and `params` from the gate (`policy_gate(..., preview_hash, params)`,
   passed by the dispatcher; the step gate passes the params only). With

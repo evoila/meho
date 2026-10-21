@@ -550,66 +550,10 @@ class ServicePrincipalGrantService:
         expire within :data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS`
         days. Ordinary grants keep today's rules in every mode.
         """
-        from meho_backplane.settings import get_settings
-
-        _reject_wildcards(payload)
-        _validate_expires_at(payload.expires_at)
-
-        descriptor = await _resolve_descriptor_for_classification(
-            tenant_id, payload.connector_id, payload.op_id
-        )
-        delete_reason = delete_grant_reason(
-            payload.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
-        )
-        model: GrantModel = ServicePrincipalGrant
-        if delete_reason is not None:
-            if not sandbox_mode_active():
-                raise GrantValidationError(delete_reason)
-            if not from_console:
-                raise DeleteGrantConsoleOnlyError(
-                    f"op {payload.op_id!r} has a delete sign, so this is a delete grant. "
-                    "A delete grant is made only in the web console, by a tenant admin, "
-                    "and only on an instance in sandbox mode. REST and the CLI refuse it."
-                )
-            _validate_delete_grant_expires_at(payload.expires_at)
-            model = SandboxDeleteGrant
-
-        is_selector = payload.target_product is not None or payload.target_name_pattern is not None
-
-        row = model(
-            tenant_id=tenant_id,
-            principal_sub=payload.principal_sub,
-            op_id=payload.op_id,
-            connector_id=payload.connector_id,
-            target_id=payload.target_id,
-            target_product=payload.target_product,
-            target_name_pattern=payload.target_name_pattern,
-            reason=payload.reason,
-            created_by_sub=created_by_sub,
-            expires_at=payload.expires_at,
-        )
+        model = await self._review(tenant_id, payload, from_console=from_console)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            # Selector grants are not covered by a DB partial unique index
-            # (the nullable selector columns make a portable NULL-safe unique
-            # index awkward), so enforce "at most one active selector per
-            # (key, product, pattern)" in the CRUD layer to preserve the
-            # same duplicate-refusal contract the targeted / targetless
-            # indexes give.
-            if is_selector:
-                await self._reject_duplicate_selector(session, tenant_id, payload, model)
-            session.add(row)
-            try:
-                await session.flush()
-            except IntegrityError as exc:
-                await session.rollback()
-                raise GrantValidationError(
-                    f"an active grant for principal {payload.principal_sub!r} on "
-                    f"op {payload.op_id!r} / connector {payload.connector_id!r} / "
-                    f"target {payload.target_id} already exists; revoke it first"
-                ) from exc
-            await session.refresh(row)
-            entry = _read_entry(row)
+            entry = await self._insert(session, tenant_id, created_by_sub, payload, model)
             await session.commit()
             (entry,) = await classify_orphaned_grants(session, tenant_id, [entry])
 
@@ -628,6 +572,207 @@ class ServicePrincipalGrantService:
             expires_at=payload.expires_at.isoformat() if payload.expires_at else None,
         )
         return entry
+
+    @staticmethod
+    async def _review(
+        tenant_id: uuid.UUID,
+        payload: ServiceGrantCreate,
+        *,
+        from_console: bool,
+    ) -> GrantModel:
+        """Run the full create-time review; return the table the grant goes in.
+
+        Every grant, new or renewed, passes here (#4622: a renewal is
+        checked like a new grant). Opens no session of its own except the
+        descriptor lookup, so a caller may run it before it writes.
+        """
+        from meho_backplane.settings import get_settings
+
+        _reject_wildcards(payload)
+        _validate_expires_at(payload.expires_at)
+
+        descriptor = await _resolve_descriptor_for_classification(
+            tenant_id, payload.connector_id, payload.op_id
+        )
+        delete_reason = delete_grant_reason(
+            payload.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
+        )
+        if delete_reason is None:
+            return ServicePrincipalGrant
+        if not sandbox_mode_active():
+            raise GrantValidationError(delete_reason)
+        if not from_console:
+            raise DeleteGrantConsoleOnlyError(
+                f"op {payload.op_id!r} has a delete sign, so this is a delete grant. "
+                "A delete grant is made only in the web console, by a tenant admin, "
+                "and only on an instance in sandbox mode. REST and the CLI refuse it."
+            )
+        _validate_delete_grant_expires_at(payload.expires_at)
+        return SandboxDeleteGrant
+
+    async def _insert(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        created_by_sub: str,
+        payload: ServiceGrantCreate,
+        model: GrantModel,
+    ) -> ServiceGrantRead:
+        """Add one reviewed grant row to *session* and flush it; the caller commits.
+
+        A duplicate active grant raises :exc:`GrantValidationError` after
+        the session is rolled back, so a multi-row caller writes nothing.
+        """
+        is_selector = payload.target_product is not None or payload.target_name_pattern is not None
+        row = model(
+            tenant_id=tenant_id,
+            principal_sub=payload.principal_sub,
+            op_id=payload.op_id,
+            connector_id=payload.connector_id,
+            target_id=payload.target_id,
+            target_product=payload.target_product,
+            target_name_pattern=payload.target_name_pattern,
+            reason=payload.reason,
+            created_by_sub=created_by_sub,
+            expires_at=payload.expires_at,
+        )
+        # Selector grants are not covered by a DB partial unique index
+        # (the nullable selector columns make a portable NULL-safe unique
+        # index awkward), so enforce "at most one active selector per
+        # (key, product, pattern)" in the CRUD layer to preserve the
+        # same duplicate-refusal contract the targeted / targetless
+        # indexes give.
+        if is_selector:
+            await self._reject_duplicate_selector(session, tenant_id, payload, model)
+        session.add(row)
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise GrantValidationError(
+                f"an active grant for principal {payload.principal_sub!r} on "
+                f"op {payload.op_id!r} / connector {payload.connector_id!r} / "
+                f"target {payload.target_id} already exists; revoke it first"
+            ) from exc
+        await session.refresh(row)
+        return _read_entry(row)
+
+    async def renew_delete_grants(
+        self,
+        tenant_id: uuid.UUID,
+        principal_sub: str,
+        renewed_by_sub: str,
+        *,
+        expires_at: datetime | None,
+        reason: str | None = None,
+        from_console: bool = False,
+    ) -> list[ServiceGrantRead]:
+        """Renew the delete grants of one service principal as one set (#4622).
+
+        The set is every live delete grant of *principal_sub*: not revoked
+        and not expired. Each one is checked like a new grant with the new
+        expiry (:meth:`_review`): the mode is on, the call comes from the
+        console, the op still has a delete sign, and the expiry is within
+        :data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS`
+        days. One failed check renews nothing. Then, in one transaction,
+        each old row is revoked with the reason ``renewed`` and a new row
+        with the new expiry takes its place. ``reason`` replaces the
+        recorded reason of every grant; ``None`` keeps each one. Returns
+        the new entries. MEHO never calls this by itself.
+        """
+        if not sandbox_mode_active():
+            raise GrantValidationError(
+                "this instance is not in sandbox mode, so it has no delete grants to renew"
+            )
+        if not from_console:
+            raise DeleteGrantConsoleOnlyError(
+                "delete grants are renewed only in the web console, by a tenant admin"
+            )
+        now = datetime.now(UTC)
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(SandboxDeleteGrant)
+                .where(
+                    SandboxDeleteGrant.tenant_id == tenant_id,
+                    SandboxDeleteGrant.principal_sub == principal_sub,
+                    SandboxDeleteGrant.revoked_at.is_(None),
+                    or_(
+                        SandboxDeleteGrant.expires_at.is_(None),
+                        SandboxDeleteGrant.expires_at > now,
+                    ),
+                )
+                .order_by(SandboxDeleteGrant.created_at)
+            )
+            old_rows = list(result.scalars().all())
+        if not old_rows:
+            raise GrantValidationError(
+                f"service principal {principal_sub!r} has no live delete grant to renew"
+            )
+
+        # Every check first, every write after: one refusal renews nothing.
+        reviewed: list[tuple[uuid.UUID, ServiceGrantCreate]] = []
+        for old in old_rows:
+            payload = ServiceGrantCreate(
+                principal_sub=old.principal_sub,
+                op_id=old.op_id,
+                connector_id=old.connector_id,
+                target_id=old.target_id,
+                target_product=old.target_product,
+                target_name_pattern=old.target_name_pattern,
+                reason=reason or old.reason,
+                expires_at=expires_at,
+            )
+            model = await self._review(tenant_id, payload, from_console=True)
+            if model is not SandboxDeleteGrant:
+                raise GrantValidationError(
+                    f"op {old.op_id!r} on connector {old.connector_id!r} no longer has a "
+                    "delete sign, so its grant is not a delete grant any more. Revoke it "
+                    "and make an ordinary grant instead."
+                )
+            reviewed.append((old.id, payload))
+
+        async with sessionmaker() as session:
+            renewed: list[ServiceGrantRead] = []
+            for old_id, payload in reviewed:
+                gone = await session.execute(
+                    update(SandboxDeleteGrant)
+                    .where(
+                        SandboxDeleteGrant.tenant_id == tenant_id,
+                        SandboxDeleteGrant.id == old_id,
+                        SandboxDeleteGrant.revoked_at.is_(None),
+                    )
+                    .values(
+                        revoked_at=now,
+                        revoked_by_sub=renewed_by_sub,
+                        revoked_reason="renewed",
+                    )
+                    .returning(SandboxDeleteGrant.id)
+                )
+                if gone.scalar_one_or_none() is None:
+                    await session.rollback()
+                    raise GrantValidationError(
+                        f"delete grant {old_id} was revoked while the set was reviewed; "
+                        "review the set again"
+                    )
+                renewed.append(
+                    await self._insert(
+                        session, tenant_id, renewed_by_sub, payload, SandboxDeleteGrant
+                    )
+                )
+            await session.commit()
+            renewed = await classify_orphaned_grants(session, tenant_id, renewed)
+
+        self._log.info(
+            "service_delete_grants_renewed",
+            tenant_id=str(tenant_id),
+            principal_sub=principal_sub,
+            renewed_by_sub=renewed_by_sub,
+            count=len(renewed),
+            grant_ids=[str(entry.id) for entry in renewed],
+            expires_at=expires_at.isoformat() if expires_at else None,
+        )
+        return renewed
 
     @staticmethod
     async def _reject_duplicate_selector(

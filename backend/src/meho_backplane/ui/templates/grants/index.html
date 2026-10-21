@@ -74,6 +74,11 @@
         </tbody>
       </table>
     </div>
+    {% if can_write and sandbox_mode_on %}
+      <div id="grants-renew-container" hx-on::before-swap="if (event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }">
+        {% include "grants/_renew.html" %}
+      </div>
+    {% endif %}
     {% if service_offset > 0 or service_has_next %}
       <nav class="flex justify-end gap-2" aria-label="Service grant pages">
         {% if service_offset > 0 %}<a class="btn btn-sm" href="{{ page_url([service_offset - limit, 0] | max, agent_offset) }}">Previous</a>{% endif %}

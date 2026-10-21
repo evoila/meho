@@ -13,6 +13,7 @@ deliberate: agent-grant reads are tenant-admin-only at their backing service.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from urllib.parse import quote
 from uuid import UUID
 
 import structlog
@@ -66,6 +67,23 @@ async def _admin(session: UISessionContext = _session) -> Operator:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="grants_require_tenant_admin",
+        )
+    return operator
+
+
+async def _human_admin(session: UISessionContext = _session) -> Operator:
+    """A tenant admin who is a person: a machine login never makes a grant here.
+
+    The console session carries the access token of its login. An agent,
+    service or runner token with the tenant-admin role still gets 403, as
+    on the REST routes (#4619); in sandbox mode this is the one place a
+    delete grant is made (#4622).
+    """
+    operator = await _admin(session)
+    if not is_human_principal(operator):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="human_principal_required",
         )
     return operator
 
@@ -205,6 +223,7 @@ async def _index(
         "service_has_next": service_has_next,
         "agent_has_next": agent_has_next,
         "csrf_token": csrf_token,
+        "sandbox_mode_on": sandbox_mode_active(),
     }
     response = get_templates().TemplateResponse(request, "grants/index.html", context)
     response.set_cookie(
@@ -249,15 +268,11 @@ async def _create(
     verdict: str = Form(default="deny"),
     expires_at: str | None = Form(default=None),
     session: UISessionContext = _session,
-    operator: Operator = Depends(_admin),
+    operator: Operator = Depends(_human_admin),
 ) -> HTMLResponse:
+    del operator
     try:
         if kind == "agent":
-            if not is_human_principal(operator):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="human_principal_required",
-                )
             agent_payload = AgentGrantCreate.model_validate(
                 {
                     "principal_sub": principal_sub,
@@ -335,6 +350,59 @@ async def _create(
     return HTMLResponse(status_code=204, headers={"HX-Redirect": "/ui/grants"})
 
 
+async def _renew_delete_grants(
+    request: Request,
+    principal_sub: str = Form(default=""),
+    expires_at: str | None = Form(default=None),
+    reason: str | None = Form(default=None),
+    session: UISessionContext = _session,
+    operator: Operator = Depends(_human_admin),
+) -> HTMLResponse:
+    """Renew the live delete grants of one service principal as one set (#4622)."""
+    del operator
+    principal_sub = principal_sub.strip()
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="service_grant.renew_delete_grants",
+        audit_op_class="write",
+        audit_agent_name=principal_sub,
+    )
+    try:
+        if not principal_sub:
+            raise ValueError("name the service principal whose delete grants to renew")
+        expiry = _iso(expires_at)
+        if isinstance(expiry, str):
+            raise ValueError(f"expires_at {expiry!r} is not an ISO-8601 timestamp")
+        await ServicePrincipalGrantService().renew_delete_grants(
+            session.tenant_id,
+            principal_sub,
+            session.operator_sub,
+            expires_at=expiry,
+            reason=(reason or "").strip() or None,
+            from_console=True,
+        )
+    except (ValidationError, ServiceGrantValidationError, ValueError) as exc:
+        response = get_templates().TemplateResponse(
+            request,
+            "grants/_renew.html",
+            {
+                "csrf_token": mint_csrf_token(str(session.session_id)),
+                "error": str(exc),
+                "values": {
+                    "principal_sub": principal_sub,
+                    "expires_at": expires_at or "",
+                    "reason": reason or "",
+                },
+            },
+            status_code=422,
+        )
+        _csrf(response, session)
+        return response
+    return HTMLResponse(
+        status_code=204,
+        headers={"HX-Redirect": f"/ui/grants?principal={quote(principal_sub, safe='')}"},
+    )
+
+
 async def _revoke(
     kind: str,
     grant_id: UUID,
@@ -371,6 +439,12 @@ def build_grants_router() -> APIRouter:
     )
     router.add_api_route(
         "/ui/grants/create", _create, methods=["POST"], response_class=HTMLResponse
+    )
+    router.add_api_route(
+        "/ui/grants/service/renew-delete-grants",
+        _renew_delete_grants,
+        methods=["POST"],
+        response_class=HTMLResponse,
     )
     router.add_api_route(
         "/ui/grants/{kind}/{grant_id}/revoke",

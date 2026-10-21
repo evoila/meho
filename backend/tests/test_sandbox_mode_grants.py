@@ -17,10 +17,14 @@
   field, a header or a token claim that claims the console gets 403.
 * **Mode on, REST** -- a person's token gets 403
   ``delete_grant_console_only``; an agent or service token gets 403
-  ``human_principal_required``.
+  ``human_principal_required``. A console session that holds a machine
+  token gets the same 403 on the create and the renew routes.
 * **Other operations** keep today's rules (expiry optional) in every mode.
+* **Renewal as a set** -- the live delete grants of one service principal
+  are renewed together, each checked like a new grant; one failed check
+  renews nothing. Only the console renews, and only with the mode on.
 * **List, get, revoke, the orphan check and the console page** cover both
-  tables; a renewal is checked like a new grant.
+  tables.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -65,6 +69,7 @@ from tests._oidc_jwt_helpers import (
 from tests._sandbox_mode_helpers import (
     rows_in,
     seed_delete_grant,
+    seed_grant_row,
     soon,
     turn_sandbox_mode_off,
     turn_sandbox_mode_on,
@@ -79,6 +84,9 @@ from tests.test_ui_agent_grants import (
     _seed_session_sync,
     _seed_tenant,
 )
+
+_OTHER_PRINCIPAL = "svc:other-runner"
+_RENEW_URL = "/ui/grants/service/renew-delete-grants"
 
 _TENANT = _TENANT_A
 _PRINCIPAL = "svc:test-runner"
@@ -265,28 +273,226 @@ async def test_ordinary_grant_keeps_todays_rules_with_the_mode_on(
     assert await rows_in(SandboxDeleteGrant) == 0
 
 
+# ---------------------------------------------------------------------------
+# Renewal: the delete grants of one service principal are renewed as one set
+# ---------------------------------------------------------------------------
+
+
+async def _all_delete_grants() -> dict[uuid.UUID, SandboxDeleteGrant]:
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(SandboxDeleteGrant))).scalars().all()
+    return {row.id: row for row in rows}
+
+
+async def _seed_renewal_set() -> dict[str, uuid.UUID]:
+    """Three live delete grants for the principal, plus the rows a renewal must skip."""
+    await _seed_descriptor(*_DELETE_SIGNS["verb"])
+    live_name = await seed_delete_grant(
+        tenant_id=_TENANT,
+        principal_sub=_PRINCIPAL,
+        op_id="vault.sys.policy.delete",
+        connector_id=_CONNECTOR,
+        expires_at=soon(2),
+    )
+    live_verb = await seed_delete_grant(
+        tenant_id=_TENANT,
+        principal_sub=_PRINCIPAL,
+        op_id="DELETE:/vcenter/vm/{vm}",
+        connector_id=_CONNECTOR,
+        expires_at=soon(3),
+    )
+    live_selector = await seed_delete_grant(
+        tenant_id=_TENANT,
+        principal_sub=_PRINCIPAL,
+        op_id="POST:/VirtualMachine/{moId}/Destroy_Task",
+        connector_id=_CONNECTOR,
+        target_product="vmware",
+        target_name_pattern="disposable-*",
+        expires_at=soon(4),
+    )
+    expired = await seed_delete_grant(
+        tenant_id=_TENANT,
+        principal_sub=_PRINCIPAL,
+        op_id="DELETE:/vcenter/namespaces/instances/{namespace}",
+        connector_id=_CONNECTOR,
+        expires_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    revoked = await seed_delete_grant(
+        tenant_id=_TENANT,
+        principal_sub=_PRINCIPAL,
+        op_id="vault.sys.seal",
+        connector_id=_CONNECTOR,
+        revoked_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    other = await seed_delete_grant(
+        tenant_id=_TENANT,
+        principal_sub=_OTHER_PRINCIPAL,
+        op_id="vault.sys.policy.delete",
+        connector_id=_CONNECTOR,
+        expires_at=soon(2),
+    )
+    return {
+        "live_name": live_name,
+        "live_verb": live_verb,
+        "live_selector": live_selector,
+        "expired": expired,
+        "revoked": revoked,
+        "other": other,
+    }
+
+
+async def _assert_set_unchanged(seeded: dict[str, uuid.UUID]) -> None:
+    rows = await _all_delete_grants()
+    assert set(rows) == set(seeded.values())
+    for key in ("live_name", "live_verb", "live_selector", "expired", "other"):
+        assert rows[seeded[key]].revoked_at is None
+    assert await rows_in(ServicePrincipalGrant) == 0
+
+
 @pytest.mark.asyncio
-async def test_renewal_is_checked_like_a_new_grant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Revoke, then grant again: the same checks run; nothing renews a grant by itself."""
+async def test_renewing_a_set_renews_every_live_delete_grant_of_the_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three live grants get one new expiry; the expired, revoked and other rows stay."""
     turn_sandbox_mode_on(monkeypatch)
-    svc = ServicePrincipalGrantService()
-    first = await svc.create(
-        _TENANT, _CREATOR, _payload("vault.sys.policy.delete"), from_console=True
+    seeded = await _seed_renewal_set()
+    new_expiry = soon(20)
+
+    renewed = await ServicePrincipalGrantService().renew_delete_grants(
+        _TENANT, _PRINCIPAL, "op-renewer", expires_at=new_expiry, from_console=True
     )
-    assert await svc.revoke(_TENANT, first.id, _CREATOR, reason="review") is True
-    with pytest.raises(GrantValidationError, match="needs an expiry"):
-        await svc.create(
-            _TENANT,
-            _CREATOR,
-            _payload("vault.sys.policy.delete", expires_at=None),
-            from_console=True,
+
+    assert len(renewed) == 3
+    assert {entry.op_id for entry in renewed} == {
+        "vault.sys.policy.delete",
+        "DELETE:/vcenter/vm/{vm}",
+        "POST:/VirtualMachine/{moId}/Destroy_Task",
+    }
+    assert all(entry.delete_grant for entry in renewed)
+    assert all(entry.created_by_sub == "op-renewer" for entry in renewed)
+    assert all(entry.expires_at is not None for entry in renewed)
+    assert {entry.expires_at.replace(tzinfo=UTC) for entry in renewed if entry.expires_at} == {
+        new_expiry
+    }
+    by_op = {entry.op_id: entry for entry in renewed}
+    selector = by_op["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    assert (selector.target_product, selector.target_name_pattern) == ("vmware", "disposable-*")
+    assert by_op["vault.sys.policy.delete"].reason == "seeded by a sandbox-mode test"
+
+    rows = await _all_delete_grants()
+    assert len(rows) == 9
+    for key in ("live_name", "live_verb", "live_selector"):
+        old = rows[seeded[key]]
+        assert old.revoked_at is not None
+        assert old.revoked_by_sub == "op-renewer"
+        assert old.revoked_reason == "renewed"
+    assert rows[seeded["other"]].revoked_at is None
+    assert rows[seeded["expired"]].revoked_at is None
+    assert await rows_in(ServicePrincipalGrant) == 0
+
+    live = await ServicePrincipalGrantService().list_(
+        _TENANT, principal_sub=_PRINCIPAL, include_expired=False
+    )
+    assert {entry.id for entry in live} == {entry.id for entry in renewed}
+
+
+@pytest.mark.asyncio
+async def test_renewing_a_set_replaces_the_reason_when_one_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    await _seed_renewal_set()
+    renewed = await ServicePrincipalGrantService().renew_delete_grants(
+        _TENANT,
+        _PRINCIPAL,
+        _CREATOR,
+        expires_at=soon(10),
+        reason="monthly review",
+        from_console=True,
+    )
+    assert {entry.reason for entry in renewed} == {"monthly review"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["no_expiry", "too_late", "lost_delete_sign"])
+async def test_renewing_a_set_checks_each_grant_like_a_new_one(
+    monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """One failed check refuses the whole set and changes nothing."""
+    turn_sandbox_mode_on(monkeypatch)
+    seeded = await _seed_renewal_set()
+    expires_at = soon(10)
+    if fault == "no_expiry":
+        expires_at = None
+        expected = "needs an expiry"
+    elif fault == "too_late":
+        expires_at = soon(SANDBOX_DELETE_GRANT_MAX_DAYS) + timedelta(hours=1)
+        expected = "must expire within 30 days"
+    else:
+        # With other name patterns, ``vault.sys.policy.delete`` has no delete
+        # sign any more. The verb grant still has one. The set is refused.
+        monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "acme.custom.nuke")
+        get_settings.cache_clear()
+        expected = "no longer has a delete sign"
+    with pytest.raises(GrantValidationError, match=expected):
+        await ServicePrincipalGrantService().renew_delete_grants(
+            _TENANT, _PRINCIPAL, _CREATOR, expires_at=expires_at, from_console=True
         )
-    renewed = await svc.create(
-        _TENANT, _CREATOR, _payload("vault.sys.policy.delete"), from_console=True
+    await _assert_set_unchanged(seeded)
+
+
+@pytest.mark.asyncio
+async def test_renewing_a_set_needs_the_console_the_mode_and_a_live_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    seeded = await _seed_renewal_set()
+    svc = ServicePrincipalGrantService()
+    with pytest.raises(DeleteGrantConsoleOnlyError):
+        await svc.renew_delete_grants(_TENANT, _PRINCIPAL, _CREATOR, expires_at=soon(10))
+    with pytest.raises(GrantValidationError, match="no live delete grant"):
+        await svc.renew_delete_grants(
+            _TENANT, "svc:nobody", _CREATOR, expires_at=soon(10), from_console=True
+        )
+    await _assert_set_unchanged(seeded)
+
+    turn_sandbox_mode_off(monkeypatch)
+    with pytest.raises(GrantValidationError, match="not in sandbox mode"):
+        await svc.renew_delete_grants(
+            _TENANT, _PRINCIPAL, _CREATOR, expires_at=soon(10), from_console=True
+        )
+    turn_sandbox_mode_on(monkeypatch)
+    await _assert_set_unchanged(seeded)
+
+
+@pytest.mark.asyncio
+async def test_renewing_a_set_writes_nothing_on_a_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live ordinary-table row cannot collide, but a second live delete row can."""
+    turn_sandbox_mode_on(monkeypatch)
+    seeded = await _seed_renewal_set()
+    # A second live selector row with the same scope, written past the CRUD
+    # check: the renewal's own duplicate check refuses it, after the first
+    # two grants of the set were already written in the same transaction.
+    duplicate = await seed_grant_row(
+        model=SandboxDeleteGrant,
+        tenant_id=_TENANT,
+        principal_sub=_PRINCIPAL,
+        op_id="POST:/VirtualMachine/{moId}/Destroy_Task",
+        connector_id=_CONNECTOR,
+        target_product="vmware",
+        target_name_pattern="disposable-*",
+        expires_at=soon(5),
     )
-    assert renewed.id != first.id
-    listed = await svc.list_(_TENANT, include_revoked=True)
-    assert {entry.id for entry in listed} == {first.id, renewed.id}
+    seeded["duplicate"] = duplicate
+    with pytest.raises(GrantValidationError, match="already exists"):
+        await ServicePrincipalGrantService().renew_delete_grants(
+            _TENANT, _PRINCIPAL, _CREATOR, expires_at=soon(10), from_console=True
+        )
+    rows = await _all_delete_grants()
+    assert set(rows) == set(seeded.values())
+    assert all(rows[seeded[k]].revoked_at is None for k in ("live_name", "live_verb"))
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +703,27 @@ def _admin_client(*, csrf: bool = False) -> Any:
     return _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=csrf)
 
 
+def _machine_admin_client(kind: str, *, csrf: bool = False) -> Any:
+    """A console session whose access token is a machine login with the admin role."""
+    keypair, jwks = _make_keypair_and_jwks()
+    sub = f"machine-{kind}"
+    token = mint_token(
+        keypair,
+        sub=sub,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        principal_kind=kind,
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=sub)
+    return _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=csrf)
+
+
+def _renew_form(**overrides: str) -> dict[str, str]:
+    form = {"principal_sub": _PRINCIPAL, "expires_at": soon(20).isoformat(), "reason": ""}
+    form.update(overrides)
+    return form
+
+
 def _console_form(**overrides: str) -> dict[str, str]:
     form = {
         "kind": "service",
@@ -558,6 +785,110 @@ def test_console_shows_the_expiry_error(monkeypatch: pytest.MonkeyPatch, expires
 
 
 @pytest.mark.usefixtures("_console_env")
+@pytest.mark.parametrize("kind", ["agent", "service"])
+@pytest.mark.parametrize("route", ["create", "renew"])
+def test_console_refuses_a_machine_session(
+    monkeypatch: pytest.MonkeyPatch, kind: str, route: str
+) -> None:
+    """A tenant-admin role on a machine token does not make or renew a grant."""
+    turn_sandbox_mode_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    asyncio.run(_seed_renewal_set())
+    before = asyncio.run(rows_in(SandboxDeleteGrant))
+    client, mock, token = _machine_admin_client(kind, csrf=True)
+    try:
+        if route == "create":
+            response = client.post(
+                "/ui/grants/create", data=_console_form(), headers=_csrf_headers(token)
+            )
+        else:
+            response = client.post(_RENEW_URL, data=_renew_form(), headers=_csrf_headers(token))
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    assert "human_principal_required" in response.text
+    assert asyncio.run(rows_in(SandboxDeleteGrant)) == before
+    assert asyncio.run(rows_in(ServicePrincipalGrant)) == 0
+    rows = asyncio.run(_all_delete_grants())
+    assert sum(1 for row in rows.values() if row.revoked_reason == "renewed") == 0
+
+
+@pytest.mark.usefixtures("_console_env")
+def test_console_refuses_an_ordinary_grant_from_a_machine_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turn_sandbox_mode_off(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, token = _machine_admin_client("service", csrf=True)
+    try:
+        response = client.post(
+            "/ui/grants/create",
+            data=_console_form(op="vmware.composite.vm.power", expires_at=""),
+            headers=_csrf_headers(token),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    assert asyncio.run(rows_in(ServicePrincipalGrant)) == 0
+
+
+@pytest.mark.usefixtures("_console_env")
+def test_console_renews_the_delete_grants_of_one_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    seeded = asyncio.run(_seed_renewal_set())
+    client, mock, token = _admin_client(csrf=True)
+    try:
+        page = client.get(f"/ui/grants?principal={_PRINCIPAL}")
+        assert "data-renew-delete-grants" in page.text
+        assert "4 delete grants expire within 7 days" in page.text
+        renewed = client.post(_RENEW_URL, data=_renew_form(), headers=_csrf_headers(token))
+        after = client.get(f"/ui/grants?principal={_PRINCIPAL}")
+    finally:
+        mock.stop()
+    assert renewed.status_code == 204, renewed.text
+    assert renewed.headers["HX-Redirect"] == "/ui/grants?principal=svc%3Atest-runner"
+    # Only the other principal's grant still expires within 7 days.
+    assert "1 delete grant expires within 7 days" in after.text
+    rows = asyncio.run(_all_delete_grants())
+    assert len(rows) == 9
+    for key in ("live_name", "live_verb", "live_selector"):
+        assert rows[seeded[key]].revoked_reason == "renewed"
+    new_rows = [row for row in rows.values() if row.id not in seeded.values()]
+    assert len(new_rows) == 3
+    assert all(row.created_by_sub == _OP_A for row in new_rows)
+    assert all(str(row.id) in after.text for row in new_rows)
+
+
+@pytest.mark.usefixtures("_console_env")
+@pytest.mark.parametrize("fault", ["far", "blank", "not_a_time", "no_principal"])
+def test_console_shows_the_renewal_error(monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    seeded = asyncio.run(_seed_renewal_set())
+    form = _renew_form()
+    if fault == "far":
+        form["expires_at"] = (soon(SANDBOX_DELETE_GRANT_MAX_DAYS) + timedelta(days=1)).isoformat()
+    elif fault == "blank":
+        form["expires_at"] = ""
+    elif fault == "not_a_time":
+        form["expires_at"] = "next month"
+    else:
+        form["principal_sub"] = " "
+    client, mock, token = _admin_client(csrf=True)
+    try:
+        response = client.post(_RENEW_URL, data=form, headers=_csrf_headers(token))
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    assert "data-renew-delete-grants" in response.text
+    assert 'role="alert"' in response.text
+    asyncio.run(_assert_set_unchanged(seeded))
+
+
+@pytest.mark.usefixtures("_console_env")
 def test_console_mode_off_still_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
     turn_sandbox_mode_off(monkeypatch)
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -567,11 +898,15 @@ def test_console_mode_off_still_refuses(monkeypatch: pytest.MonkeyPatch) -> None
             "/ui/grants/create", data=_console_form(), headers=_csrf_headers(token)
         )
         page = client.get("/ui/grants")
+        renewed = client.post(_RENEW_URL, data=_renew_form(), headers=_csrf_headers(token))
     finally:
         mock.stop()
     assert response.status_code == 422
     assert "delete-shaped" in response.text
     assert "data-sandbox-banner" not in page.text
+    assert "data-renew-delete-grants" not in page.text
+    assert renewed.status_code == 422
+    assert "not in sandbox mode" in renewed.text
     assert asyncio.run(rows_in(SandboxDeleteGrant)) == 0
 
 

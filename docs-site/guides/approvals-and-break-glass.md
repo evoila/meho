@@ -268,7 +268,9 @@ How delete grants work:
   API and the CLI refuse it, also with a person's token.
 - Every delete grant expires within 30 days. MEHO never renews one by
   itself; the banner on every console page counts the delete grants that
-  expire within 7 days.
+  expire within 7 days. A tenant admin renews the delete grants of one
+  service principal as a set, on the grant page: one new expiry for all
+  of them, and each one is checked like a new grant.
 - Delete grants are kept in their own table. An older MEHO build never
   reads it, so after a rollback every delete waits for a person again.
 

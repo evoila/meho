@@ -83,8 +83,13 @@ SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         ),
         "next_step": (
             "Call supervisor.status with the cluster: config_status shows REMOVING while it "
-            "runs. Once the Supervisor is gone, supervisor.status fails with a vCenter error; "
-            "that means the removal is done."
+            "runs. A failing supervisor.status call does not prove the Supervisor is gone; "
+            "the same error also comes from access or server problems. To confirm the "
+            "removal, list the Supervisor clusters (search the operations for "
+            "'namespace-management clusters', the vCenter call GET "
+            "/vcenter/namespace-management/clusters) and check that the cluster is not in "
+            "the list, or ask an operator to check Workload Management in vCenter. Until "
+            "that check passes, report the removal as started but not confirmed."
         ),
     },
     _P + "supervisor.status": {
@@ -101,7 +106,9 @@ SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "READY|WARNING|ERROR, ready, messages: [{severity, details}], conditions: [{type, "
             "status, severity, reason, description}], message_count, condition_count}. ready "
             "is true only when config_status is RUNNING and kubernetes_status is READY. A "
-            "cluster without a Supervisor makes the call fail with a vCenter error."
+            "cluster without a Supervisor makes the call fail with a vCenter error, but so "
+            "do access and server problems; a failed call alone does not prove there is no "
+            "Supervisor."
         ),
         "next_step": (
             "When ready is true, call namespace.create. While config_status is CONFIGURING, "

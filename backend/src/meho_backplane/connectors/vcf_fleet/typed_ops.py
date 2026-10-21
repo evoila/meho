@@ -96,21 +96,13 @@ class FleetTypedOp:
 #: looks each op's ``group_key`` up here.
 FLEET_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "fleet-about": (
-        "Use to read the VCF Fleet (vRSLCM) appliance's identity / health via "
-        "fleet.about — API version, product version, build. WARNING: in VCF "
-        "9.0 builds the /about endpoint returns HTTP 500; when that happens the "
-        "appliance is still reachable — the connector's probe reads the "
-        "Lcm-API-Version header off the datacenters surface, and the product "
-        "version is cross-sourced from SDDC Manager's /v1/vcf-services entry. "
-        "The right group to confirm which Fleet instance a target points at."
+        "One read: the VCF Fleet (vRSLCM) appliance's API version, product version "
+        "and build. On VCF 9.0 builds the call fails with HTTP 500 although the "
+        "appliance is reachable; then read the version from SDDC Manager. A read."
     ),
     "fleet-inventory": (
-        "Use to read the Fleet component inventory — what products Fleet has "
-        "deployed — via fleet.environment.list. Every product deployment (vRA, "
-        "vROps, vRLI, vIDM, …) lives under a Fleet environment; the call "
-        "returns every environment with its deployment status and an inline "
-        "products[] summary, so one no-argument call answers 'what has Fleet "
-        "provisioned' for lab bookkeeping and inventory snapshots."
+        "One read: the Fleet environments and the products deployed in each (vRA, "
+        "vROps, vRLI, vIDM and more). Answers 'what has Fleet deployed'. A read."
     ),
 }
 
@@ -118,28 +110,25 @@ FLEET_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 _ABOUT = FleetTypedOp(
     op_id="fleet.about",
     handler_attr="about",
-    summary="Read the VCF Fleet appliance identity / health (about probe).",
+    summary="Read the VCF Fleet appliance's API version, product version and build.",
     description=(
-        "Reads the vRSLCM appliance identity via GET /lcm/lcops/api/v2/about — "
-        "API version, product version, build number, release date. KNOWN "
-        "REGRESSION: in VCF 9.0 builds this endpoint returns HTTP 500; the call "
-        "then surfaces as a connector_error and the caller should treat the "
-        "appliance as reachable-but-about-broken (the connector's own probe "
-        "confirms reachability off the datacenters surface). safety_level=safe, "
-        "read-only."
+        "Reads GET /lcm/lcops/api/v2/about: API version, product version, build "
+        "number and release date. On VCF 9.0 builds this call fails with HTTP 500; "
+        "the appliance is still reachable. Read-only."
     ),
     parameter_schema={
         "type": "object",
         "properties": {},
         "additionalProperties": False,
+        "examples": [{}],
     },
     response_schema={
         "type": "object",
         "properties": {
-            "apiVersion": {"type": "string"},
-            "productVersion": {"type": "string"},
-            "buildNumber": {"type": "string"},
-            "releaseDate": {"type": "string"},
+            "apiVersion": {"type": "string", "description": "The LCM API version."},
+            "productVersion": {"type": "string", "description": "The product version."},
+            "buildNumber": {"type": "string", "description": "The build number."},
+            "releaseDate": {"type": "string", "description": "The release date."},
         },
         "additionalProperties": True,
     },
@@ -175,26 +164,49 @@ _ABOUT = FleetTypedOp(
 _ENVIRONMENT_LIST = FleetTypedOp(
     op_id="fleet.environment.list",
     handler_attr="environment_list",
-    summary="List Fleet environments with their deployed products (inventory).",
+    summary="List the Fleet environments with the products deployed in each.",
     description=(
-        "Lists every Fleet-managed environment via GET "
-        "/lcm/lcops/api/v2/environments — the component inventory of what "
-        "Fleet has deployed. An environment is the unit Fleet uses to group "
-        "one or more product deployments (vRA, vROps, vRLI, vIDM, …); each "
-        "entry carries environmentId, environmentName, environmentStatus "
-        "(DEPLOY_SUCCESSFUL / DEPLOY_FAILED / …) and an inline products[] "
-        "summary. Returns the array under an 'environments' key. "
-        "safety_level=safe, read-only."
+        "Lists every Fleet environment via GET /lcm/lcops/api/v2/environments. An "
+        "environment groups one or more product deployments (vRA, vROps, vRLI, "
+        "vIDM and more). Each entry has its id, name, status and products. "
+        "Read-only."
     ),
     parameter_schema={
         "type": "object",
         "properties": {},
         "additionalProperties": False,
+        "examples": [{}],
     },
     response_schema={
         "type": "object",
         "properties": {
-            "environments": {"type": "array"},
+            "environments": {
+                "type": "array",
+                "description": "The Fleet environments. MEHO puts the vendor list under this key.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "environmentId": {"type": "string", "description": "The environment id."},
+                        "environmentName": {
+                            "type": "string",
+                            "description": "The environment name.",
+                        },
+                        "environmentStatus": {
+                            "type": "string",
+                            "description": (
+                                "The deployment state, for example DEPLOY_SUCCESSFUL or "
+                                "DEPLOY_FAILED."
+                            ),
+                        },
+                        "products": {
+                            "type": "array",
+                            "description": "The products deployed in the environment.",
+                            "items": {"type": "object"},
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+            },
         },
         "additionalProperties": True,
     },

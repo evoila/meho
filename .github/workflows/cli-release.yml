@@ -110,7 +110,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Matches `cli/go.mod`'s `go 1.26.9` directive. GoReleaser
+          # Matches `cli/go.mod`'s `go 1.26.10` directive. GoReleaser
           # builds with this toolchain; bumping requires an aligned
           # `cli/go.mod` edit so we hardcode the version explicitly
           # rather than reading it from go.mod via `go-version-file:`
@@ -118,8 +118,12 @@ jobs:
           # rebuild signal).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
           # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer.
+          # crypto/tls, net/textproto) need go1.26.9 or newer, and
+          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
           go-version: '1.26'
+          # Same reason as ci.yml's go-lint-test lane: do not use an
+          # older 1.26.x that the runner image has cached.
+          check-latest: true
           # Cache go modules across runs; speeds up the cold checkout
           # by 10-20s on the self-hosted runner pool's pre-warmed
           # filesystem. Keyed by cli/go.sum (the only Go module in
@@ -230,7 +234,7 @@ jobs:
           echo "RELEASE_NOTES_FILE=${NOTES_FILE}" >> "${GITHUB_ENV}"
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de  # v7.3.0
         with:
           # Pinned to the exact patch so the GoReleaser build that
           # produces the signed (cosign) release artefacts is

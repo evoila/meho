@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""hcx spec-reconcile lane -- hand-coded paths vs the pinned HCX API files.
+
+Every hand-coded ``METHOD:/path`` literal in the hcx connector is listed
+here with its method, introspected from the live module constants:
+
+* the login, ``POST /hybridity/api/sessions``;
+* the version call, ``POST /hybridity/api/hcspAppliances``;
+* the documentation path, ``GET /hybridity/docs`` -- marked
+  "documentation path, not in the API file" and left out of the served
+  check, because the Manager serves it as a web page, not as an API call.
+
+No HCX API file is pinned yet: Broadcom publishes none, and the lab pins
+the files that a running Manager serves through ``hcx.api_file.get``
+(the read this connector ships). Until then the shelf lane skips with the
+harness's uniform reason (the waiting lane of
+``docs/decisions/spec-reconcile-guards-standard.md``); the manifest-pin
+test below runs always, so the enumeration stays proven. When the lab
+pins the files, rename :data:`_SPEC_FILE` to the pinned file name and the
+lane arms itself.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from meho_backplane.connectors.hcx import api_file as _api_file_module
+from meho_backplane.connectors.hcx import connector as _connector_module
+from tests._spec_shelf import (
+    assert_op_ids_served,
+    openapi_served_op_ids,
+    require_shelf_spec,
+)
+
+#: One shelf directory per HCX version the connector covers.
+_SPEC_DIRS = ("hcx-4.11", "hcx-9.0", "hcx-9.1")
+#: Expected pinned file name (OpenAPI 3.x conversion of the served
+#: description). Renamed when the lab pins the files.
+_SPEC_FILE = "hybridity_api.openapi3.json"
+
+#: Documentation path, not in the API file: served as a web page.
+_DOCUMENTATION_OP_IDS = frozenset({f"GET:{_api_file_module._DOCS_PATH}"})
+
+
+def _declared_api_op_ids() -> set[str]:
+    """The hand-coded API calls: every ``*_PATH`` constant of the connector module (``POST``)."""
+    return {
+        f"POST:{value}"
+        for name, value in vars(_connector_module).items()
+        if name.endswith("_PATH") and isinstance(value, str) and value.startswith("/")
+    }
+
+
+def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
+    """Pin the swept op_id set so drift cannot silently shrink the reconcile."""
+    assert _declared_api_op_ids() == {
+        "POST:/hybridity/api/sessions",
+        "POST:/hybridity/api/hcspAppliances",
+    }
+    assert {"GET:/hybridity/docs"} == _DOCUMENTATION_OP_IDS
+
+
+@pytest.mark.parametrize("spec_dir", _SPEC_DIRS)
+def test_hcx_hand_coded_api_paths_are_served_by_the_pinned_file(spec_dir: str) -> None:
+    """Every hand-coded hcx API call is served by the pinned file (skips until pinned)."""
+    spec_path = require_shelf_spec(spec_dir, _SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    assert_op_ids_served(_declared_api_op_ids(), served, spec_label=f"{spec_dir}/{_SPEC_FILE}")

@@ -226,7 +226,82 @@ registrar is queued via `register_typed_op_registrar` in the package
   the stat's **value**; the handler passes the payload through unparsed so
   the vendor's `stats-of-resources` field names stay out of executable code.
 
-All four are `safety_level="safe"`, `requires_approval=False`,
+- **`vrops.api_file.get`** (`typed_ops_api_file.py`, handler `api_file_get`)
+  — reads one documentation page or API description file that the
+  appliance serves, so the API file of a version with no vendor download
+  (Aria Operations 8.18) can be pinned, and a 9.x file can be compared with
+  what an appliance serves. `safe`, read-only, in its own group
+  `vrops-api-files`. Registered through `VROPS_TYPED_OPS`, so it is on both
+  vROps catalogs.
+
+  | Versions | Catalog |
+  |---|---|
+  | Aria Operations 8.18 | `vrops-vrops8-8.0` |
+  | VCF Operations 9.0, 9.1, 9.1.1 | `vrops-rest-9.0` |
+
+  - **Which paths it reads.** Only: the API start page `/suite-api/`; a
+    path under the documentation folder `/suite-api/doc/` (the Swagger
+    page `/suite-api/doc/swagger-ui.html` and the files under it); or a
+    Swagger or OpenAPI file at its usual place: a path with a part named
+    `api-docs`, `swagger-resources` or `swagger-config`, or a path that
+    ends with `swagger.json`, `swagger.yaml`, `openapi.json` or
+    `openapi.yaml`. Allowed characters are letters, digits and `. _ ~ / -`;
+    no `..` or `//`; the query may hold only `group` and `apiVersion`. So a
+    backslash, a `%` (an encoded dot or slash), a scheme or a host is
+    refused. The same rule is the `pattern` of the `path` parameter, so the
+    dispatcher refuses a bad path as `invalid_params`, and the handler
+    checks it again. A refused path sends no request. The vendor names the
+    page but not always the file the page loads; the agent reads the page
+    first, then the file the page asks for. If that file lies outside the
+    rule, a small change to the rule adds it.
+  - **How it reads.** One `GET` on the pooled client with the target's own
+    login (`Authorization: OpsToken <token>` on 9.x, `vRealizeOpsToken` on
+    8.x through the inherited `auth_headers`). The request goes through
+    `httpx.AsyncClient.send(..., follow_redirects=False)`, so a redirect
+    is not followed (the pooled client class would follow a same-origin
+    redirect by itself). A `3xx` returns `redirect_path`; a `401`, `403`,
+    `404` or `5xx` returns its `status` with no text. A login failure
+    (no credentials, a rejected login) stops the read before the request.
+  - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
+    `size` (bytes), `sha256` (of the file bytes), `parts`, `text_parts`,
+    `version`, `build`, `version_error`. Only UTF-8 text comes back (HTML,
+    JSON, YAML, XML, script); other content is refused and the error names
+    its content type.
+  - **Version and build** come from `GET /suite-api/api/versions/current`
+    (`releaseName`, `buildNumber`) on the same login, the call the
+    connector's version detection makes. If that read fails, the file still
+    comes back, `version` and `build` are `null`, and `version_error` says
+    why.
+  - **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
+    each at most 64 KiB of UTF-8, cut only between characters. Join the
+    `text` of all parts in `index` order and encode as UTF-8; the SHA-256
+    of the result equals `sha256`. A part is a fixed byte size, not a line,
+    because a served file can be one long line. `text_parts` is the only
+    list in the answer, so JSONFlux stores a large answer as rows (one row
+    per part) behind a result handle and keeps the scalar fields
+    (`sha256`, `size`, `parts`, `build`, ...) inline. Page the rows with
+    `result_query` (`offset` and a small `limit` such as 2; one answer is
+    at most 256 KiB). A file that does not fit in one stored result
+    (`result_handle_max_spill_rows`, 10,000 rows, or
+    `result_handle_max_record_bytes`, 16 MiB, measured as stored JSON)
+    stops with an error that names its size; the read never returns a cut
+    file.
+  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+    every stored result. A rule that fires on the file text would rewrite a
+    part, and the joined parts would no longer match `sha256`. So the read
+    runs the same middleware, with the same connector, tenant and operation
+    labels, on the text parts and on the whole file text before it returns,
+    and stops with an error that names the rule and the place when the text
+    would change. The whole-file pass catches a secret that the part cut
+    splits in two. Redaction itself stays on.
+  - **Tests.** `tests/test_connectors_vcf_operations_typed_api_file.py`
+    (respx: accepted and refused paths with no request, the login header on
+    both connectors, status and redirect cases, large files, version
+    failures, a login failure, a file that a redaction rule would change, a
+    secret split across the part cut, the result-handle round trip, and the
+    operation-contract rules) and the reconcile lane below.
+
+All five are `safety_level="safe"`, `requires_approval=False`,
 read-only. Each rides the connector's `OpsToken` session; `authSource`
 federation lives in the acquire body, not on the reads. `vrops.resource.query`
 encodes its `page`/`pageSize` pagination onto the request path (the base
@@ -241,7 +316,7 @@ symptoms, recommendations, super metrics) stay browsable until Initiative
 #2266 T7 retires the apparatus.
 
 **Spec-reconcile lane (#2984).** Every hand-coded `METHOD:/path` above — the
-four typed-read paths plus the session mint
+four API typed-read paths plus the session mint
 (`POST /suite-api/api/auth/token/acquire`) — is asserted against the pinned
 `vcf-operations-9.0` shelf spec by
 [`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_operations_spec_reconcile.py)
@@ -252,7 +327,11 @@ vendor core spec pinned on the shelf, because the vendor document itself
 fails `parse_openapi`'s OpenAPI 3.0 metaschema gate (three
 `components.schemas` entries carry `"required": []`; the derivative drops
 them, a semantic no-op — recipe + sha256 in the shelf's `MANIFEST.md`). An
-operator ingesting the core spec needs the same remediation. Standard:
+operator ingesting the core spec needs the same remediation. The lane also
+lists the one path `vrops.api_file.get` adds, `GET /suite-api/doc/`, as a
+documentation path, not in the API file: an API file never lists the path
+that serves it, so the served-path check skips it with that reason and pins
+instead that the spec serves nothing under that folder. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ### Shutdown
@@ -306,6 +385,7 @@ NSX / vRLI take).
 - **Task (skeleton)**: <https://github.com/evoila/meho/issues/829>
 - **Task (OpsToken auth rebuild)**: <https://github.com/evoila/meho/issues/2395>
 - **Task (stat/metric read for sizing)**: <https://github.com/evoila/meho/issues/2838>
+- **Task (API description read)**: <https://github.com/evoila/meho/issues/4605>
 - **Parent initiative**: <https://github.com/evoila/meho/issues/369>
 - **Parent goal**: <https://github.com/evoila/meho/issues/214>
 - **Sibling skeletons (same Initiative wave)**:

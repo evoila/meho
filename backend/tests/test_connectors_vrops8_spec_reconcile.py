@@ -31,6 +31,7 @@ runs in the required unit sweep.
 
 from __future__ import annotations
 
+from meho_backplane.connectors.vcf_operations import typed_ops_api_file as _api_file
 from meho_backplane.connectors.vcf_operations.typed_ops import VROPS_TYPED_OPS
 from meho_backplane.connectors.vrops8 import connector as _connector
 from meho_backplane.connectors.vrops8 import typed_ops as _typed_ops
@@ -44,7 +45,14 @@ _EXPECTED_REUSED_OP_IDS = {
     "vrops.alert.list",
     "vrops.resource.query",
     "vrops.resource.stats",
+    "vrops.api_file.get",
 }
+
+#: The one path ``vrops.api_file.get`` adds, as ``METHOD:/path``: a documentation
+#: path, not in the API file. An API file never lists the path that serves it, so
+#: the served-path check of the modern lane skips it with that reason. The read's
+#: version call (``GET /suite-api/api/versions/current``) stays checked there.
+_EXPECTED_DOCUMENTATION_ONLY = {"GET:/suite-api/doc/"}
 
 
 def test_vrops8_reuses_modern_typed_op_ids_verbatim() -> None:
@@ -99,3 +107,17 @@ def test_vrops8_inherits_every_typed_handler_and_is_rebindable() -> None:
             f"{op.op_id} handler is not MRO-rebindable onto Vrops8Connector — a dispatch "
             "would not rebind to the 8.x instance/scheme"
         )
+
+
+def test_vrops8_api_file_read_adds_only_the_documentation_path() -> None:
+    """The reused ``vrops.api_file.get`` reads a documentation path, not an API path.
+
+    The read's folder is listed as ``GET`` and marked a documentation path: no API
+    file lists the path that serves it, so no served-set check can cover it. The
+    8.x impl inherits the read unchanged (the handler and the path rule live on the
+    modern module), and the Swagger 2.0 page an 8.x appliance serves
+    (``/suite-api/doc/v2/api-docs``) lies under that folder.
+    """
+    assert {f"GET:{_api_file.DOC_FOLDER}"} == _EXPECTED_DOCUMENTATION_ONLY
+    assert _api_file.check_api_file_path("/suite-api/doc/v2/api-docs")
+    assert _api_file.PATH_PATTERN.count(_api_file.DOC_FOLDER) == 1

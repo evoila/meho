@@ -550,6 +550,7 @@ def test_typed_ops_are_read_only_and_well_formed() -> None:
         "vrops.alert.list",
         "vrops.resource.query",
         "vrops.resource.stats",
+        "vrops.api_file.get",
     }
     for op in VROPS_TYPED_OPS:
         assert op.safety_level == "safe", f"{op.op_id} must be safe (read-only surface)"
@@ -560,6 +561,9 @@ def test_typed_ops_are_read_only_and_well_formed() -> None:
         )
         assert op.group_key, f"{op.op_id} must declare a group_key"
         assert op.llm_instructions, f"{op.op_id} must carry llm_instructions"
-        assert op.llm_instructions.get("when_to_use", "").strip(), (
-            f"{op.op_id} llm_instructions.when_to_use must be non-empty"
+        # The contract check wants ``when_to_call``; the older ops still say
+        # ``when_to_use`` (a listed gap in vmware_operation_contract_gaps.yaml).
+        guidance = op.llm_instructions
+        assert (guidance.get("when_to_call") or guidance.get("when_to_use") or "").strip(), (
+            f"{op.op_id} llm_instructions must say when to call the op"
         )

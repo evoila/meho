@@ -603,6 +603,26 @@ class VcfOperationsConnector(HttpConnector):
             target, _RESOURCES_STATS_LATEST_PATH, operator=operator, params=query
         )
 
+    async def api_file_get(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.api_file.get`` — read one documentation page or API description file.
+
+        Sends one ``GET`` with the target's login to a path under
+        ``/suite-api/doc/`` (or a usual Swagger / OpenAPI file path) and
+        reads the appliance version and build. Delegates to
+        :func:`~meho_backplane.connectors.vcf_operations.typed_ops_api_file.api_file_get_impl`
+        (imported lazily, like ``resource_query``'s body-field import).
+        """
+        from meho_backplane.connectors.vcf_operations.typed_ops_api_file import (
+            api_file_get_impl,
+        )
+
+        return await api_file_get_impl(self, operator, target, params)
+
     async def invalidate_credentials(self, target: VcfOperationsTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396).
 

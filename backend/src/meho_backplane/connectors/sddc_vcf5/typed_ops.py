@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from meho_backplane.connectors.sddc_vcf5._response_schemas import SDDC_VCF5_RESPONSE_SCHEMAS
+
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -82,47 +84,72 @@ class SddcVcf5TypedOp:
     llm_instructions: dict[str, Any] | None
 
 
-#: Curated ``when_to_use`` blurb per typed-op group. ``register_typed_operation``
-#: requires a non-empty string whenever ``group_key`` is set.
+#: Short text per typed-op group. The agent reads it through
+#: ``list_operation_groups`` to pick a group, so it says which reads each
+#: group holds. ``register_typed_operation`` requires a non-empty string
+#: whenever ``group_key`` is set.
 SDDC_VCF5_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     _GROUP_INVENTORY: (
-        "Use to inventory the VCF 5.x infrastructure a migration is moving off: the "
-        "workload + management domains (sddc.vcf5.domain.list), their vSphere "
-        "clusters (sddc.vcf5.cluster.list), ESXi hosts (sddc.vcf5.host.list), the "
-        "managed vCenters (sddc.vcf5.vcenter.list), the NSX-T manager clusters that "
-        "front them (sddc.vcf5.nsxt_cluster.list), and the SDDC Manager appliance "
-        "itself with its version (sddc.vcf5.manager.list). The right group for 'what "
-        "does this VCF 5.x stack contain and how big is it' — the physical + logical "
-        "footprint a migration must re-home. Read-only."
+        "Reads of a VCF 5.x stack: domains, clusters, ESXi hosts, vCenters, NSX "
+        "clusters, and the SDDC Manager appliance with its version. Use it to see "
+        "what the stack holds and how big it is, for example before a migration. "
+        "All reads; nothing here changes anything."
     ),
     _GROUP_TASKS: (
-        "Use to read VCF workflow tasks (sddc.vcf5.task.list) — in-flight or recently "
-        "completed operations, optionally filtered by status. The right group for "
-        "confirming the source estate is quiescent before a migration cutover, or "
-        "triaging a workflow that failed. Read-only."
+        "One read: the VCF 5.x workflow tasks, running or recently ended. Use it to "
+        "check that nothing runs before a cutover, or to find a failed task. All "
+        "reads."
     ),
 }
 
 
 # ---------------------------------------------------------------------------
-# Shared parameter-schema fragments
+# Shared schema helpers
 # ---------------------------------------------------------------------------
 
 #: The empty parameter object shared by the no-argument reads.
-_NO_PARAMS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
+_NO_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+    "examples": [{}],
+}
 
 
 def _instructions(
     *,
-    when_to_use: str,
+    when_to_call: str,
     output_shape: str,
+    next_step: str,
     parameter_hints: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build the per-op ``llm_instructions`` blob with the canonical SDDC keys."""
-    blob: dict[str, Any] = {"when_to_use": when_to_use, "output_shape": output_shape}
+    """Build the per-op ``llm_instructions`` blob with the canonical keys."""
+    blob: dict[str, Any] = {
+        "when_to_call": when_to_call,
+        "output_shape": output_shape,
+        "next_step": next_step,
+    }
     if parameter_hints is not None:
         blob["parameter_hints"] = parameter_hints
     return blob
+
+
+def _optional_id(description: str) -> dict[str, Any]:
+    """An optional id filter."""
+    return {"type": "string", "minLength": 1, "description": description}
+
+
+#: The ``{domainId?}`` parameter schema of the reads that filter by domain.
+_DOMAIN_FILTER_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "domainId": _optional_id(
+            "Optional VCF domain id (from sddc.vcf5.domain.list). Omit for all domains."
+        ),
+    },
+    "additionalProperties": False,
+    "examples": [{"domainId": "<domain-id>"}],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -132,28 +159,30 @@ def _instructions(
 _DOMAIN_LIST = SddcVcf5TypedOp(
     op_id="sddc.vcf5.domain.list",
     handler_attr="domain_list",
-    summary="VCF 5.x domains (management + workload) SDDC Manager governs.",
+    summary="List the VCF 5.x domains (management and workload) SDDC Manager manages.",
     description=(
-        "Lists every VCF domain the SDDC Manager governs via GET /v1/domains — the "
-        "management domain plus any workload domains — the top of the VCF tenancy "
-        "tree and the entry point for a migration inventory. Works with zero catalog "
-        "ingest. safety_level=safe, read-only."
+        "Lists every VCF domain via GET /v1/domains: the management domain and the "
+        "workload domains, with their vCenters, clusters and NSX cluster. The top of "
+        "the VCF 5.x inventory. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=SDDC_VCF5_RESPONSE_SCHEMAS["sddc.vcf5.domain.list"],
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "sddc", "vcf", "domain", "inventory"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call first when inventorying a VCF 5.x source estate — the management "
-            "domain and any workload domains are the top of the tree and the anchor "
-            "for domain-scoped cluster / host / vCenter reads."
+        when_to_call=(
+            "Call first when you take stock of a VCF 5.x stack. The domains are the "
+            "top of the tree; their ids scope the cluster, host and vCenter reads."
         ),
         output_shape=(
-            "{elements: [{id, name, type (MANAGEMENT/WORKLOAD), vcenters, "
-            "nsxtCluster}, ...], pageMetadata}."
+            "{elements: [{id, name, type, status, vcenters: [{id, fqdn}], clusters: "
+            "[{id}], nsxtCluster: {id, vipFqdn}, ssoName}], pageMetadata}."
+        ),
+        next_step=(
+            "Pass a domain id as domainId to sddc.vcf5.host.list or "
+            "sddc.vcf5.vcenter.list to read one domain."
         ),
     ),
 )
@@ -161,33 +190,33 @@ _DOMAIN_LIST = SddcVcf5TypedOp(
 _CLUSTER_LIST = SddcVcf5TypedOp(
     op_id="sddc.vcf5.cluster.list",
     handler_attr="cluster_list",
-    summary="vSphere clusters across all or one VCF 5.x domain.",
+    summary="List the vSphere clusters of all VCF 5.x domains or of one domain.",
     description=(
-        "Lists vSphere clusters across all VCF domains via GET /v1/clusters, or "
-        "narrowed to one domain via the optional domainId filter — cluster count, "
-        "datastore type, and host membership a migration must re-home. Works with "
-        "zero catalog ingest. safety_level=safe, read-only."
+        "Lists vSphere clusters via GET /v1/clusters, for all domains or for one "
+        "domain with domainId. Shows each cluster's main datastore and type, its "
+        "hosts and its distributed switches. Read-only."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "domainId": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional VCF domain id filter. Omit for all domains.",
-            },
-        },
-        "additionalProperties": False,
-    },
-    response_schema={"type": "object", "additionalProperties": True},
+    parameter_schema=_DOMAIN_FILTER_PARAMS,
+    response_schema=SDDC_VCF5_RESPONSE_SCHEMAS["sddc.vcf5.cluster.list"],
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "sddc", "vcf", "cluster", "inventory"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use="Call to list vSphere clusters; pass domainId to scope to one domain.",
+        when_to_call=(
+            "Call to list vSphere clusters; pass domainId to read one domain. The "
+            "vendor reference lists the domainId filter from 5.2 on. On older 5.x "
+            "builds list all clusters, then keep the rows whose id appears in the "
+            "clusters entries of that domain in sddc.vcf5.domain.list."
+        ),
         output_shape=(
-            "{elements: [{id, name, primaryDatastoreType, domainId, hosts}, ...], pageMetadata}."
+            "{elements: [{id, name, primaryDatastoreName, primaryDatastoreType, "
+            "isStretched, hosts: [{id, fqdn, ipAddress}], vdsSpecs: [{name, mtu}]}], "
+            "pageMetadata}."
+        ),
+        next_step=(
+            "Pass a cluster id as clusterId to sddc.vcf5.host.list for the full host "
+            "detail of that cluster."
         ),
         parameter_hints={"domainId": "VCF domain id from sddc.vcf5.domain.list; omit for all."},
     ),
@@ -196,59 +225,54 @@ _CLUSTER_LIST = SddcVcf5TypedOp(
 _HOST_LIST = SddcVcf5TypedOp(
     op_id="sddc.vcf5.host.list",
     handler_attr="host_list",
-    summary="ESXi hosts across the VCF 5.x estate, optionally filtered.",
+    summary="List the ESXi hosts of the VCF 5.x stack, with optional filters.",
     description=(
-        "Enumerates ESXi hosts across all VCF domains via GET /v1/hosts, or narrowed "
-        "by the optional domainId / clusterId / status filters — the physical "
-        "footprint (host count, FQDN, ESXi version, assignment status) a migration "
-        "must size. Large estates return hundreds of hosts, reduced to a JSONFlux "
-        "handle. Works with zero catalog ingest. safety_level=safe, read-only."
+        "Lists ESXi hosts via GET /v1/hosts, for all domains or filtered by domain, "
+        "cluster or status. Shows each host's FQDN, ESXi version, IPs, hardware, "
+        "domain, cluster and status. The list can hold hundreds of hosts. Read-only."
     ),
     parameter_schema={
         "type": "object",
         "properties": {
-            "domainId": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional VCF domain id filter. Omit for all domains.",
-            },
-            "clusterId": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional cluster id filter. Omit for all clusters.",
-            },
+            "domainId": _optional_id("Optional VCF domain id filter. Omit for all domains."),
+            "clusterId": _optional_id("Optional cluster id filter. Omit for all clusters."),
             "status": {
                 "type": "string",
-                "minLength": 1,
+                "enum": ["ASSIGNED", "UNASSIGNED_USEABLE", "UNASSIGNED_UNUSEABLE"],
                 "description": (
-                    "Optional host status filter (e.g. ASSIGNED, UNASSIGNED_USEABLE). "
-                    "Omit for all statuses."
+                    "Optional host status filter: ASSIGNED, UNASSIGNED_USEABLE or "
+                    "UNASSIGNED_UNUSEABLE. Omit for all statuses."
                 ),
             },
         },
         "additionalProperties": False,
+        "examples": [{"domainId": "<domain-id>", "status": "ASSIGNED"}],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=SDDC_VCF5_RESPONSE_SCHEMAS["sddc.vcf5.host.list"],
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "sddc", "vcf", "host", "inventory"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to enumerate ESXi hosts — the migration's physical footprint. "
-            "Narrow with domainId / clusterId / status when the operator named one; "
-            "a large list is reduced to a JSONFlux handle you page with "
-            "result_query(handle_id, offset, limit), reading host/version fields "
-            "per row."
+        when_to_call=(
+            "Call to list ESXi hosts, for example to size a migration. Narrow with "
+            "domainId, clusterId or status when the operator named one. "
+            "status=UNASSIGNED_USEABLE lists the free hosts."
         ),
         output_shape=(
-            "{elements: [{id, fqdn, esxiVersion, ipAddresses, domain, cluster, "
-            "status}, ...], pageMetadata}."
+            "{elements: [{id, fqdn, esxiVersion, status, ipAddresses: [{ipAddress, "
+            "type}], domain: {id, name}, cluster: {id}, networkpool: {id, name}, "
+            "hardwareVendor, hardwareModel}], pageMetadata}. Large lists come back as a "
+            "result handle."
+        ),
+        next_step=(
+            "Use result_query on a handle to filter or page a large list, for example "
+            "by esxiVersion."
         ),
         parameter_hints={
             "domainId": "VCF domain id; omit for all.",
             "clusterId": "cluster id; omit for all.",
-            "status": "ASSIGNED / UNASSIGNED_USEABLE; omit for all.",
+            "status": "ASSIGNED / UNASSIGNED_USEABLE / UNASSIGNED_UNUSEABLE; omit for all.",
         },
     ),
 )
@@ -256,35 +280,26 @@ _HOST_LIST = SddcVcf5TypedOp(
 _VCENTER_LIST = SddcVcf5TypedOp(
     op_id="sddc.vcf5.vcenter.list",
     handler_attr="vcenter_list",
-    summary="vCenter Server instances the VCF 5.x SDDC Manager manages.",
+    summary="List the vCenter Server instances the VCF 5.x SDDC Manager manages.",
     description=(
-        "Lists the vCenter Server instances SDDC Manager manages via GET /v1/vcenters, "
-        "or narrowed to one domain via the optional domainId filter. Cross the "
-        "returned fqdn against the vSphere connector for VM-level migration inventory. "
-        "Works with zero catalog ingest. safety_level=safe, read-only."
+        "Lists the vCenters via GET /v1/vcenters, for all domains or for one domain "
+        "with domainId. Shows each vCenter's FQDN, IP, version and domain. Read-only."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "domainId": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional VCF domain id filter. Omit for all domains.",
-            },
-        },
-        "additionalProperties": False,
-    },
-    response_schema={"type": "object", "additionalProperties": True},
+    parameter_schema=_DOMAIN_FILTER_PARAMS,
+    response_schema=SDDC_VCF5_RESPONSE_SCHEMAS["sddc.vcf5.vcenter.list"],
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "sddc", "vcf", "vcenter", "inventory"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to list managed vCenters, then cross each fqdn against the vSphere "
-            "connector to inventory the VMs a migration will move."
+        when_to_call=("Call to list managed vCenters, or to find the vCenter of one domain."),
+        output_shape=(
+            "{elements: [{id, fqdn, ipAddress, version, domain: {id, name}}], pageMetadata}."
         ),
-        output_shape="{elements: [{id, fqdn, domain}, ...], pageMetadata}.",
+        next_step=(
+            "Find the vSphere target with this fqdn (list_targets) to read its VMs, "
+            "for example for a migration inventory."
+        ),
         parameter_hints={"domainId": "VCF domain id; omit for all."},
     ),
 )
@@ -292,50 +307,55 @@ _VCENTER_LIST = SddcVcf5TypedOp(
 _NSXT_CLUSTER_LIST = SddcVcf5TypedOp(
     op_id="sddc.vcf5.nsxt_cluster.list",
     handler_attr="nsxt_cluster_list",
-    summary="NSX-T manager clusters the VCF 5.x SDDC Manager manages.",
+    summary="List the NSX manager clusters the VCF 5.x SDDC Manager manages.",
     description=(
-        "Lists the NSX-T manager clusters SDDC Manager manages via GET /v1/nsxt-clusters "
-        "and the domains each one backs — the network fabric a migration must re-home. "
-        "Works with zero catalog ingest. safety_level=safe, read-only."
+        "Lists the NSX manager clusters via GET /v1/nsxt-clusters, with the domains "
+        "each one serves and its manager nodes. Use it to find which NSX cluster a "
+        "workload domain uses. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=SDDC_VCF5_RESPONSE_SCHEMAS["sddc.vcf5.nsxt_cluster.list"],
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "sddc", "vcf", "nsxt", "inventory"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to map the NSX-T fabric — which NSX-T cluster fronts each workload "
-            "domain — so the target-side network design covers every domain."
+        when_to_call=(
+            "Call to list NSX clusters and the domains they serve, for example to map "
+            "each workload domain to its NSX cluster."
         ),
-        output_shape="{elements: [{id, vipFqdn, domainIds}, ...], pageMetadata}.",
+        output_shape=(
+            "{elements: [{id, vipFqdn, version, status, isShared, domains: [{id, "
+            "name}], nodes: [{id, fqdn, name}]}], pageMetadata}."
+        ),
+        next_step="Find the NSX target with this vipFqdn (list_targets) for NSX reads.",
     ),
 )
 
 _MANAGER_LIST = SddcVcf5TypedOp(
     op_id="sddc.vcf5.manager.list",
     handler_attr="manager_list",
-    summary="SDDC Manager appliance inventory + version.",
+    summary="List the SDDC Manager appliances with their version.",
     description=(
-        "Lists the SDDC Manager appliances via GET /v1/sddc-managers — their FQDN, "
-        "IP, version, and management domain. Confirms which SDDC Manager fronts the "
-        "VCF stack and its exact 5.x build; the same surface the connector's "
-        "fingerprint reads, exposed as an operator-callable typed op. Works with zero "
-        "catalog ingest. safety_level=safe, read-only."
+        "Lists the SDDC Manager appliances via GET /v1/sddc-managers: FQDN, IP, "
+        "version and domain. Use it to confirm which SDDC Manager runs the stack and "
+        "its exact 5.x build. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=SDDC_VCF5_RESPONSE_SCHEMAS["sddc.vcf5.manager.list"],
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "sddc", "vcf", "manager", "inventory"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to identify the SDDC Manager appliance(s) and read the exact VCF "
-            "version/build — the anchor for the migration source record."
+        when_to_call=(
+            "Call to find the SDDC Manager appliance and read the exact VCF version "
+            "and build, for example to record a migration source."
         ),
-        output_shape="{elements: [{id, fqdn, ipAddress, version, domain}, ...], pageMetadata}.",
+        output_shape=(
+            "{elements: [{id, fqdn, ipAddress, version, domain: {id, name}}], pageMetadata}."
+        ),
+        next_step=("Go on with sddc.vcf5.domain.list to read what this SDDC Manager manages."),
     ),
 )
 
@@ -346,13 +366,11 @@ _MANAGER_LIST = SddcVcf5TypedOp(
 _TASK_LIST = SddcVcf5TypedOp(
     op_id="sddc.vcf5.task.list",
     handler_attr="task_list",
-    summary="In-flight or recent VCF 5.x workflow tasks, optionally filtered.",
+    summary="List the VCF 5.x workflow tasks, running or recently ended.",
     description=(
-        "Lists in-flight or recently completed VCF workflow tasks via GET /v1/tasks, "
-        "optionally narrowed by the status filter (Successful / Failed / In_Progress "
-        "/ Pending / Cancelled). The read for confirming the source estate is "
-        "quiescent before a migration cutover, or triaging a workflow that failed. "
-        "Works with zero catalog ingest. safety_level=safe, read-only."
+        "Lists VCF workflow tasks via GET /v1/tasks, optionally filtered by status. "
+        "Shows each task's name, type, state, times, errors and the objects it works "
+        "on. Use it to check that nothing runs before a cutover. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -364,20 +382,28 @@ _TASK_LIST = SddcVcf5TypedOp(
             },
         },
         "additionalProperties": False,
+        "examples": [{"status": "Failed"}],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=SDDC_VCF5_RESPONSE_SCHEMAS["sddc.vcf5.task.list"],
     group_key=_GROUP_TASKS,
     tags=("read-only", "sddc", "vcf", "task", "workflow"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to confirm no VCF workflow is in flight before a migration cutover "
-            "(quiescence), or narrow with status='Failed' when triaging."
+        when_to_call=(
+            "Call to check that no VCF workflow runs before a cutover, or with "
+            "status='Failed' to find a failed task. Each row has its own status; "
+            "check it, and drop rows in other states yourself."
         ),
         output_shape=(
-            "{elements: [{id, name, status, type, subtasks, errors}, ...], "
-            "pageMetadata}. For a failed task surface errors[].message."
+            "{elements: [{id, name, type, status, creationTimestamp, "
+            "completionTimestamp, subTasks: [{name, status}], errors: [{errorCode, "
+            "message, remediationMessage}], resources: [{resourceId, fqdn, type}]}], "
+            "pageMetadata}."
+        ),
+        next_step=(
+            "For a failed task, report errors[].message and remediationMessage. If any "
+            "task is PENDING or IN_PROGRESS, the stack is not idle yet."
         ),
         parameter_hints={
             "status": "Successful / Failed / In_Progress / Pending / Cancelled; omit for all.",

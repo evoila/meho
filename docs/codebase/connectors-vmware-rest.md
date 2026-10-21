@@ -560,6 +560,92 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     state (`queued`/`running`/`success`/`error`), progress, cancelled
     flag, the queue/start/complete timestamps, and the localized error
     message when a task faulted.
+  - **`vmware.tasks.history`** (`typed_ops_tasks_history.py`, handler
+    `tasks_history`, `#3701`) — vCenter tasks in a past time window.
+    Use it when a task has already left the recent list.
+    - **Recent vs history.** `tasks.recent` reads
+      `TaskManager.recentTask`, which keeps only the last few minutes.
+      Classic vim tasks (an OVF deploy from a content library, a clone, a
+      relocate) are not CIS task providers, so `/cis/tasks` cannot see
+      them. `tasks.history` is the read for those older tasks.
+    - **One dispatch, no lasting server state.** The op calls
+      `TaskManager.CreateCollectorForTasks` with a `TaskFilterSpec`, pages
+      the new `TaskHistoryCollector` with `ReadNextTasks` (100 rows per
+      page, oldest first), and calls `DestroyCollector` on the success
+      path and on the error path. The op returns only when the collector
+      is confirmed gone.
+    - **Every call on the collector goes to the session that created
+      it.** A collector lives in one vCenter session. The create call
+      records the session token it was sent with in a `SessionTokenUsed`
+      (`session.py`): the connector pins that token on the request, so it
+      is the token on the wire, not the cached token before or after the
+      call. The reads and the destroys are then sent with that token
+      (`_post_vmomi_json(..., session_token=...)`), even when the
+      connector has logged in again in between (the session max-age ran
+      out, a `NotAuthenticated` fault on another call forced a re-login,
+      or another request replaced the session while the create was in
+      flight). A `NotAuthenticated` fault on such a pinned call is not
+      retried on a new login: that session is gone, and a new one would
+      not hold the collector.
+    - **One cleanup rule.** The collector counts as gone only when the
+      owning session accepts `DestroyCollector`, or answers
+      `ManagedObjectNotFound` (already gone) or `NotAuthenticated` (the
+      session is gone, and the collector with it). A failed destroy is
+      retried (3 tries in all, logged as
+      `vmware_tasks_history_destroy_failed`). In every other case the op
+      closes the owning session (`VmwareRestConnector.close_session` with
+      the recorded token: `DELETE` at the session path with that token),
+      because a collector dies with its session
+      (`vmware_tasks_history_session_closed`). That covers a destroy that
+      keeps failing, a timeout or a lost answer, and a create request
+      that was sent but returned no collector reference (a timeout, a
+      lost answer, a fault, an empty answer;
+      `vmware_tasks_history_create_unconfirmed`): vCenter may have
+      created the collector before the answer was lost. When the closed
+      session is still the cached one, the cache entry is evicted too, so
+      the next call on the target logs in again on a clean session and
+      leaked collectors cannot pile up. When the connector has already
+      logged in again, only the old session is closed and the new one
+      stays. Only a 2xx answer to that `DELETE` counts as closed; an
+      error answer, a transport error, or a redirect the shared client
+      did not follow counts as a failed close. When the session close
+      fails too, the call fails with
+      `CollectorCleanupError` (`vmware_tasks_history_collector_leaked`);
+      vCenter then drops the collector when that session times out. A
+      read error (or a create error) always wins over a cleanup error, so
+      cleanup never hides why the call failed.
+    - **Cancel-safe.** The cleanup also runs when the call is cancelled
+      (for example by a timeout) while a page is being read. A cancel
+      while the create request is pending lets that request finish,
+      because vCenter may have created the collector already; the op then
+      removes it (`vmware_tasks_history_cancelled_during_create`), or
+      closes the session when the request failed. A cancel that arrives
+      during the cleanup waits for the cleanup to finish and is raised
+      again afterwards. So no collector survives the call.
+    - **Params.** `since` (required) and `until` filter on the task's
+      queued time (ISO-8601; a time without a zone is UTC). `entity` +
+      `entity_type` filter on the object the task ran on;
+      `include_children` widens that to child objects. `description_ids`
+      keeps only some operations (for example `ResourcePool.ImportVApp`).
+      `TaskFilterSpec` has no operation filter, so MEHO applies this one
+      after the read. `max_tasks` caps the rows (default 200, at most
+      1,000).
+    - **Output.** `{tasks, truncated, scanned, collector_cleanup}`.
+      `collector_cleanup` is `destroyed` (the owning session confirmed
+      the collector gone) or `session_closed` (the session close above
+      ran). Rows have the same
+      shape as `tasks.recent` (one shared parser).
+      A long list goes through the normal JSONFlux result handle.
+    - **Limits.** vCenter caps how many collectors one session may hold
+      (create fails with `InvalidState` above the cap) and keeps task
+      history only as long as its own settings allow. A wide window can
+      hit `max_tasks` or the 50-page scan budget; then `truncated` is
+      `true` and the caller should narrow the window. vCenter only: a
+      standalone ESXi host does not serve the collector.
+    - **Safety level `safe`.** The collector is a temporary,
+      session-scoped read cursor that the op removes before it returns. It
+      changes no inventory or configuration, and vCenter needs only the
+      `System.View` privilege to create it.
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input

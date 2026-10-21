@@ -166,8 +166,12 @@ The read core follows the harbor #2856 layout:
   operator, target, params)`), each issuing an authenticated `GET` via
   `HttpConnector._get_json` and returning the parsed payload.
 - **`_llm_instructions.py`** — the per-op `llm_instructions` blobs
-  (`when_to_call` / `output_shape` / `next_step`), keyed by op id (split out
-  for the file-size budget).
+  (`when_to_call` / `output_shape` / `next_step`, plus `parameter_hints` on the
+  by-id reads), keyed by op id (split out for the file-size budget).
+- **`_response_schemas.py`** — the per-op response schemas
+  (`FLEET_LCM_RESPONSE_SCHEMAS`), keyed by op id. The field names come from
+  the vendor's `fleet-lcm-openapi.yaml` (9.1.0.0, checked against 9.1.1). They
+  are informational; the reducer does not read them.
 - **`_paths.py`** — the `/v1/*` request-path templates + `fill_path` /
   `encode_segment` (percent-encoded, fail-loud path substitution for the by-id
   ops; the reconcile lane introspects these constants).
@@ -182,6 +186,13 @@ list via `register_typed_op_registrar` in `__init__.py`;
 True`, `method=None` / `path=None` (the wire path lives only in the handler).
 So the read core needs no operator review — it is live the moment the connector
 loads.
+
+**Operation contracts.** The 13 typed ops meet the VMware operation-contract
+check (`backend/tests/test_vmware_operation_contracts.py`): each response schema
+names its main fields, each parameter schema carries one example call under
+`examples` (`{}` for the no-argument reads, a placeholder such as
+`<component-id>` for the by-id reads), and each `llm_instructions` blob has
+`when_to_call`, `output_shape` and `next_step`.
 
 ## Spec reconcile lane
 

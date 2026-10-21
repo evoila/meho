@@ -77,6 +77,7 @@ __all__ = [
     "VMWARE_HOST_USAGE_OP",
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_OBJECT_COLLECT_OP",
+    "VMWARE_TASKS_HISTORY_OP",
     "VMWARE_TASKS_RECENT_OP",
     "VMWARE_TYPED_OPS",
     "VMWARE_TYPED_WHEN_TO_USE_BY_GROUP",
@@ -394,6 +395,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
     SSO_ADMIN_API_FILE_WHEN_TO_USE,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_tasks_history import (  # noqa: E402
+    TASKS_HISTORY_GROUP_KEY,
+    TASKS_HISTORY_WHEN_TO_USE,
+    VMWARE_TASKS_HISTORY_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (  # noqa: E402
     TASKS_RECENT_GROUP_KEY,
     TASKS_RECENT_WHEN_TO_USE,
@@ -426,6 +432,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE,
     OBJECT_COLLECT_GROUP_KEY: OBJECT_COLLECT_WHEN_TO_USE,
     TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
+    TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE,
     SSO_ADMIN_API_FILE_GROUP_KEY: SSO_ADMIN_API_FILE_WHEN_TO_USE,
 }
 
@@ -500,7 +507,8 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``host.vsan_health`` (#2258, re-shipped from the former composites);
 #: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
 #: standalone-ESXi); and the incident-survival reads ``vm.info`` +
-#: ``object.collect`` + ``tasks.recent`` (#2300); and the SSO Admin API
+#: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
+#: (#3701, tasks older than the recent list); and the SSO Admin API
 #: description read ``vcenter.sso_admin.api_file.get``. The tuple shape lets
 #: future typed reads join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
@@ -511,6 +519,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_VM_INFO_OP,
     VMWARE_OBJECT_COLLECT_OP,
     VMWARE_TASKS_RECENT_OP,
+    VMWARE_TASKS_HISTORY_OP,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
 )
 

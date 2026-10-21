@@ -1021,6 +1021,32 @@ async def test_close_session_reports_a_failed_revoke_but_still_evicts() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [302, 307])
+async def test_close_session_treats_an_unfollowed_redirect_as_not_closed(status: int) -> None:
+    """A 3xx the shared client did not follow is not a closed session.
+
+    The client refuses cross-origin redirects and hands the 3xx back
+    unfollowed, so the DELETE never reached a session endpoint. Only a 2xx
+    confirms the close; the cache slot is evicted anyway.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="token-1")
+        revoke = mock.delete("/api/session").respond(
+            status, headers={"Location": "https://elsewhere.test.invalid/api/session"}
+        )
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+        assert await connector.close_session(_TARGET_A) is False
+
+    assert revoke.call_count == 1
+    assert target_cache_key(_TARGET_A) not in connector._session_tokens
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
 async def test_close_session_with_an_older_token_keeps_the_cached_session() -> None:
     """An already replaced session is closed by its own token; the cache is untouched."""
     connector = _make_connector()

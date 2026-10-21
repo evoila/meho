@@ -859,6 +859,41 @@ async def test_wire_destroy_faults_end_the_session_on_vcenter() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [302, 307])
+async def test_wire_a_redirected_session_close_is_not_a_closed_session(status: int) -> None:
+    """Destroy faults every time and DELETE /api/session answers a redirect.
+
+    The shared client hands a cross-origin 3xx back unfollowed, so the
+    session (and the collector in it) may still be alive. The call must
+    not report ``session_closed``; it fails with ``CollectorCleanupError``.
+    """
+    connector = _make_connector()
+    base = "/sdk/vim25/8.0.3.0"
+    try:
+        async with respx.mock(base_url="https://vc.test.invalid") as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.post(f"{base}{_CREATE_PATH}").respond(200, json=_COLLECTOR_REF)
+            mock.post(f"{base}{_READ_PATH}").respond(200, json=[_IMPORT_FAILED])
+            destroy = mock.post(f"{base}{_DESTROY_PATH}").respond(
+                500, json={"_typeName": "SystemError", "reason": "boom"}
+            )
+            revoke = mock.delete("/api/session").respond(
+                status, headers={"Location": "https://elsewhere.test.invalid/api/session"}
+            )
+            with pytest.raises(CollectorCleanupError, match="could not be removed"):
+                await connector.tasks_history(
+                    _make_operator(), _Target(), {"since": "2026-10-20T08:00:00Z"}
+                )
+            assert destroy.call_count == _DESTROY_ATTEMPTS
+            assert revoke.call_count == 1
+            assert revoke.calls[0].request.headers["vmware-api-session-id"] == "tok"
+            assert connector._session_tokens == {}
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
 async def test_wire_cleanup_closes_the_session_that_owns_the_collector() -> None:
     """The connector logs in again before the cleanup: the old session is closed, not the new one.
 

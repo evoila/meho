@@ -3106,11 +3106,13 @@ class VmwareRestConnector(HttpConnector):
     ) -> bool:
         """``DELETE`` one vCenter session; log a failure instead of raising.
 
-        Returns ``True`` when vCenter accepted the revoke (a 2xx answer), so
-        the caller knows the server-side session, and everything that lived
-        in it, is gone. A non-2xx answer or a transport error is logged and
-        returns ``False`` -- shutdown and the cleanup paths that call this
-        must not block on an unreachable target.
+        Returns ``True`` only when vCenter accepted the revoke (a 2xx answer),
+        so the caller knows the server-side session, and everything that
+        lived in it, is gone. Any other answer or a transport error is logged
+        and returns ``False`` -- shutdown and the cleanup paths that call this
+        must not block on an unreachable target. A 3xx counts as not closed
+        too: the shared client returns a cross-origin redirect unfollowed, so
+        the ``DELETE`` never reached a session endpoint.
         """
         try:
             resp = await client.request(
@@ -3127,7 +3129,7 @@ class VmwareRestConnector(HttpConnector):
                 session_path=revoke_path,
             )
             return False
-        if resp.status_code >= 400:
+        if not resp.is_success:
             _log.warning(
                 "vsphere_session_revoke_non_2xx",
                 target=cache_key,

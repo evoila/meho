@@ -606,7 +606,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       the next call on the target logs in again on a clean session and
       leaked collectors cannot pile up. When the connector has already
       logged in again, only the old session is closed and the new one
-      stays. When the session close fails too, the call fails with
+      stays. Only a 2xx answer to that `DELETE` counts as closed; an
+      error answer, a transport error, or a redirect the shared client
+      did not follow counts as a failed close. When the session close
+      fails too, the call fails with
       `CollectorCleanupError` (`vmware_tasks_history_collector_leaked`);
       vCenter then drops the collector when that session times out. A
       read error (or a create error) always wins over a cleanup error, so

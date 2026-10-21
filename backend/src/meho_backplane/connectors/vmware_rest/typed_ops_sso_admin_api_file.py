@@ -25,9 +25,11 @@ The read is narrow on purpose:
   file bytes. A file that does not fit in one stored result is refused
   with its size, never cut.
 * MEHO redacts secret-shaped text in every stored result. The read runs
-  the same redaction rules the dispatcher will apply and refuses a file
-  whose text they would change, naming the rule. So the stored parts
-  always match ``sha256``, and redaction stays active.
+  the same redaction rules the dispatcher will apply, on the whole file
+  text and on each part, and refuses a file whose text they would
+  change, naming the rule. So the stored parts always match ``sha256``,
+  no secret that a part cut would hide gets through, and redaction
+  stays active.
 
 The vCenter version and build come from ``GET /api/appliance/system/version``
 on the connector's normal login. When that read fails (HTTP error, login
@@ -326,10 +328,15 @@ def _check_redaction_keeps_text(
     (connector, tenant, operation) before it stores the result. A rule
     that fires on the file text would rewrite a part, and the joined parts
     would no longer match ``sha256``. This runs the same middleware with
-    the same labels on the text parts alone, so the check and the real
-    redaction cannot disagree.
+    the same labels on the text parts, so the check and the real
+    redaction cannot disagree, and on the whole file text as well: a
+    secret that a part cut splits in two is invisible to the per-part
+    check, and the dispatcher would store it in clear text.
     """
-    probe = {"text_parts": answer["text_parts"]}
+    probe = {
+        "text_parts": answer["text_parts"],
+        "file_text": "".join(part["text"] for part in answer["text_parts"]),
+    }
     result = apply_connector_boundary_redaction(
         probe,
         connector_id=f"{connector.impl_id}-{connector.version}",

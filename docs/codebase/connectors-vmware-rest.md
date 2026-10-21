@@ -667,10 +667,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
     that fires on the file text would rewrite a part, and the joined parts
     would no longer match `sha256`. So the read runs the same middleware, with
-    the same connector, tenant and operation labels, on the text parts before
-    it returns. When the text would change, the read stops with an error that
-    names the rule and the part, and returns no file. Redaction itself stays
-    on. The default policy's `strip-api-key` rule fires on text such as
+    the same connector, tenant and operation labels, on the text parts and on
+    the whole file text before it returns. The whole-file pass matters: a
+    secret that the part cut splits in two matches in no single part, so the
+    dispatcher's own redaction would store it in clear text. When the text
+    would change, the read stops with an error that names the rule and the
+    place (a part, or `file_text` for the whole file), and returns no file.
+    Redaction itself stays on. The default policy's `strip-api-key` rule fires
+    on text such as
     `type="token:SecurityToken"`; a redaction policy registered for this
     operation changes what the check accepts, because both use the same
     policy lookup.
@@ -678,7 +682,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     (respx: accepted and refused paths, no login on the `GET`, status and
     redirect cases, large files, version failure including missing
     credentials and a failed credential-store login, a file that a redaction
-    rule would change, and the result-handle round trip through redaction,
+    rule would change, a secret split across the part cut, and the
+    result-handle round trip through redaction,
     storage and read-back) and the reconcile lane
     `tests/test_connectors_vmware_rest_sso_admin_api_file_reconcile.py`
     (the SSO Admin folder is a documentation path that the pinned 8.0 and

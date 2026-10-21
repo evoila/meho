@@ -515,6 +515,45 @@ async def test_file_whose_text_redaction_would_change_is_refused() -> None:
     assert "SecurityToken" not in message
 
 
+def _xml_with_a_secret_across_the_part_cut() -> bytes:
+    """Valid one-line XML whose ``password="..."`` label straddles the first part cut.
+
+    All characters are ASCII, so the cut falls exactly at ``PART_MAX_BYTES``:
+    ``pass`` ends part 0 and ``word="..."`` starts part 1.
+    """
+    head = '<?xml version="1.0"?><root><pad n="'
+    joint = '"/><entry '
+    before = head + "a" * (PART_MAX_BYTES - 4 - len(head) - len(joint)) + joint
+    assert len(before) == PART_MAX_BYTES - 4
+    return (before + 'password="made-up-pass-value-0123"/></root>').encode()
+
+
+async def test_secret_split_across_the_part_cut_is_refused() -> None:
+    body = _xml_with_a_secret_across_the_part_cut()
+    parts = split_text_parts(body)
+    assert parts[0].endswith("pass") and parts[1].startswith('word="')
+    # The per-part check alone misses the split label; the whole text trips it.
+    per_part = _redact_like_the_dispatcher(
+        {"text_parts": [{"index": i, "text": text} for i, text in enumerate(parts)]}
+    )
+    assert per_part.manifest == () and per_part.redacted == per_part.raw
+    assert _redact_like_the_dispatcher({"text": body.decode()}).manifest
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_WSDL_PATH).respond(200, content=body, headers={"Content-Type": "text/xml"})
+        with pytest.raises(SsoAdminApiFileError) as excinfo:
+            await _call(connector, _WSDL_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert "strip-api-key" in message
+    assert "file_text" in message
+    assert "not returned" in message
+    assert "made-up-pass-value" not in message
+
+
 @pytest.mark.parametrize(
     "body",
     [

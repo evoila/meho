@@ -4743,10 +4743,10 @@ async def vm_destroy_composite(
     Op-id: ``vmware.composite.vm.destroy``. The FIRST governed destructive
     delete (#3198) — ``safety_level="destructive"``, so it rides the hardest
     gate MEHO has (decision ``docs/decisions/governed-delete-operations.md``):
-    mandatory human approval (no agent path, no standing grant, no
-    self-approval even under break-glass), a mandatory preview-hash binding,
-    and a mandatory blast-radius statement (built by
-    :func:`._write_preview._vm_destroy_preview`).
+    mandatory human approval (no agent path, no standing grant except on an
+    instance in sandbox mode, no self-approval even under break-glass), a
+    mandatory preview-hash binding, and a mandatory blast-radius statement
+    (built by :func:`._write_preview._vm_destroy_preview`).
 
     **Fail-closed on a running VM.** vSphere faults a destroy on a VM that is
     not powered off, so the composite live-re-reads the power state and

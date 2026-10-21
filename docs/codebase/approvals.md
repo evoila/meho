@@ -2282,6 +2282,42 @@ delete-shaped ops are refused at creation (the grant list is the *floor*
 of what runs unattended, never a bypass of a modeled destructive gate).
 Full design: [`service-principal-grants.md`](service-principal-grants.md).
 
+## Sandbox mode (#4622)
+
+On an instance in **sandbox mode** (decision record
+[`docs/decisions/sandbox-mode.md`](../decisions/sandbox-mode.md)) the
+destructive-tier rule above has one exception: a standing grant made in
+the web console by a tenant admin, a **delete grant**, may cover a delete
+by a service principal. The instance holds only disposable test systems,
+so nothing waits for a person there. Everything else in this document
+stays as it is: people and agents keep their rules, a run approval never
+covers a delete, satellites get no delete, and self-approval stays
+forbidden.
+
+- The mode is one instance-wide switch, set at install time and fixed for
+  the life of the database (`meho_backplane/sandbox_mode.py`). Every other
+  instance shows `"sandbox_mode": "off"` on `/ready` and
+  `GET /api/v1/health`, and every audit row carries
+  `audit_log.sandbox_mode = false`.
+- A `destructive` call under a delete grant still needs its preview hash
+  and a valid blast radius. The gate runs the same checks the park path
+  runs (`_destructive_binding_refusal`) before it records the grant use,
+  so a refused call leaves no `approval.decision` row. The grant-use row
+  stores the hash and the blast radius in `payload`.
+- A delete below `destructive` (the verb `DELETE`, the `destructive` tag,
+  a delete name, a delete step) runs under a delete grant with no hash;
+  its grant-use row stores the proposed effect.
+- A `destructive` step gate or child call stays refused: it cannot carry a
+  preview hash (`preview_binding_required`, as today).
+- Delete grants live in `sandbox_delete_grant`, which an older build and an
+  instance with the mode off never read: after a rollback every delete
+  waits for a person again.
+- With the mode on, the park reasons add that a delete grant made in the
+  web console may cover the delete; with it off every reason text is
+  unchanged.
+
+Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
+
 ## References
 
 - `backend/src/meho_backplane/operations/approval_queue.py` — queue lifecycle (T4) + read helpers + broadcast (T5) + park-time `expires_at` stamping and `expire_stale_requests` coalesce (#2322).

@@ -59,6 +59,7 @@ from fastapi.responses import JSONResponse
 
 from meho_backplane.features import build_features_block
 from meho_backplane.metrics_access import has_metrics_access
+from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -543,10 +544,12 @@ async def ready(request: Request) -> JSONResponse:
     :func:`~meho_backplane.metrics_access.has_metrics_access`.
 
     Returns 200 with
-    ``{"status": "ready", "checks": [...], "features": {...}}`` when
+    ``{"status": "ready", "checks": [...], "sandbox_mode": "off",
+    "features": {...}}`` when
     at least one probe is registered and every probe reports ``ok``.
     Returns 503 with
-    ``{"status": "not_ready", "checks": [...], "features": {...}}``
+    ``{"status": "not_ready", "checks": [...], "sandbox_mode": "off",
+    "features": {...}}``
     otherwise — including the fail-closed empty-registry case at the
     chassis stage. The empty case is handled explicitly because
     ``all([])`` is vacuously ``True`` in Python, which would otherwise
@@ -560,12 +563,17 @@ async def ready(request: Request) -> JSONResponse:
     block's shape and the audit table in
     ``docs/codebase/error-message-shape.md`` for why this surface
     exists (signals 16, 17).
+
+    ``sandbox_mode`` (#4622) sits at the top level, for every caller, on
+    purpose: when the metrics token is set, ``features`` is hidden from a
+    caller without it, and the mode must be readable on every instance.
     """
     results = await run_probes_async()
     ready_ok = bool(results) and all(r.ok for r in results)
     payload: dict[str, object] = {
         "status": "ready" if ready_ok else "not_ready",
         "checks": [asdict(r) for r in results],
+        "sandbox_mode": sandbox_mode_label(),
     }
     if has_metrics_access(request):
         payload["features"] = build_features_block(get_settings())

@@ -35,6 +35,16 @@ Built-in PostgreSQL (corePostgres):
     Delete the PVC and these Secrets together, or neither.
 {{- end }}
 
+{{- if .Values.sandboxMode.enabled }}
+
+WARNING: sandbox mode is ON (sandboxMode.enabled=true, confirmed for host {{ .Values.sandboxMode.confirmHost }}).
+  On this instance a tenant admin may give a service principal a standing grant that
+  also covers deletes, made in the web console and expiring within 30 days. Agents
+  may then delete systems here without a person's approval. Keep only disposable
+  test systems on this instance, with no network route to any other system.
+  The mode is fixed for the life of the database.
+{{- end }}
+
 Next steps:
   1. Watch the rollout:
        kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "meho.fullname" . }}

@@ -39,6 +39,7 @@ from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._param_errors import describe_violation
+from meho_backplane.sandbox_mode import sandbox_mode_active
 
 # Read-class HTTP verbs — the same set the ingest layer pins as
 # ``READ_HTTP_METHODS`` (``operations/ingest/_internals.py``). Duplicated as
@@ -196,6 +197,13 @@ def _is_mutating(descriptor: EndpointDescriptor) -> bool:
     return descriptor.safety_level != "safe"
 
 
+def _sandbox_delete_grant_note() -> str:
+    """The sentence a park reason adds in sandbox mode (#4622)."""
+    return (
+        "; this instance is in sandbox mode, so a delete grant made in the web console may cover it"
+    )
+
+
 def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     """Extra gating a **service** principal gets from ``safety_level`` (#3152).
 
@@ -212,6 +220,12 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     Returns the park reason, or ``None`` when the op stays auto-execute.
     """
     if descriptor.safety_level == "destructive":
+        if sandbox_mode_active():
+            return (
+                "safety_level=destructive; service-principal deletes park "
+                "(routed to the approval queue) unless a delete grant made in the "
+                "web console covers them — this instance is in sandbox mode (#4622)"
+            )
         return (
             "safety_level=destructive; service-principal deletes park always "
             "(routed to the approval queue) and are never satisfiable by a "
@@ -316,6 +330,8 @@ async def _service_grant_verdict(
     connector_id: str,
     gate_reason: str | None,
     target_id_str: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> tuple[PermissionVerdict | None, str | None]:
     """Consult a standing grant for a parking service-principal op (#3151 / #3349).
 
@@ -333,6 +349,8 @@ async def _service_grant_verdict(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
     )
     if grant_id is not None:
         _log.info(
@@ -364,6 +382,8 @@ async def _non_agent_verdict(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
@@ -398,6 +418,8 @@ async def _non_agent_verdict(
             "non-agent principal parks (routed to the approval queue), never "
             "auto-executes, and no standing grant can pre-clear it (#3183)"
         )
+        if is_service and sandbox_mode_active():
+            gate_reason += _sandbox_delete_grant_note()
     elif descriptor.requires_approval:
         gate_reason = "requires_approval is True; routed to the approval queue (G11.7-T1)"
     elif is_service:
@@ -425,6 +447,8 @@ async def _non_agent_verdict(
             connector_id=connector_id,
             gate_reason=gate_reason,
             target_id_str=target_id_str,
+            preview_hash=preview_hash,
+            params=params,
         )
         if cleared is not None:
             return cleared, gate_reason
@@ -452,6 +476,8 @@ async def policy_gate(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str | None = None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> tuple[PermissionVerdict, str | None]:
     """G11.2-T3 per-(principal, op, target) policy gate.
 
@@ -514,6 +540,12 @@ async def policy_gate(
     The function is **async** — it opens its own DB session to load the
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_safe` uses.
+
+    ``preview_hash`` and ``params`` (#4622) are read only by the
+    service-principal grant consult on an instance in sandbox mode: a
+    ``destructive`` delete under a delete grant must present the hash of
+    its own preview and a valid blast radius before the grant use is
+    recorded. Every other path ignores them.
     """
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
@@ -523,9 +555,16 @@ async def policy_gate(
             descriptor=descriptor,
             target=target,
             connector_id=connector_id,
+            preview_hash=preview_hash,
+            params=params,
         )
     return await _caller_verdict(
-        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
     )
 
 
@@ -535,12 +574,19 @@ async def _caller_verdict(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for the caller alone, by its principal kind."""
     if operator.principal_kind is PrincipalKind.AGENT:
         return await _agent_verdict(operator=operator, descriptor=descriptor, target=target)
     return await _non_agent_verdict(
-        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
     )
 
 
@@ -551,6 +597,8 @@ async def _direct_run_verdict(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str | None,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for a call made by a direct hosted-agent run (#4237).
 
@@ -583,7 +631,12 @@ async def _direct_run_verdict(
     ):
         return agent_result
     verdict, reason = await _caller_verdict(
-        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
     )
     if _more_restrictive(verdict, agent_verdict) is verdict:
         return verdict, reason

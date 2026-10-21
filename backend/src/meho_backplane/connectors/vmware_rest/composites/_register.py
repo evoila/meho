@@ -881,8 +881,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         description=(
             "Deletes a powered-off VM and all its disks for good. A VM that is not "
             "powered off is refused. Destructive: a second person must always "
-            "approve it, after seeing the VM, its disks, NICs and snapshots. Like "
-            "'govc vm.destroy'."
+            "approve it, after seeing the VM, its disks, NICs and snapshots. The "
+            "only exception is a standing delete grant on an instance in sandbox "
+            "mode. Like 'govc vm.destroy'."
         ),
         parameter_schema=VM_DESTROY_PARAMETER_SCHEMA,
         response_schema=VM_DESTROY_RESPONSE_SCHEMA,

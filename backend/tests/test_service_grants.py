@@ -19,15 +19,17 @@ from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant, Target
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, ServicePrincipalGrant, Target
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
 from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
+    consult_and_record_grant,
     find_live_grant,
     null_target_only_park_hint,
 )
@@ -197,6 +199,170 @@ async def test_create_refuses_delete_shaped_by_pattern(op_id: str) -> None:
     with pytest.raises(GrantValidationError) as exc:
         await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
     assert "delete-shaped" in str(exc.value)
+
+
+_VIM_DELETE_OP_IDS = (
+    "POST:/VirtualMachine/{moId}/Destroy_Task",
+    "POST:/VirtualApp/{moId}/Destroy_Task",
+    "POST:/HostNetworkSystem/{moId}/RemovePortGroup",
+    "POST:/FileManager/{moId}/DeleteDatastoreFile_Task",
+    "POST:/VirtualMachine/{moId}/UnregisterVM",
+)
+
+
+async def _grant_rows_for(op_id: str) -> int:
+    async with get_sessionmaker()() as s:
+        count = await s.execute(
+            select(func.count())
+            .select_from(ServicePrincipalGrant)
+            .where(ServicePrincipalGrant.op_id == op_id)
+        )
+        return int(count.scalar_one())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _VIM_DELETE_OP_IDS)
+async def test_create_refuses_vendor_delete_action_name(op_id: str) -> None:
+    """A VI-JSON delete is a POST, so only its action name says it is a delete (#4632)."""
+    svc = ServicePrincipalGrantService()
+    with pytest.raises(GrantValidationError) as exc:
+        await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+    action_name = op_id.rsplit("/", 1)[-1]
+    assert f"is a delete (vendor action name {action_name!r})" in str(exc.value)
+    assert await _grant_rows_for(op_id) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "op_id",
+    ["POST:/VirtualMachine/{moId}/Destroyer_Task", "POST:/VirtualMachine/{moId}/Reset_Task"],
+)
+async def test_create_allows_names_that_only_look_like_a_delete(op_id: str) -> None:
+    """The same lookalike pair the parser test uses stays grantable."""
+    svc = ServicePrincipalGrantService()
+    row = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+    assert row.op_id == op_id
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_vendor_delete_action_name_without_pattern_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The action-name sign does not depend on SERVICE_GRANT_DELETE_SHAPED_PATTERNS."""
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "acme.custom.nuke")
+    get_settings.cache_clear()
+    assert get_settings().service_grant_delete_shaped_patterns == ("acme.custom.nuke",)
+    svc = ServicePrincipalGrantService()
+    with pytest.raises(GrantValidationError) as exc:
+        await svc.create(
+            _TENANT_ID, _CREATOR, _payload(op_id="POST:/VirtualMachine/{moId}/Destroy_Task")
+        )
+    assert "vendor action name 'Destroy_Task'" in str(exc.value)
+
+
+def _service_operator() -> Operator:
+    return Operator(
+        sub=_PRINCIPAL,
+        raw_jwt="svc-jwt",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.SERVICE,
+    )
+
+
+async def _seed_grant_row(op_id: str) -> None:
+    """Write a grant row straight into the database, bypassing create's review."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            ServicePrincipalGrant(
+                tenant_id=_TENANT_ID,
+                principal_sub=_PRINCIPAL,
+                op_id=op_id,
+                connector_id=_CONNECTOR,
+                reason="written before the rule existed",
+                created_by_sub=_CREATOR,
+            )
+        )
+        await s.commit()
+
+
+async def _grant_use_audit_rows() -> int:
+    async with get_sessionmaker()() as s:
+        count = await s.execute(
+            select(func.count()).select_from(AuditLog).where(AuditLog.path == "approval.decision")
+        )
+        return int(count.scalar_one())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "descriptor_kwargs",
+    [
+        pytest.param(
+            {"source_kind": "ingested", "method": "POST", "tags": ["write"]},
+            id="ingested-style-record",
+        ),
+        pytest.param({"source_kind": "composite"}, id="inner-step-record"),
+    ],
+)
+async def test_existing_grant_row_never_lets_a_vendor_delete_run(
+    descriptor_kwargs: dict[str, object],
+) -> None:
+    """A stored grant on a VI-JSON delete is inert at dispatch (#4632).
+
+    The inner step of a multi-step operation arrives as an in-memory record
+    with only its declared level: no method, no tags. The op id is the only
+    sign, and it is enough.
+    """
+    op_id = "POST:/VirtualMachine/{moId}/Destroy_Task"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        safety_level="dangerous",
+        requires_approval=True,
+        parameter_schema={},
+        **descriptor_kwargs,
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+    )
+
+    assert grant_id is None
+    assert await _grant_use_audit_rows() == 0
+
+
+@pytest.mark.asyncio
+async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
+    """Control: the same seeded-row path auto-approves a non-delete inner step."""
+    op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="composite",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+    )
+
+    assert grant_id is not None
+    assert await _grant_use_audit_rows() == 1
 
 
 @pytest.mark.asyncio

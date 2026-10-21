@@ -1,48 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Fail-open publish-on-write to the per-tenant Valkey stream (G6.1-T3).
+"""Publish agent announcements: archive first, then a stream wake-up.
 
-Constructs one ``XADD meho:feed:{tenant_id}`` per audited operation,
-trimmed to :data:`BROADCAST_MAXLEN` via ``MAXLEN ~`` (approximate).
-Two Prometheus counters surface the publish path on ``/metrics``:
+Broadcast carries deliberate agent announcements only (#3758). No
+automatic activity (REST or MCP calls, dispatches, approvals, checks,
+topology writes, event ingest) is published here; the audit log is the
+record of that activity.
 
-* :data:`BROADCAST_EVENTS_PUBLISHED_TOTAL` — labelled by ``op_class``
-  + ``result_status`` so operators can see the broadcast surface
-  partitioned by sensitivity class and outcome.
-* :data:`BROADCAST_PUBLISH_ERRORS_TOTAL` — unlabelled, counts every
-  fail-open swallow (Valkey unreachable, ``XADD`` rejected, redis-py
-  client teardown race). Operators alert off this counter; the
-  cardinality is intentionally coarse.
-
-Fail-open semantics
-===================
-
-A publish failure NEVER propagates back to the audit-middleware or
-MCP handler call site. Reasons:
-
-* The audit row is the canonical record; the broadcast feed is the
-  real-time view. Returning a 500 to the operator because the broadcast
-  side-channel didn't reach Slack would be worse than the operator just
-  missing one event in the feed.
-* Valkey unreachability is operationally common (rolling restart of
-  the broadcast subchart, brief network blips); making it a request-path
-  failure would multiply the operational cost of every Valkey wobble
-  by the chassis's QPS.
-
-The trade-off is **at-most-once** publish semantics — events can be
-dropped, never duplicated. Subscribers that need at-least-once
-ordering query :class:`~meho_backplane.db.models.AuditLog` by
-``audit_id`` (the field on every :class:`BroadcastEvent`) to reconcile
-gaps. G8's audit-query API (#334) is the upstream path for this.
+:func:`publish_agent_announcement` stores the announcement in the
+``agent_announcement`` archive (fail-loud), then writes one
+``XADD meho:feed:{tenant_id}`` entry, trimmed to :data:`BROADCAST_MAXLEN`
+via ``MAXLEN ~``. That entry only wakes live watchers; readers read the
+archive (#3748). A failed stream write is fail-soft: the call returns
+``delivery_pending=True`` and bumps
+:data:`BROADCAST_PUBLISH_ERRORS_TOTAL`.
 
 References
 ----------
 
 * Valkey ``XADD``: https://valkey.io/commands/xadd/
-* Decision #3 (PII defaults the publisher relies on the upstream
-  :func:`~meho_backplane.broadcast.events.redact_payload` to enforce):
-  ``docs/decisions/locked-decisions.md``.
 """
 
 from __future__ import annotations
@@ -67,7 +44,6 @@ from meho_backplane.broadcast.announcement_claims import (
 )
 from meho_backplane.broadcast.archive_sequence import next_announcement_seq
 from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.broadcast.history import row_to_announcement
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
@@ -75,12 +51,10 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
-    "BROADCAST_EVENTS_PUBLISHED_TOTAL",
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
     "AnnouncementPublishResult",
     "publish_agent_announcement",
-    "publish_event",
 ]
 
 
@@ -95,29 +69,17 @@ __all__ = [
 BROADCAST_MAXLEN: Final[int] = 10000
 
 
-#: Per-event publish success counter. The two labels partition the
-#: feed so operators can graph "broadcast volume by op class" without
-#: fanning into per-tenant cardinality. ``op_class`` matches the
-#: ``BroadcastEvent.op_class`` taxonomy from
-#: :func:`~meho_backplane.broadcast.events.classify_op`;
-#: ``result_status`` matches the ``"ok"`` / ``"error"`` / ``"denied"``
-#: trichotomy the handlers produce.
-BROADCAST_EVENTS_PUBLISHED_TOTAL: Counter = Counter(
-    "broadcast_events_published_total",
-    "BroadcastEvents successfully XADD'd to the per-tenant Valkey stream.",
-    labelnames=("op_class", "result_status"),
-)
-
-#: Per-failure counter for the fail-open swallow path. Unlabelled by
-#: design: the failure modes (Valkey unreachable, XADD-rejected, redis-py
-#: teardown race) all reduce to "the broadcast feed missed one event",
-#: and an alert on a sustained nonzero rate is the only operational
-#: signal that matters. Cardinality is intentionally coarse — adding
-#: ``error_class`` as a label would multiply series by every redis-py
-#: exception subclass the worker happens to see.
+#: Failed stream wake-up writes for stored announcements (#3758). The
+#: archive row is already committed, so readers still see the
+#: announcement; the call returns ``delivery_pending=True`` and live
+#: watchers find it on their next archive scan. Unlabelled by design:
+#: the failure modes (Valkey unreachable, XADD error, redis-py teardown
+#: race) all mean "the wake-up stream is not working", and an alert on a
+#: sustained nonzero rate (the chart's ``MehoBroadcastPublishErrors``) is
+#: the signal that matters.
 BROADCAST_PUBLISH_ERRORS_TOTAL: Counter = Counter(
     "broadcast_publish_errors_total",
-    "BroadcastEvent publishes that failed (Valkey unreachable / XADD error / teardown race).",
+    "Announcement stream wake-up writes that failed (Valkey unreachable / XADD error).",
 )
 
 
@@ -505,6 +467,7 @@ async def _deliver(event: AgentAnnouncementEvent) -> _Delivery:
             written, entry_id = await _write_stream_entry_once(event)
         except Exception as exc:
             await session.rollback()
+            BROADCAST_PUBLISH_ERRORS_TOTAL.inc()
             _log.warning(
                 "broadcast_announcement_delivery_pending",
                 error_class=type(exc).__name__,
@@ -524,67 +487,6 @@ async def _deliver(event: AgentAnnouncementEvent) -> _Delivery:
         return _Delivery(written_entry_id=entry_id if written else None)
 
 
-async def publish_event(event: BroadcastEvent) -> None:
-    """Fail-open publish to the per-tenant Valkey stream.
-
-    Exactly one ``XADD`` per call:
-
-    * ``key`` — ``meho:feed:{event.tenant_id}`` (per-tenant isolation).
-    * ``fields`` — single ``event`` field carrying the JSON-serialised
-      :class:`BroadcastEvent`. Single field rather than splitting the
-      event into one Streams field per :class:`BroadcastEvent` attribute
-      because the wire shape (one JSON blob) round-trips identically
-      through SSE (T4), the MCP resource (T6), and any future Slack
-      mirror (G6.2) — every consumer deserialises back to a
-      :class:`BroadcastEvent`.
-    * ``maxlen=BROADCAST_MAXLEN`` + ``approximate=True`` — the ``MAXLEN ~``
-      form per the Valkey docs. Best-effort retention is acceptable for
-      the broadcast feed; strict ``MAXLEN`` would force a slow per-call
-      O(n) trim and the broadcast subscribers are already designed
-      around at-most-once delivery (see :doc:`module docstring`).
-
-    Failure handling: any exception from :func:`get_broadcast_client`
-    or :meth:`Redis.xadd` is logged at warning level with the
-    exception class only (no error message — redis-py exceptions can
-    embed URL substrings that would leak the broadcast endpoint to
-    log shippers), the error counter is incremented, and the call
-    returns silently. The caller (AuditMiddleware on the HTTP path,
-    MCP handlers on the JSON-RPC path) MUST NOT depend on this
-    succeeding — the audit row is the canonical record.
-
-    Parameters
-    ----------
-    event:
-        The frozen :class:`BroadcastEvent`. Its ``payload`` field MUST
-        already be the redacted view per
-        :func:`~meho_backplane.broadcast.events.redact_payload`; this
-        publisher does not re-redact, doesn't inspect the payload, and
-        doesn't enforce the PII contract. See the events module
-        docstring for why the contract is enforced upstream.
-    """
-    try:
-        client = get_broadcast_client()
-        await client.xadd(
-            _stream_key(event.tenant_id),
-            {"event": event.model_dump_json()},
-            maxlen=BROADCAST_MAXLEN,
-            approximate=True,
-        )
-    except Exception as exc:
-        _log.warning(
-            "broadcast_publish_failed",
-            error_class=type(exc).__name__,
-            tenant_id=str(event.tenant_id),
-            op_id=event.op_id,
-        )
-        BROADCAST_PUBLISH_ERRORS_TOTAL.inc()
-        return
-    BROADCAST_EVENTS_PUBLISHED_TOTAL.labels(
-        op_class=event.op_class,
-        result_status=event.result_status,
-    ).inc()
-
-
 async def publish_agent_announcement(
     event: AgentAnnouncementEvent,
     *,
@@ -592,10 +494,9 @@ async def publish_agent_announcement(
 ) -> AnnouncementPublishResult:
     """Store an agent-authored announcement in the archive, then wake the stream.
 
-    Companion to :func:`publish_event` -- same wire shape on the stream
-    (``XADD meho:feed:{tenant_id}`` with a single ``event`` field carrying
-    the JSON-serialised model), same ``MAXLEN ~`` trim, same per-tenant
-    stream key.
+    The stream entry is ``XADD meho:feed:{tenant_id}`` with a single
+    ``event`` field carrying the JSON-serialised model, trimmed with
+    ``MAXLEN ~``.
 
     Archive first, stream second (#3748)
     ------------------------------------

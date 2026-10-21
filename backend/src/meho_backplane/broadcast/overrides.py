@@ -50,8 +50,7 @@ Fail-open contract
 A DB failure during cache load logs ``broadcast_override_cache_load_failed``
 and drops to the default branch -- the publish path is non-load-bearing
 for application correctness (the audit row is the canonical record),
-and the broadcast feed is the real-time view. Valkey unreachability is
-already swallowed by :func:`~meho_backplane.broadcast.publisher.publish_event`;
+and no Broadcast event is published from this path since #3758.
 PG unreachability during the resolver lookup gets the same treatment
 here.
 

@@ -138,9 +138,11 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 )
 from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    VIM_TYPE_NAME_KEY,
     fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
+    vim_moref,
 )
 
 from .schemas import DATASTORE_USAGE_MAX_VM_NAMES
@@ -512,6 +514,156 @@ async def cluster_drs_recommendations_composite(
     return out
 
 
+# vim types of the QueryEvents request body (spec-verified against the pinned
+# vi-json.yaml: ``QueryEventsRequestType.filter`` is an ``EventFilterSpec``;
+# its ``time`` / ``entity`` members are ``EventFilterSpecByTime`` /
+# ``EventFilterSpecByEntity``). vCenter 8.0.x rejects a QueryEvents call with
+# no body (HTTP 500 ``InvalidArgument``), and its deserialiser wants the
+# ``_typeName`` tag on every DataObject (#3103), so the filter is always sent
+# and always tagged. The body shape is the same on 8.0.x and 9.0: only the
+# ``/sdk/vim25/{release}`` path segment differs. 9.0 adds an optional
+# ``eventViewSpec`` argument, which this composite does not send.
+_EVENT_FILTER_SPEC_TYPE = "EventFilterSpec"
+_EVENT_FILTER_SPEC_BY_TIME_TYPE = "EventFilterSpecByTime"
+_EVENT_FILTER_SPEC_BY_ENTITY_TYPE = "EventFilterSpecByEntity"
+_EVENT_TAIL_DEFAULT_MAX_COUNT = 100
+_EVENT_TAIL_DEFAULT_RECURSION = "all"
+# Event argument fields that name the managed entity an event is about, most
+# specific first. Each is an ``EntityEventArgument`` subtype carrying ``name``
+# plus one MoRef member (``vm`` / ``datastore`` / ``host`` / ...).
+_EVENT_ENTITY_ARGUMENTS: tuple[str, ...] = (
+    "vm",
+    "ds",
+    "host",
+    "net",
+    "dvs",
+    "computeResource",
+    "datacenter",
+)
+
+
+def _build_query_events_body(params: dict[str, Any], max_count: int) -> dict[str, Any]:
+    """Build the ``QueryEvents`` method args: one tagged ``EventFilterSpec``.
+
+    Members are added in the order the vim schema declares them (``entity``,
+    ``time``, ``disableFullMessage``, ``eventTypeId``, ``maxCount``).
+    ``disableFullMessage`` is sent as ``false`` because the spec says an unset
+    flag leaves ``fullFormattedMessage`` out, and the reduced rows need it.
+    Time strings pass through as given; the parameter schema already checked
+    they are RFC 3339.
+    """
+    spec: dict[str, Any] = {VIM_TYPE_NAME_KEY: _EVENT_FILTER_SPEC_TYPE}
+    entity = params.get("entity")
+    if isinstance(entity, dict):
+        spec["entity"] = {
+            VIM_TYPE_NAME_KEY: _EVENT_FILTER_SPEC_BY_ENTITY_TYPE,
+            "entity": vim_moref(entity["type"], entity["moId"]),
+            "recursion": entity.get("recursion", _EVENT_TAIL_DEFAULT_RECURSION),
+        }
+    begin_time = params.get("begin_time")
+    end_time = params.get("end_time")
+    if begin_time is not None or end_time is not None:
+        window: dict[str, Any] = {VIM_TYPE_NAME_KEY: _EVENT_FILTER_SPEC_BY_TIME_TYPE}
+        if begin_time is not None:
+            window["beginTime"] = begin_time
+        if end_time is not None:
+            window["endTime"] = end_time
+        spec["time"] = window
+    spec["disableFullMessage"] = False
+    event_type_ids = params.get("event_type_ids")
+    if event_type_ids:
+        spec["eventTypeId"] = list(event_type_ids)
+    spec["maxCount"] = max_count
+    return {"filter": spec}
+
+
+def _event_explicit_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The object an ``EventEx`` / ``ExtendedEvent`` names itself, else ``None``.
+
+    ``EventEx`` carries ``objectId`` / ``objectType`` / ``objectName``;
+    ``ExtendedEvent`` carries ``managedObject``. Both event classes also
+    inherit the base ``Event`` context members, so these fields must be read
+    before them.
+    """
+    object_id = event.get("objectId")
+    if isinstance(object_id, str):
+        object_type = event.get("objectType")
+        object_name = event.get("objectName")
+        return {
+            "type": object_type if isinstance(object_type, str) else None,
+            "moId": object_id,
+            "name": object_name if isinstance(object_name, str) else None,
+        }
+    managed_object = event.get("managedObject")
+    if isinstance(managed_object, dict) and isinstance(managed_object.get("value"), str):
+        mo_type = managed_object.get("type")
+        return {
+            "type": mo_type if isinstance(mo_type, str) else None,
+            "moId": managed_object["value"],
+            "name": None,
+        }
+    return None
+
+
+def _event_argument_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The most specific ``EntityEventArgument`` member of an event, else ``None``."""
+    for field in _EVENT_ENTITY_ARGUMENTS:
+        argument = event.get(field)
+        if not isinstance(argument, dict):
+            continue
+        moref = next(
+            (
+                value
+                for value in argument.values()
+                if isinstance(value, dict)
+                and isinstance(value.get("type"), str)
+                and isinstance(value.get("value"), str)
+            ),
+            None,
+        )
+        name = argument.get("name")
+        return {
+            "type": moref["type"] if moref else None,
+            "moId": moref["value"] if moref else None,
+            "name": name if isinstance(name, str) else None,
+        }
+    return None
+
+
+def _event_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The entity an event is about, as ``{type, moId, name}``, else ``None``.
+
+    The event's own object (``EventEx`` ``objectId``, ``ExtendedEvent``
+    ``managedObject``) wins. Only when an event names no object of its own do
+    the base ``Event`` context members (``vm`` / ``ds`` / ``host`` / ...)
+    count, most specific first. Reading the context first would turn an
+    ``EventEx`` about a datastore into a row about its datacenter.
+    """
+    return _event_explicit_entity(event) or _event_argument_entity(event)
+
+
+def _reduce_event(event: Any) -> dict[str, Any]:
+    """Project one vim ``Event`` to ``{createdTime, eventTypeId, fullFormattedMessage, entity}``.
+
+    ``eventTypeId`` follows the vim matching rule for
+    ``EventFilterSpec.eventTypeId``: ``EventEx`` / ``ExtendedEvent`` carry an
+    ``eventTypeId`` member, every other event's type id is its class name
+    (the ``_typeName`` tag). So the value can be fed back as a filter.
+    """
+    raw = event if isinstance(event, dict) else {}
+    created = raw.get("createdTime")
+    type_id = raw.get("eventTypeId")
+    if not isinstance(type_id, str):
+        type_id = raw.get(VIM_TYPE_NAME_KEY)
+    message = raw.get("fullFormattedMessage")
+    return {
+        "createdTime": created if isinstance(created, str) else None,
+        "eventTypeId": type_id if isinstance(type_id, str) else None,
+        "fullFormattedMessage": message if isinstance(message, str) else None,
+        "entity": _event_entity(raw),
+    }
+
+
 async def event_tail_composite(
     *,
     operator: Operator,
@@ -519,29 +671,42 @@ async def event_tail_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any]:
-    """Tail recent events via EventManager.QueryEvents (vi-json).
+    """Read recent vCenter events via EventManager.QueryEvents (vi-json).
 
     Op-id: ``vmware.composite.event.tail``.
 
     Sub-op read directly on the connector session (single call):
 
-    1. ``POST:/EventManager/{moId}/QueryEvents`` -- recent events. The
-       vi-json call returns an array of event dicts; the handler caps
-       the array client-side to ``max_events`` (default 100).
+    1. ``POST:/EventManager/{moId}/QueryEvents`` -- always with a tagged
+       ``EventFilterSpec`` body (see :func:`_build_query_events_body`).
+       ``begin_time`` / ``end_time`` map to ``filter.time``,
+       ``event_type_ids`` to ``filter.eventTypeId``, ``entity`` to
+       ``filter.entity`` and ``max_count`` to ``filter.maxCount``. The
+       server-side ``maxCount`` is the bound; the handler also cuts the list
+       to ``max_count`` in case a server ignores it.
 
     Returns
     -------
     dict[str, Any]
-        ``{"events": <list[event dict]>, "count": <int>,
-        "moId": <str>, "max_events_applied": <int>}``. ``count`` is
-        the post-cap length so operators can detect truncation.
+        ``{"events": <list[reduced row]>, "count": <int>, "moId": <str>,
+        "max_count_applied": <int>}``. Each row is ``{createdTime,
+        eventTypeId, fullFormattedMessage, entity}``. The ``events`` list is
+        what the dispatcher turns into a result handle when it is large.
     """
     mo_id = params.get("moId", "EventManager")
-    max_events = int(params.get("max_events", 100))
+    max_count = int(params.get("max_count", _EVENT_TAIL_DEFAULT_MAX_COUNT))
     raw = await _read_sub_op(
-        connector, target, operator, _OP_POST_QUERY_EVENTS, path_params={"moId": mo_id}
+        connector,
+        target,
+        operator,
+        _OP_POST_QUERY_EVENTS,
+        path_params={"moId": mo_id},
+        body=_build_query_events_body(params, max_count),
     )
     events = _unwrap_value(raw)
+    if events is None:
+        # The pinned spec marks the QueryEvents response ``nullable``.
+        events = []
     if not isinstance(events, list):
         # vi-json QueryEvents always returns a list. A non-list payload
         # is a connector-side bug -- surface it to the caller rather
@@ -549,12 +714,12 @@ async def event_tail_composite(
         raise RuntimeError(
             f"event_tail: expected list from {_OP_POST_QUERY_EVENTS!r}, got {type(events).__name__}"
         )
-    capped = events[:max_events]
+    rows = [_reduce_event(event) for event in events[:max_count]]
     return {
-        "events": capped,
-        "count": len(capped),
+        "events": rows,
+        "count": len(rows),
         "moId": mo_id,
-        "max_events_applied": max_events,
+        "max_count_applied": max_count,
     }
 
 
@@ -662,6 +827,37 @@ async def datastore_refresh_composite(
     }
 
 
+# vim types for the performance-summary entity (#4038). VI-JSON wants the
+# ``entity`` argument of QueryAvailablePerfMetric / PerfQuerySpec as an
+# annotated ManagedObjectReference; vCenter 8.0.3 answers a bare moid string
+# with 500 ``InvalidArgument: Unexpected string value``. The type comes from
+# the caller's ``entity_type`` or, failing that, from the moid prefix.
+_PERF_ENTITY_TYPE_BY_MOID_PREFIX: tuple[tuple[str, str], ...] = (
+    ("host-", "HostSystem"),
+    ("vm-", _VIRTUAL_MACHINE_MO_TYPE),
+    ("domain-c", _CLUSTER_COMPUTE_RESOURCE_MO_TYPE),
+)
+_PERF_QUERY_SPEC_TYPE = "PerfQuerySpec"
+
+
+def _perf_entity_moref(entity_moid: str, entity_type: str | None) -> dict[str, str]:
+    """The annotated ``ManagedObjectReference`` for the perf *entity_moid*.
+
+    *entity_type* wins when given; otherwise the vim type comes from the
+    moid prefix. Raises :class:`ValueError` when neither yields a type.
+    """
+    if entity_type:
+        return vim_moref(entity_type, entity_moid)
+    for prefix, mo_type in _PERF_ENTITY_TYPE_BY_MOID_PREFIX:
+        if entity_moid.startswith(prefix):
+            return vim_moref(mo_type, entity_moid)
+    known = ", ".join(f"{prefix!r}" for prefix, _ in _PERF_ENTITY_TYPE_BY_MOID_PREFIX)
+    raise ValueError(
+        f"performance_summary: cannot tell the vim type of entity_moid "
+        f"{entity_moid!r} from its prefix (known: {known}); pass entity_type"
+    )
+
+
 async def performance_summary_composite(
     *,
     operator: Operator,
@@ -693,13 +889,18 @@ async def performance_summary_composite(
     ``counter_ids``) is an explicit v0.2.next concern per the issue
     body's *Out of scope* section.
 
-    The vi-json method arguments (``entity``, ``interval_seconds``)
-    become the flat JSON request body; the ``moId`` targets the
-    PerformanceManager singleton in the path -- the same method-args-as-
-    body shape the ``vmware.host.usage`` typed op sends for
-    RetrievePropertiesEx.
+    The vi-json method arguments become the flat JSON request body; the
+    ``moId`` targets the PerformanceManager singleton in the path -- the
+    same method-args-as-body shape the ``vmware.host.usage`` typed op
+    sends for RetrievePropertiesEx. Per the pinned ``vi-json.yaml``:
+    QueryAvailablePerfMetric takes ``entity`` + ``intervalId``; QueryPerf
+    takes ``querySpec`` (a ``PerfQuerySpec`` list carrying ``entity`` /
+    ``intervalId`` / ``maxSample``). ``entity`` is an annotated
+    ``ManagedObjectReference`` built by :func:`_perf_entity_moref` (#4038);
+    vCenter 8.0.3 rejects a bare moid string.
     """
     entity_moid = params["entity_moid"]
+    entity = _perf_entity_moref(entity_moid, params.get("entity_type"))
     perf_mgr_moid = params.get("perf_manager_moid", "PerfMgr")
     interval_s = int(params.get("interval_seconds", 20))
     max_samples = int(params.get("max_samples", 60))
@@ -710,7 +911,7 @@ async def performance_summary_composite(
         operator,
         _OP_POST_QUERY_AVAILABLE_PERF_METRIC,
         path_params={"moId": perf_mgr_moid},
-        body={"entity": entity_moid},
+        body={"entity": entity, "intervalId": interval_s},
     )
     available = _unwrap_value(available_raw)
     if not isinstance(available, list):
@@ -726,7 +927,16 @@ async def performance_summary_composite(
         operator,
         _OP_POST_QUERY_PERF,
         path_params={"moId": perf_mgr_moid},
-        body={"entity": entity_moid, "interval_seconds": interval_s},
+        body={
+            "querySpec": [
+                {
+                    VIM_TYPE_NAME_KEY: _PERF_QUERY_SPEC_TYPE,
+                    "entity": entity,
+                    "intervalId": interval_s,
+                    "maxSample": max_samples,
+                }
+            ]
+        },
     )
     samples = _unwrap_value(samples_raw)
     if not isinstance(samples, list):

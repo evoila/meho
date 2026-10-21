@@ -37,9 +37,13 @@ delete-shaped patterns: it reads them from the same single source the
 grant guard uses -- ``Settings.service_grant_delete_shaped_patterns``
 (the ``_delete_shaped_reason_by_pattern`` seam at
 ``operations/service_grants.py``) -- and applies the same descriptor
-signals (HTTP ``DELETE`` method, ``destructive`` tag). When the
-``destructive`` safety tier (#3196) lands, this classifier already
-covers it via the tag it promotes; nothing here changes.
+signals (HTTP ``DELETE`` method, ``destructive`` tag). The third sign is
+the vendor action name (``Destroy``, ``Delete``, ``Remove``,
+``Unregister``, #4632): the ingest parser's word list in
+:mod:`meho_backplane.delete_names`, so
+``POST:/VirtualMachine/{moId}/Destroy_Task`` never records a body either.
+When the ``destructive`` safety tier (#3196) lands, this classifier
+already covers it via the tag it promotes; nothing here changes.
 
   NOTE (pending cross-ref amendment): the reciprocal pointer from
   ``governed-delete-operations.md`` back to the flight-recorder record is
@@ -74,6 +78,8 @@ from fnmatch import fnmatchcase
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict
+
+from meho_backplane.delete_names import destructive_action_name_in_op_id
 
 __all__ = [
     "SECRET_FAMILY_PATTERNS",
@@ -284,31 +290,63 @@ def classify_body_exclusion(
             )
 
     # --- destructive / delete-shaped (single-sourced) ------------------
+    destructive = _destructive_exclusion(
+        op_id, tag_set=tag_set, method=method, delete_shaped_patterns=delete_shaped_patterns
+    )
+    if destructive is not None:
+        return destructive
+
+    return BodyExclusion(excluded=False)
+
+
+def _destructive_reason(
+    op_id: str,
+    *,
+    tag_set: set[str],
+    method: str | None,
+    delete_shaped_patterns: tuple[str, ...] | None,
+) -> str | None:
+    """Return why *op_id* is a delete, or ``None``.
+
+    Four signs, cheapest first: the HTTP ``DELETE`` method, the
+    ``destructive`` tag, a vendor delete action name (the ingest parser's
+    word list in :mod:`meho_backplane.delete_names`, #4632) and the
+    configured delete-shaped patterns shared with the grant guard.
+    """
+    if (method or "").upper() == "DELETE":
+        return f"op {op_id!r} is an HTTP DELETE; body never recorded"
+    if "destructive" in tag_set:
+        return f"op {op_id!r} carries the 'destructive' tag; body never recorded"
+    action_name = destructive_action_name_in_op_id(op_id)
+    if action_name is not None:
+        return (
+            f"op {op_id!r} is a delete (vendor action name {action_name!r}, "
+            "the ingest parser's word list); body never recorded"
+        )
     if delete_shaped_patterns is None:
         from meho_backplane.settings import get_settings
 
         delete_shaped_patterns = get_settings().service_grant_delete_shaped_patterns
-    if (method or "").upper() == "DELETE":
-        return BodyExclusion(
-            excluded=True,
-            family="destructive",
-            reason=f"op {op_id!r} is an HTTP DELETE; body never recorded",
-        )
-    if "destructive" in tag_set:
-        return BodyExclusion(
-            excluded=True,
-            family="destructive",
-            reason=f"op {op_id!r} carries the 'destructive' tag; body never recorded",
-        )
     for pattern in delete_shaped_patterns:
         if fnmatchcase(op_id, pattern):
-            return BodyExclusion(
-                excluded=True,
-                family="destructive",
-                reason=(
-                    f"op {op_id!r} matches delete-shaped pattern {pattern!r} "
-                    "(single-sourced with the grant guard); body never recorded"
-                ),
+            return (
+                f"op {op_id!r} matches delete-shaped pattern {pattern!r} "
+                "(single-sourced with the grant guard); body never recorded"
             )
+    return None
 
-    return BodyExclusion(excluded=False)
+
+def _destructive_exclusion(
+    op_id: str,
+    *,
+    tag_set: set[str],
+    method: str | None,
+    delete_shaped_patterns: tuple[str, ...] | None,
+) -> BodyExclusion | None:
+    """Return the ``destructive`` family exclusion for *op_id*, or ``None``."""
+    reason = _destructive_reason(
+        op_id, tag_set=tag_set, method=method, delete_shaped_patterns=delete_shaped_patterns
+    )
+    if reason is None:
+        return None
+    return BodyExclusion(excluded=True, family="destructive", reason=reason)

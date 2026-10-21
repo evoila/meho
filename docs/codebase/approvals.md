@@ -27,15 +27,11 @@ truth:
   "decision" row on approve/reject/expire).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
   (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
-  `meho approvals {list,show,approve,reject}` CLI verbs. T5 also adds
-  the broadcast notifications: each `create_pending_request` /
-  `approve_request` / `reject_request` publishes an
-  `approval.{pending,approved,rejected}` event via
-  `broadcast.publisher.publish_event`. These events go to the live SSE
-  feed (`/api/v1/feed`, `/ui/broadcast/stream`) until #3758 moves them,
-  and the audit log (`query_audit`) records them. Since #3748 the MCP and
-  REST `recent` / `watch` reads return agent announcements only, so an
-  operator session does not see approval events there.
+  `meho approvals {list,show,approve,reject}` CLI verbs. Since #3758 no
+  approval step is published to Broadcast. `record_approval_step_event`
+  records `approval.{pending,approved,rejected,expired}` only for the
+  paired add-on that asked (#3027); the audit log records every step; the
+  agent waiter, the bell badge and the console read the stored row.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
@@ -161,6 +157,12 @@ Set it up in three steps:
      secretName: meho-approval-handoff
      secretKey: approval_handoff_encryption_key
    ```
+
+With a built-in part of the core on (`corePostgres.enabled` or
+`coreKeycloak.enabled`), the install makes this key itself, in the Secret
+`<release>-core-approval-handoff` (key `approval_handoff_encryption_key`).
+Skip steps 1 and 2 and set `approvalHandoff.secretName` to that name. See
+[core-secrets.md](core-secrets.md).
 
 The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
 creating a new Fernet key in the referenced Secret and restarting all
@@ -755,8 +757,8 @@ Two changes close that gap, scoped to the **direct**-op path:
 **The `run_id` gate (no double-execution / agent-run regression
 guard).** `/decide` re-dispatches **only when
 `run_id IS NULL`** — i.e. a direct operator op. An **agent-run** request
-(`run_id` set) is still resumed in-process by the agent runtime off the
-`approval.approved` broadcast (the must-not-regress path); re-dispatching
+(`run_id` set) is still resumed in-process by the agent runtime once it
+reads the approved row (the must-not-regress path); re-dispatching
 it from `/decide` too would execute the op twice. So the agent-run
 resume path is untouched: it keeps its in-memory params, ignores the new
 column, and remains the sole re-dispatcher for `run_id`-bearing requests.
@@ -894,7 +896,10 @@ What the run row holds:
   `payload.error` with the `error_code` and the safe details (#2680).
 - `payload.approval_request_id` names the request it ran for.
 - `parent_audit_id` points at the request's `approval.request` row, next to
-  the decision row (#2086). The agent-run resume uses the same shape.
+  the decision row (#2086). The agent-run resume sets `parent_audit_id` the
+  same way, but its run row has no `payload.approval_request_id` (follow
+  `parent_audit_id` to the request), and its `operator_sub` is the agent
+  that made the call, not the approver.
 - `operator_sub` is the approver, who ran it.
 
 The approve response (`dispatch_status`, `dispatch_error`) and the stored
@@ -1323,6 +1328,31 @@ When such an op reaches `needs-approval`, `_handle_needs_approval` calls
   mismatch (params swapped between preview and call, or a forged/stale
   hash) → `preview_hash_mismatch`.
 
+**Every refusal is recorded (#4647).** A `destructive` call that is
+refused before it can wait for approval, with `preview_binding_required`,
+`preview_hash_mismatch` or `blast_radius_required`, writes one `denied`
+audit row on the op's own path through `dispatcher._audit_denied_and_return`,
+the same writer a policy denial and the #3542 preflight refusal use:
+`event_class=policy_decision`, synthetic status 403,
+`payload.result_status=denied`, and the refusal code under
+`payload.error.error_code`. No approval row is written and nothing reaches
+the vendor. A refused `destructive` step inside a multi-step operation
+(`composite.enforce_subop_policy`) writes the same row on the step's path,
+linked to the parent operation's audit id in `parent_audit_id`, because the
+dispatcher writes no row for a `denied` result a handler returns.
+
+Two system faults in `_handle_needs_approval` write no audit row on
+purpose. Neither is a decision about the call; both are a MEHO-side fault
+with no fitting audit event class. They leave different traces:
+
+- A missing or malformed approval encryption key
+  (`ApprovalHandoffKeyError`) returns a `denied` result whose message names
+  the key setting. Nothing is logged. The returned result is the only
+  record.
+- A failure while saving the approval request is logged as
+  `approval_queue_create_failed` (with the op id and the operator) and
+  returns a `denied` result.
+
 The verified hash is persisted on `ApprovalRequest.preview_hash` (nullable
 `Text`, migration `0086`) — **distinct** from `params_hash` (that hashes
 the request *params*; this hashes the *preview result* the approver was
@@ -1548,7 +1578,11 @@ same as an ordinary policy denial. They share one writer,
 multi-step operation the row is written by the sub-op gate and carries the
 parent operation's audit id in `parent_audit_id`. This matters because the
 parent returns the step's result as is, and the dispatcher writes no audit
-row for a result a handler returns. Before #3542 the verdict was only a
+row for a result a handler returns. Every row the step gate writes (this
+`denied` row and the `approval.request` row of a step that waits) carries
+the step's own policy result in `policy_decision`, `needs-approval`, not
+the parent's (#4646). The gate binds the step's result for its own call
+only, so the parent operation's own audit row keeps the parent's result. Before #3542 the verdict was only a
 warning and the op parked anyway; rows parked then still carry
 `write_capability_warning`, which the console modal shows as a banner.
 
@@ -2208,6 +2242,26 @@ service`), leaving the human `USER` path unchanged:
   during an unattended run auto-approve instead. Each use writes an
   `approval.decision` / `auto-approved` audit row (this section's shape),
   carrying `grant_id` — same ledger visibility as a human decision.
+- **Lineage ids on the auto-approval row** (#3695): the grant-use row is
+  written at decision time with the same ids the parked path keeps, so an
+  auto-approval links to the call it cleared:
+  - `request_id` — the request's correlation id. The call's `DISPATCH` row
+    now carries the same `request_id` (it was always NULL before), so you
+    can find the call an auto-approval cleared, and its flight-recorder
+    trace, by matching `request_id`. In a multi-step operation all child
+    rows share the request id; use `parent_audit_id` to tell them apart.
+  - `agent_session_id` — the agent-run or MCP session
+    (`resolve_agent_session_id()`). NULL for a plain REST call, which has
+    no session.
+  - `parent_audit_id` — the multi-step parent's audit id
+    (`parent_audit_id_var`) when the cleared call is a child step. NULL for
+    a top-level call.
+
+  There is still no row while a call runs; a call only gets its `DISPATCH`
+  row when it ends. For long calls use async mode (`async: true` on REST
+  `/call` or on MCP `call_operation`): the `operation_run` row shows the
+  call as `running` with `started_at` for its whole run. See
+  [`async-governed-dispatch.md`](async-governed-dispatch.md).
 
 Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*

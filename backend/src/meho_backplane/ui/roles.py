@@ -29,7 +29,7 @@ from meho_backplane.ui.auth.refresh import (
     verify_access_token_with_refresh,
 )
 
-__all__ = ["is_ui_tenant_admin", "resolve_ui_operator"]
+__all__ = ["is_ui_operator", "is_ui_tenant_admin", "resolve_ui_operator"]
 
 log = structlog.get_logger(__name__)
 
@@ -89,3 +89,23 @@ async def is_ui_tenant_admin(session_ctx: UISessionContext) -> bool:
     """
     operator = await resolve_ui_operator(session_ctx)
     return operator is not None and operator.tenant_role is TenantRole.TENANT_ADMIN
+
+
+async def is_ui_operator(session_ctx: UISessionContext) -> bool:
+    """Resolve whether the session's operator holds ``operator`` or higher.
+
+    The audit API serves its rows to ``operator`` and ``tenant_admin``
+    only (``require_role(TenantRole.OPERATOR)`` in ``api/v1/audit.py``).
+    Console surfaces that show audit rows (#3758: the dashboard tray and
+    the connector recent-operations card) use this helper to apply the
+    same minimum. Fails soft to ``False``: a ``read_only`` session, or a
+    role lift that cannot complete, sees no audit rows. Denying on a
+    failed lift is deliberate here, unlike :func:`is_ui_tenant_admin`
+    which only hides an affordance -- these surfaces return the data
+    itself.
+    """
+    operator = await resolve_ui_operator(session_ctx)
+    return operator is not None and operator.tenant_role in (
+        TenantRole.OPERATOR,
+        TenantRole.TENANT_ADMIN,
+    )

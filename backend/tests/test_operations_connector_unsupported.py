@@ -43,9 +43,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import (
@@ -102,18 +100,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -425,9 +411,8 @@ async def test_real_auto_shim_message_preserved_verbatim() -> None:
 async def test_dispatch_converts_auth_model_nie_to_connector_unsupported(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """Unsupported-auth_model branch: structured result, audit row, event.
+    """Unsupported-auth_model branch: structured result, audit row.
 
     The dispatcher catches the connector's :exc:`NotImplementedError`
     ahead of the generic ``except Exception`` and emits
@@ -484,15 +469,11 @@ async def test_dispatch_converts_auth_model_nie_to_connector_unsupported(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_converts_auto_shim_nie_to_connector_unsupported(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Auto-shim branch: the dispatcher classifies the shim via isinstance.
 
@@ -539,9 +520,6 @@ async def test_dispatch_converts_auto_shim_nie_to_connector_unsupported(
     assert "Register the hand-rolled per-product Connector subclass" in result.error
     assert "connector_error" not in result.error
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 # ---------------------------------------------------------------------------
 # REST / MCP parity: the shared call_operation funnel
@@ -552,7 +530,6 @@ async def test_dispatch_converts_auto_shim_nie_to_connector_unsupported(
 async def test_call_operation_envelope_carries_connector_unsupported(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The serialized envelope both transports return carries the shape.
 

@@ -66,9 +66,7 @@ import respx
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import CredentialsCache
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -171,18 +169,6 @@ def stub_embedding_service() -> AsyncMock:
 
 
 @pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events so the audit/broadcast leg is asserted."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
-@pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
     """AsyncSession against the autouse-migrated per-worker SQLite engine."""
     sessionmaker = get_sessionmaker()
@@ -264,7 +250,6 @@ async def _seed_descriptor(session: AsyncSession, embedding: list[float]) -> Non
 async def test_dispatch_executes_full_credread_chain_returns_ok(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The full dispatch->loader->acquire->vROps chain returns ok with no injected loader."""
@@ -310,15 +295,12 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     assert op_route.called and op_route.call_count == 1
     sent_auth = op_route.calls[0].request.headers.get("authorization")
     assert sent_auth == f"OpsToken {_OPS_TOKEN}"
-    # One audit + one broadcast for the dispatched op.
-    assert len(captured_events) == 1
 
 
 @pytest.mark.asyncio
 async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No credential value appears in the OperationResult or any captured log event."""
@@ -353,22 +335,16 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     assert _CANARY_USERNAME not in result_blob
 
     # The credential never rides any structlog event (loader, connector,
-    # dispatcher, audit, broadcast).
+    # dispatcher, audit).
     log_blob = repr(captured)
     assert _CANARY_PASSWORD not in log_blob
     assert _CANARY_USERNAME not in log_blob
-
-    # The credential never rides the broadcast event payload either.
-    events_blob = repr(captured_events)
-    assert _CANARY_PASSWORD not in events_blob
-    assert _CANARY_USERNAME not in events_blob
 
 
 @pytest.mark.asyncio
 async def test_dispatch_recovers_from_session_expiry_401_via_invalidate_and_retry(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 401 on a dispatched op re-acquires the token and retries once (the #2067 seam).
@@ -421,7 +397,6 @@ async def test_dispatch_recovers_from_session_expiry_401_via_invalidate_and_retr
 async def test_dispatch_acquire_401_maps_to_connector_auth_failed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 401 at token/acquire surfaces as connector_auth_failed (cause session_establish_401).

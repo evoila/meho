@@ -27,7 +27,7 @@ service primitive against the autouse SQLite test DB and covers the
 service-level conflict mechanics exhaustively; the SQLite coverage of
 the conflict logic the issue body anticipates is already on the tree.
 This suite proves the same invariants survive at the production
-boundary — RBAC dependency, audit middleware, broadcast publish, real
+boundary — RBAC dependency, audit middleware, real
 JSONB column semantics for the ``superseded_by`` / ``conflicts_with``
 markers (SQLite's JSON1 round-trips the values but does not enforce the
 ``jsonb_typeof`` predicates the substrate's ``conflicts_only=True``
@@ -52,7 +52,6 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -88,14 +87,6 @@ TENANT_B_ID = "22222222-2222-2222-2222-222222222222"
 _skip_no_docker = pytest.mark.skipif(not DOCKER_AVAILABLE, reason=SKIP_REASON)
 
 _PRODUCT = "annotate-test-product"
-
-# Patch site for the broadcast publish: ``from ... import publish_event``
-# rebinds the symbol into ``meho_backplane.topology.annotate``'s module
-# dict, so the patchable reference is the *importer's* name. Mocking
-# here keeps the test self-contained (no NATS / fan-out infra) while
-# still proving the service called the publisher exactly once per write.
-_PUBLISH_PATCH = "meho_backplane.topology.annotate.publish_event"
-
 
 # ---------------------------------------------------------------------------
 # A deterministic connector. The conflict-fixture tests don't drive the
@@ -458,7 +449,7 @@ async def test_conflict_same_kind_marks_auto_superseded_and_survives_refresh(
         tenant_role=TenantRole.TENANT_ADMIN,
     )
 
-    with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
+    with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         async with _make_async_client(annotate_app) as client:
             # --- 1. Annotate the curated competitor ---
@@ -529,10 +520,7 @@ async def test_conflict_same_kind_marks_auto_superseded_and_survives_refresh(
             # The production signature is ``(target, operator)`` where
             # ``target`` is the ``Target`` ORM row (refresh.py L589); we
             # load it through a fresh session and let the function open
-            # its own transactions inside ``_apply_reconcile``. Broadcast
-            # is patched alongside the annotate publish hook so the
-            # post-commit publish in refresh.py does not exercise the
-            # real event bus inside the test.
+            # its own transactions inside ``_apply_reconcile``.
             from meho_backplane.topology.refresh import refresh_target_topology
 
             sm = get_sessionmaker()
@@ -541,11 +529,7 @@ async def test_conflict_same_kind_marks_auto_superseded_and_survives_refresh(
                     await session.execute(select(TargetORM).where(TargetORM.id == target_id))
                 ).scalar_one()
 
-            with patch(
-                "meho_backplane.topology.refresh.publish_event",
-                new_callable=AsyncMock,
-            ):
-                await refresh_target_topology(target_row, operator)
+            await refresh_target_topology(target_row, operator)
 
             props_after_refresh = await _get_edge_props(nodes["auto_edge"])
             assert props_after_refresh.get("superseded_by") == str(curated_id), (
@@ -628,7 +612,7 @@ async def test_conflict_incompatible_kinds_persists_both_rows_with_bidirectional
 
     key, token = _token(role=TenantRole.TENANT_ADMIN, tenant_id=TENANT_A_ID, sub="op-a")
 
-    with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
+    with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         async with _make_async_client(annotate_app) as client:
             # Annotate the curated competitor (depends-on over the same pair).
@@ -705,7 +689,7 @@ async def test_tenant_boundary_isolates_resolve_node_and_list_edges(
 
     key_a, token_a = _token(role=TenantRole.TENANT_ADMIN, tenant_id=TENANT_A_ID, sub="op-a")
 
-    with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
+    with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key_a))
         async with _make_async_client(annotate_app) as client:
             # 1. Cross-tenant annotate — to-endpoint resolves to a tenant-B
@@ -772,7 +756,7 @@ async def test_unannotate_safety_auto_edge_returns_409_curated_clears_markers(
 
     key, token = _token(role=TenantRole.TENANT_ADMIN, tenant_id=TENANT_A_ID, sub="op-a")
 
-    with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
+    with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         async with _make_async_client(annotate_app) as client:
             # 1. DELETE on the seeded auto edge → 409 with the rule message.
@@ -859,7 +843,7 @@ async def test_role_gating_operator_post_delete_forbidden_read_only_get_forbidde
         "to": {"name": "rg-host", "kind": "host"},
     }
 
-    with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
+    with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key_op, key_ro, key_ad))
         async with _make_async_client(annotate_app) as client:
             # operator: POST → 403, DELETE → 403
@@ -944,8 +928,7 @@ async def test_audit_and_broadcast_one_per_write(
 
     key, token = _token(role=TenantRole.TENANT_ADMIN, tenant_id=TENANT_A_ID, sub="op-a")
 
-    publish_mock = AsyncMock()
-    with patch(_PUBLISH_PATCH, new=publish_mock), respx.mock as mock_router:
+    with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         async with _make_async_client(annotate_app) as client:
             # --- annotate ---
@@ -984,9 +967,6 @@ async def test_audit_and_broadcast_one_per_write(
     # registered target; in this fixture ``au-vm`` is a plain vm node,
     # so target_id is None (§10 of Initiative #364).
     assert ann_rows[0].target_id is None
-
-    # Broadcast was called exactly twice (one annotate + one unannotate).
-    assert publish_mock.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1030,24 +1010,20 @@ async def test_novel_kinds_flow_end_to_end_on_postgres(
     )
 
     sm = get_sessionmaker()
-    with patch(
-        "meho_backplane.topology.nodes.publish_event",
-        new_callable=AsyncMock,
-    ):
-        async with sm() as session:
-            created = await create_or_get_node(
-                session,
-                operator,
-                kind="dns-record",
-                name="www.example.com",
-            )
-        async with sm() as session:
-            realm = await create_or_get_node(
-                session,
-                operator,
-                kind="keycloak-realm",
-                name="master",
-            )
+    async with sm() as session:
+        created = await create_or_get_node(
+            session,
+            operator,
+            kind="dns-record",
+            name="www.example.com",
+        )
+    async with sm() as session:
+        realm = await create_or_get_node(
+            session,
+            operator,
+            kind="keycloak-realm",
+            name="master",
+        )
     assert created.was_created is True
     assert created.node.kind == "dns-record"
     assert realm.node.kind == "keycloak-realm"
@@ -1056,7 +1032,7 @@ async def test_novel_kinds_flow_end_to_end_on_postgres(
 
     key, token = _token(role=TenantRole.TENANT_ADMIN, tenant_id=TENANT_A_ID, sub="op-a")
 
-    with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
+    with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         async with _make_async_client(annotate_app) as client:
             ann = await client.post(

@@ -247,6 +247,63 @@ fast"*, not *"the error never happens"*.
 This doc captures the upstream half: making the vocabulary so explicit
 that the assumption isn't there to make.
 
+## Operation contract check
+
+An AI picks an operation from its summary, description, group text and
+safety level. It fills in the parameters from the field descriptions. So
+these texts are part of what a connector ships.
+
+[`backend/tests/test_vmware_operation_contracts.py`](../../backend/tests/test_vmware_operation_contracts.py)
+checks every hand-written (typed and multi-step) operation of the VMware
+and Broadcom connectors. It reads what MEHO registers at start-up and
+calls no vendor system. It runs in the normal unit test sweep.
+
+The nine rules (the rule name is in brackets):
+
+1. A one-line summary of at most 120 characters, and a description of at
+   most 300 characters. Longer guidance goes into `llm_instructions`.
+   (`summary`)
+2. Every parameter field, top level and nested, has a description.
+   (`field_descriptions`)
+3. The response schema names its fields: `properties`, or `items` with
+   `properties`. (`response_schema`)
+4. `llm_instructions` has `when_to_call`, `output_shape` and `next_step`.
+   A change (any operation that is not `safe`) also has `preconditions`.
+   (`llm_instructions`)
+5. The parameter schema has at least one entry under `examples`, and each
+   example passes the same schema check a real call gets. (`examples`)
+6. No ticket number (`#` and three or more digits) in the summary, the
+   description or the guidance. (`no_ticket_numbers`)
+7. Every operation that is not `safe` has `requires_approval: true`.
+   (`requires_approval`)
+8. The operation's group exists and has a text. (`group`)
+9. Every `destructive` operation has a preview builder
+   (`register_preview_builder`). Without one it can never wait for
+   approval. (`preview_builder`)
+
+The gaps that exist today are listed in
+[`backend/tests/data/vmware_operation_contract_gaps.yaml`](../../backend/tests/data/vmware_operation_contract_gaps.yaml),
+as connector id, then operation id, then the rules it does not meet yet.
+The list may only get shorter:
+
+- A gap that is not in the list fails the test. Fix the operation. Do not
+  add the gap to the list.
+- A listed gap that is gone also fails the test. The message names the
+  entry. Delete that rule line (and the operation, or the connector, when
+  nothing is left under it).
+
+To shrink the list: fix the operation's texts or schemas, run
+`cd backend && uv run pytest tests/test_vmware_operation_contracts.py`,
+and delete the entries the test reports as fixed.
+
+To cover a new VMware connector: add its connector id to
+`VMWARE_CONNECTORS` at the top of the test. That is one line. A new
+connector should meet all nine rules from the start, so it adds nothing
+to the gap list.
+
+Group texts are not checked for safety claims here; that is a separate
+test.
+
 ## References
 
 - Consumer feedback report dated 2026-05-20 from

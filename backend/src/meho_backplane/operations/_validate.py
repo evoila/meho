@@ -38,6 +38,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.operations._param_errors import describe_violation
 
 # Read-class HTTP verbs — the same set the ingest layer pins as
 # ``READ_HTTP_METHODS`` (``operations/ingest/_internals.py``). Duplicated as
@@ -105,11 +106,15 @@ def validate_params(
 ) -> list[dict[str, Any]]:
     """Validate *params* against *parameter_schema* via JSON Schema 2020-12.
 
-    Returns a list of validation-error dicts (``[]`` on success). Each
-    entry carries ``path`` (JSON Pointer-ish dotted shape), ``message``,
-    and ``validator`` so the dispatcher's ``invalid_params`` error
-    payload is operator-actionable without leaking the JSON Schema's
-    internals.
+    Returns a list of validation-error dicts (``[]`` on success), one
+    per violation. Each entry carries ``path`` (JSON path of the bad
+    spot), ``validator`` (the failed schema keyword), ``expected`` (what
+    the schema wants there) and ``remediation`` (a short fixed hint),
+    built by :func:`~meho_backplane.operations._param_errors.describe_violation`
+    (#3669). No entry carries the rejected value: jsonschema's own
+    ``message`` quotes it, so it is not used. The list is not capped
+    here; :func:`~meho_backplane.operations._errors.result_invalid_params`
+    caps what reaches the envelope.
 
     Empty / missing schemas validate everything as ok -- typed ops
     registered without a parameter_schema (or with ``{}``) accept any
@@ -130,14 +135,7 @@ def validate_params(
     out: list[dict[str, Any]] = []
     try:
         validator = Draft202012Validator(parameter_schema)
-        for err in validator.iter_errors(params):
-            out.append(
-                {
-                    "path": err.json_path,
-                    "message": err.message,
-                    "validator": err.validator,
-                }
-            )
+        out.extend(describe_violation(err) for err in validator.iter_errors(params))
     except Unresolvable as exc:
         pointer = str(exc.ref)
         missing_ref = f"#{pointer}" if pointer.startswith("/") else pointer
@@ -515,7 +513,7 @@ async def policy_gate(
 
     The function is **async** — it opens its own DB session to load the
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
-    mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
+    mirroring the same pattern :func:`audit_safe` uses.
     """
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:

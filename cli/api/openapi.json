@@ -85,7 +85,7 @@
           "auth"
         ],
         "summary": "Auth Config",
-        "description": "Return Keycloak issuer, audience, and CLI client_id for device-code flow.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is trailing-slash-\nnormalised here \u2014 Keycloak's discovery document advertises the\ncanonical form without a trailing slash and the CLI's own URL\nconstruction (``<issuer>/.well-known/openid-configuration``) is\ncleaner against the normalised form.",
+        "description": "Return Keycloak issuer, audience, and CLI client_id for device-code flow.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
         "operationId": "auth_config_api_v1_auth_config_get",
         "responses": {
           "200": {
@@ -3342,7 +3342,7 @@
           "feed"
         ],
         "summary": "Feed Endpoint",
-        "description": "Stream broadcast events for the operator's tenant as Server-Sent Events.\n\nHeaders:\n    ``Last-Event-Id``: optional SSE reconnect cursor. Takes\n    precedence over the ``since`` query parameter when both are\n    present.\n\nReturns:\n    :class:`StreamingResponse` with ``media_type=text/event-stream``.\n    ``Cache-Control: no-cache, no-store, must-revalidate`` and\n    ``X-Accel-Buffering: no`` keep intermediaries from buffering\n    the stream into a single response (nginx default behaviour\n    would otherwise stall every event behind its buffer flush).",
+        "description": "Stream the tenant's agent announcements as Server-Sent Events.\n\nHeaders:\n    ``Last-Event-Id``: optional SSE reconnect cursor. Takes\n    precedence over the ``since`` query parameter.\n\nReturns:\n    :class:`StreamingResponse` with ``media_type=text/event-stream``.",
         "operationId": "feed_endpoint_api_v1_feed_get",
         "parameters": [
           {
@@ -3918,7 +3918,7 @@
           "operations"
         ],
         "summary": "Get Search",
-        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list.\n\n``q`` is the canonical free-text query param across the kb / memory /\noperations-search list surfaces (#1854); ``query`` is its deprecated\nalias, kept working for back-compat. Exactly one of the two is\nrequired: supplying neither is a ``422`` (the search has nothing to\nmatch), and supplying both with different values is a ``422`` rather\nthan a silent pick.",
+        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list. Every ``200`` body carries the ``outcome`` /\n``advisory`` / ``narrowing`` fields that say why (#3670).\n\n``q`` is the canonical free-text query param across the kb / memory /\noperations-search list surfaces (#1854); ``query`` is its deprecated\nalias, kept working for back-compat. Exactly one of the two is\nrequired: supplying neither is a ``422`` (the search has nothing to\nmatch), and supplying both with different values is a ``422`` rather\nthan a silent pick.\n\nWith ``op_id`` (#3668) the route skips ranking and returns one\noperation's call contract; a known connector with no such op is a\n``404`` whose ``detail`` carries ``reason=\"unknown_op\"``.",
         "operationId": "get_search_api_v1_operations_search_get",
         "parameters": [
           {
@@ -3996,6 +3996,31 @@
               "default": 10,
               "title": "Limit"
             }
+          },
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "nullable": true,
+              "description": "Exact-op mode. Look up this one operation and return its call contract (`{operation: {...}}`: the parameter schema, examples, target rule, result shape and retry guidance) instead of ranked hits. `q`, `group` and `limit` are ignored when it is set. An unknown op_id is a 404 with `detail.reason=unknown_op`.",
+              "title": "Op Id"
+            },
+            "description": "Exact-op mode. Look up this one operation and return its call contract (`{operation: {...}}`: the parameter schema, examples, target rule, result shape and retry guidance) instead of ranked hits. `q`, `group` and `limit` are ignored when it is set. An unknown op_id is a 404 with `detail.reason=unknown_op`."
+          },
+          {
+            "name": "include_scores",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else.",
+              "default": false,
+              "title": "Include Scores"
+            },
+            "description": "Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else."
           },
           {
             "name": "authorization",
@@ -4376,7 +4401,7 @@
             }
           },
           "403": {
-            "description": "The body's ``tenant_id`` is neither omitted/null (built-in / global scope) nor the caller's own tenant UUID. Rejected synchronously on both the sync and async branches; no job row is created.",
+            "description": "The body's ``tenant_id`` is neither omitted/null (built-in / global scope) nor the caller's own tenant UUID, and the caller does not hold platform_admin. Rejected synchronously on both the sync and async branches; no job row is created.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10288,7 +10313,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and publishes the ``approval.{approved,rejected}``\nbroadcast event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -10447,7 +10472,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. Audited via the audit middleware.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. Audited via the audit middleware.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -10553,7 +10578,7 @@
           "service-principal-grants"
         ],
         "summary": "Revoke Grant",
-        "description": "Revoke (soft-delete) a standing grant.\n\n``reason`` is optional, so a revoke without one stays valid. When given,\nit is stored as ``revoked_reason`` on the grant row and as ``reason`` in\nthe audit row payload, the same way create records its ``reason``.\nIt is a query parameter, not a body, because a DELETE body is not well\nsupported by HTTP clients and proxies.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
+        "description": "Revoke (soft-delete) a standing grant.\n\nOnly a person may revoke one: a machine principal gets 403\n``human_principal_required`` before this runs.\n``reason`` is optional, so a revoke without one stays valid. When given,\nit is stored as ``revoked_reason`` on the grant row and as ``reason`` in\nthe audit row payload, the same way create records its ``reason``.\nIt is a query parameter, not a body, because a DELETE body is not well\nsupported by HTTP clients and proxies.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
         "operationId": "revoke_grant_api_v1_service_principals_grants__grant_id__delete",
         "parameters": [
           {
@@ -11421,7 +11446,7 @@
           "discovery"
         ],
         "summary": "Protected Resource Metadata",
-        "description": "Return the RFC 9728 protected-resource metadata document.\n\nFields per RFC 9728 \u00a73:\n\n* ``resource`` (REQUIRED) \u2014 the canonical MCP server URI clients\n  pass as the ``resource`` parameter in OAuth requests per RFC 8707.\n  Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,\n  which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls\n  back to ``f\"{backplane_url}/mcp\"``.\n* ``authorization_servers`` \u2014 the Keycloak issuer URL. MCP 2025-06-18\n  \u00a7Authorization Server Discovery requires this to be non-empty.\n* ``scopes_supported`` \u2014 v0.2 ships two scopes that downstream\n  Tasks (T3 RBAC filter, T4 reference tool, T5 audit) consume.\n  Conservative: clients that request only ``mcp:read`` can list /\n  inspect but not invoke side-effecting tools.\n* ``bearer_methods_supported`` \u2014 ``[\"header\"]`` only. MCP transport\n  forbids tokens in the URI query (see \u00a7\"Access Token Usage\").\n\nNo authentication is enforced on this endpoint by design: RFC 9728\ndiscovery is the bootstrap step that lets unauthenticated clients\nlearn how to obtain a token. The chassis middleware chain still\nruns \u2014 the request_id stays bound for log correlation, and\nAuditMiddleware skips the row because no ``operator_sub`` is bound\n(the standard unauthenticated-route path).",
+        "description": "Return the RFC 9728 protected-resource metadata document.\n\nFields per RFC 9728 \u00a73:\n\n* ``resource`` (REQUIRED) \u2014 the canonical MCP server URI clients\n  pass as the ``resource`` parameter in OAuth requests per RFC 8707.\n  Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,\n  which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls\n  back to ``f\"{backplane_url}/mcp\"``.\n* ``authorization_servers`` \u2014 the issuer URL exactly as configured\n  in ``KEYCLOAK_ISSUER_URL``. MCP 2025-06-18 \u00a7Authorization Server\n  Discovery requires this to be non-empty. The value is not\n  trailing-slash-normalised: RFC 8414 \u00a73.3 makes clients compare\n  it byte-for-byte with the ``issuer`` in the discovery document,\n  and providers such as authentik publish theirs with a ``/``.\n* ``scopes_supported`` \u2014 v0.2 ships two scopes that downstream\n  Tasks (T3 RBAC filter, T4 reference tool, T5 audit) consume.\n  Conservative: clients that request only ``mcp:read`` can list /\n  inspect but not invoke side-effecting tools.\n* ``bearer_methods_supported`` \u2014 ``[\"header\"]`` only. MCP transport\n  forbids tokens in the URI query (see \u00a7\"Access Token Usage\").\n\nNo authentication is enforced on this endpoint by design: RFC 9728\ndiscovery is the bootstrap step that lets unauthenticated clients\nlearn how to obtain a token. The chassis middleware chain still\nruns \u2014 the request_id stays bound for log correlation, and\nAuditMiddleware skips the row because no ``operator_sub`` is bound\n(the standard unauthenticated-route path).",
         "operationId": "protected_resource_metadata__well_known_oauth_protected_resource_get",
         "responses": {
           "200": {
@@ -11596,6 +11621,28 @@
         "responses": {
           "302": {
             "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/ui/dashboard/recent-operations": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Ui Dashboard Recent Operations",
+        "description": "Render ``GET /ui/dashboard/recent-operations`` -- the tray alone.",
+        "operationId": "ui_dashboard_recent_operations_ui_dashboard_recent_operations_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -11796,7 +11843,7 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Stream",
-        "description": "``GET /ui/broadcast/stream`` -- stream the session tenant's feed.\n\nTenant is taken from the validated session, never a query\nparameter. ``Last-Event-Id`` (sent by ``EventSource`` on\nreconnect) takes precedence over ``since`` for replay.",
+        "description": "``GET /ui/broadcast/stream`` -- stream the session tenant's announcements.",
         "operationId": "ui_broadcast_stream_ui_broadcast_stream_get",
         "parameters": [
           {
@@ -11868,7 +11915,7 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
+        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nReads the session tenant's stored announcements of the retention\nwindow (fail-soft, :func:`_fetch_history`), passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
         "parameters": [
           {
@@ -13757,17 +13804,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -14717,6 +14753,49 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/recent-operations": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Recent Operations",
+        "description": "``GET /ui/connectors/{name}/recent-operations``.",
+        "operationId": "ui_connectors_recent_operations_ui_connectors__name__recent_operations_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -26719,6 +26798,9 @@
             },
             "type": "array",
             "title": "Ops"
+          },
+          "advisory": {
+            "$ref": "#/components/schemas/ConnectorReviewGroupAdvisory"
           }
         },
         "type": "object",
@@ -26732,6 +26814,23 @@
         ],
         "title": "ConnectorReviewGroup",
         "description": "One group within the review payload.\n\nCarries the LLM-generated group metadata\n(``group_key``, ``name``, ``when_to_use``), the current\n``review_status``, and the full list of child operations. The\noperator-facing review UI iterates this list to render the\nreview queue; ``op_count`` is the cheap precomputed length for\nthe CLI's ``meho connector review`` summary view (T5)."
+      },
+      "ConnectorReviewGroupAdvisory": {
+        "properties": {
+          "distribution": {
+            "$ref": "#/components/schemas/GroupSafetyDistribution"
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Flags"
+          }
+        },
+        "type": "object",
+        "title": "ConnectorReviewGroupAdvisory",
+        "description": "Advice for the operator who reviews one group (#3671).\n\n``distribution`` is what the group's enabled ops really do.\n``flags`` lists short, plain notes where the group's ``when_to_use``\ntext does not match those ops (for example the text says\n\"read-only\" but some ops need approval). Empty when nothing looks\nwrong.\n\nThis is advice only. It never blocks a dispatch, an ingest, or the\nmove from ``staged`` to ``enabled``. Dispatch keeps using each op's\nown ``safety_level``, ``requires_approval``, and policy; the group\nlabel and its text are never part of that decision."
       },
       "ConnectorReviewOp": {
         "properties": {
@@ -29654,6 +29753,43 @@
         "title": "GrantPrincipalKind",
         "description": "What kind of principal a grant's ``principal_sub`` names (#3795).\n\nSelects the create-time enforceability check applied by\n:meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:\n\n* :attr:`AGENT` (default) \u2014 ``principal_sub`` must name a registered,\n  non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its\n  ``keycloak_client_id`` (``agent:<name>``). This is the shipped\n  behaviour; the grant enforces against a registered agent client's\n  token (matched on the token's client identity, #3795).\n* :attr:`USER_AGENT` \u2014 ``principal_sub`` is the JWT ``sub`` of a **human\n  user** who authenticates with ``principal_kind=agent`` through a\n  public client. There is no ``AgentPrincipal`` row for such a sub (its\n  ``azp`` is the public client, not ``agent:<name>``), so the registry\n  check is skipped and the raw sub is accepted. Enforcement matches on\n  the token ``sub`` directly. Deliberately explicit \u2014 the caller opts\n  into keying a grant on a bare sub, which the default rejects to catch\n  typos.\n\nThe field is optional on the create surfaces and defaults to\n:attr:`AGENT`, so every existing caller is unaffected."
       },
+      "GroupSafetyDistribution": {
+        "properties": {
+          "enabled_op_count": {
+            "type": "integer",
+            "title": "Enabled Op Count",
+            "default": 0
+          },
+          "safe": {
+            "type": "integer",
+            "title": "Safe",
+            "default": 0
+          },
+          "caution": {
+            "type": "integer",
+            "title": "Caution",
+            "default": 0
+          },
+          "dangerous": {
+            "type": "integer",
+            "title": "Dangerous",
+            "default": 0
+          },
+          "destructive": {
+            "type": "integer",
+            "title": "Destructive",
+            "default": 0
+          },
+          "requires_approval_count": {
+            "type": "integer",
+            "title": "Requires Approval Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "GroupSafetyDistribution",
+        "description": "Risk levels of the enabled ops in one group (#3671).\n\nCounts only ops with ``is_enabled=True``. One count per value of the\nclosed ``safety_level`` set, plus how many of those ops need approval\nand how many ops are enabled in total. Disabled ops are not counted."
+      },
       "GroupSummaryModel": {
         "properties": {
           "group_key": {
@@ -30037,7 +30173,7 @@
             "format": "uuid",
             "nullable": true,
             "title": "Tenant Id",
-            "description": "Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) \u2014 the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403."
+            "description": "Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) \u2014 the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403 unless the caller holds platform_admin, which may ingest into another tenant when it names that tenant here (the write is audited)."
           },
           "spec_info_versions_compatible": {
             "items": {
@@ -30087,7 +30223,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "IngestRequest",
-        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\nTwo mutually-exclusive request shapes:\n\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources the caller already knows. The MCP admin tool and\n  the historical CLI manual mode use this shape.\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  carries a ``\"<product>/<version>\"`` reference; the route\n  handler resolves the entry against the packaged catalog (see\n  :mod:`meho_backplane.operations.ingest.catalog`) and fills in\n  ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the\n  catalog entry before dispatching through the existing ingest\n  path. REST-native agent runtimes that can't shell out to the\n  CLI use this shape; the CLI's ``--catalog`` flag has been\n  refactored to POST this shape rather than resolving the entry\n  client-side.\n\nThe two shapes are mutually exclusive: a body that sets\n``catalog_entry`` alongside any of ``product`` / ``version`` /\n``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at\nthe validator below. A body that sets neither fails 422\n``ingest_request_underspecified``. ``base_url``, ``dry_run``, and\n``tenant_id`` are accepted in both shapes.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``tenant_id`` selects the write scope (#2085): ``None`` \u2014 whether\nthe field is omitted or explicitly ``null`` \u2014 targets the\nbuilt-in / global scope (``tenant_id IS NULL``), the same\nomit-equals-global semantics the MCP sibling\n``meho_connector_ingest`` documents. The operator's own tenant\nUUID targets their tenant-curated namespace; any other UUID is\nrejected with a synchronous 403 on both the sync and async\nbranches by :meth:`IngestionPipelineService.authorize_scope`\n(checked eagerly at the route before the async job row is\ncreated, #2208, and again inside the service as defence-in-depth).\nBefore #2085 the REST route resolved omission to the *caller's\ntenant*, diverging from the MCP surface \u2014 a consumer pasting the\nMCP-documented body into REST silently minted a tenant-scoped\nshadow copy of an existing global row (the dedup lookup is\nscope-aware and never matches across scopes).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
+        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\nTwo mutually-exclusive request shapes:\n\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources the caller already knows. The MCP admin tool and\n  the historical CLI manual mode use this shape.\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  carries a ``\"<product>/<version>\"`` reference; the route\n  handler resolves the entry against the packaged catalog (see\n  :mod:`meho_backplane.operations.ingest.catalog`) and fills in\n  ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the\n  catalog entry before dispatching through the existing ingest\n  path. REST-native agent runtimes that can't shell out to the\n  CLI use this shape; the CLI's ``--catalog`` flag has been\n  refactored to POST this shape rather than resolving the entry\n  client-side.\n\nThe two shapes are mutually exclusive: a body that sets\n``catalog_entry`` alongside any of ``product`` / ``version`` /\n``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at\nthe validator below. A body that sets neither fails 422\n``ingest_request_underspecified``. ``base_url``, ``dry_run``, and\n``tenant_id`` are accepted in both shapes.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``tenant_id`` selects the write scope (#2085): ``None`` \u2014 whether\nthe field is omitted or explicitly ``null`` \u2014 targets the\nbuilt-in / global scope (``tenant_id IS NULL``), the same\nomit-equals-global semantics the MCP sibling\n``meho_connector_ingest`` documents. The operator's own tenant\nUUID targets their tenant-curated namespace; any other UUID is\nrejected (unless the operator holds ``platform_admin``, #3800)\nwith a synchronous 403 on both the sync and async\nbranches by :meth:`IngestionPipelineService.authorize_scope`\n(checked eagerly at the route before the async job row is\ncreated, #2208, and again inside the service as defence-in-depth).\nBefore #2085 the REST route resolved omission to the *caller's\ntenant*, diverging from the MCP surface \u2014 a consumer pasting the\nMCP-documented body into REST silently minted a tenant-scoped\nshadow copy of an existing global row (the dedup lookup is\nscope-aware and never matches across scopes).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
       },
       "IngestResponse": {
         "properties": {

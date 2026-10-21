@@ -17,15 +17,13 @@ Three axes, per the Task:
   successful handler returns an ``ok`` :class:`OperationResult` with
   ``delivery="unavailable"`` through
   :func:`~meho_backplane.operations.dispatcher._reduce_or_error`; the audit
-  row + broadcast event still commit, so callers do not repeat a completed
-  operation.
+  row still commits, so callers do not repeat a completed operation.
 
 The third test wires a deliberately-broken reducer through the real
 dispatch path the same way :mod:`tests.test_operations_dispatcher` does
 (register a typed op, install the reducer via
 :func:`~meho_backplane.operations.dispatcher.set_default_reducer`,
-dispatch, assert on the delivery signal + the persisted audit row +
-the captured broadcast event).
+dispatch, assert on the delivery signal + the persisted audit row).
 """
 
 from __future__ import annotations
@@ -40,9 +38,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -1148,24 +1144,6 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub.
-
-    Mirrors :mod:`tests.test_operations_dispatcher`: the audit helper
-    invokes ``publish_event`` via the imported reference inside
-    :mod:`meho_backplane.operations._audit`, so patching that module's
-    attribute captures every event the dispatch emits.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 class _NoOpVaultConnector(Connector):
     """Connector class used to satisfy resolver lookups in the dispatch test."""
 
@@ -1341,13 +1319,12 @@ async def _registered_typed_op(
 
 async def test_reducer_exception_marks_completed_delivery_unavailable_via_dispatcher(
     _registered_typed_op: None,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A reducer failure preserves completed execution and its committed receipt.
 
     The reducer runs only after the handler succeeds. Its exception must not
     relabel that completed operation as ``connector_error`` or expose the
-    exception text. The single audit row and broadcast event retain
+    exception text. The single audit row keeps
     ``result_status == 'ok'`` for the completed dispatch.
     """
     set_default_reducer(_BrokenReducer())
@@ -1383,10 +1360,6 @@ async def test_reducer_exception_marks_completed_delivery_unavailable_via_dispat
     assert len(rows) == 1
     assert rows[0].id == result.audit_id
     assert rows[0].payload["result_status"] == "ok"
-
-    assert len(captured_events) == 1
-    assert captured_events[0].audit_id == result.audit_id
-    assert captured_events[0].result_status == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -2452,14 +2425,13 @@ async def _registered_set_shaped_op(
 
 async def test_reducing_dispatch_writes_handle_metadata_into_audit_payload(
     _registered_set_shaped_op: None,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A reducing dispatch hoists ``handle_id`` / ``total_rows`` / ``sample_rows_returned``.
 
     G0.15-T8 (#1219). After the reducer materializes, the dispatcher
     derives the audit-payload hoist dict via
     ``_handle_metadata_for_audit(handle)`` and threads it through
-    ``audit_and_broadcast_safe(..., handle_metadata=...)`` →
+    ``audit_safe(..., handle_metadata=...)`` →
     ``write_audit_row(..., handle_metadata=...)`` →
     ``_build_audit_payload(..., handle_metadata=...)``, where
     ``payload.update(handle_metadata)`` merges the three keys onto the
@@ -2498,10 +2470,6 @@ async def test_reducing_dispatch_writes_handle_metadata_into_audit_payload(
     assert payload["handle_id"] == str(result.handle.handle_id)
     assert payload["total_rows"] == 60
     assert payload["sample_rows_returned"] == 5
-
-    # The broadcast event also fired.
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "ok"
 
 
 async def _tail_log_handler(
@@ -2547,7 +2515,6 @@ async def _registered_tail_ordered_op(
 
 async def test_reducing_dispatch_honours_result_ordering_tail_hint(
     _registered_tail_ordered_op: None,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A tail-ordered op dispatched end-to-end samples the most-recent lines.
 
@@ -2631,7 +2598,6 @@ async def _registered_scalar_hinted_op(
 
 async def test_reducing_dispatch_preserves_registered_result_scalars(
     _registered_scalar_hinted_op: None,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A scalar-hinted op dispatched end-to-end keeps its poll keys top-level.
 

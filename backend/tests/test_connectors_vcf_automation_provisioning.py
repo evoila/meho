@@ -90,7 +90,6 @@ def _reset_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "meho_backplane.operations.typed_register.encode_endpoint_text",
         AsyncMock(return_value=[0.1] * 384),
     )
-    monkeypatch.setattr("meho_backplane.operations._audit.publish_event", AsyncMock())
     reset_dispatcher_caches()
     reset_handler_cache()
     yield

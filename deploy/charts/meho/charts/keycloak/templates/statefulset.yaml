@@ -1,0 +1,187 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "coreKeycloak.fullname" . }}
+  labels:
+    {{- include "coreKeycloak.labels" . | nindent 4 }}
+spec:
+  # One replica. Keycloak keeps its state in PostgreSQL and runs with the
+  # `local` cache, so a second pod would not share sessions. High
+  # availability is a later step.
+  replicas: 1
+  serviceName: {{ include "coreKeycloak.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "coreKeycloak.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "coreKeycloak.selectorLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
+      initContainers:
+        # Keycloak does not retry a failed database connection at start.
+        # Wait here until PostgreSQL accepts connections. `-U` and `-d` are
+        # needed: without them pg_isready looks up the name of the current
+        # user, which fails under a user id that has no passwd entry (as on
+        # OpenShift), and then it never reports ready.
+        - name: wait-for-database
+          image: {{ include "meho.core.image" .Values.waitForDatabase.image | quote }}
+          imagePullPolicy: {{ .Values.waitForDatabase.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -q -h "$DB_HOST" -p "$DB_PORT" -U keycloak -d keycloak; do
+                echo "waiting for PostgreSQL at $DB_HOST:$DB_PORT"
+                sleep 2
+              done
+          env:
+            - name: DB_HOST
+              value: {{ include "coreKeycloak.databaseHost" . | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
+          resources:
+            {{- toYaml .Values.waitForDatabase.resources | nindent 12 }}
+          securityContext:
+            {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.waitForDatabase.securityContext "global" .Values.global) | nindent 12 }}
+      containers:
+        - name: keycloak
+          image: {{ include "meho.core.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - start
+            - --import-realm
+          env:
+            # Database: the `keycloak` database and role of the built-in
+            # PostgreSQL. The pool stays at 20 so Keycloak and the backplane
+            # fit PostgreSQL's 100 connections together.
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL_HOST
+              value: {{ include "coreKeycloak.databaseHost" . | quote }}
+            - name: KC_DB_URL_PORT
+              value: {{ .Values.database.port | quote }}
+            - name: KC_DB_URL_DATABASE
+              value: keycloak
+            - name: KC_DB_USERNAME
+              value: keycloak
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "postgres-keycloak") }}
+                  key: password
+            - name: KC_DB_POOL_INITIAL_SIZE
+              value: "2"
+            - name: KC_DB_POOL_MIN_SIZE
+              value: "2"
+            - name: KC_DB_POOL_MAX_SIZE
+              value: "20"
+            # Address. Browsers, the CLI and the `iss` claim use the public
+            # URL; pods call the Service. With the dynamic back channel, the
+            # discovery document fetched at the Service URL names the public
+            # issuer and Service-URL endpoints for keys and tokens.
+            - name: KC_HTTP_RELATIVE_PATH
+              value: /auth
+            - name: KC_HOSTNAME
+              value: {{ printf "https://%s/auth" .Values.hostname | quote }}
+            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_CACHE
+              value: local
+            # The temporary admin service account Keycloak creates in the
+            # master realm at the first start. The realm stage of the
+            # bootstrap Job uses it once and then removes it.
+            - name: KC_BOOTSTRAP_ADMIN_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecrets.bootstrap | default (include "coreKeycloak.coreSecret" (dict "root" . "kind" "keycloak-bootstrap")) }}
+                  key: client_id
+            - name: KC_BOOTSTRAP_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecrets.bootstrap | default (include "coreKeycloak.coreSecret" (dict "root" . "kind" "keycloak-bootstrap")) }}
+                  key: client_secret
+            # Values for the `${...}` placeholders in the realm file. Keycloak
+            # reads them only while it imports the realm.
+            - name: MEHO_REALM_PUBLIC_URL
+              value: {{ printf "https://%s" .Values.hostname | quote }}
+            - name: MEHO_REALM_TENANT_ID
+              value: {{ .Values.firstTenantId | quote }}
+            - name: MEHO_REALM_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "keycloak-admin") }}
+                  key: client_secret
+            - name: MEHO_REALM_WEB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "ui-auth") }}
+                  key: client_secret
+            - name: MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "check-runner") }}
+                  key: client_secret
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: management
+              containerPort: 9000
+              protocol: TCP
+          # The first start builds the server, creates the schema and
+          # imports the realm, so the start probe allows 5 minutes.
+          startupProbe:
+            httpGet:
+              path: /auth/health/started
+              port: management
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /auth/health/ready
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /auth/health/live
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.securityContext "global" .Values.global) | nindent 12 }}
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: realm
+          configMap:
+            name: {{ include "coreKeycloak.fullname" . }}-realm
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

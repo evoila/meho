@@ -84,7 +84,6 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
     KIND_SLUG_MAX_LENGTH,
     KIND_SLUG_MIN_LENGTH,
@@ -97,7 +96,6 @@ from meho_backplane.db.models import (
     GraphNode,
     is_valid_kind_slug,
 )
-from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.topology.history import (
     edge_snapshot,
     record_edge_change,
@@ -557,7 +555,7 @@ def _build_audit_row(
 ) -> AuditLog:
     """Construct one ``AuditLog`` row for an annotate / unannotate.
 
-    Mirrors the columns ``refresh._write_audit_and_broadcast`` writes
+    Mirrors the columns ``refresh._write_audit`` writes
     (status 200, ``method`` as verb token, ``path`` as op_id) and
     pre-allocates the ``audit_id`` so the broadcast event's
     ``audit_id`` field references the *same* row (the chassis
@@ -590,47 +588,6 @@ def _broadcast_target_id(node: GraphNode) -> uuid.UUID | None:
     None`` per the §10 spec.
     """
     return node.target_id
-
-
-async def _publish(
-    *,
-    audit_id: uuid.UUID,
-    operator: Operator,
-    op_id: str,
-    target_name: str | None,
-    payload: dict[str, Any],
-) -> None:
-    """Fail-open broadcast publish.
-
-    Same shape as :func:`refresh._publish_refresh_event` — emits the
-    broadcast event and swallows publisher failure so a broken stream
-    never rolls back a successful annotate / unannotate.
-    """
-    try:
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=operator.tenant_id,
-            principal_sub=operator.sub,
-            principal_name=operator.name,
-            target_name=target_name,
-            op_id=op_id,
-            op_class=_OP_CLASS,
-            result_status="ok",
-            audit_id=audit_id,
-            payload=payload,
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
-        )
-        await publish_event(event)
-    except Exception:
-        _log.exception(
-            "topology_annotation_broadcast_failed",
-            op_id=op_id,
-            tenant_id=str(operator.tenant_id),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -759,13 +716,6 @@ async def annotate_edge_with_plan(
             evidence_url=evidence_url,
         )
 
-    await _publish(
-        audit_id=plan.audit_id,
-        operator=operator,
-        op_id=_ANNOTATE_OP_ID,
-        target_name=plan.target_name,
-        payload=plan.audit_payload,
-    )
     return plan
 
 
@@ -1410,7 +1360,7 @@ async def unannotate_edge(
     _check_unannotate_selectors(edge_id=edge_id, from_ref=from_ref, kind=kind, to_ref=to_ref)
 
     async with session.begin():
-        removed_id, target_name, audit_id, payload = await _unannotate_in_txn(
+        removed_id = await _unannotate_in_txn(
             session,
             operator,
             edge_id=edge_id,
@@ -1419,13 +1369,6 @@ async def unannotate_edge(
             to_ref=to_ref,
         )
 
-    await _publish(
-        audit_id=audit_id,
-        operator=operator,
-        op_id=_UNANNOTATE_OP_ID,
-        target_name=target_name,
-        payload=payload,
-    )
     return removed_id
 
 
@@ -1437,14 +1380,12 @@ async def _unannotate_in_txn(
     from_ref: NodeRef | None,
     kind: str | None,
     to_ref: NodeRef | None,
-) -> tuple[uuid.UUID, str, uuid.UUID, dict[str, Any]]:
+) -> uuid.UUID:
     """In-transaction body of :func:`unannotate_edge`.
 
     Resolves the curated row, clears its reciprocal §6 markers, emits
     the diff-on-write history rows, hard-deletes the live row, and
-    writes the audit row. Returns ``(removed_id, target_name,
-    audit_id, audit_payload)`` so the caller can publish the
-    broadcast event after commit.
+    writes the audit row. Returns the removed edge id.
     """
     edge, from_node, to_node = await _resolve_unannotate_target(
         session,
@@ -1537,4 +1478,4 @@ async def _unannotate_in_txn(
             payload=payload,
         )
     )
-    return removed_id, from_node.name, audit_id, payload
+    return removed_id

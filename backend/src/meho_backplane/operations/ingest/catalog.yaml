@@ -190,6 +190,98 @@ entries:
       HTML Broadcom Developer Portal). SddcManagerConnector handles dispatch
       (typed). Product realigned from `sddc-manager` to the short,
       dispatch-canonical `sddc` token in #1814 (Initiative #1810). See #743.
+    # #4617: ingested reads whose answer holds credentials get the same
+    # guards as the hand-written sddc.credential.list. The rules here raise
+    # them to caution with approval; the redaction comes from the same op
+    # ids in broadcast/events.py _CREDENTIAL_READ_OPS. Keep both in step.
+    safety_overlay:
+      # The credential store and its password-rotation tasks.
+      - method: GET
+        path: /v1/credentials
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/credentials/{id}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/credentials/tasks
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/credentials/tasks/{id}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/credentials/tasks/{id}/subtasks/{subtaskId}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/credentials/tasks/{id}/resource-credentials
+        safety_level: caution
+        requires_approval: true
+      # Depot, backup and proxy settings carry account passwords.
+      - method: GET
+        path: /v1/system/settings/depot
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/system/backup-configuration
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/system/backup-configuration/backup-locations
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/system/proxy-configuration
+        safety_level: caution
+        requires_approval: true
+      # Host prechecks echo the host password; VASA providers and their
+      # users carry passwords; a management-component task spec carries
+      # the admin and root passwords.
+      - method: GET
+        path: /v1/hosts/prechecks/{id}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/vasa-providers
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/vasa-providers/{id}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/vasa-providers/{id}/users
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/vcf-management-components/tasks/{taskId}/spec
+        safety_level: caution
+        requires_approval: true
+      # Users carry an API key; identity providers carry the sync client
+      # bearer token.
+      - method: GET
+        path: /v1/users
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/users/ui
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/users/local/admin
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/identity-providers
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /v1/identity-providers/{id}
+        safety_level: caution
+        requires_approval: true
 
   - product: harbor
     version: "2.x"

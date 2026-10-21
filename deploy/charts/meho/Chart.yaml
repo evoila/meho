@@ -59,3 +59,21 @@ dependencies:
     alias: resultCache
     version: 0.1.0
     repository: ""
+  # Built-in PostgreSQL 17 with pgvector (`charts/postgres/`, #4039), off
+  # by default. The `alias` maps the parent's `corePostgres:` values block
+  # onto the subchart; its helpers pin the resource names to
+  # `<release>-postgres`. With it off, the chart renders exactly what it
+  # rendered before (bring-your-own PostgreSQL through `postgres:`).
+  - name: postgres
+    condition: corePostgres.enabled
+    alias: corePostgres
+    version: 0.1.0
+    repository: ""
+  # Built-in Keycloak, the login server of the MEHO core (`charts/keycloak/`),
+  # off by default. The `alias` maps the parent's `coreKeycloak:` values block
+  # onto the subchart; its helpers pin the resource names to `keycloak`.
+  - name: keycloak
+    condition: coreKeycloak.enabled
+    alias: coreKeycloak
+    version: 0.1.0
+    repository: ""

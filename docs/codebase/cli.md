@@ -148,7 +148,7 @@ names.
 
 ```text
 cli/
-├── go.mod                  # github.com/evoila/meho/cli; Go 1.26.9.
+├── go.mod                  # github.com/evoila/meho/cli; Go 1.26.10.
 ├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
 ├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
@@ -252,7 +252,7 @@ cli/
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
     │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
-    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams.
+    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams. A 200 with the backplane's `status: "rate_limited"` envelope is rendered as unexpected_response (exit 4) with the wait, in both ranked and `--op-id` mode.
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
@@ -780,7 +780,7 @@ that branch on them:
 | Code | Meaning                                                         |
 | ---- | --------------------------------------------------------------- |
 | 0    | Success                                                         |
-| 1    | Generic failure (cobra usage error, panic recovery, etc.)       |
+| 1    | Generic failure; also `usage_error` (unknown flag, wrong number of arguments) |
 | 2    | `auth_expired`                                                  |
 | 3    | `unreachable`                                                   |
 | 4    | `unexpected_response`                                           |
@@ -790,6 +790,26 @@ The propagation path is `output.RenderError` → `silentError` →
 default error printer is bypassed via `SilenceErrors=true` on the
 status subcommand so the JSON envelope doesn't double-render
 alongside the text rendering of `.Error()`.
+
+Most subcommands set `SilenceErrors=true`. cobra checks flags and the
+argument count before `RunE` runs, so without help those errors would
+print nothing. `internal/cmd/usage_errors.go` covers this for the whole
+tree in one place: the root's flag error function (every child inherits
+it) and a wrapper around every command's `Args` check both print a
+`usage_error` through `output.RenderError`, exit code 1:
+
+```text
+meho: usage_error: unknown flag: --bogus (run 'meho targets list --help' for usage)
+```
+
+With `--json` on a command that has that flag, the same error uses the
+JSON envelope. cobra stops parsing at an unknown flag, so the usage
+error reads the raw command line up to `--` and the last `--json`
+setting wins, as it does for a parsed flag. A word that is the value of
+another flag of the command (`--query --json`) is skipped, so it does
+not count as a setting. `usage_errors_test.go` walks every command and
+checks that an unknown flag prints a message that names the flag. Missing
+required flags (`MarkFlagRequired`) are not covered by this path yet.
 
 ### Sensitive-data discipline
 
@@ -1144,9 +1164,10 @@ end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
 [oapi-codegen v2.5](https://github.com/oapi-codegen/oapi-codegen)
 from `cli/api/openapi.json` — a committed snapshot of the
 backplane's OpenAPI document. v2.5 is the last v2.x release that
-supports Go 1.22. The CLI module itself requires Go 1.26.9: Go 1.25
-gets no more security fixes, and 1.26.9 is the first 1.26 release
-that fixes nine standard-library CVEs. The generator itself runs
+supports Go 1.22. The CLI module itself requires Go 1.26.10: Go 1.25
+gets no more security fixes, 1.26.9 is the first 1.26 release
+that fixes nine standard-library CVEs, and 1.26.10 also fixes
+GO-2026-6809 in `crypto/x509`. The generator itself runs
 on a newer Go toolchain (downloaded automatically by `go install`
 when the host has Go 1.21+) so this is a build-time vs.
 runtime split.
@@ -1241,11 +1262,15 @@ narrow-waist contract.
   per group + a `when_to_use` blurb the agent consults to pick a group
   to search within. Unknown `connector_id` returns an empty `groups`
   list (operationally meaningful, never 404).
-- `meho operation search <connector_id> <query> [--group K] [--limit N]`
+- `meho operation search <connector_id> <query> [--group K] [--limit N] [--scores]`
   — calls `GET /api/v1/operations/search`. Runs hybrid BM25 + cosine
   RRF over `endpoint_descriptor` rows scoped to the connector
   (optionally narrowed to one `group_key`) and renders the top hits
-  with `fused_score`. `--limit` is clamped by the API at 50.
+  with their `safety_level`. `--limit` is clamped by the API at 50.
+  `--scores` shows the ranking score; the backplane sends it only to a
+  `tenant_admin` (#3668). With `--op-id <op_id>` (no query needed) it
+  prints that one operation's call contract instead: parameter
+  schema, examples, target rule, result shape and retry rules.
 - `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
@@ -1353,11 +1378,12 @@ scenarios.
 ### Exit codes
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
-- `1` — `call` only: dispatcher returned `status == "error"` or
-  `status == "denied"` (connector raised, schema validation rejected,
-  or policy denied — the three structured-failure envelopes the
-  backend `Connector.execute` contract defines). Surfaced via the
-  `errOpError` sentinel.
+- `1` — `call` only: dispatcher returned `status == "error"`,
+  `status == "denied"` or `status == "rate_limited"` (connector raised,
+  schema validation rejected, policy denied, or the caller is over its
+  rate or concurrency limit). The envelope is printed first; a
+  `rate_limited` one shows `extras.retry_after_seconds`. Surfaced via
+  the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
 - `4` — `unexpected_response` (parse error, malformed JSON, or an
@@ -1642,8 +1668,8 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `gcloud`, `bind9`, `k8s`, `sddc-manager`, `vcf-automation`, `vcf-fleet`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
-`httpError` trios. Exit codes: `0` status=ok, `1` status=error/denied
-(via the `errOpError` sentinel re-exported from
+`httpError` trios. Exit codes: `0` status=ok, `1`
+status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
 
@@ -2222,12 +2248,12 @@ Direct:
   `Config.DeviceAccessToken` for the RFC 8628 device-code flow,
   plus `Config.TokenSource` for the T3 refresh path. Pinned at
   `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
-  upgrades is lifted now that the module requires Go 1.26.9.
+  upgrades is lifted now that the module requires Go 1.26.10.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated
   client uses (JSON merging for `oneOf` unions, parameter styling
   per RFC 6570). Pinned at `v1.1.1`; the Go 1.22 compatibility
   constraint that blocked upgrades is lifted now that the module
-  requires Go 1.26.9 — upgrade tracked as a follow-up.
+  requires Go 1.26.10 — upgrade tracked as a follow-up.
 
 Build-time tool (not in `go.mod`; installed under `bin/` via
 `make tools`):
@@ -2235,7 +2261,7 @@ Build-time tool (not in `go.mod`; installed under `bin/` via
 * `github.com/oapi-codegen/oapi-codegen/v2` — the OpenAPI → Go
   client generator itself. Pinned at `v2.5.0`, the last v2.x
   release whose module go directive was compatible with Go 1.22;
-  now that the module requires Go 1.26.9, a newer v2.x may be
+  now that the module requires Go 1.26.10, a newer v2.x may be
   used — upgrade tracked as a follow-up. `make tools` runs
   `go install …@v2.5.0` with
   `GOBIN=$PWD/bin`; the generator itself executes on a Go 1.24+
@@ -2252,8 +2278,8 @@ have to trust to run `meho login` against their secrets.
 `cli/internal/cmd/admin/keycloak/` registers the install-time
 realm-provisioning verb that closes the v0.3.1 dogfood's deepest
 deployer friction: a working `meho-cli` device-code client + the
-public MCP browser-flow client + the **5 protocol mappers + 4 default
-client scopes + meho-admins group + admin user** that together let
+public MCP browser-flow client + the **6 protocol mappers + 4 default
+client scopes + five MEHO role groups + admin user** that together let
 `meho login` and the MCP onramp authenticate without 4 sequential
 walls of opaque `invalid_token` / `unauthorized_client` errors. The
 verb encodes the 5-step recipe documented in
@@ -2281,10 +2307,24 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      loopback callbacks `http://localhost:*` + `http://127.0.0.1:*`
      that `mcp-remote` and Claude Code listen on — Keycloak matches
      redirect hosts literally, so both loopback forms are listed).
-  3. 5 protocol mappers cloned from the reference shape on
-     `meho-backplane`, installed on **both** public clients:
-     `audience-meho-backplane`, `meho-mcp-audience`, `tenant-id`,
-     `tenant-role`, `groups-claim`.
+  3. 6 protocol mappers, installed on **both** public clients:
+     `audience-meho-backplane`, `meho-mcp-audience`, `groups-claim`,
+     and three stock User Attribute mappers
+     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`
+     and `approver` — that read the `tenant_id`, `tenant_role` and
+     `approver` attributes of the person's group
+     (`aggregate.attrs=false`, `multivalued=false`; `approver` is a
+     `boolean` claim). No mapper carries a fixed value
+     ([`docs/decisions/login-role-groups.md`](../decisions/login-role-groups.md),
+     #4590). The names `tenant-id` / `tenant-role` are the names the
+     older fixed-value mappers had, so a run on an older realm updates
+     them in place (Keycloak's mapper PUT replaces the type and config)
+     and prints `[updated] mapper tenant-id (replaced
+     oidc-hardcoded-claim-mapper with oidc-usermodel-attribute-mapper)`.
+     Every mapper spells out all four token toggles (ID token, access
+     token, userinfo, introspection), because Keycloak's GET fills an
+     unset toggle with its default and the mapper would otherwise never
+     match on a re-run.
   4. 4 default client scopes (`basic`, `roles`, `web-origins`,
      `acr`) explicitly assigned to **both** public clients. The
      `basic` scope is load-bearing — Keycloak 25+ moved the `sub`
@@ -2292,8 +2332,18 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      **not** auto-inherit the realm's default-default scopes, so an
      explicit assignment is the only way to guarantee `sub` lands in
      the access token (RFC 9068 §2.2.1 requires it).
-  5. The `meho-admins` top-level group + an admin user joined to
-     it, with a password set via `/users/{id}/reset-password`.
+  5. The five MEHO role groups (`roleGroups` in `bootstrap.go`):
+     `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
+     `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
+     `MEHO-Approvers` (`read_only` + `approver=true`). Each carries
+     `tenant_id` from `--tenant-id` (default the all-zero UUID). The
+     groups are created even with `--skip-user-provisioning`, because
+     they carry the tenant and the role. Then an admin user joined to
+     `MEHO-Admins`, with a password set via
+     `/users/{id}/reset-password` (skipped with
+     `--skip-user-provisioning`). `--tenant-role` and
+     `--admin-group-name` were removed in #4590; passing either fails
+     with cobra's `unknown flag` error before any Keycloak call.
   6. Optional client scope `offline_access`. Attached to the MCP
      client (`meho-mcp`) as **optional** (not default — only flows
      that ask for a refresh token mint one); this closes the W7 wall
@@ -2341,15 +2391,25 @@ Every step does a "does this exist?" check before mutating:
   missing scope → PUT; already present → skip. Only applied to the
   MCP client (the CLI client's optional-scope set is left untouched
   for the RFC 8628 rationale above).
-- Group: `GET /groups?search=<name>` (filtered client-side to exact
-  match); missing → POST.
+- Role groups: `GET /groups?search=<name>` (filtered client-side to
+  exact match; the search answer has no attributes); missing → POST
+  with the attributes; present → `GET /groups/{id}` and compare the
+  three owned attributes (`tenant_id`, `tenant_role`, `approver`).
+  Different → `PUT /groups/{id}` with the full attribute map (Keycloak
+  replaces the whole map, so other attributes are carried over, and so
+  is the group description); equal → skip. `approver` is removed from
+  every group except `MEHO-Approvers`. Old groups such as
+  `meho-admins` are never touched.
 - User: `GET /users?exact=true&username=<name>`; missing → POST then
   `PUT /users/{id}/reset-password`; existing → skip the password
   reset (silent password rotation on a re-run is strictly worse than
   a "set it once at create time" rule — see the per-finding rationale
-  in `reconcileUser`).
+  in `reconcileUser`). Not yet in `MEHO-Admins` → join it (printed as
+  `[updated] user …`).
 
-A clean re-run prints `[skip]` for every resource and exits 0.
+A clean re-run prints `[skip]` for every mapper, scope, group and the
+user, and exits 0. The two clients always print `[updated] client`:
+the client is PUT with the same settings on every run.
 
 ### Refusals
 
@@ -2413,31 +2473,47 @@ the CA cert is available.
 ### Tests
 
 `bootstrap_test.go` drives a fake Keycloak (`httptest.Server` +
-in-memory state maps) through eight scenarios:
+in-memory state maps) through these scenarios, among others:
 
 - Fresh realm: every resource created, mapper + scope counts match
-  the recipe (5 mappers, 4 default scopes, 2 clients, 1 group, 1
-  user).
-- Idempotent re-run: zero new POSTs against the same realm; password
-  reset called exactly once across two runs.
+  the recipe (6 mappers, 4 default scopes, 2 clients, 5 groups with
+  their attributes, 1 user in `MEHO-Admins` only).
+- Idempotent re-run: zero new POSTs and zero mapper / group /
+  membership PUTs against the same realm; password reset called
+  exactly once across two runs.
+- Upgrade: a realm with the older fixed-value `tenant-id` /
+  `tenant-role` mappers and a `meho-admins` group ends with only User
+  Attribute mappers, the five groups, the admin user also in
+  `MEHO-Admins`, the old group left in place; a second run changes
+  nothing.
+- Changed group attributes are set back; other attributes stay;
+  `approver` is removed from a non-approver group.
+- `--tenant-role` / `--admin-group-name` stop with `unknown flag`.
 - Confidential-client refusal: `--cli-client-id meho-backplane`
   errors at the validation boundary.
 - Trailing-slash refusal: `--mcp-resource-uri .../mcp/` errors with
   a "trailing slash" message naming the recipe rule.
 - Dry-run: zero Keycloak calls, banner present in stdout.
-- Skip-user-provisioning: 2 clients land, 0 groups, 0 users.
+- Skip-user-provisioning: 2 clients land, 5 groups, 0 users.
 - Mandatory-flag validation: missing `--keycloak-base-url`,
   `--realm`, etc. each surface a flag-specific error.
 - Mapper-shape parity with the reference shell script:
   `audience-meho-backplane` carries `included.client.audience=
   meho-backplane`; `meho-mcp-audience` carries `included.custom.
-  audience=<uri>`; `tenant-id` / `tenant-role` are
-  `oidc-hardcoded-claim-mapper`; `groups-claim` is
-  `oidc-group-membership-mapper` with `claim.name=groups`.
+  audience=<uri>`; `tenant-id` / `tenant-role` / `approver` are
+  `oidc-usermodel-attribute-mapper` with no `claim.value`;
+  `groups-claim` is `oidc-group-membership-mapper` with
+  `claim.name=groups`.
 
-Real-realm verification belongs in a future `testcontainers` Keycloak
-integration test; the unit suite proves the orchestrator's
-interaction shape, not the realm semantics.
+The unit suite proves the orchestrator's interaction shape.
+`backend/tests/integration/test_keycloak_bootstrap_mcp_login.py`
+proves the realm semantics against a real Keycloak 26.0 in CI: a
+person in each of the five groups gets the right `tenant_id` /
+`tenant_role` (and only the `MEHO-Approvers` person gets `approver`),
+both in the token Keycloak builds for `meho-cli` and through a real
+`meho-mcp` login checked by the backplane's JWT code; a person in no
+group gets `401 missing_tenant_claim`; and an older realm with
+fixed-value mappers is upgraded, with a second run changing nothing.
 
 ## Known issues / forward-compat scaffolding
 

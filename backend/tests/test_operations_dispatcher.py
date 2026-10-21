@@ -23,8 +23,6 @@ Coverage matrix (G0.6-T5 / Task #396 acceptance criteria):
 * Audit row written synchronously: one row per dispatch with the
   resolved ``op_id`` / ``target_id`` / ``params_hash`` /
   ``result_status``.
-* Broadcast event emitted via the shipped :func:`publish_event` hook;
-  the event carries the right ``op_class`` + redacted payload.
 * Pass-through reducer: the dispatcher invokes the reducer; the v0.2
   default returns the response unchanged + a ``None`` handle.
 * Handler-import error -> ``handler_unreachable`` error code.
@@ -32,11 +30,9 @@ Coverage matrix (G0.6-T5 / Task #396 acceptance criteria):
   principal to the approval queue (``awaiting_approval``), not a
   hard-deny (G11.7-T1 #1401); agents floor to ``needs-approval``.
 
-The audit + broadcast assertions read the actual ``audit_log`` rows
+The audit assertions read the actual ``audit_log`` rows
 written by the dispatcher (the conftest autouse fixture runs the
-Alembic migration so the table exists). The broadcast publisher is
-patched to a recording stub so tests can assert on the
-:class:`BroadcastEvent` without standing up a Valkey container.
+Alembic migration so the table exists).
 """
 
 from __future__ import annotations
@@ -53,9 +49,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult, resolve_connector
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.base import Connector
@@ -125,24 +119,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub.
-
-    The audit helper invokes ``publish_event`` via the imported
-    reference inside :mod:`meho_backplane.operations._audit`; patching
-    the module's attribute is sufficient -- no need to swap the
-    broadcast package's bind.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -458,6 +434,34 @@ async def _module_composite_handler_gated_subop(
     return {"parent": "ok", "step": "ran"}
 
 
+async def _module_composite_handler_reports_refused_step(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite that reports a refused follow-on step as a warning (#4646).
+
+    Its main change is done before the gated step runs, so the handler keeps
+    its own result and reports the step's refusal as a warning issue. The
+    parent then writes its own audit row after the step gate wrote the step's.
+    """
+    from meho_backplane.operations.composite import enforce_subop_policy
+
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.gated_step",
+        safety_level="caution",
+        requires_approval=True,
+        target=target,
+        params={"path": params.get("path", "?")},
+    )
+    issues: list[dict[str, Any]] = []
+    if gate is not None:
+        issues.append({"category": "step", "severity": "warning", "message": gate.status})
+    return {"parent": "ok", "issues": issues}
+
+
 async def _module_composite_handler_warning_only(
     operator: Operator,
     target: Any,
@@ -636,9 +640,7 @@ def test_import_handler_caches_resolved_handler() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_returns_unknown_op_when_descriptor_missing(
-    captured_events: list[BroadcastEvent],
-) -> None:
+async def test_dispatch_returns_unknown_op_when_descriptor_missing() -> None:
     """No descriptor -> ``OperationResult.error`` starts with ``"unknown_op:"``."""
     operator = _make_operator()
     target = _FakeTarget(product="vault")
@@ -665,7 +667,6 @@ async def test_dispatch_returns_unknown_op_when_descriptor_missing(
 @pytest.mark.asyncio
 async def test_dispatch_returns_invalid_params_when_schema_violated(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Invalid params -> ``invalid_params`` error with ``validation_errors`` list."""
     await register_typed_operation(
@@ -703,14 +704,111 @@ async def test_dispatch_returns_invalid_params_when_schema_violated(
     assert result.extras["error_code"] == "invalid_params"
     validation = result.extras["validation_errors"]
     assert isinstance(validation, list)
-    assert any(err["validator"] == "required" for err in validation)
+    assert validation == [
+        {
+            "path": "$",
+            "validator": "required",
+            "expected": 'required property missing: "path"',
+            "remediation": "add the missing property to params",
+        }
+    ]
+    assert result.extras["validation_errors_suppressed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_invalid_params_never_echoes_the_rejected_value(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#3669: a rejected value never rides the ``invalid_params`` envelope.
+
+    jsonschema's own message quotes the bad value. A credential sent to the
+    wrong field would then come back in cleartext. The entry is built from
+    the schema side only, so the value (here a bearer token, which the
+    default redaction policy matches) is absent from the whole envelope.
+    """
+    secret = "eyJtoken" + "$value!123" + "abcdef"
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "version": {"type": "integer"},
+                "mode": {"enum": ["latest", "pinned"]},
+                "path": {"type": "string", "pattern": "^[a-z/]+$"},
+            },
+            "additionalProperties": False,
+        },
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_FakeTarget(product="vault"),
+        params={
+            "version": "Bearer " + secret,
+            "mode": "Bearer " + secret,
+            "path": "Bearer " + secret,
+        },
+    )
+    assert result.extras["error_code"] == "invalid_params"
+    entries = result.extras["validation_errors"]
+    assert {e["validator"] for e in entries} == {"type", "enum", "pattern"}
+    for entry in entries:
+        assert set(entry) == {"path", "validator", "expected", "remediation"}
+    dumped = json.dumps(result.model_dump(mode="json"))
+    assert secret not in dumped
+
+
+@pytest.mark.asyncio
+async def test_dispatch_invalid_params_caps_the_error_list(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#3669: many violations -> a capped list plus a suppressed count."""
+    from meho_backplane.operations._errors import _MAX_VALIDATION_ERRORS
+
+    count = _MAX_VALIDATION_ERRORS + 5
+    properties = {f"p{i}": {"type": "integer"} for i in range(count)}
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={"type": "object", "properties": properties},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_FakeTarget(product="vault"),
+        params=dict.fromkeys(properties, "x"),
+    )
+    assert result.extras["error_code"] == "invalid_params"
+    assert len(result.extras["validation_errors"]) <= _MAX_VALIDATION_ERRORS
+    assert result.extras["validation_errors_suppressed"] == 5
+    assert result.error == (
+        f"invalid_params: {count} validation error(s); showing the first {_MAX_VALIDATION_ERRORS}"
+    )
 
 
 @pytest.mark.asyncio
 async def test_dispatch_ingested_rejects_undeclared_param(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#293 (S05): an undeclared param on an ingested op -> ``invalid_params``.
 
@@ -780,15 +878,11 @@ async def test_dispatch_ingested_rejects_undeclared_param(
     validation = result.extras["validation_errors"]
     assert isinstance(validation, list)
     assert any(err["validator"] == "additionalProperties" for err in validation)
-    # No vendor request was built -- the reject is a pre-dispatch fault, so
-    # no broadcast event fires for a would-be call.
-    assert captured_events == []
 
 
 @pytest.mark.asyncio
 async def test_dispatch_returns_invalid_op_schema_for_poisoned_descriptor(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A stored schema with a dangling $ref -> structured ``invalid_op_schema``.
 
@@ -842,7 +936,7 @@ async def test_dispatch_returns_invalid_op_schema_for_poisoned_descriptor(
 
 
 # ---------------------------------------------------------------------------
-# Typed dispatch + audit + broadcast
+# Typed dispatch + audit
 # ---------------------------------------------------------------------------
 
 
@@ -871,7 +965,6 @@ class _NoOpVaultConnector(Connector):
 @pytest.mark.asyncio
 async def test_dispatch_typed_invokes_handler_and_returns_result(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Typed handler runs; its return value lands in ``result.result``."""
     register_connector_v2(
@@ -929,23 +1022,10 @@ async def test_dispatch_typed_invokes_handler_and_returns_result(
     assert row.payload["result_status"] == "ok"
     assert "params_hash" in row.payload
 
-    # Broadcast event emitted.
-    assert len(captured_events) == 1
-    event = captured_events[0]
-    assert event.op_id == "vault.kv.read"
-    assert event.op_class == "credential_read"  # vault.kv.read is in the allowlist
-    assert event.result_status == "ok"
-    assert event.tenant_id == operator.tenant_id
-    assert event.audit_id == row.id
-    # credential_read payload is aggregate-only -- the broadcast must
-    # NOT contain the params.
-    assert "params" not in event.payload
-
 
 @pytest.mark.asyncio
 async def test_dispatch_typed_handler_without_operator_param(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A typed handler with signature ``(target, params)`` is also accepted."""
     register_connector_v2(
@@ -990,7 +1070,6 @@ async def test_dispatch_typed_handler_without_operator_param(
 async def test_dispatch_ingested_returns_no_connector_when_resolver_misses(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Ingested op with no matching connector -> ``no_connector`` error."""
     # Insert an ingested descriptor directly -- T4 only registers typed
@@ -1053,7 +1132,6 @@ async def test_dispatch_ingested_returns_no_connector_when_resolver_misses(
 async def test_no_connector_error_names_target_product_not_connector_id(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#2701: the ``no_connector`` error names the TARGET's product, not the caller's.
 
@@ -1146,7 +1224,6 @@ async def test_no_connector_error_names_target_product_not_connector_id(
 @pytest.mark.asyncio
 async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Typed branch mirrors the ingested branch's resolver-miss label.
 
@@ -1199,7 +1276,6 @@ async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
 @pytest.mark.asyncio
 async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Typed branch surfaces ``ambiguous_connector`` with the resolver's diagnostic message.
 
@@ -1300,7 +1376,6 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
 @pytest.mark.asyncio
 async def test_dispatch_self_first_handler_no_target_returns_target_required(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Self-first typed op + ``target=None`` -> structured ``target_required``.
 
@@ -1355,7 +1430,6 @@ async def test_dispatch_self_first_handler_no_target_returns_target_required(
 @pytest.mark.asyncio
 async def test_dispatch_module_level_handler_no_target_still_dispatches(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A legitimately target-less module-level typed op still dispatches.
 
@@ -1418,7 +1492,6 @@ def test_handler_requires_target_flags_connector_declaring_composite() -> None:
 async def test_dispatch_ingested_returns_ambiguous_when_resolver_cant_tiebreak(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Ingested branch catches ``AmbiguousConnectorResolution`` the same way.
 
@@ -1586,7 +1659,6 @@ class _VmwareFakeHttpConnector(_FakeHttpConnector):
 async def test_vmware_ingested_hardware_write_parks_before_http_execution(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The connector floor parks a raw NIC create before its HTTP branch runs."""
     register_connector_v2(
@@ -1636,7 +1708,6 @@ async def test_vmware_ingested_hardware_write_parks_before_http_execution(
     instance = _CONNECTOR_INSTANCE_CACHE[_VmwareFakeHttpConnector]
     assert isinstance(instance, _VmwareFakeHttpConnector)
     assert instance.calls == []
-    assert captured_events == []
 
 
 class _VmwareGuardHttpConnector(VmwareRestConnector):
@@ -2002,7 +2073,6 @@ async def test_vmware_8_0_tasks_list_dispatch_sends_two_level_body(
 async def test_dispatch_ingested_builds_request_via_request_json(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Ingested dispatch: path vars substituted, query/body split, ``_request_json`` called."""
     from datetime import UTC, datetime
@@ -2077,7 +2147,6 @@ async def test_dispatch_ingested_builds_request_via_request_json(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["method"] == "GET"
-    assert len(captured_events) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2186,7 +2255,6 @@ async def test_dispatch_ingested_post_sends_unwrapped_request_body(
     issue_body: dict[str, Any],
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """gh-rest issue-create sends the body param's *value* (unwrapped) on the wire.
 
@@ -2237,7 +2305,6 @@ async def test_dispatch_ingested_post_sends_unwrapped_request_body(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["number"] == 7
-    assert len(captured_events) == 1
 
 
 def _gh_update_issue_descriptor(embedding: Any, *, verb: str) -> Any:
@@ -2295,7 +2362,6 @@ async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
     verb: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An ingested PUT/PATCH/DELETE reaches the wire with its real verb + header param.
 
@@ -2351,7 +2417,6 @@ async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["state"] == "closed"
-    assert len(captured_events) == 1
 
 
 class _QueryParamRoundTripHttpConnector(_RoundTripHttpConnector):
@@ -2420,7 +2485,6 @@ def _acme_thing_action_descriptor(embedding: Any) -> Any:
 async def test_dispatch_ingested_post_forwards_query_param(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An ingested POST forwards an ``in: query`` param (not in the path) to the wire.
 
@@ -2471,7 +2535,6 @@ async def test_dispatch_ingested_post_forwards_query_param(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["status"] == "queued"
-    assert len(captured_events) == 1
 
 
 def test_unwrap_body_returns_value_not_wrapper() -> None:
@@ -2513,7 +2576,6 @@ def test_unwrap_body_rejects_multiple_body_params() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_composite_receives_dispatch_and_emits_child_row(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Composite handler receives ``dispatch`` + child audit row carries ``parent_audit_id``."""
     register_connector_v2(
@@ -2666,7 +2728,6 @@ async def _register_module_composite(op_id: str, handler_ref: str, embedding: An
 @pytest.mark.asyncio
 async def test_dispatch_composite_terminal_error_envelope_audits_error(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A composite envelope with an ``error``-severity issue dispatches as an error (#3809).
 
@@ -2715,8 +2776,6 @@ async def test_dispatch_composite_terminal_error_envelope_audits_error(
     assert row.payload["result_status"] == "error"
     assert row.status_code == 500
     assert row.payload["error"]["error_code"] == "create_error"
-    # The broadcast frame carries the failed status, not a false ``ok``.
-    assert any(e.result_status == "error" for e in captured_events)
 
 
 async def _dispatch_issue_list_error(
@@ -2871,7 +2930,6 @@ async def test_dispatch_composite_terminal_error_with_non_ascii_messages_stays_b
 @pytest.mark.asyncio
 async def test_dispatch_folder_create_ambiguous_parent_audits_error(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An unresolved ``folder.create`` parent is a failed op, not an ``ok`` no-op (#3588).
 
@@ -2912,13 +2970,11 @@ async def test_dispatch_folder_create_ambiguous_parent_audits_error(
         )
     assert row.payload["result_status"] == "error"
     assert row.payload["error"]["error_code"] == "ambiguous_parent"
-    assert any(e.result_status == "error" for e in captured_events)
 
 
 @pytest.mark.asyncio
 async def test_dispatch_folder_create_oversized_candidates_land_behind_a_handle(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     result_reducer_cls: type[Any],
 ) -> None:
     """An oversized refusal envelope ships a handle, not the whole list (#4223).
@@ -2985,13 +3041,11 @@ async def test_dispatch_folder_create_oversized_candidates_land_behind_a_handle(
     assert row.payload["result_status"] == "error"
     assert row.payload["error"]["error_code"] == "ambiguous_parent"
     assert row.payload["handle_id"] == str(result.handle.handle_id)
-    assert any(e.result_status == "error" for e in captured_events)
 
 
 @pytest.mark.asyncio
 async def test_dispatch_composite_error_envelope_reducer_failure_stays_error(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A reducer failure on the error arm keeps the error and drops the envelope (#4223).
 
@@ -3037,13 +3091,11 @@ async def test_dispatch_composite_error_envelope_reducer_failure_stays_error(
         )
     assert row.payload["result_status"] == "error"
     assert row.payload["error"]["error_code"] == "ambiguous_parent"
-    assert any(e.result_status == "error" for e in captured_events)
 
 
 @pytest.mark.asyncio
 async def test_dispatch_composite_warning_only_envelope_stays_ok(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A composite envelope carrying only a ``warning`` issue stays ``ok`` (#3809).
 
@@ -3091,7 +3143,6 @@ async def test_dispatch_composite_warning_only_envelope_stays_ok(
 @pytest.mark.asyncio
 async def test_dispatch_invokes_reducer_pass_through_by_default(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The pass-through reducer leaves the response shape untouched."""
     register_connector_v2(
@@ -3132,7 +3183,6 @@ async def test_dispatch_invokes_reducer_pass_through_by_default(
 @pytest.mark.asyncio
 async def test_dispatch_uses_swapped_reducer(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A non-default reducer (T6 will install one) sees the response."""
 
@@ -3235,7 +3285,6 @@ def test_isolate_global_registries_restores_default_reducer() -> None:
 async def test_dispatch_returns_handler_unreachable_when_import_fails(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``handler_ref`` pointing at a deleted module -> ``handler_unreachable``."""
     from datetime import UTC, datetime
@@ -3296,7 +3345,6 @@ async def test_dispatch_returns_handler_unreachable_when_import_fails(
 @pytest.mark.asyncio
 async def test_dispatch_returns_connector_error_when_handler_raises(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Handler exception -> ``connector_error`` + audit row with ``result_status='error'``."""
     register_connector_v2(
@@ -3346,14 +3394,10 @@ async def test_dispatch_returns_connector_error_when_handler_raises(
     # #3733: a failed run is still an execution record.
     assert rows[0].event_class == "operation_execution"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A denied ``vault.kv.put`` -> ``vault_write_identity_forbidden`` (#2331).
 
@@ -3411,7 +3455,6 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
 @pytest.mark.asyncio
 async def test_dispatch_denies_dangerous_op_by_safety_level(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``safety_level='dangerous'`` → ``denied`` for an **agent** principal.
 
@@ -3465,14 +3508,10 @@ async def test_dispatch_denies_dangerous_op_by_safety_level(
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].status_code == 403
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "denied"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_agent_deny_grant_on_client_id_denies_safe_op(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A ``deny`` grant keyed on the agent clientId denies a safe op + audits it (#3795).
 
@@ -3548,14 +3587,11 @@ async def test_dispatch_agent_deny_grant_on_client_id_denies_safe_op(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].status_code == 403
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "denied"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_pending_caution_op_no_permission_row(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``safety_level='caution'`` + no permission row → ``awaiting_approval`` (agent).
 
@@ -3630,15 +3666,10 @@ async def test_dispatch_pending_caution_op_no_permission_row(
     assert len(request_rows) == 1
     assert request_rows[0].status_code == 202
 
-    # The approval-queue path writes audit directly, not via the
-    # broadcast helper, so no broadcast event is emitted here.
-    assert len(captured_events) == 0
-
 
 @pytest.mark.asyncio
 async def test_audit_row_stamps_policy_decision_per_verdict(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#130 AC1: each governed dispatch stamps its gate verdict on ``policy_decision``.
 
@@ -3726,7 +3757,6 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
 @pytest.mark.asyncio
 async def test_dispatch_human_dangerous_op_auto_executes(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A **human** dispatching a ``dangerous`` op keeps the v0.2 contract.
 
@@ -3765,7 +3795,6 @@ async def test_dispatch_human_dangerous_op_auto_executes(
 @pytest.mark.asyncio
 async def test_dispatch_human_caution_op_auto_executes(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A **human** dispatching a ``caution`` op auto-executes (v0.2 contract)."""
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
@@ -3796,7 +3825,6 @@ async def test_dispatch_human_caution_op_auto_executes(
 @pytest.mark.asyncio
 async def test_dispatch_human_requires_approval_op_queues(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``requires_approval=True`` queues a **human**, not hard-deny (G11.7-T1 #1401).
 
@@ -3838,7 +3866,6 @@ async def test_dispatch_human_requires_approval_op_queues(
 @pytest.mark.asyncio
 async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``requires_approval=True`` floors an agent's ``safe`` op to approval.
 
@@ -3880,7 +3907,6 @@ async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
 @pytest.mark.asyncio
 async def test_park_populates_proposed_effect_from_builder(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked op with a registered preview builder stores its preview.
 
@@ -3948,7 +3974,6 @@ async def test_park_populates_proposed_effect_from_builder(
 @pytest.mark.asyncio
 async def test_park_without_builder_uses_identifier_default(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An op with no preview builder (and empty params) parks with the identifier-only default.
 
@@ -4010,7 +4035,6 @@ async def test_park_without_builder_uses_identifier_default(
 @pytest.mark.asyncio
 async def test_park_merges_permission_preflight_onto_identifier_default(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked write with a registered permission preflight stores its result.
 
@@ -4088,7 +4112,6 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
 @pytest.mark.asyncio
 async def test_park_params_echo_masks_secret_named_params(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked op's ``params_echo`` never stores a secret-named param value (#3808).
 
@@ -4152,17 +4175,12 @@ async def test_park_params_echo_masks_secret_named_params(
         stored = repr(row.proposed_effect)
         for value in secret_values:
             assert value not in stored
-    # The park's broadcast carries no secret value either.
-    broadcast = repr([event.payload for event in captured_events])
-    for value in secret_values:
-        assert value not in broadcast
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("will_be_denied", [True, False])
 async def test_park_refused_when_preflight_says_write_will_be_denied(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
     will_be_denied: bool,
 ) -> None:
     """A will-be-denied preflight refuses the park (#3542).
@@ -4172,8 +4190,8 @@ async def test_park_refused_when_preflight_says_write_will_be_denied(
     ``write_capability_denied`` with ``granted`` / ``required`` and the
     write-policy ``doc_ref``, so no person spends an approval on a write
     that cannot land. The refusal still lands as one ``denied`` audit row
-    on the op's own path (with the refusal details under ``error``) and
-    one ``denied`` broadcast event, exactly like a policy denial. When the
+    on the op's own path (with the refusal details under ``error``),
+    exactly like a policy denial. When the
     write is authorized the op parks as before, with no
     ``write_capability_warning``.
     """
@@ -4263,8 +4281,6 @@ async def test_park_refused_when_preflight_says_write_will_be_denied(
             assert op_rows[0].payload["error"]["error_code"] == "write_capability_denied"
             assert op_rows[0].payload["error"]["granted"] == ["read"]
             assert op_rows[0].payload["error"]["required"] == ["create", "update"]
-            assert len(captured_events) == 1
-            assert captured_events[0].result_status == "denied"
         else:
             assert result.status == "awaiting_approval"
             approval_request_id = UUID(result.extras["approval_request_id"])
@@ -4276,10 +4292,179 @@ async def test_park_refused_when_preflight_says_write_will_be_denied(
         _PERMISSION_PREFLIGHTS.pop("vault.kv.warn_op", None)
 
 
+async def _seed_gated_composite(
+    embedding: list[float],
+    *,
+    op_id: str = "vault.composite.gated_write",
+    handler: str = "_module_composite_handler_gated_subop",
+) -> None:
+    """Store a ``safe`` composite whose one step needs approval."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id=op_id,
+                source_kind="composite",
+                method=None,
+                path=None,
+                handler_ref=f"tests.test_operations_dispatcher.{handler}",
+                summary="Composite with one gated write step.",
+                description="The step parks for approval unless its preflight refuses.",
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=embedding,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+
+
+def _register_refusing_preflight(op_id: str) -> None:
+    """Register a permission check for *op_id* that says the write will be denied."""
+    from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+        }
+
+    register_permission_preflight(op_id, _preflight)
+
+
+async def _audit_rows(path: str) -> list[AuditLog]:
+    async with get_sessionmaker()() as s:
+        return list(
+            (await s.execute(select(AuditLog).where(AuditLog.path == path))).scalars().all()
+        )
+
+
+@pytest.mark.asyncio
+async def test_composite_step_wait_records_needs_approval_on_request_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A step that waits inside a multi-step operation records its own verdict (#4646).
+
+    The parent composite is ``safe`` and auto-executes; its step needs
+    approval. The ``approval.request`` row the step gate writes must say
+    ``needs-approval`` (the step's verdict), not ``auto-execute`` (the
+    parent's), the same as a top-level call that waits.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(stub_embedding_service.encode_one.return_value)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.gated_write",
+        target=_FakeTarget(product="vault"),
+        params={"path": "meho/test/x"},
+    )
+    assert result.status == "awaiting_approval"
+    assert result.op_id == "vault.kv.gated_step"
+
+    rows = await _audit_rows("approval.request")
+    assert len(rows) == 1
+    assert rows[0].policy_decision == "needs-approval"
+
+
+@pytest.mark.asyncio
+async def test_composite_step_refusal_row_records_needs_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The ``denied`` row of a refused step wait carries the step's verdict (#4646).
+
+    The permission check says the step's write will be denied, so the step
+    gate refuses the wait and writes a ``denied`` row on the step's path.
+    That row says ``needs-approval``, the same as the top-level refusal.
+    """
+    from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(stub_embedding_service.encode_one.return_value)
+    _register_refusing_preflight("vault.kv.gated_step")
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.gated_write",
+            target=_FakeTarget(product="vault"),
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "denied"
+    assert result.op_id == "vault.kv.gated_step"
+
+    rows = await _audit_rows("vault.kv.gated_step")
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].policy_decision == "needs-approval"
+
+
+@pytest.mark.asyncio
+async def test_composite_parent_row_keeps_its_own_verdict_after_step_gate(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parent's own audit row keeps the parent's verdict after a step gate (#4646).
+
+    The step gate binds the step's verdict only for its own call. A composite
+    that goes on after a refused step and returns its own result gets a row
+    with the parent's verdict, ``auto-execute``, while the step's ``denied``
+    row says ``needs-approval``.
+    """
+    from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(
+        stub_embedding_service.encode_one.return_value,
+        op_id="vault.composite.reports_refused_step",
+        handler="_module_composite_handler_reports_refused_step",
+    )
+    _register_refusing_preflight("vault.kv.gated_step")
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.reports_refused_step",
+            target=_FakeTarget(product="vault"),
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "ok", result.error
+    assert result.result["issues"][0]["message"] == "denied"
+
+    step_rows = await _audit_rows("vault.kv.gated_step")
+    assert len(step_rows) == 1
+    assert step_rows[0].policy_decision == "needs-approval"
+    parent_rows = await _audit_rows("vault.composite.reports_refused_step")
+    assert len(parent_rows) == 1
+    assert parent_rows[0].payload["result_status"] == "ok"
+    assert parent_rows[0].policy_decision == "auto-execute"
+    assert step_rows[0].parent_audit_id == parent_rows[0].id
+
+
 @pytest.mark.asyncio
 async def test_composite_with_refused_step_writes_one_denied_audit_row(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parent operation with a refused step leaves one denial audit record (#3542).
 
@@ -4291,7 +4476,7 @@ async def test_composite_with_refused_step_writes_one_denied_audit_row(
     operation's audit id. No approval request and no approval-request audit
     row are written.
     """
-    from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+    from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._preview import (
         _PERMISSION_PREFLIGHTS,
         PreviewContext,
@@ -4310,38 +4495,7 @@ async def test_composite_with_refused_step_writes_one_denied_audit_row(
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     target = _FakeTarget(product="vault")
     sessionmaker = get_sessionmaker()
-    async with sessionmaker() as s:
-        s.add(
-            EndpointDescriptor(
-                id=uuid.uuid4(),
-                tenant_id=None,
-                product="vault",
-                version="1.x",
-                impl_id="vault",
-                op_id="vault.composite.gated_write",
-                source_kind="composite",
-                method=None,
-                path=None,
-                handler_ref=(
-                    "tests.test_operations_dispatcher._module_composite_handler_gated_subop"
-                ),
-                summary="Composite with one gated write step.",
-                description="The step parks for approval unless its preflight refuses.",
-                tags=[],
-                parameter_schema={"type": "object"},
-                response_schema=None,
-                llm_instructions=None,
-                safety_level="safe",
-                requires_approval=False,
-                is_enabled=True,
-                embedding=stub_embedding_service.encode_one.return_value,
-                custom_description=None,
-                custom_notes=None,
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
-            )
-        )
-        await s.commit()
+    await _seed_gated_composite(stub_embedding_service.encode_one.return_value)
     register_permission_preflight("vault.kv.gated_step", _preflight)
     try:
         result = await dispatch(
@@ -4383,8 +4537,6 @@ async def test_composite_with_refused_step_writes_one_denied_audit_row(
     assert row.payload["error"]["required"] == ["create", "update"]
     # The step's row points at the parent operation's audit id.
     assert row.parent_audit_id is not None
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "denied"
 
 
 # ---------------------------------------------------------------------------
@@ -4463,7 +4615,6 @@ components:
 @pytest.mark.asyncio
 async def test_reingest_repairs_pre_fix_row_through_dispatch_validation(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#3102 end-to-end: flagged pre-fix row -> ``invalid_op_schema``; re-ingest -> repaired.
 

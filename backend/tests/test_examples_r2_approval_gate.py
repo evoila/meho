@@ -18,13 +18,10 @@ The Initiative #807 acceptance criterion for R2:
 > The sample pauses a change-class action for approval and resumes on
 > approve (CI-exercised against the integration stack).
 
-…interpreted as the unit-lane shape: the test stubs the broadcast
-Valkey client (the same shape ``test_agent_approval_resume.py`` uses)
-and exercises the in-process backplane primitives end-to-end. The
-``approval_queue`` / ``approval_wait`` / ``policy_gate`` modules are
-the real code; only the Valkey transport is faked. A testcontainers
-variant under ``tests/integration/`` would add Valkey wall-clock cost
-without changing the contract this gate enforces.
+…interpreted as the unit-lane shape: the test exercises the in-process
+backplane primitives end-to-end. The ``approval_queue`` /
+``approval_wait`` / ``policy_gate`` modules are the real code. The wait
+reads the stored approval row, so no Valkey is needed.
 
 What it deliberately does NOT do
 ================================
@@ -43,11 +40,9 @@ What it deliberately does NOT do
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -58,8 +53,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import reset_broadcast_client_for_testing
-from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPermission,
@@ -133,7 +126,7 @@ async def _r2_example_revert_handler(
 
 @pytest.fixture(autouse=True)
 def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin every env var :class:`Settings` requires + reset broadcast state.
+    """Pin every env var :class:`Settings` requires.
 
     Mirrors the env-pinning convention every approval-queue test file uses
     (``test_agent_approval_resume.py``, ``test_approval_queue.py``). The
@@ -144,13 +137,10 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
     monkeypatch.setenv("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "2.0")
     get_settings.cache_clear()
-    reset_broadcast_client_for_testing()
     yield
     get_settings.cache_clear()
-    reset_broadcast_client_for_testing()
 
 
 @pytest.fixture
@@ -198,80 +188,6 @@ def _make_human_operator(sub: str = _OPERATOR_SUB) -> Operator:
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
     )
-
-
-def _build_approval_decision_entry(
-    *,
-    approval_request_id: uuid.UUID,
-    decision: str,
-) -> tuple[str, dict[str, str]]:
-    """Build one ``XREAD`` entry shaped like ``publish_approval_event`` writes.
-
-    Mirrors the producer in
-    :func:`~meho_backplane.operations.approval_queue.publish_approval_event`
-    verbatim so the stubbed Valkey stream is wire-compatible with the real
-    publisher. The agent's wait reads ``payload.approval_request_id`` off
-    the parsed entry; everything else is decoration.
-    """
-    event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime(2026, 5, 27, 12, 0, 0, tzinfo=UTC),
-        tenant_id=_TENANT_ID,
-        principal_sub=_OPERATOR_SUB,
-        op_id=f"approval.{decision}",
-        op_class="other",
-        result_status="ok",
-        audit_id=uuid.uuid4(),
-        payload={
-            "op_class": "other",
-            "result_status": "ok",
-            "approval_request_id": str(approval_request_id),
-            "decision": decision,
-            "connector_id": "examples-1.x",
-            "approval_op_id": _OP_ID,
-        },
-    )
-    return ("1715600000000-0", {"event": event.model_dump_json()})
-
-
-def _stub_broadcast_client(
-    *,
-    monkeypatch: pytest.MonkeyPatch,
-    decision_entry: tuple[str, dict[str, str]],
-) -> AsyncMock:
-    """Stub the long-poll client (RDC #789 N1 / #1353) with a one-shot Valkey fake.
-
-    The first ``xread`` call yields ``decision_entry``; subsequent calls
-    idle by honouring the BLOCK window (matching the
-    ``test_agent_approval_resume`` stub shape — see
-    ``_stub_broadcast_client_with_decision`` there for the same idiom).
-    Both the agent module's binding and the
-    :mod:`meho_backplane.broadcast.client` module's binding are patched
-    so callers via either path see the same fake.
-    """
-    stream_key = f"meho:feed:{_TENANT_ID}"
-    call_state = {"n": 0}
-
-    async def _xread_side_effect(*args: object, **kwargs: object) -> object:
-        call_state["n"] += 1
-        if call_state["n"] == 1:
-            return [(stream_key, [decision_entry])]
-        block_ms = kwargs.get("block")
-        if isinstance(block_ms, int) and block_ms > 0:
-            await asyncio.sleep(min(0.01, block_ms / 1000))
-        return None
-
-    client = AsyncMock()
-    client.xread = AsyncMock(side_effect=_xread_side_effect)
-    monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    monkeypatch.setattr(
-        "meho_backplane.broadcast.client.get_broadcast_blocking_client",
-        lambda: client,
-    )
-    return client
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +264,7 @@ def test_permissions_fixture_parses_and_matches_resolver_assumptions() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_pause_approve_resume_execute_cycle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_pause_approve_resume_execute_cycle() -> None:
     """The R2 example's full cycle — pause, approve, resume, execute.
 
     Mirrors the example's README §5 ("Verifying it works end-to-end"). The
@@ -367,19 +281,16 @@ async def test_pause_approve_resume_execute_cycle(
        service-layer function REST ``/decide``, MCP ``meho_approvals_approve``,
        and CLI ``meho approvals approve`` all call. This is the **response
        flow** (§3).
-    5. The broadcast publishes ``approval.approved``; stub Valkey so the wait
-       observes it.
-    6. ``resume_or_surface_awaiting_approval`` re-dispatches with
+    5. ``resume_or_surface_awaiting_approval`` re-dispatches with
        ``_approved=True`` and the original in-memory params — the op
        executes, the handler returns its deterministic payload. This is the
        **resume flow** (§4).
-    7. Verify the audit-row attribution: the executed op's audit row carries
+    6. Verify the audit-row attribution: the executed op's audit row carries
        the agent's ``sub`` as ``operator_sub``; the approval-decision audit
        row carries the human operator's ``sub`` as ``reviewed_by``. The
        full audit chain reflects both identities (per RFC 8693 §1.1 the
        MEHO substrate synthesises).
     """
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -389,16 +300,6 @@ async def test_pause_approve_resume_execute_cycle(
         reset_dispatcher_caches,
     )
     from meho_backplane.operations.approval_queue import approve_request
-
-    # Silence the audit publish so the dispatcher's audit hook does not
-    # try to reach a real Valkey. The wait stub patches the broadcast
-    # client separately.
-    captured_audit_events: list[Any] = []
-
-    async def _capture_audit_event(event: Any) -> None:
-        captured_audit_events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture_audit_event)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -526,16 +427,7 @@ async def test_pause_approve_resume_execute_cycle(
     assert row.status == "approved"
     assert row.reviewed_by == _OPERATOR_SUB
 
-    # ---- Phase 5: broadcast publishes approval.approved ----
-    _stub_broadcast_client(
-        monkeypatch=monkeypatch,
-        decision_entry=_build_approval_decision_entry(
-            approval_request_id=approval_request_id,
-            decision="approved",
-        ),
-    )
-
-    # ---- Phase 6: agent's resume helper observes + re-dispatches ----
+    # ---- Phase 5: agent's resume helper reads the decision + re-dispatches ----
     awaiting_envelope = first.model_dump(mode="json")
     resumed = await resume_or_surface_awaiting_approval(
         operator=agent_operator,
@@ -554,7 +446,7 @@ async def test_pause_approve_resume_execute_cycle(
     # row instead (asserted below).
     assert resumed["result"]["operator_sub"] == _AGENT_SUB
 
-    # ---- Phase 7: verify audit-row attribution ----
+    # ---- Phase 6: verify audit-row attribution ----
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         # The approve_request call wrote exactly one approval.decision row.

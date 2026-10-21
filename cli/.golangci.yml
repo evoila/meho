@@ -35,7 +35,8 @@ run:
   # with "package requires newer Go version". Bumped 1.25 → 1.26 with
   # go.mod's move to go 1.26.9: Go 1.25 gets no more security fixes,
   # and 1.26.9 is the first 1.26 release that fixes nine standard-
-  # library CVEs (net/http, crypto/tls, net/textproto).
+  # library CVEs (net/http, crypto/tls, net/textproto). go.mod is now
+  # at go 1.26.10 for GO-2026-6809 (crypto/x509); "1.26" still matches.
   go: "1.26"
 
 linters:

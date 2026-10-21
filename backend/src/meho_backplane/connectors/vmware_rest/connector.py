@@ -2920,6 +2920,26 @@ class VmwareRestConnector(HttpConnector):
 
         return await tasks_recent_impl(self, operator, target, params)
 
+    async def sso_admin_api_file_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcenter.sso_admin.api_file.get`` -- read one SSO Admin WSDL or XSD file.
+
+        A ``source_kind="typed"`` read. Sends one ``GET`` without login to a
+        path under ``/sso-adminserver/`` and reads the vCenter version and
+        build. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file.sso_admin_api_file_get_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
+            sso_admin_api_file_get_impl,
+        )
+
+        return await sso_admin_api_file_get_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

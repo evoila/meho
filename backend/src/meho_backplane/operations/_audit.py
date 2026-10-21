@@ -391,8 +391,9 @@ def _build_audit_payload(
     ``payload["error"]`` so a failed dispatch's durable audit row records
     *why* it failed rather than only ``result_status='error'``, closing
     the forensics gap where the approver's ephemeral surface saw the real
-    error but the ledger did not. ``None`` (and ``{}``) on every non-error
-    write, so success / denied / pending rows are unchanged. The envelope
+    error but the ledger did not. ``None`` (and ``{}``) on a success write;
+    the row of a run that stopped because a step waits or was denied (#4275)
+    carries that result's extras here too. The envelope
     is already Tier-1-redacted + capped by the ``operations/_errors.py``
     builders, so persisting it to the durable ledger adds no leak surface;
     it is threaded to the audit row only.
@@ -569,11 +570,12 @@ async def write_audit_row(
 
     *error_extras* (#2680) is the error row's structured envelope,
     forwarded to :func:`_build_audit_payload` where it lands under
-    ``payload["error"]``. ``None`` on every non-error write.
+    ``payload["error"]``. ``None`` on a success write.
 
     *event_class* (#3733) is declared by the caller, which knows what
-    happened: ``operation_execution`` when the operation ran (``ok`` or
-    ``error``), ``policy_decision`` when a gate refused it before it ran.
+    happened: ``operation_execution`` when the operation ran (``ok``,
+    ``error``, or stopped part-way because a step waits for approval or was
+    denied, #4275), ``policy_decision`` when a gate refused it before it ran.
     """
     sessionmaker = get_sessionmaker()
     payload = _build_audit_payload(
@@ -675,7 +677,8 @@ async def audit_safe(
       recorded via ``dispatch_audit_failed`` and swallowed. The caller
       keeps the outcome it already decided.
     * ``require_audit=True`` (the success path of every completed
-      handler, read or write) -- the durable DISPATCH row is a hard
+      handler, read or write, and the row of a multi-step operation that
+      stopped because a step waits or was denied, #4275) -- the durable DISPATCH row is a hard
       precondition of a successful return (CLAUDE.md postulate 7 /
       v0.1-spec §6). An audit-insert failure is still logged, and then
       :exc:`AuditCommitError` is raised so the caller fails the

@@ -1148,6 +1148,22 @@ class Settings(BaseModel):
         own call. Set ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` only on
         a lab-class deployment. Ordinary decisions are never affected.
         Read at boot only; no request field can change it.
+    sandbox_mode:
+        Sandbox mode (#4622, ``docs/decisions/sandbox-mode.md``). Only for
+        an instance that holds disposable test systems. When on, a tenant
+        admin may give a service principal a standing grant that also
+        covers deletes (a delete grant), made in the web console and
+        expiring within 30 days. Default ``False``: every other instance
+        keeps today's rules. Read at boot only, from ``MEHO_SANDBOX_MODE``.
+        The mode is stored in the database at the first start and checked
+        at every start; see :mod:`meho_backplane.sandbox_mode`.
+    sandbox_mode_confirm:
+        The host name that confirms sandbox mode, from
+        ``MEHO_SANDBOX_MODE_CONFIRM``. With the mode on, it must equal the
+        host of the MCP resource URI (the public address of the instance),
+        and one dot-separated part of that host must be exactly
+        ``sandbox``. Otherwise MEHO refuses to start. Ignored when the
+        mode is off.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1612,6 +1628,10 @@ class Settings(BaseModel):
     # the reason, #3692) are allowed only on lab-class deployments. Default
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
+    # #4622 -- sandbox mode: a standing grant may also cover deletes, only
+    # on an instance for disposable test systems. Both read at boot only.
+    sandbox_mode: bool = False
+    sandbox_mode_confirm: str = ""
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -2752,6 +2772,12 @@ def get_settings() -> Settings:
         approval_allow_delegated_decision=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
+        # #4622 -- sandbox mode is off unless both settings are set; the
+        # boot guards in ``meho_backplane.sandbox_mode`` check them.
+        sandbox_mode=parse_bool_env(
+            os.environ.get("MEHO_SANDBOX_MODE", "false"),
+        ),
+        sandbox_mode_confirm=os.environ.get("MEHO_SANDBOX_MODE_CONFIRM", "").strip(),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(
             os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),

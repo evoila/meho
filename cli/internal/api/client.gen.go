@@ -2154,6 +2154,13 @@ type BodyEditUiEventSourcesSlugEditPost struct {
 	Status       string  `json:"status"`
 }
 
+// BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost defines model for Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post.
+type BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost struct {
+	ExpiresAt    *string `json:"expires_at"`
+	PrincipalSub *string `json:"principal_sub,omitempty"`
+	Reason       *string `json:"reason"`
+}
+
 // BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
 type BodyAnnotateUiTopologyEdgesPost struct {
 	EvidenceUrl *string `json:"evidence_url,omitempty"`
@@ -5694,6 +5701,11 @@ type HTTPValidationError struct {
 // server registers with the ones this session lists
 // (:class:`SurfaceSummary`). Both have empty defaults so older response
 // decoders keep working; the handler always fills them.
+//
+// “sandbox_mode“ (#4622) is “"on"“ or “"off"“: whether this
+// instance lets a standing grant made in the web console cover a delete
+// by a service principal. “meho status“ prints one line when it is on.
+// The default “"off"“ keeps older response decoders working.
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -5728,8 +5740,9 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
-	Operator OperatorIdentity `json:"operator"`
-	Pairings *[]PairingHealth `json:"pairings,omitempty"`
+	Operator    OperatorIdentity `json:"operator"`
+	Pairings    *[]PairingHealth `json:"pairings,omitempty"`
+	SandboxMode *string          `json:"sandbox_mode,omitempty"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
 	//
@@ -8777,6 +8790,7 @@ type ServiceGrantRead struct {
 	ConnectorId       string              `json:"connector_id"`
 	CreatedAt         time.Time           `json:"created_at"`
 	CreatedBySub      string              `json:"created_by_sub"`
+	DeleteGrant       *bool               `json:"delete_grant,omitempty"`
 	ExpiresAt         *time.Time          `json:"expires_at"`
 	Id                openapi_types.UUID  `json:"id"`
 	OpId              string              `json:"op_id"`
@@ -12135,6 +12149,9 @@ type EditUiEventSourcesSlugEditPostFormdataRequestBody = BodyEditUiEventSourcesS
 // CreateUiGrantsCreatePostFormdataRequestBody defines body for CreateUiGrantsCreatePost for application/x-www-form-urlencoded ContentType.
 type CreateUiGrantsCreatePostFormdataRequestBody = BodyCreateUiGrantsCreatePost
 
+// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody defines body for RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost for application/x-www-form-urlencoded ContentType.
+type RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody = BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost
+
 // KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
 type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
 
@@ -14685,6 +14702,11 @@ type ClientInterface interface {
 	CreateUiGrantsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody request with any body
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RevokeUiGrantsKindGrantIdRevokePost request
 	RevokeUiGrantsKindGrantIdRevokePost(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20255,6 +20277,30 @@ func (c *Client) CreateUiGrantsCreatePostWithBody(ctx context.Context, contentTy
 
 func (c *Client) CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateUiGrantsCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -39699,6 +39745,46 @@ func NewCreateUiGrantsCreatePostRequestWithBody(server string, contentType strin
 	return req, nil
 }
 
+// NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody calls the generic RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost builder with application/x-www-form-urlencoded body
+func NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody(server string, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody generates requests for RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost with any type of body
+func NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/grants/service/renew-delete-grants")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRevokeUiGrantsKindGrantIdRevokePostRequest generates requests for RevokeUiGrantsKindGrantIdRevokePost
 func NewRevokeUiGrantsKindGrantIdRevokePostRequest(server string, kind string, grantId openapi_types.UUID) (*http.Request, error) {
 	var err error
@@ -45726,6 +45812,11 @@ type ClientWithResponsesInterface interface {
 	CreateUiGrantsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
 
 	CreateUiGrantsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
+
+	// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse request with any body
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error)
+
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBodyWithResponse(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error)
 
 	// RevokeUiGrantsKindGrantIdRevokePostWithResponse request
 	RevokeUiGrantsKindGrantIdRevokePostWithResponse(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeUiGrantsKindGrantIdRevokePostResponse, error)
@@ -52816,6 +52907,28 @@ func (r CreateUiGrantsCreatePostResponse) StatusCode() int {
 	return 0
 }
 
+type RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RevokeUiGrantsKindGrantIdRevokePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -58705,6 +58818,23 @@ func (c *ClientWithResponses) CreateUiGrantsCreatePostWithFormdataBodyWithRespon
 		return nil, err
 	}
 	return ParseCreateUiGrantsCreatePostResponse(rsp)
+}
+
+// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse request with arbitrary body returning *RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse
+func (c *ClientWithResponses) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	rsp, err := c.RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBodyWithResponse(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	rsp, err := c.RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp)
 }
 
 // RevokeUiGrantsKindGrantIdRevokePostWithResponse request returning *RevokeUiGrantsKindGrantIdRevokePostResponse
@@ -68675,6 +68805,32 @@ func ParseCreateUiGrantsCreatePostResponse(rsp *http.Response) (*CreateUiGrantsC
 	}
 
 	response := &CreateUiGrantsCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse parses an HTTP response from a RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithResponse call
+func ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp *http.Response) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -192,7 +192,8 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "The VM must be POWERED_OFF; MEHO never powers it off for you (use "
             "vm.power verb 'off' first). vm is the moid, not the name. A second person "
             "must approve every call, after seeing the VM, its disks, NICs and "
-            "snapshots; an AI agent cannot run it alone."
+            "snapshots; an AI agent cannot run it alone. The only exception is a "
+            "standing delete grant on an instance in sandbox mode."
         ),
         "output_shape": (
             "{status: destroyed|not_powered_off|not_found|timeout, vm_id, power_state, "

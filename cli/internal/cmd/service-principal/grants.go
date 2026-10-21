@@ -164,7 +164,7 @@ func newCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&principal, "principal", "", "JWT sub of the service principal (required)")
-	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs and delete-shaped ops are refused (required)")
+	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)")
 	cmd.Flags().StringVar(&connectorID, "connector-id", "", "exact connector id; globs are refused (required)")
 	cmd.Flags().StringVar(&target, "target", "", "target UUID (optional; targetless is not a wildcard)")
 	cmd.Flags().StringVar(&targetProduct, "target-product", "", "exact target-product selector (optional)")
@@ -187,7 +187,7 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, t
 		return api.ServiceGrantCreate{}, fmt.Errorf("--target is mutually exclusive with --target-product and --target-name-pattern")
 	}
 	if isDeleteShaped(opID) {
-		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is delete-shaped and can never be granted", opID)
+		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a delete operation. A delete grant is made in the web console, by a tenant admin, and only on an instance in sandbox mode; the CLI cannot create one", opID)
 	}
 	if strings.Contains(opID, ".composite.") {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a composite; create one grant for each governed child operation instead", opID)

@@ -2789,6 +2789,50 @@ async def _destructive_binding_refusal(
     return None
 
 
+async def destructive_binding_evidence(
+    *,
+    op_id: str,
+    connector_id: str,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    preview_hash: str,
+) -> dict[str, Any] | None:
+    """Run the destructive binding checks for a delete-grant use (#4622).
+
+    The same two checks the park path runs
+    (:func:`_destructive_binding_refusal`): the preview hash must match the
+    hash of a fresh server-side preview of the identical call, and the
+    proposed effect must carry a valid blast radius. Returns the evidence
+    the grant-use audit row stores (``preview_hash`` and ``blast_radius``)
+    when both pass, else ``None``. The caller then parks the call, and the
+    park path returns the exact refusal (``preview_hash_mismatch``,
+    ``blast_radius_required``), so a refused call writes no grant-use row.
+    """
+    proposed_effect = await _build_proposed_effect(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
+    refusal = await _destructive_binding_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        operator=operator,
+        target=target,
+        params=params,
+        preview_hash=preview_hash,
+        proposed_effect=proposed_effect,
+        duration_ms=0.0,
+    )
+    if refusal is not None or proposed_effect is None:
+        return None
+    return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: proposed_effect[BLAST_RADIUS_KEY]}
+
+
 def _preflight_denied_refusal(
     *, op_id: str, proposed_effect: dict[str, Any] | None, duration_ms: float
 ) -> OperationResult | None:
@@ -3291,11 +3335,16 @@ async def dispatch(
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now
             # awaits a DB read to load the principal's AgentPermission rows.
+            # #4622: the preview hash and the params reach the gate so a
+            # delete grant (sandbox mode) can check the binding before it
+            # records the grant use. Every other path ignores them.
             verdict, gate_reason = await policy_gate(
                 operator=operator,
                 descriptor=descriptor,
                 target=target,
                 connector_id=connector_id,
+                preview_hash=preview_hash,
+                params=params,
             )
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:

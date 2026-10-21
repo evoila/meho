@@ -336,6 +336,13 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 
 	// DB subsystem. migrated is a tri-state (true, false, nil/unknown).
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+
+	// Sandbox mode (#4622): one line when it is on, nothing when it is
+	// off. Older backplanes send no field; the generated decoder leaves
+	// it nil or empty, which reads as off.
+	if resp.SandboxMode != nil && *resp.SandboxMode == "on" {
+		fmt.Fprintln(stdoutW, "  Sandbox mode: on (a standing grant made in the web console may cover deletes by service principals)")
+	}
 	return nil
 }
 

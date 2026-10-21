@@ -739,6 +739,23 @@ def _force_import_connector_modules() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_sandbox_mode_flag() -> Iterator[None]:
+    """Start and end every test with sandbox mode off (#4622).
+
+    The flag is process state set once at boot
+    (:func:`meho_backplane.sandbox_mode.set_sandbox_mode_active`). A test
+    that turns it on must not leak it into the next test on the same
+    xdist worker; a test that runs the app lifespan sets it from the
+    stored mode of its own database, which is also reset here.
+    """
+    from meho_backplane.sandbox_mode import set_sandbox_mode_active
+
+    set_sandbox_mode_active(False)
+    yield
+    set_sandbox_mode_active(False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_global_registries() -> Iterator[None]:
     """Snapshot/restore every process-global registry around each test.
 

@@ -136,6 +136,9 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._storage_network_llm_instructions import (
+    STORAGE_NETWORK_LLM_INSTRUCTIONS,
+)
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     storage_policy_create_composite,
     storage_policy_delete_composite,
@@ -692,15 +695,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.datastore.usage",
         handler=datastore_usage_composite,
-        summary="List datastores with capacity, free space, and VM placement.",
+        summary="List datastores with capacity, free space and the VMs on each.",
         description=(
-            "Reads the datastore listing, then per-datastore detail "
-            "(capacity, free space, type) plus the VM-placement filter "
-            "via 'GET:/vcenter/vm?filter.datastores=...'. Aggregates "
-            "into one row per datastore including vm_count + vm_names. "
-            "Equivalent of an operator-facing 'storage usage report' "
-            "that would otherwise require 1 + N sub-calls. Read-only -- "
-            "never mutates storage state."
+            "Lists the datastores with their capacity, free space and type, and the number and "
+            "names of the VMs on each. filter_names keeps only the named datastores. Read-only."
         ),
         parameter_schema=DATASTORE_USAGE_PARAMETER_SCHEMA,
         response_schema=DATASTORE_USAGE_RESPONSE_SCHEMA,
@@ -708,27 +706,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "storage", "datastore"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.usage"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.datastore.refresh",
         handler=datastore_refresh_composite,
-        summary="Refresh a datastore's cached capacity/free-space, then read the summary back.",
+        summary="Make ESXi read a datastore's capacity and free space again, then return them.",
         description=(
-            "Re-probes one datastore's backing volume via the vim "
-            "Datastore.RefreshDatastore method (and the deeper "
-            "RefreshDatastoreStorageInfo when storage_info=true), then reads "
-            "the refreshed Datastore.summary back. ESXi caches an NFS "
-            "datastore's capacity/freeSpace from mount time, so after an NFS "
-            "export grows the summary keeps the stale numbers until the host "
-            "re-probes -- a deploy pre-check then wrongly fails on free space. "
-            "This composite forces that re-probe without SSH/govc. Read-side "
-            "only: both methods are System.Read-privilege in the pinned spec "
-            "and change no configuration. The ingested REST binding for "
-            "RefreshDatastore is routed under /api and 400s on a standalone "
-            "ESXi target (the #3534 class), so the op dispatches through the "
-            "VI-JSON (vCenter) / hand-rolled-SOAP (standalone ESXi) vmomi "
-            "seam. On ESXi the datastore moid is the '<server>:/<export>' NAS "
-            "identifier; on vCenter it is a 'datastore-NNN' moref."
+            "Asks vSphere to read the datastore's volume again (RefreshDatastore, and "
+            "RefreshDatastoreStorageInfo with storage_info), then returns the new summary. Use "
+            "it after an NFS export grew. Works on vCenter and on a standalone ESXi host. "
+            "Read-only."
         ),
         parameter_schema=DATASTORE_REFRESH_PARAMETER_SCHEMA,
         response_schema=DATASTORE_REFRESH_RESPONSE_SCHEMA,
@@ -736,49 +724,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "storage", "datastore", "vi-json"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Call after growing an NFS export (or any datastore whose "
-                "backing volume changed size), before deploying VMs, when "
-                "Datastore.summary / a deploy pre-check reports stale free "
-                "space or capacity. Pass the datastore moid; set "
-                "storage_info=true for a deeper refresh that also recomputes "
-                "per-VM usage. Read-only -- it re-probes and reports, it never "
-                "changes datastore configuration."
-            ),
-            "parameter_hints": {
-                "datastore": (
-                    "Datastore moid: 'datastore-NNN' on vCenter (from "
-                    "datastore.usage / list_targets), or '<server>:/<export>' "
-                    "on a standalone ESXi target."
-                ),
-                "storage_info": (
-                    "Optional bool (default false); true also runs RefreshDatastoreStorageInfo."
-                ),
-            },
-            "output_shape": (
-                "{datastore, refreshed: true, storage_info_refreshed: bool, "
-                "summary: {name, capacity, free_space, accessible, type, url}}. "
-                "capacity / free_space are bytes read back AFTER the refresh."
-            ),
-        },
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.refresh"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.audit",
         handler=network_portgroup_audit_composite,
-        summary="Audit distributed portgroups with parent DVS + connected VMs.",
+        summary="List distributed portgroups with their switch, VLAN and VMs.",
         description=(
-            "Lists the distributed portgroups via "
-            "'GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP', "
-            "then reads each portgroup's parent switch, default VLAN and "
-            "connected VMs from the portgroup object through the vim "
-            "PropertyCollector, plus the switch and VM names. Aggregates "
-            "one row per portgroup: dvs, dvs_name, vlan (access ID or "
-            "trunk ranges), vm_count and vm_names (only the VMs with a "
-            "network adapter on that portgroup). Equivalent of "
-            "'govc dvs.portgroup.info' rolled up across every "
-            "portgroup. Read-only -- never mutates network "
-            "configuration."
+            "Lists the distributed portgroups. Each row has the parent switch, the VLAN (access "
+            "id or trunk ranges) and the VMs with a network adapter on the portgroup. "
+            "filter_dvs keeps one switch. Read-only."
         ),
         parameter_schema=NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
         response_schema=NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
@@ -786,6 +741,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "networking", "portgroup"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.network.portgroup.audit"
+        ],
     ),
     # ----------------------------------------------------------------
     # Write composites (T6 / #509) -- dangerous / requires approval
@@ -884,8 +842,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         description=(
             "Deletes a powered-off VM and all its disks for good. A VM that is not "
             "powered off is refused. Destructive: a second person must always "
-            "approve it, after seeing the VM, its disks, NICs and snapshots. Like "
-            "'govc vm.destroy'."
+            "approve it, after seeing the VM, its disks, NICs and snapshots. The "
+            "only exception is a standing delete grant on an instance in sandbox "
+            "mode. Like 'govc vm.destroy'."
         ),
         parameter_schema=VM_DESTROY_PARAMETER_SCHEMA,
         response_schema=VM_DESTROY_RESPONSE_SCHEMA,
@@ -1035,22 +994,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.create",
         handler=network_portgroup_create_composite,
-        summary="Create a distributed portgroup on a DVS with a VLAN trunk (or access) spec.",
+        summary="Create a distributed portgroup on a switch, with a VLAN trunk or one access VLAN.",
         description=(
-            "Creates a distributed portgroup on an existing DVS -- the L2 "
-            "substrate a nested-hypervisor lab attaches to. The pinned "
-            "vcenter.yaml serves no portgroup-create REST path, so the create "
-            "goes through vim DistributedVirtualSwitch.CreateDVPortgroup_Task "
-            "with one DVPortgroupConfigSpec (name, binding type, optional "
-            "numPorts) and a VMwareDVSPortSetting.vlan -- either a VLAN trunk "
-            "(VmwareDistributedVirtualSwitchTrunkVlanSpec NumericRange[], e.g. "
-            "0-4094 during bootstrap) or a single access VLAN "
-            "(VmwareDistributedVirtualSwitchVlanIdSpec). The returned task is "
-            "polled to a terminal state; the new portgroup's config is read "
-            "back (name + vlan) for verification. vds is the switch moid (no "
-            "portgroup/switch REST list exists to resolve a name); passing "
-            "both trunk and access VLAN returns status='invalid_vlan_spec' "
-            "before any write. Equivalent of 'govc dvs.portgroup.add'."
+            "Creates a distributed portgroup on an existing distributed switch (vSphere "
+            "CreateDVPortgroup_Task), waits for the task and reads the new portgroup back. Give "
+            "vlan_trunk_ranges or vlan_id, not both; give neither to keep the switch default."
         ),
         parameter_schema=NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA,
         response_schema=NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA,
@@ -1058,29 +1006,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "networking", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.network.portgroup.create"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.security.set",
         handler=network_portgroup_security_set_composite,
-        summary=(
-            "Set a distributed portgroup's security policy "
-            "(promiscuous / forged-transmits / MAC-changes)."
-        ),
+        summary="Set promiscuous mode, forged transmits and MAC changes on a portgroup.",
         description=(
-            "Sets any of a distributed portgroup's security-policy triple -- "
-            "allowPromiscuous / forgedTransmits / macChanges -- the knobs a "
-            "nested-ESXi trunk portgroup needs at Accept. The security policy "
-            "lives in DVPortgroupConfigSpec.defaultPortConfig.securityPolicy "
-            "with no REST expression (govc exposes no flags for it), so the "
-            "change goes through vim "
-            "DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task. The "
-            "required configVersion and the current policy are read first (the "
-            "before-state the four-eyes reviewer sees); only the booleans you "
-            "supply are written; the applied policy is read back after. No "
-            "boolean supplied returns status='no_change_requested' before any "
-            "write. Governance-sensitive: promiscuous mode makes the portgroup "
-            "see all traffic on its VLANs. Equivalent of PowerCLI "
-            "'Set-VDSecurityPolicy'."
+            "Sets promiscuous mode, forged transmits and MAC address changes on a distributed "
+            "portgroup (vSphere ReconfigureDVPortgroup_Task). Only the values you give change. "
+            "It reads the policy before and after, so the approver sees both."
         ),
         parameter_schema=NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA,
         response_schema=NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
@@ -1088,30 +1025,19 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "networking", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.network.portgroup.security.set"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.vlan.set",
         handler=network_portgroup_vlan_set_composite,
-        summary="Reconfigure an existing distributed portgroup's VLAN (trunk ranges or access id).",
+        summary="Change the VLAN of a distributed portgroup: trunk ranges or one access VLAN.",
         description=(
-            "Reconfigures an EXISTING distributed portgroup's VLAN config -- "
-            "portgroup.create only sets the VLAN at create time, and nothing "
-            "else could change it (an operator who created a trunk without the "
-            "native/untagged VLAN 0 had no governed way to add it). Sets "
-            "DVPortgroupConfigSpec.defaultPortConfig.vlan to either a VLAN trunk "
-            "(VmwareDistributedVirtualSwitchTrunkVlanSpec, a NumericRange[]) or a "
-            "single access VLAN (VmwareDistributedVirtualSwitchVlanIdSpec) through "
-            "vim DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task -- there "
-            "is no REST VLAN write. The spec REPLACES the current VLAN config "
-            "(there is no merge): to add VLAN 0 to an existing trunk, pass the "
-            "full desired range list. Idempotent -- the current VLAN is read + "
-            "normalised first and a request that already matches returns "
-            "status='unchanged' with no write; otherwise the required "
-            "configVersion is echoed, the reconfigure is polled to terminal, and "
-            "the applied VLAN is read back (before/after in the envelope). "
-            "Both/neither VLAN mode (or replace=false) returns "
-            "status='invalid_vlan_spec' before any write. Equivalent of PowerCLI "
-            "'Set-VDPortgroup -VlanTrunkRange' / '-VlanId'."
+            "Sets the VLAN of an existing distributed portgroup (vSphere "
+            "ReconfigureDVPortgroup_Task). The new VLAN replaces the old one; there is no "
+            "merge. Give exactly one of vlan_trunk_ranges or vlan_id. When the VLAN already "
+            "matches, nothing is written."
         ),
         parameter_schema=NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA,
         response_schema=NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA,
@@ -1119,6 +1045,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "networking", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.network.portgroup.vlan.set"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.cluster.patch",
@@ -1829,14 +1758,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.storage_policy.list",
         handler=storage_policy_list_composite,
-        summary="List the visible vCenter storage policies (JSONFlux-reduced).",
+        summary="List the VM storage policies of vCenter.",
         description=(
-            "Reads GET /vcenter/storage/policies and returns the visible "
-            "storage policies; the set-shaped list is JSONFlux-reduced to a "
-            "result handle by the dispatcher when large (drill in via "
-            "result_query). Optional policy_ids narrows the scan. The "
-            "companion read for storage_policy.create/delete — confirms a "
-            "minted policy is visible or a deleted one is gone. Read-only."
+            "Reads the VM storage policies of vCenter (GET /vcenter/storage/policies). "
+            "policy_ids keeps only the given ids. A long list comes back as a link to the "
+            "stored result. Use it to check storage_policy.create and storage_policy.delete. "
+            "Read-only."
         ),
         parameter_schema=STORAGE_POLICY_LIST_PARAMETER_SCHEMA,
         response_schema=STORAGE_POLICY_LIST_RESPONSE_SCHEMA,
@@ -1844,32 +1771,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "storage", "policy", "spbm"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.storage_policy.list"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.storage_policy.create",
         handler=storage_policy_create_composite,
-        summary="Create a tag-based NFS VM storage policy (tag substrate + PBM SOAP).",
+        summary="Create a tag-based VM storage policy for NFS datastores.",
         description=(
-            "Mints a tag-based requirement storage policy for NFS-principal "
-            "datastores (which have no default policy — vSAN Default Storage "
-            "Policy is vSAN-only), the first link in the Supervisor-enable "
-            "chain (#3494). Creates the tag category + tag over vCenter REST "
-            "(POST /cis/tagging/category / /tag), attaches the tag to each "
-            "named datastore (/tag-association?action=attach), then creates "
-            "the policy over the PBM SOAP API (PbmProfileProfileManager."
-            "PbmCreate on /pbm — there is no vCenter REST for policy creation) "
-            "whose one rule requires the tag, and returns the new policy id. "
-            "safety_level='caution' + requires_approval=True: parked for human "
-            "approval before any write; each child write flows through the "
-            "governed sub-op seam (its own audit row + grant point). "
-            "Fail-closed if a datastore name resolves to zero / many. "
-            "Idempotent (#3826): an existing category / tag / policy of the same "
-            "name is adopted (reported in 'adopted' + 'issues') so a retry after "
-            "a partial run succeeds instead of failing ALREADY_EXISTS; an "
-            "incompatible existing category or a same-named policy with a "
-            "different rule set is a terminal category_conflict / policy_conflict. "
-            "Equivalent of the out-of-band 'New-SpbmStoragePolicy' / "
-            "'govc storage.policy.create -category -tag', governed."
+            "Creates a tag category and a tag, puts the tag on the named datastores, then "
+            "creates a VM storage policy that asks for that tag (PBM API). NFS datastores need "
+            "this: they have no default policy. Objects that already exist with the same name "
+            "are reused."
         ),
         parameter_schema=STORAGE_POLICY_CREATE_PARAMETER_SCHEMA,
         response_schema=STORAGE_POLICY_CREATE_RESPONSE_SCHEMA,
@@ -1877,21 +1789,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "storage", "policy", "spbm", "tagging", "nfs"],
         safety_level="caution",
         requires_approval=True,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.storage_policy.create"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.storage_policy.delete",
         handler=storage_policy_delete_composite,
-        summary="Delete a storage policy by id (PBM SOAP) and read-back verify absent.",
+        summary="Delete a VM storage policy by id and check that it is gone.",
         description=(
-            "The teardown counterpart of storage_policy.create (#3494). Issues "
-            "PbmProfileProfileManager.PbmDelete for the policy id over the PBM "
-            "SOAP API, then read-backs GET /vcenter/storage/policies to confirm "
-            "the id is gone. safety_level='destructive' + requires_approval="
-            "True. A per-id PbmDelete fault (e.g. the policy is still in use by "
-            "a VM / Supervisor) returns status='delete_failed' with the fault "
-            "type — an in-use policy must be freed first (no force). Deletes "
-            "only the policy; the tag / category are left in place (may be "
-            "shared). Equivalent of 'govc storage.policy.rm', governed."
+            "Deletes one VM storage policy (PBM API), then reads the policy list again to check "
+            "that it is gone. A policy that is still in use is refused (delete_failed). The "
+            "tag and tag category stay. A second person must always approve it."
         ),
         parameter_schema=STORAGE_POLICY_DELETE_PARAMETER_SCHEMA,
         response_schema=STORAGE_POLICY_DELETE_RESPONSE_SCHEMA,
@@ -1899,6 +1806,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "storage", "policy", "spbm", "destroy", "destructive"],
         safety_level="destructive",
         requires_approval=True,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.storage_policy.delete"],
     ),
     # Content-library SUBSCRIBED-library composites (#3495) -- the
     # governed TKr/VKr image source for a vSphere Supervisor. Two
@@ -1995,19 +1903,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=network_portgroup_delete_composite,
         summary="Delete a distributed portgroup. Refused while a VM or adapter uses it.",
         description=(
-            "Deletes one distributed portgroup (the opposite of "
-            "network.portgroup.create). First it reads the portgroup: its name, "
-            "switch, VLAN and the VMs on it. It also asks the switch which ports are "
-            "connected. If any VM, VMkernel adapter or other port still uses the "
-            "portgroup, if it is the switch's uplink portgroup, or if it is backed by an "
-            "NSX segment, nothing is changed "
-            "and the result is status='precondition_failed' with the users listed in "
-            "'blockers'. Otherwise it runs the vSphere Destroy_Task, waits for it and "
-            "reads the portgroup again: status='deleted' when it is gone. If the "
-            "portgroup does not exist, the result is status='unchanged'. If vSphere "
-            "reports an error, the call fails (it is not reported as success). "
-            "Destructive: a second person must always approve it, after seeing what "
-            "will be deleted. Like 'govc object.destroy' on a portgroup."
+            "Deletes one distributed portgroup (vSphere Destroy_Task) and reads it again to "
+            "check it is gone. Refused before any change while a VM, VMkernel adapter or other "
+            "port uses it, or if it is the uplink portgroup or backed by NSX. A second person "
+            "must always approve it."
         ),
         parameter_schema=NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA,
         response_schema=NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA,
@@ -2015,40 +1914,19 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "networking", "vi-json", "teardown", "destroy", "destructive"],
         safety_level="destructive",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Use it to remove a distributed portgroup that an environment created. "
-                "Move or remove every VM NIC and VMkernel adapter first. Get the moid "
-                "from vmware.composite.network.portgroup.audit."
-            ),
-            "parameter_hints": {"portgroup": "Distributed portgroup moid, e.g. 'dvportgroup-42'."},
-            "output_shape": (
-                "{status: deleted|unchanged|precondition_failed|still_present|timeout, "
-                "object: {kind, moid, name, dvs, vlan, num_ports, port_binding, uplink, "
-                "backing_type, port_check}, blockers: [{kind: vm|port, ...}], task, "
-                "task_state, guidance}. "
-                "A vSphere error makes the call fail; it is not a status."
-            ),
-        },
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.network.portgroup.delete"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.host.standard_portgroup.delete",
         handler=host_standard_portgroup_delete_composite,
         summary="Remove a port group from one host's standard switch. Refused while used.",
         description=(
-            "Removes one port group from the standard virtual switch of one host. "
-            "First it reads the host: its port groups, its VMkernel adapters and the "
-            "VMs registered on it. If a VM on this host (also a powered-off VM) or a "
-            "VMkernel adapter uses the port group, nothing is changed and the result "
-            "is status='precondition_failed' with the users listed in 'blockers'. "
-            "Otherwise it calls vSphere HostNetworkSystem.RemovePortGroup and reads "
-            "the host again: status='deleted' when the port group is gone. If the "
-            "host has no port group with that name, the result is "
-            "status='unchanged'; an unknown host moid gives "
-            "status='invalid_request'. If vSphere reports an error, the call fails. "
-            "One host per call: a port group with the same name on other hosts is not "
-            "touched. Destructive: a second person must always approve it. Like "
-            "'govc host.portgroup.remove'."
+            "Removes one port group from the standard switch of one host (vSphere "
+            "RemovePortGroup), then reads the host again. Refused before any change while a VM "
+            "on the host (also a powered-off one) or a VMkernel adapter uses it. Other hosts "
+            "are not touched. A second person must approve."
         ),
         parameter_schema=HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA,
         response_schema=HOST_STANDARD_PORTGROUP_DELETE_RESPONSE_SCHEMA,
@@ -2065,23 +1943,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         ],
         safety_level="destructive",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Use it once per host to remove a standard-switch port group that an "
-                "environment created (for example a trunk port group on each host). "
-                "Remove its VMs and VMkernel adapters first. For a distributed "
-                "portgroup use vmware.composite.network.portgroup.delete instead."
-            ),
-            "parameter_hints": {
-                "host": "HostSystem moid, e.g. 'host-21'.",
-                "portgroup_name": "Exact port group name on that host's standard switch.",
-            },
-            "output_shape": (
-                "{status: deleted|unchanged|invalid_request|precondition_failed|"
-                "still_present, object: {kind, host, host_name, name, vswitch, vlan, "
-                "active_ports}, blockers: [{kind: vm|vmkernel_adapter, ...}], guidance}."
-            ),
-        },
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.host.standard_portgroup.delete"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.folder.delete",
@@ -2114,25 +1978,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=datastore_file_delete_composite,
         summary="Delete a file or folder on a datastore. Refused for files of registered VMs.",
         description=(
-            "Deletes one file, or one folder with everything in it, on a datastore. "
-            "Use it to clean up what a teardown leaves behind: the folder of a deleted "
-            "VM, an old ISO, an installer folder. The path is relative to the root of "
-            "the datastore. Refused before any change (the input check rejects these "
-            "already at preview): the root itself, '..', names starting with '.' at any "
-            "depth (hidden and lock files), spaces at the start or end of a name, "
-            "wildcards, and the top-level folders 'contentlib-*' (content library), "
-            "'fcd' and 'catalog' (first-class disks such as Kubernetes volumes). Only "
-            "VMFS and NFS datastores are supported (vSAN and vVol are refused). Also "
-            "refused (status='precondition_failed'): a path that is, or contains, a "
-            "file a VM registered in this vCenter uses (disks, .vmx, snapshots, logs, "
-            "or an ISO / floppy image in its drive, also when the VM is powered off); "
-            "the VMs are listed in 'blockers'. If vCenter answers only part of that "
-            "question, the delete is refused too. A path that does not exist gives "
-            "status='unchanged'. Otherwise it runs FileManager.DeleteDatastoreFile_Task, "
-            "waits for it and checks again: status='deleted'. If vSphere reports an "
-            "error, the call fails. Destructive: a second person must always approve "
-            "it, after seeing the size and the files that will be deleted. vCenter "
-            "targets only. Like 'govc datastore.rm'."
+            "Deletes one file, or one folder with all it holds, on a VMFS or NFS datastore "
+            "(vSphere DeleteDatastoreFile_Task). Refused before any change for unsafe paths and "
+            "for files a registered VM uses (listed in blockers). A second person must always "
+            "approve it, after seeing the size."
         ),
         parameter_schema=DATASTORE_FILE_DELETE_PARAMETER_SCHEMA,
         response_schema=DATASTORE_FILE_DELETE_RESPONSE_SCHEMA,
@@ -2149,38 +1998,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         ],
         safety_level="destructive",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Use it to remove files a teardown leaves on a datastore (a deleted VM's "
-                "folder, an old ISO). To delete a registered VM, use "
-                "vmware.composite.vm.destroy -- its files are refused here."
-            ),
-            "parameter_hints": {
-                "datastore": "Datastore moid, e.g. 'datastore-17'.",
-                "path": "Relative path, e.g. 'old-appliance' or 'iso/stale.iso'.",
-            },
-            "output_shape": (
-                "{status: deleted|unchanged|invalid_request|precondition_failed|"
-                "still_present|timeout, object: {kind, datastore, datastore_name, path, "
-                "datastore_path, file_type, size_bytes}, blockers: [{kind: vm, moid, name, "
-                "files}], task, task_state, guidance}."
-            ),
-        },
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.file.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.datastore.dir.create",
         handler=datastore_dir_create_composite,
         summary="Create a folder on a datastore. Does nothing if it already exists.",
         description=(
-            "Creates one folder on a datastore with vSphere FileManager.MakeDirectory "
-            "(the partner of datastore.file.delete). Same path rules as the delete, "
-            "and only on VMFS and NFS datastores. "
-            "If the folder already exists: status='unchanged'. If a file has that "
-            "name, or the parent folder is missing and create_parents is not true: "
-            "status='precondition_failed'. Both are decided before any change. Then "
-            "it checks again: status='created'. If vSphere reports an error, the call "
-            "fails. Needs approval (caution level). Like "
-            "'govc datastore.mkdir [-p]'."
+            "Creates one folder on a VMFS or NFS datastore (vSphere FileManager.MakeDirectory), "
+            "then checks that it exists. Same path rules as datastore.file.delete. A folder "
+            "that already exists gives unchanged. A missing parent is refused unless "
+            "create_parents is true."
         ),
         parameter_schema=DATASTORE_DIR_CREATE_PARAMETER_SCHEMA,
         response_schema=DATASTORE_DIR_CREATE_RESPONSE_SCHEMA,
@@ -2188,19 +2016,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "storage", "datastore", "vi-json"],
         safety_level="caution",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": "Use it to create a folder on a datastore (e.g. for ISO files).",
-            "parameter_hints": {
-                "datastore": "Datastore moid, e.g. 'datastore-17'.",
-                "path": "Relative path, e.g. 'iso' or 'stage/media'.",
-                "create_parents": "true to also create missing parent folders.",
-            },
-            "output_shape": (
-                "{status: created|unchanged|invalid_request|precondition_failed|"
-                "not_verified, object: {kind, datastore, datastore_name, path, "
-                "datastore_path}, blockers: [], guidance}."
-            ),
-        },
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.dir.create"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.content_library.delete",

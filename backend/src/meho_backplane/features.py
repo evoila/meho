@@ -110,6 +110,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from cryptography.fernet import Fernet
 
+from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import Settings
 
 __all__ = [
@@ -440,6 +441,13 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
     default — a decision made on someone else's ``Instructed-by:``
     instruction is refused), ``"lab_class_delegation_allowed"`` when
     ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` is set.
+
+    ``sandbox_mode`` (#4622) is ``"on"`` or ``"off"``: whether a standing
+    grant made in the web console may cover a delete by a service
+    principal on this instance. Read from the process flag the boot sets
+    after it checks the stored mode (:mod:`meho_backplane.sandbox_mode`),
+    not from the settings object, so the value is the one MEHO enforces.
+    ``/ready`` repeats it at the top level for every caller.
     """
     agent_runtime = _agent_runtime_block(settings)
     return {
@@ -455,6 +463,7 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
             if settings.approval_allow_delegated_decision
             else "production_own_hand_only"
         ),
+        "sandbox_mode": sandbox_mode_label(),
     }
 
 

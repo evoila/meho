@@ -16153,6 +16153,47 @@
         }
       }
     },
+    "/ui/grants/service/renew-delete-grants": {
+      "post": {
+        "tags": [
+          "ui-grants"
+        ],
+        "summary": " Renew Delete Grants",
+        "description": "Renew the live delete grants of one service principal as one set (#4622).",
+        "operationId": "_renew_delete_grants_ui_grants_service_renew_delete_grants_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/grants/{kind}/{grant_id}/revoke": {
       "post": {
         "tags": [
@@ -24241,6 +24282,27 @@
           "status"
         ],
         "title": "Body__edit_ui_event_sources__slug__edit_post"
+      },
+      "Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub",
+            "default": ""
+          },
+          "expires_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "title": "Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post"
       },
       "Body_annotate_ui_topology_edges_post": {
         "properties": {

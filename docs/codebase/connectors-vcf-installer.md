@@ -170,8 +170,11 @@ appliance retries the stored spec as-is — the common transient-failure case;
 provided, it is the vendor's edit-and-retry flow), and its own park-time
 preview leads with the failed task id, appending the blast-radius identity only
 when a spec rides along. `bringup.status` polls the `SddcTask` (`IN_PROGRESS` /
-`COMPLETED_WITH_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus `sddcSubTasks[]` /
-`milestones[]`). `installer.sddc.list`
+`COMPLETED_WITH_SUCCESS` / `ROLLBACK_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus
+`sddcSubTasks[]` / `milestones[]`). `ROLLBACK_SUCCESS` is a finished task too:
+the bring-up failed and the appliance undid what it had built, so the AI
+guidance of `bringup.start`, `bringup.retry`, `bringup.status` and the
+composite names it as a stop condition. `installer.sddc.list`
 ([#3418](https://github.com/evoila/meho/issues/3418)) lists every bring-up task
 and needs no id. Use it when the id of a running bring-up is lost — for example
 when the result of an approved `bringup.start` was not picked up in time — then
@@ -255,6 +258,33 @@ request, so re-issuing the non-idempotent POST once after a re-login cannot
 double-apply.
 
 Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
+
+### Operation contracts
+
+The 14 typed ops and the bring-up composite meet the VMware operation-contract
+check (`backend/tests/test_vmware_operation_contracts.py`), with one gap left
+(see below):
+
+- **Response schemas** live in `_response_schemas.py` (split out for the
+  file-size budget). Vendor field names come from the pinned `vcf-installer-9.1`
+  OpenAPI file (`Validation`, `SddcTask`, `DepotSettings`, `DepotSyncInfo`,
+  `PageOfTrustedCertificate`, `PageOfBundle`,
+  `PageOfBundleDownloadStatusInfo`). The envelope keys of the writes and of the
+  composite (`status`, `settings`, `results`, `sddc_task`, ...) are the keys the
+  handlers build. The schemas are informational; the reducer does not read them.
+- **Examples.** Each parameter schema has one example call under `examples`:
+  `{}` for the no-argument reads, a placeholder such as `<validation-id>` for
+  the reads by id, and the short placeholder `SDDC_SPEC_EXAMPLE` for the spec
+  submits.
+- **AI guidance.** Each `llm_instructions` blob has `when_to_call`,
+  `output_shape` and `next_step`; the changes also have `preconditions`. The
+  JSONFlux hints (`result_scalars`, `result_digest`) are unchanged.
+- **One group text.** The `installer-bringup` group text is defined only in
+  `typed_ops.INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP`. `bringup.py` reads it from
+  there, so the group row gets the same text whichever registrar runs first.
+- **Open gap.** `installer.sddc.spec.validate` is `caution` without
+  `requires_approval`. It only checks a spec and deploys nothing; making it wait
+  for approval would change what it does, so it stays on the gap list.
 
 ## Spec-reconcile lane
 

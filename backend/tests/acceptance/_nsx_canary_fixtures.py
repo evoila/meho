@@ -145,7 +145,7 @@ NSX_CANARY_TRANSPORT_NODES: dict[str, object] = {
         {
             "id": f"transport-node-{i}",
             "display_name": f"esx-canary-{i:02d}",
-            "node_deployment_info": {"resource_type": "EsxiNode"},
+            "node_deployment_info": {"resource_type": "HostNode"},
             "host_switch_spec": {"host_switches": []},
         }
         for i in range(3)
@@ -457,8 +457,7 @@ def _register_nsx_routes(mock: respx.MockRouter) -> None:
                 {
                     "id": "tz-overlay",
                     "display_name": "canary-overlay-tz",
-                    "tz_type": "OVERLAY",
-                    "host_switch_name": "canary-host-switch",
+                    "tz_type": "OVERLAY_BACKED",
                     "resource_type": "PolicyTransportZone",
                 }
             ],

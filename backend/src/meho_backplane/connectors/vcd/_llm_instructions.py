@@ -67,7 +67,8 @@ _VAPP_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Query-service record envelope {record: [AdminVAppRecord, ...], total, "
-        "page, pageSize}. Each record carries name, orgName, vdcName, status "
+        "page, pageSize}. Each record carries name, org (a reference or id of "
+        "the organization, not its name), vdcName, status "
         "(e.g. POWERED_ON / POWERED_OFF), numberOfVMs, and isDeployed. A large "
         "list is reduced to a JSONFlux handle."
     ),
@@ -88,7 +89,8 @@ _VM_LIST_INSTRUCTIONS: dict[str, object] = {
     "output_shape": (
         "Query-service record envelope {record: [AdminVMRecord, ...], total, "
         "page, pageSize}. Each record carries name, containerName (the vApp), "
-        "vdc, org, status, numberOfCpus, memoryMB, and guestOs. A large "
+        "vdc and org (references or ids, not names), vdcName, status, "
+        "numberOfCpus, memoryMB, and guestOs. A large "
         "inventory is reduced to a JSONFlux handle; page it with "
         "result_query(handle_id, offset, limit) and read memoryMB / org per row."
     ),
@@ -110,7 +112,7 @@ _CATALOG_LIST_INSTRUCTIONS: dict[str, object] = {
     "output_shape": (
         "Query-service record envelope {record: [AdminCatalogRecord, ...], "
         "total, page, pageSize}. Each record carries name, orgName, isShared / "
-        "isPublished, and numberOfVAppTemplates / numberOfMedia."
+        "isPublished, and numberOfTemplates / numberOfMedia."
     ),
     "next_step": (
         "Flag isPublished / isShared catalogs as cross-tenant dependencies for "
@@ -128,11 +130,14 @@ _EDGE_GATEWAY_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Query-service record envelope {record: [EdgeGatewayRecord, ...], total, "
-        "page, pageSize}. Each record carries name, vdc, orgName, "
-        "numberOfExtNetworks, and numberOfOrgNetworks."
+        "page, pageSize}. Each record carries name, vdc (a reference or id, "
+        "not the name), orgVdcName, orgName, numberOfExtNetworks, and "
+        "numberOfOrgNetworks."
     ),
     "next_step": (
-        "Map each edge gateway's vdc back to vcd.vdc.list to associate network "
+        "Match each edge gateway to a vcd.vdc.list row on both orgName and "
+        "orgVdcName (the VDC row's orgName and name). A VDC name alone is not "
+        "unique: different orgs can use the same one. This associates network "
         "boundaries with compute allocations, so the target-side network design "
         "covers every VDC's egress."
     ),

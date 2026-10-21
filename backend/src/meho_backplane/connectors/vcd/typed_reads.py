@@ -120,7 +120,8 @@ async def vcd_vapp_list_impl(
 
     Lists the vApps (the deployable multi-VM units) across every org. Returns the
     query-service record envelope; each ``AdminVAppRecord`` carries ``name``,
-    ``orgName``, ``vdcName``, ``status``, ``numberOfVMs``, and ``isDeployed``.
+    ``org`` (a reference or id, not the name), ``vdcName``, ``status``,
+    ``numberOfVMs``, and ``isDeployed``.
     """
     del params  # schema declares the param object empty
     return await connector._vcd_get(
@@ -138,7 +139,8 @@ async def vcd_vm_list_impl(
 
     Lists the VMs across every org — the core migration-workload inventory.
     Returns the query-service record envelope; each ``AdminVMRecord`` carries
-    ``name``, ``containerName`` (the vApp), ``vdc``, ``org``, ``status``,
+    ``name``, ``containerName`` (the vApp), ``vdc`` and ``org`` (references or
+    ids, not names), ``vdcName``, ``status``,
     ``numberOfCpus``, ``memoryMB``, and ``guestOs``. A large inventory is reduced
     to a JSONFlux handle.
     """
@@ -159,7 +161,7 @@ async def vcd_catalog_list_impl(
     Lists the catalogs (vApp-template + media libraries) across every org.
     Returns the query-service record envelope; each ``AdminCatalogRecord``
     carries ``name``, ``orgName``, ``isShared`` / ``isPublished``, and
-    ``numberOfVAppTemplates`` / ``numberOfMedia``.
+    ``numberOfTemplates`` / ``numberOfMedia``.
     """
     del params  # schema declares the param object empty
     return await connector._vcd_get(
@@ -177,7 +179,8 @@ async def vcd_edge_gateway_list_impl(
 
     Lists the edge gateways (the org-VDC network egress + services boundary).
     Returns the query-service record envelope; each ``EdgeGatewayRecord`` carries
-    ``name``, ``vdc``, ``orgName``, ``numberOfExtNetworks``, and
+    ``name``, ``vdc`` (a reference or id, not the name), ``orgVdcName``,
+    ``orgName``, ``numberOfExtNetworks``, and
     ``numberOfOrgNetworks`` — the networking surface a migration must re-home.
     """
     del params  # schema declares the param object empty

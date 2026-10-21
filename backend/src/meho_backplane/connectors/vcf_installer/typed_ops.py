@@ -129,7 +129,8 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its verdict; installer.sddc.bringup.start (dangerous, approval-gated) "
         "starts the bring-up and installer.sddc.bringup.status polls the task's "
         "lifecycle state (IN_PROGRESS / COMPLETED_WITH_SUCCESS / "
-        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; installer.sddc.list "
+        "ROLLBACK_SUCCESS / COMPLETED_WITH_FAILURE) and per-stage sub-tasks; "
+        "installer.sddc.list "
         "lists every bring-up task with its id and status and needs no id, so "
         "use it to find a running bring-up whose id you do not have; on "
         "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
@@ -444,7 +445,9 @@ _BRINGUP_START = InstallerTypedOp(
         ),
         next_step=(
             "Keep the id. Call installer.sddc.bringup.status with it until status is "
-            "COMPLETED_WITH_SUCCESS or COMPLETED_WITH_FAILURE."
+            "COMPLETED_WITH_SUCCESS, COMPLETED_WITH_FAILURE or ROLLBACK_SUCCESS. "
+            "ROLLBACK_SUCCESS means the bring-up failed and the Installer undid "
+            "what it had built; the task is finished, so stop polling."
         ),
         preconditions=(
             "Run installer.sddc.spec.validate with the same spec first, and go on "
@@ -509,7 +512,9 @@ _BRINGUP_RETRY = InstallerTypedOp(
         ),
         next_step=(
             "Call installer.sddc.bringup.status with the same id until status is "
-            "COMPLETED_WITH_SUCCESS or COMPLETED_WITH_FAILURE."
+            "COMPLETED_WITH_SUCCESS, COMPLETED_WITH_FAILURE or ROLLBACK_SUCCESS. "
+            "ROLLBACK_SUCCESS means the bring-up failed and the Installer undid "
+            "what it had built; the task is finished, so stop polling."
         ),
         preconditions=(
             "installer.sddc.bringup.status shows status COMPLETED_WITH_FAILURE. Read "
@@ -534,9 +539,10 @@ _BRINGUP_STATUS = InstallerTypedOp(
     summary="Read one VCF bring-up task: its status and its steps.",
     description=(
         "Reads GET /v1/sddcs/{id}: the bring-up task with its status "
-        "(IN_PROGRESS, COMPLETED_WITH_SUCCESS or COMPLETED_WITH_FAILURE), "
-        "sddcSubTasks[] (each step) and milestones[] (the main stages). Needs the "
-        "id from the start call or from installer.sddc.list. Read-only."
+        "(IN_PROGRESS, COMPLETED_WITH_SUCCESS, ROLLBACK_SUCCESS or "
+        "COMPLETED_WITH_FAILURE), sddcSubTasks[] (each step) and milestones[] "
+        "(the main stages). Needs the id from the start call or from "
+        "installer.sddc.list. Read-only."
     ),
     parameter_schema=_id_parameter_schema(
         "The bring-up (SDDC) task id returned by the deploy.", "<bringup-task-id>"
@@ -561,8 +567,10 @@ _BRINGUP_STATUS = InstallerTypedOp(
         next_step=(
             "If status is IN_PROGRESS, call again later. If it is "
             "COMPLETED_WITH_FAILURE, report the failed steps and their errors, fix "
-            "the cause, then use installer.sddc.bringup.retry. Read all steps with "
-            "result_query on the handle."
+            "the cause, then use installer.sddc.bringup.retry. If it is "
+            "ROLLBACK_SUCCESS, the bring-up failed and the Installer undid what it "
+            "had built; report the failed steps and stop polling. Read all steps "
+            "with result_query on the handle."
         ),
         parameter_hints={"id": "The bring-up (SDDC) task id from the deploy."},
         result_scalars=_SDDC_TASK_RESULT_SCALARS,

@@ -170,8 +170,11 @@ appliance retries the stored spec as-is — the common transient-failure case;
 provided, it is the vendor's edit-and-retry flow), and its own park-time
 preview leads with the failed task id, appending the blast-radius identity only
 when a spec rides along. `bringup.status` polls the `SddcTask` (`IN_PROGRESS` /
-`COMPLETED_WITH_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus `sddcSubTasks[]` /
-`milestones[]`). `installer.sddc.list`
+`COMPLETED_WITH_SUCCESS` / `ROLLBACK_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus
+`sddcSubTasks[]` / `milestones[]`). `ROLLBACK_SUCCESS` is a finished task too:
+the bring-up failed and the appliance undid what it had built, so the AI
+guidance of `bringup.start`, `bringup.retry`, `bringup.status` and the
+composite names it as a stop condition. `installer.sddc.list`
 ([#3418](https://github.com/evoila/meho/issues/3418)) lists every bring-up task
 and needs no id. Use it when the id of a running bring-up is lost — for example
 when the result of an approved `bringup.start` was not picked up in time — then

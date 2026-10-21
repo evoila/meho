@@ -481,9 +481,11 @@ _BRINGUP_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "next_step": (
         "On deploying, call installer.sddc.bringup.status with sddc_task.id until "
-        "status is COMPLETED_WITH_SUCCESS or COMPLETED_WITH_FAILURE; the bring-up "
-        "runs for hours. On validation_failed, report failed_checks and fix the "
-        "spec. On validation_timeout, follow validation_id with "
+        "status is COMPLETED_WITH_SUCCESS, COMPLETED_WITH_FAILURE or "
+        "ROLLBACK_SUCCESS; the bring-up runs for hours. ROLLBACK_SUCCESS means the "
+        "bring-up failed and the Installer undid what it had built; stop polling. "
+        "On validation_failed, report failed_checks and fix the spec. On "
+        "validation_timeout, follow validation_id with "
         "installer.sddc.validation.status."
     ),
     "preconditions": (

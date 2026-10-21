@@ -9,7 +9,7 @@
 #
 #   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
 #     python-lint       : ruff check + ruff format --check + mypy (once)
-#     python-unit-shard : the pytest unit sweep as a 3-way file-stride matrix
+#     python-unit-shard : the pytest unit sweep as a 4-way file-stride matrix
 #     python-unit-lane  : fan-in carrying the branch-protection required
 #                         context `Python (ruff + mypy + pytest)`
 #   go-lint-test      : golangci-lint + go build + go test on cli/
@@ -38,7 +38,7 @@
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the three
+# `.md`). On such a PR the heavy Python lanes — `python-lint`, the four
 # `python-unit-shard` legs, and `python-integration` — skip via their own
 # job-level `if:` (skipped-by-`if:` == Success per #2140), so a changelog
 # roll / guide edit / README fix finishes CI in minutes instead of paying the
@@ -193,12 +193,12 @@ jobs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
       - name: Checkout
-        # fetch-depth: 0 so the PR base commit is present for the
-        # three-dot diff below (the default shallow fetch would not
-        # reach the merge-base).
+        # On a PR, HEAD is the test merge: the PR on top of the newest
+        # `main`. Its first parent (HEAD^1) is that `main` commit, so
+        # depth 2 is enough for the diff below.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 2
       - name: Detect migration-related + docs-only changes
         id: detect
         run: |
@@ -210,13 +210,18 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             # push / merge_group: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only} (full run)"
-          elif ! changed="$(git diff --name-only --no-renames "${{ github.event.pull_request.base.sha }}...HEAD")"; then
+          # HEAD^1, not `github.event.pull_request.base.sha`: the event's
+          # base sha is `main` as of when the PR was opened. Once `main`
+          # moves, a diff against it also lists other PRs' files and a
+          # docs-only PR loses the fast path (#4657).
+          elif ! changed="$(git diff --name-only --no-renames HEAD^1 HEAD)"; then
             # Diff unavailable -> keep fail-safe defaults (full run + migration gate on).
             echo "git diff failed -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           elif [ -z "${changed}" ]; then
             # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
             echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           else
+            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
             # --- migration classification (#2140, unchanged) ---
             # Files that make the migration suite meaningful to run: the
             # alembic tree, the relocated migration test suite, the db
@@ -259,9 +264,9 @@ jobs:
   #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
   #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
   #                       pool. Non-required check.
-  #   python-unit-shard — the pytest unit sweep as a 3-way stride matrix over
+  #   python-unit-shard — the pytest unit sweep as a 4-way stride matrix over
   #                       the sorted test-file list (heavy pool, in parallel).
-  #                       Non-required checks (`Python unit shard N/3`).
+  #                       Non-required checks (`Python unit shard N/4`).
   #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
   #                       context `Python (ruff + mypy + pytest)`; fails iff
   #                       python-lint or ANY shard did not pass. Branch
@@ -347,19 +352,20 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: Python unit shard ${{ matrix.shard }}/3
-    # Non-required checks (one per matrix leg: `Python unit shard 1/3`,
-    # `.../2/3`, `.../3/3`) — the required context is carried by the
-    # python-unit-lane fan-in below. This is the pytest half of the old
-    # required lane, split into a deterministic 3-way file-stride matrix
-    # (#3251) so its ~15-18-min serial wall runs as ~6-min parallel shards.
+    name: Python unit shard ${{ matrix.shard }}/4
+    # Non-required checks (one per matrix leg: `Python unit shard 1/4`,
+    # `.../2/4`, `.../3/4`, `.../4/4`) — the required context is carried by
+    # the python-unit-lane fan-in below. This is the pytest half of the old
+    # required lane, split into a deterministic 4-way file-stride matrix
+    # (#3251, 3 shards; #4655 raised it to 4 when the 3 shards reached the
+    # 660 s budget) so its serial wall runs as parallel shards.
     #
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
-    # starts on a fork PR. On a fork PR all three legs skip (→ reported
+    # starts on a fork PR. On a fork PR all four legs skip (→ reported
     # Success), which the fan-in's own fork guard mirrors. Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
-    # skips all three legs → the fan-in reports success-by-skip. `needs:
+    # skips all four legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
     # these legs and the fan-in fails the required context CLOSED.
     needs: changes
@@ -368,20 +374,21 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
     # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods) — #761.
-    # Three shards fit inside the 5-pod ceiling. Only the pytest sweep is
+    # Four shards fit inside the 5-pod ceiling. Only the pytest sweep is
     # CPU/memory-bound enough to want the extra cores; ruff/mypy run once in
     # python-lint on a GitHub-hosted runner.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 3 stride shards (#3251), sized off the pre-shard ~19-min lane so each
-      # shard lands ~6-8 min. fail-fast: false — one shard's red tests must NOT
+      # 4 stride shards (#3251 started with 3; #4655 raised it to 4 after the
+      # slowest shard reached the 660 s budget — measure, then add shards, do
+      # not raise the budget). fail-fast: false — one shard's red tests must NOT
       # cancel the others, so a broad breakage surfaces every failing shard in
       # one run (the fan-in still fails if ANY leg fails). To rebalance, change
       # the shard count in BOTH the matrix and the `TOTAL` in the pytest step,
       # in lockstep.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -500,7 +507,7 @@ jobs:
           # lazy blob filter: the runner materialises just the pinned
           # spec files (~0.4 MB argocd-3.3 + ~13 MB esxi-9.0 + ~0.2 MB
           # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
-          # ~2 MB sddc-manager-9.0 + ~5 MB vcenter-8.0 + ~18 MB
+          # ~2 MB sddc-manager-9.0 + ~38 MB vcenter-8.0 + ~18 MB
           # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB
           # vcf-installer-9.1 + ~5 MB vcf-operations-9.0 + ~0.4 MB
           # vks-9.0), not the
@@ -562,6 +569,9 @@ jobs:
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/sddc-manager-9.1/sddc-manager-openapi.json \
             spec-shelf/docs/vcenter-8.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
@@ -574,7 +584,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -627,7 +637,7 @@ jobs:
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
-        # same lockfile are near-instant, so the three shards share one
+        # same lockfile are near-instant, so the four shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
@@ -651,7 +661,7 @@ jobs:
         # pinned there, so a fastembed bump (which can remap the HF
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
-        # lock change still reuse the prior model blob. All three shards
+        # lock change still reuse the prior model blob. All four shards
         # share this one cache entry (same key), so steady-state only the
         # first cold run pays the download.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -738,7 +748,7 @@ jobs:
           sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
           php --version | head -1
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/3)
+      - name: Pytest (unit shard ${{ matrix.shard }}/4)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
@@ -792,7 +802,7 @@ jobs:
         # file-stride split (over a superset of these files) green.
         # Worker count is -n 3 (lowered -n 6 → -n 4 per #1901 for CPU starvation,
         # then -n 4 → -n 3 for MEMORY headroom when the whole-suite lane OOM-killed
-        # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/3 the
+        # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/4 the
         # tests so its base memory is well under the pod limit even without --cov,
         # and -n 3 stays inside the #1983 heartbeat-safe worker count on the
         # 6-core cap. History: -n auto was inconsistent on the shared 4-core pool
@@ -823,11 +833,11 @@ jobs:
           # TOTAL-th file to this shard. File-level split keeps conftest /
           # loadscope semantics identical to a full run; stride (vs
           # contiguous blocks) spreads the heavyweight suites across shards.
-          # The three shards partition the full set exactly (NR mod 3 hits
+          # The four shards partition the full set exactly (NR mod 4 hits
           # each residue once). tests/integration stays out (→ python-
           # integration) and tests/migrations stays out (→ python-migration-
           # tests), matching the pre-shard lane's `--ignore` of both.
-          TOTAL=3
+          TOTAL=4
           SHARD="${{ matrix.shard }}"
           mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
@@ -837,9 +847,10 @@ jobs:
           fi
           # Per-shard perf-budget guard — early warning for CI-perf creep (the
           # #898 / G3.6 timeout class), scaled from the pre-shard 1320 s
-          # whole-suite budget to a per-shard wall (~1/3 the suite). 660 s
-          # leaves generous headroom over the expected ~6-min (~360 s) shard
-          # wall + the heaviest stride slice, while still firing well below the
+          # whole-suite budget to a per-shard wall (then ~1/3 the suite). #4655
+          # kept 660 s when the shard count went 3 → 4: the 3 shards had
+          # reached 580-660 s; the #4655 measurement put the slowest of 4
+          # shards at ~470 s with the same budget. The budget still fires below the
           # 20-min job `timeout-minutes` hang backstop. This step measures the
           # pytest wall, always prints it (trend visibility), and FAILS at the
           # budget so a regression is caught at the PR that causes it.
@@ -945,7 +956,7 @@ jobs:
           shards='${{ needs.python-unit-shard.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 3 stride legs): ${shards}"
+          echo "python-unit-shard (aggregate of all 4 stride legs): ${shards}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -984,14 +995,14 @@ jobs:
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest stride shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/3' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest stride shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 3 pytest stride shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest stride shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 3 pytest stride shards passed."
+            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest stride shards passed."
           fi
 
   python-coverage:
@@ -1608,6 +1619,9 @@ jobs:
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/sddc-manager-9.1/sddc-manager-openapi.json \
             spec-shelf/docs/vcenter-8.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
@@ -1620,7 +1634,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the
@@ -1646,6 +1660,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Install uv
@@ -1776,17 +1791,22 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.26.9` directive. golangci-lint
+          # Tracks `cli/go.mod`'s `go 1.26.10` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
           # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer.
-          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.9
+          # crypto/tls, net/textproto) need go1.26.9 or newer, and
+          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
+          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
           # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
           # an older 1.26.x fail the build instead of shipping the CVEs.
+          # check-latest: the runner image can cache an older 1.26.x
+          # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
+          # uses a cached match unless asked to check for a newer one.
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
@@ -1940,6 +1960,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Ensure make is available

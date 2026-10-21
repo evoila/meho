@@ -46,7 +46,7 @@ from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._errors import result_blast_radius_required
@@ -518,6 +518,70 @@ async def test_dispatch_refuses_park_without_blast_radius(embedding: list[float]
     assert result.extras["error_code"] == "blast_radius_required"
     assert connector.calls == []
     assert await _approval_row_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# A refused destructive park is recorded as a ``denied`` audit row (#4647)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case, error_code",
+    [
+        ("no_hash", "preview_binding_required"),
+        ("wrong_hash", "preview_hash_mismatch"),
+        ("no_blast_radius", "blast_radius_required"),
+    ],
+)
+async def test_refused_destructive_park_writes_one_denied_audit_row(
+    embedding: list[float], case: str, error_code: str
+) -> None:
+    """Each destructive-tier refusal leaves exactly one ``denied`` audit row.
+
+    The refusal goes through the same writer as a policy denial, so the row
+    sits on the op's own path, is a ``policy_decision``, carries the synthetic
+    403 and names the refusal code under ``payload["error"]``. Still no
+    approval row and nothing sent to the vendor.
+    """
+    connector = _register_recording_connector()
+    if case != "no_blast_radius":
+        register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _insert_destructive_descriptor(embedding=embedding)
+    preview_hash: str | None = None
+    if case == "wrong_hash":
+        preview_hash = "deadbeef" * 8
+    elif case == "no_blast_radius":
+        env = await preview_dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=_FakeTarget(),
+            params=_PARAMS,
+        )
+        preview_hash = env["preview_hash"]
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_ID,
+        target=_FakeTarget(),
+        params=_PARAMS,
+        preview_hash=preview_hash,
+    )
+    assert result.status == "denied"
+    assert result.extras["error_code"] == error_code
+    assert connector.calls == []
+    assert await _approval_row_count() == 0
+
+    async with get_sessionmaker()() as s:
+        rows = (await s.execute(select(AuditLog))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].path == _OP_ID
+    assert rows[0].event_class == "policy_decision"
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].payload["error"]["error_code"] == error_code
 
 
 # ---------------------------------------------------------------------------

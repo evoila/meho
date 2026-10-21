@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Mapping
 from typing import Any, Final
 
@@ -73,10 +74,10 @@ from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._branches import resolve_ingested_request
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._lookup import (
-    count_known_ops,
     lookup_descriptor,
     parse_connector_id,
 )
+from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._validate import InvalidOpSchemaError, validate_params
 from meho_backplane.redaction import apply_connector_boundary_redaction
@@ -233,7 +234,9 @@ async def _resolve_previewable_descriptor(
     governed-tier non-ingested op), and its params pass the schema. Otherwise
     returns the structured envelope the caller propagates verbatim:
 
-    * ``unknown_op`` -- the natural key resolved no descriptor.
+    * ``unknown_connector`` / ``unknown_op`` -- the natural key resolved no
+      descriptor; :func:`~._op_miss.op_miss_result` picks the code and
+      names other connectors that have the op (#4031).
     * ``preview_unavailable`` (status ``"unavailable"``) -- a ``typed`` /
       ``composite`` op outside the governed approval tiers.
     * ``invalid_params`` -- params failed the descriptor's
@@ -253,22 +256,19 @@ async def _resolve_previewable_descriptor(
         op_id=op_id,
     )
     if descriptor is None:
-        known_op_count = await count_known_ops(
+        miss = await op_miss_result(
             tenant_id=operator.tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
+            connector_id=connector_id,
+            op_id=op_id,
+            triple=(product, version, impl_id),
+            started=time.monotonic(),
         )
         return {
             "status": "error",
             "op_id": op_id,
             "connector_id": connector_id,
-            "error": (
-                f"unknown_op: no operation {op_id!r} for connector "
-                f"{connector_id!r} ({known_op_count} known op(s) for the "
-                "connector). Discover op ids via search_operations."
-            ),
-            "extras": {"error_code": "unknown_op", "known_op_count": known_op_count},
+            "error": miss.error,
+            "extras": dict(miss.extras),
         }
 
     # --- Previewability gate (see :func:`_is_previewable`) -----------------

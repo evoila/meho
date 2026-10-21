@@ -83,6 +83,8 @@ deploy/charts/meho/
 │   ├── _core-secrets.tpl   # built-in core: hook account name, core Secret names, the secrets Job's plan
 │   ├── core-secrets-rbac.yaml # built-in core: hook ServiceAccount + Role + RoleBinding (weight -40)
 │   ├── core-secrets-job.yaml  # built-in core: makes missing <release>-core-* Secrets (weight -30)
+│   ├── _core-bootstrap.tpl    # built-in core: the bootstrap Job's realm-stage plan
+│   ├── core-bootstrap-job.yaml # built-in core: finishes the Keycloak realm after install/upgrade (weight 10)
 │   ├── _core-postgres-helpers.tpl # shared core helpers: image triple, OpenShift-aware pod security context
 │   ├── tests/test-pgvector.yaml   # helm test pod on the chart's PostgreSQL image
 │   ├── _core-keycloak.tpl  # /auth paths for the Ingress + the hostname check (coreKeycloak.enabled only)
@@ -1268,7 +1270,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-3-way pytest stride matrix (`python-unit-shard`). The required-context
+4-way pytest stride matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1429,15 +1431,15 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/3`) | `backend/` unit + acceptance subtree, split 3 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
+| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-The three `python-unit-shard` legs run on `meho-runners-ci-heavy`
+The four `python-unit-shard` legs run on `meho-runners-ci-heavy`
 (dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
-rdc-gitops#55; three shards fit the 5-pod ceiling). `python-integration`,
+rdc-gitops#55; four shards fit the 5-pod ceiling). `python-integration`,
 `python-migration-tests` and the push-only `python-coverage-combine` run
 on the dense `meho-runners-ci` pool (4-core): they pull their test images
 from the internal image mirror or read the private vendor spec shelf.
@@ -1492,13 +1494,19 @@ shape (deterministic file-stride matrix + fan-in):
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **3-way stride matrix**.
+- **`python-unit-shard`** — the pytest sweep as a **4-way stride matrix**.
   Each shard runs `find tests -name 'test_*.py' -not -path
   'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk 'NR %
-  3 == shard - 1'` — the sorted test-file list, every third file. The
+  4 == shard - 1'` — the sorted test-file list, every fourth file. The
   stride (not contiguous blocks) spreads heavyweight suites across shards,
-  and the three residues partition the file set **exactly** (union == full,
-  pairwise disjoint). File-level sharding is strictly coarser than what
+  and the four residues partition the file set **exactly** (union == full,
+  pairwise disjoint). #3251 started with 3 shards. #4655 raised the count
+  to 4 when the slowest shard reached the 660 s per-shard budget (579 s
+  as a middle value and up to 605 s on `main`; 663 s on a pull request).
+  The budget stayed at 660 s:
+  the rule in `ci.yml` is to measure, then add shards, not to raise the
+  budget. To change the count again, edit the matrix and `TOTAL` in the
+  pytest step together. File-level sharding is strictly coarser than what
   xdist `--dist loadscope` already does across workers (whole modules stay
   together, conftest semantics identical to a full run), so an xdist-safe
   suite is shard-safe — proven live by the `python-coverage` sweep, which
@@ -1558,14 +1566,19 @@ completes CI in minutes.
   `\.md$` (any Markdown file anywhere). Anything else — a `.py`, a workflow, a
   config, a `cli/` or `deploy/` file — sets `docs_only=false` and forces the
   full matrix. The diff is taken with `git diff --name-only --no-renames
-  <base>...HEAD`: `--no-renames` makes a rename appear as delete(old) +
+  HEAD^1 HEAD`. On a PR, HEAD is the test merge (the PR on top of the newest
+  `main`) and `HEAD^1` is that `main` commit, so the list holds exactly what
+  the PR changes. The detector does not use `github.event.pull_request.base.sha`:
+  that is `main` as of when the PR was opened, and once `main` moves a diff
+  against it also lists other PRs' files, which cost docs-only PRs the fast
+  path (#4657). `--no-renames` makes a rename appear as delete(old) +
   add(new) so a code→`*.md` (or `*.md`→code) rename can never smuggle a
   non-docs path past the allow-list. The step is written to always exit `0`
   and emit both outputs — an unresolvable diff or an empty diff keeps the
   fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
   fast-path (a queue batch may mix docs + code; a `main` push must always run
   the full matrix).
-- **What skips.** `python-lint`, the three `python-unit-shard` legs, and
+- **What skips.** `python-lint`, the four `python-unit-shard` legs, and
   `python-integration` gain `needs: changes` and an `if:` that skips them when
   `docs_only == 'true'` (same #2140 shape as the `python-migration-tests`
   gate). A job skipped by its own `if:` reports **Success**, so the required

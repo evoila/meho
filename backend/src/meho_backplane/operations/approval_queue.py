@@ -971,8 +971,10 @@ async def _write_audit_row(
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
-    # requester's task, where the dispatcher bound ``policy_decision_var`` to
-    # ``needs-approval`` before parking, so the var carries the verdict here.
+    # requester's task, where the dispatcher (or, for a step inside a
+    # multi-step operation, the step gate ``composite.enforce_subop_policy``,
+    # #4646) bound ``policy_decision_var`` to ``needs-approval`` before
+    # parking, so the var carries the verdict here.
     # A "decision" row is written on the *approver's* task (var unset) and on
     # a path where no gate ran, so it correctly stays NULL — the operator's
     # approve/reject is recorded via ``result_status``, not a gate verdict.

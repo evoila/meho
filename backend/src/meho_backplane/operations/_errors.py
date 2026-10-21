@@ -15,8 +15,8 @@ dispatcher's :func:`dispatch` body stay focused on control flow.
 
 Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
-``unknown_op`` / ``invalid_params`` / ``invalid_op_schema`` /
-``no_connector`` /
+``unknown_op`` / ``unknown_connector`` / ``invalid_params`` /
+``invalid_op_schema`` / ``no_connector`` /
 ``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
@@ -81,6 +81,7 @@ __all__ = [
     "result_receipt_too_large",
     "result_target_invalid_type",
     "result_target_required",
+    "result_unknown_connector",
     "result_unknown_op",
     "result_unqualified_target_version",
     "result_vault_credentials_read_error",
@@ -146,15 +147,84 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     return redacted
 
 
-def result_unknown_op(op_id: str, known_op_count: int, duration_ms: float) -> OperationResult:
-    """Descriptor lookup miss for *(product, version, impl_id, op_id)*."""
+def result_unknown_op(
+    op_id: str,
+    known_op_count: int,
+    duration_ms: float,
+    *,
+    connector_id: str | None = None,
+    connectors_with_op: list[str] | None = None,
+) -> OperationResult:
+    """Descriptor lookup miss for *(product, version, impl_id, op_id)*.
+
+    The dispatcher and the preview path pass *connector_id* and
+    *connectors_with_op* (#4031). The message then tells the caller where
+    to go next: the other connectors that have this op, or
+    ``search_operations`` on the named connector when no other connector
+    has it. ``extras.connectors_with_op`` carries the same ids for
+    callers that parse the envelope. The typed-connector ``execute``
+    shims pass neither and keep the short ``unknown_op: <op_id>`` form.
+    """
+    extras: dict[str, Any] = {"error_code": "unknown_op", "known_op_count": known_op_count}
+    if connector_id is None:
+        return OperationResult(
+            status="error",
+            op_id=op_id,
+            error=f"unknown_op: {op_id}",
+            duration_ms=duration_ms,
+            extras=extras,
+        )
+    found = connectors_with_op or []
+    extras["connectors_with_op"] = found
+    error = (
+        f"unknown_op: no operation {op_id!r} for connector {connector_id!r} "
+        f"({known_op_count} known op(s) for the connector)."
+    )
+    if found:
+        names = ", ".join(found)
+        error += (
+            f" This operation exists on connector(s) {names}. "
+            "Call it with one of those connector ids."
+        )
+    else:
+        error += f" Use search_operations on connector {connector_id!r} to find the right op_id."
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"unknown_op: {op_id}",
+        error=error,
         duration_ms=duration_ms,
-        extras={"error_code": "unknown_op", "known_op_count": known_op_count},
+        extras=extras,
     )
+
+
+def result_unknown_connector(connector_id: str, op_id: str, duration_ms: float) -> OperationResult:
+    """The *connector_id* matches no connector the caller can see (#4031).
+
+    Same meaning as the ``unknown_connector`` answer of
+    ``list_operation_groups`` / ``search_operations``: no operation rows
+    and no registered connector class for the parsed id. Before #4031 this
+    case surfaced as ``unknown_op`` with ``known_op_count: 0``, which
+    hid that the connector id itself was wrong.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"unknown_connector: unknown connector_id {connector_id!r}. Expected "
+            "<impl_id>-<version> (e.g. 'vmware-rest-9.0', 'vault-1.x'). The id is "
+            "mistyped or the connector is not registered on this deploy. Use "
+            "meho_connector_list to see the connector ids."
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "unknown_connector", "connector_id": connector_id},
+    )
+
+
+#: Most ``validation_errors`` entries one ``invalid_params`` envelope carries
+#: (#3669). A params object that breaks many rules would otherwise grow the
+#: response and audit envelope without bound; the rest is counted in
+#: ``extras["validation_errors_suppressed"]``.
+_MAX_VALIDATION_ERRORS: int = 10
 
 
 def result_invalid_params(
@@ -162,15 +232,26 @@ def result_invalid_params(
     validation_errors: list[dict[str, Any]],
     duration_ms: float,
 ) -> OperationResult:
-    """JSON Schema validation against ``parameter_schema`` failed."""
+    """JSON Schema validation against ``parameter_schema`` failed.
+
+    The ``error`` summary counts every violation. ``extras`` keeps the
+    first :data:`_MAX_VALIDATION_ERRORS` entries and records how many were
+    left out in ``validation_errors_suppressed`` (``0`` when none were).
+    """
+    total = len(validation_errors)
+    suppressed = max(0, total - _MAX_VALIDATION_ERRORS)
+    summary = f"invalid_params: {total} validation error(s)"
+    if suppressed:
+        summary += f"; showing the first {_MAX_VALIDATION_ERRORS}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"invalid_params: {len(validation_errors)} validation error(s)",
+        error=summary,
         duration_ms=duration_ms,
         extras={
             "error_code": "invalid_params",
-            "validation_errors": validation_errors,
+            "validation_errors": validation_errors[:_MAX_VALIDATION_ERRORS],
+            "validation_errors_suppressed": suppressed,
         },
     )
 

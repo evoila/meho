@@ -34,12 +34,14 @@ read, and the caller reads that path next. Only UTF-8 text comes back;
 other content is refused with its content type. A compressed body
 (``gzip`` or ``deflate``; any other encoding is refused) is decoded in
 bounded steps and measured as it decodes, so the decoded bytes never
-grow past the limit. A file whose stored record does not fit in one
-result handle stops with an error that names its size -- the read never
-returns a cut file. A file that the secret-redaction rules would change
-stops too, so the read never claims an exact file it cannot return; the
-rules run on the whole text and on the answer, so a secret that spans
-two parts is found as well.
+grow past the limit. A body whose compressed stream ends early, or that
+carries bytes after a ``deflate`` stream, is refused; a ``gzip`` body
+made of several members is decoded whole, under the same limit. A file
+whose stored record does not fit in one result handle stops with an
+error that names its size -- the read never returns a cut file. A file
+that the secret-redaction rules would change stops too, so the read never
+claims an exact file it cannot return; the rules run on the whole text
+and on the answer, so a secret that spans two parts is found as well.
 """
 
 from __future__ import annotations
@@ -152,15 +154,26 @@ class _BoundedDecoder:
     waits in ``unconsumed_tail`` and is decoded on the next loop. A step
     that crosses the limit stops the read; the one extra byte is what
     shows the file is over the limit.
+
+    The decoder returns the whole file or fails. A ``gzip`` body may hold
+    several members one after the other (RFC 1952); each member after the
+    first is decoded with a fresh stream, under the same limit. Bytes
+    after a ``deflate`` stream are refused, as is a body that ends before
+    its stream does. Only an empty body (no compressed bytes at all, as on
+    a redirect) decodes to nothing without an error.
     """
 
     def __init__(self, encoding: str, max_bytes: int) -> None:
+        self._encoding = encoding
         self._max_bytes = max_bytes
         self._total = 0
+        self._fed = 0
         self._first_step = True
         self._raw_deflate_retry = encoding == "deflate"
-        wbits = zlib.MAX_WBITS | 16 if encoding == "gzip" else zlib.MAX_WBITS
-        self._zlib = zlib.decompressobj(wbits)
+        self._zlib = zlib.decompressobj(self._wbits())
+
+    def _wbits(self) -> int:
+        return zlib.MAX_WBITS | 16 if self._encoding == "gzip" else zlib.MAX_WBITS
 
     @property
     def total(self) -> int:
@@ -189,15 +202,35 @@ class _BoundedDecoder:
             self._first_step = False
 
     def feed(self, data: bytes) -> Iterator[bytes]:
+        self._fed += len(data)
         while data:
             yield self._count(self._step(data))
-            data = self._zlib.unconsumed_tail
+            data = self._next_input()
+
+    def _next_input(self) -> bytes:
+        """The bytes the next step decodes: the step's leftover, or the next member."""
+        if not self._zlib.eof:
+            return self._zlib.unconsumed_tail
+        # At the end of a stream zlib puts every later byte in ``unused_data``
+        # (and in ``unconsumed_tail`` too), so the tail must not be fed again.
+        rest = self._zlib.unused_data
+        if not rest:
+            return b""
+        if self._encoding != "gzip":
+            raise httpx.DecodingError(
+                "compressed body carries data after the end of the deflate stream"
+            )
+        self._zlib = zlib.decompressobj(self._wbits())
+        return rest
 
     def finish(self) -> bytes:
         try:
-            return self._count(self._zlib.flush())
+            out = self._count(self._zlib.flush())
         except zlib.error as exc:  # pragma: no cover - zlib flush does not fail on short input
             raise httpx.DecodingError(str(exc)) from exc
+        if self._fed and not self._zlib.eof:
+            raise httpx.DecodingError("compressed body ended before the compressed stream finished")
+        return out
 
 
 def check_path(raw: Any) -> tuple[str, str]:

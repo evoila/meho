@@ -114,8 +114,12 @@ The body is read in a stream. The read asks for `gzip` or `deflate` only
 and decodes the wire chunks itself with `zlib`, in steps that never
 produce more than the room left under the limit. So a small compressed
 answer that decodes to a file over the limit is refused at the limit, and
-the decoded bytes never grow past it, not even for one step. An answer
-with any other content encoding is refused with the encoding named.
+the decoded bytes never grow past it, not even for one step. The read
+returns the whole file or fails: a body whose compressed stream ends
+early is refused, and so are bytes after a `deflate` stream. A `gzip`
+body made of several members (which the gzip format allows) is decoded
+whole, under the same limit. An answer with any other content encoding
+is refused with the encoding named.
 
 Only UTF-8 text comes back. A content type that is not text (anything
 other than `text/*`, JSON, YAML, XML or JavaScript) or a body that is not

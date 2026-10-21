@@ -19,6 +19,9 @@ What is covered, with a respx-mocked HCX Manager and no ingested catalog:
   a streamed gzip or deflate body that would decode to many MiB is
   refused while the decoded bytes are still near the limit; an encoding
   the read cannot decode in bounded steps is refused;
+* a gzip body of several members gives the whole file, under the same
+  limit; a compressed stream that ends early, or bytes after a deflate
+  stream, stop with an error and never pass as the complete file;
 * the whole stored record is measured: a file that passes the check is read
   back from the result store with every part, through ``dispatch()``;
 * a page the secret-redaction rules would change stops with an error, also
@@ -660,6 +663,90 @@ async def test_content_encoding_the_read_cannot_bound_is_refused(
     assert result.status == "error"
     assert "content encoding 'br'" in result.extras["exception_message"]
     assert route.calls.last.request.headers["accept-encoding"] == "gzip, deflate"
+
+
+@pytest.mark.asyncio
+async def test_gzip_body_of_several_members_gives_the_whole_file_under_the_limit(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gzip body may hold several members in a row; the read decodes them all.
+
+    The old decoder stopped after the first member and reported that
+    part's size and SHA-256 as the complete file. The limit still counts
+    every member: two members that together pass it stop the read.
+    """
+    limit = 4096
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", str(limit))
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    first, second = b'{"a": "' + b"a" * 500 + b'", ', b'"b": "' + b"b" * 500 + b'"}'
+    whole = first + second
+    joined = gzip.compress(first) + gzip.compress(second)
+    over = gzip.compress(b"x" * 3000) + gzip.compress(b"y" * 3000)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/hybridity/docs/joined.json").mock(
+            return_value=httpx.Response(
+                200,
+                stream=_ChunkedStream(joined, 7),
+                headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+            )
+        )
+        mock.get("/hybridity/docs/over.json").respond(
+            200, content=over, headers={"Content-Encoding": "gzip", "Content-Type": "text/plain"}
+        )
+        result = await _dispatch("/hybridity/docs/joined.json")
+        too_big = await _dispatch("/hybridity/docs/over.json")
+
+    assert result.status == "ok", result.error
+    assert result.result["size"] == len(whole)
+    assert result.result["sha256"] == hashlib.sha256(whole).hexdigest()
+    assert "".join(item["text"] for item in result.result["items"]) == whole.decode()
+    assert too_big.status == "error"
+    assert f"more than {limit} bytes" in too_big.extras["exception_message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "encoding", "wire"),
+    [
+        ("gzip cut short", "gzip", gzip.compress(b'{"cut": "' + b"c" * 3000 + b'"}')[:-12]),
+        ("deflate cut short", "deflate", zlib.compress(b'{"cut": "' + b"c" * 3000 + b'"}')[:-4]),
+        (
+            "second gzip member cut short",
+            "gzip",
+            gzip.compress(b'{"one": 1}') + gzip.compress(b'{"two": 2}')[:-12],
+        ),
+        ("bytes after the deflate stream", "deflate", zlib.compress(b'{"ok": 1}') + b"tail"),
+    ],
+)
+async def test_unfinished_or_overrun_compressed_stream_stops_with_an_error(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    name: str,
+    encoding: str,
+    wire: bytes,
+) -> None:
+    """A compressed body that does not decode to one complete stream is refused.
+
+    The old decoder returned the bytes it had and reported their size and
+    SHA-256 as the complete file.
+    """
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/hybridity/docs/broken.json").mock(
+            return_value=httpx.Response(
+                200,
+                stream=_ChunkedStream(wire, 5),
+                headers={"Content-Encoding": encoding, "Content-Type": "application/json"},
+            )
+        )
+        result = await _dispatch("/hybridity/docs/broken.json")
+
+    assert result.status == "error", name
+    message = result.extras["exception_message"]
+    assert "compressed stream finished" in message or "after the end of the deflate" in message
 
 
 class _FakeValkey:

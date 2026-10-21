@@ -42,6 +42,8 @@ from urllib.parse import urlsplit
 import structlog
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
     from meho_backplane.settings import Settings
 
 __all__ = [
@@ -144,7 +146,9 @@ def check_sandbox_settings(settings: Settings) -> None:
         )
 
 
-async def store_or_check_sandbox_mode(settings: Settings) -> bool:
+async def store_or_check_sandbox_mode(
+    settings: Settings, *, engine: AsyncEngine | None = None
+) -> bool:
     """Store the setting once, then check the stored mode (guard 3).
 
     One ``INSERT ... ON CONFLICT DO NOTHING`` on the single-row table: the
@@ -154,13 +158,20 @@ async def store_or_check_sandbox_mode(settings: Settings) -> bool:
     other mode (it was installed with the other setting, it belongs to
     another instance, or a backup from the other kind of instance was
     restored). Returns the stored mode.
+
+    ``engine`` is a test seam: the process engine when ``None``. Two
+    engines on one database, each with its own connection, stand in for
+    two processes that start at once.
     """
     from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    from meho_backplane.db.engine import get_engine, get_sessionmaker
+    from meho_backplane.db.engine import get_engine
 
+    if engine is None:
+        engine = get_engine()
     wanted = settings.sandbox_mode is True
-    async with get_sessionmaker()() as session:
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         await session.execute(
             text(
                 "INSERT INTO sandbox_mode_state (id, sandbox_mode, stored_at) "
@@ -179,7 +190,7 @@ async def store_or_check_sandbox_mode(settings: Settings) -> bool:
     # the app serves requests; a test client runs the boot on its own event
     # loop, and a pooled connection must not be reused across loops. The
     # pool is created again on first use.
-    await get_engine().dispose()
+    await engine.dispose()
     stored_mode = bool(stored)
     if stored_mode != wanted:
         stored_word = "on" if stored_mode else "off"

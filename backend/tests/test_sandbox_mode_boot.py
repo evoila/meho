@@ -11,14 +11,17 @@
   ``sandbox`` part; a stored mode that is not the setting, both ways.
   Each has a plain message.
 * **Stored mode** -- a new database stores the mode at its first start;
-  two starts with different settings: one stores, the other refuses; the
-  mode is stored and checked before MEHO serves a request.
+  two starts with different settings, one after the other and at the same
+  time on separate connections: one stores, the other refuses, and one
+  mode remains stored; the mode is stored and checked before MEHO serves
+  a request.
 * **Normal boot** -- with the mode off and no sandbox settings the app
   boots and shows ``"off"``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,7 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.engine import create_engine_for_url, get_sessionmaker
 from meho_backplane.db.models import SandboxModeState
 from meho_backplane.main import app
 from meho_backplane.sandbox_mode import (
@@ -172,6 +175,48 @@ async def test_two_starts_with_different_settings(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(SandboxModeConfigError, match="installed with sandbox mode off"):
         await store_or_check_sandbox_mode(get_settings())
     assert await _stored() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_on", [True, False])
+async def test_two_starts_at_once_with_different_settings(
+    monkeypatch: pytest.MonkeyPatch, first_on: bool
+) -> None:
+    """Two processes start at once on one new database, one with the mode on.
+
+    Each start runs on its own engine, so on its own database connection.
+    One stores its mode, the other refuses, and exactly one mode remains
+    stored, whichever start was first.
+    """
+    turn_sandbox_mode_on(monkeypatch)
+    on = get_settings()
+    turn_sandbox_mode_off(monkeypatch)
+    off = get_settings()
+    assert on.sandbox_mode is True and off.sandbox_mode is False
+    starts = (on, off) if first_on else (off, on)
+    engines = [
+        create_engine_for_url(off.database_url, pool_size=1, pool_timeout=5.0) for _ in starts
+    ]
+    try:
+        results = await asyncio.gather(
+            *(
+                store_or_check_sandbox_mode(settings, engine=engine)
+                for settings, engine in zip(starts, engines, strict=True)
+            ),
+            return_exceptions=True,
+        )
+    finally:
+        for engine in engines:
+            await engine.dispose()
+
+    stored = [result for result in results if isinstance(result, bool)]
+    refused = [result for result in results if isinstance(result, SandboxModeConfigError)]
+    assert len(stored) == 1 and len(refused) == 1, results
+    assert "The mode is fixed for the life of the database" in str(refused[0])
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(SandboxModeState))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].sandbox_mode is stored[0]
 
 
 @pytest.mark.asyncio

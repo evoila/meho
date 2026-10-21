@@ -1682,7 +1682,7 @@ async def _run_branch_with_error_handling(
             duration_ms=duration_ms,
         )
     else:
-        return await _audit_returned_error_result(
+        return await _audit_returned_result(
             raw,
             audit_id=audit_id,
             operator=operator,
@@ -1709,7 +1709,7 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     return dict(extras) if extras else None
 
 
-async def _audit_returned_error_result(
+async def _audit_returned_result(
     raw: Any,
     *,
     audit_id: uuid.UUID,
@@ -1720,33 +1720,76 @@ async def _audit_returned_error_result(
     params_hash: str,
     started: float,
 ) -> Any:
-    """Write the error audit row when a handler *returns* an error result (#4274).
+    """Write the operation's own audit row when a handler *returns* a result.
 
-    A typed or composite handler can return an :class:`OperationResult` instead
-    of raising (for example a composite's ``composite_resume_unsupported``, or
-    an ``enforce_subop_policy`` refusal it passes on). Without this, no row
-    carries this dispatch's ``audit_id``, yet the composite's step rows point
-    at it as ``parent_audit_id`` and the flight-recorder trace is stored under
-    it. Only ``status='error'`` is audited here; ``awaiting_approval`` and
-    ``denied`` results pass through unchanged (#4275). Anything that is not an
-    :class:`OperationResult` is the raw payload and passes through too.
+    A typed or composite handler can return an :class:`OperationResult`
+    instead of raising: an error result (#4274, for example a composite's
+    ``composite_resume_unsupported``), or the result of a step that stopped
+    the operation part-way on the ``enforce_subop_policy`` seam (#4275): the
+    step waits for approval (``awaiting_approval``) or is denied (``denied``).
+    Without this row nothing carries this dispatch's ``audit_id``, yet the
+    rows of the steps that ran point at it as ``parent_audit_id``, the waiting
+    step's ``approval.request`` row does too, and the flight-recorder trace is
+    stored under it. Any other status passes through unchanged, and anything
+    that is not an :class:`OperationResult` is the raw payload and passes
+    through too.
 
-    The caller gets the handler's result as it was, plus the ``audit_id``
-    receipt :func:`_audit_error_and_return` adds. The row records the real
-    elapsed time, because a handler-built result may carry ``duration_ms=0``.
+    The row is an ``operation_execution`` row: the operation's code ran, even
+    if only partly. The step's own decision stays on the step's decision row
+    (#3733). ``result_status`` is the status the caller got, and
+    ``payload["error"]`` holds the result's extras (the ``approval_request_id``
+    of a wait, the ``reason`` of a deny). The row records the real elapsed
+    time, because a handler-built result may carry ``duration_ms=0``. The
+    caller gets the handler's result as it was, plus the row's ``audit_id``.
+
+    An error row is written fail-open, like every error row: when it does not
+    commit the caller still gets the error, only without an ``audit_id``. A
+    wait or deny row is written fail-closed (``require_audit=True``), like the
+    ``ok`` row: the caller must never hear "waits for approval" or "denied"
+    for a run that left no record (postulate 7). When that row does not
+    commit the caller gets ``audit_commit_failed``; for a wait the result
+    keeps the ``approval_request_id``, because the request is saved and still
+    waits. The row is written last, after the handler returned, so it never
+    shares the approval request's transaction and is never changed later
+    (``docs/decisions/composite-audit-when-a-step-waits.md``).
     """
-    if not isinstance(raw, OperationResult) or raw.status != "error":
+    if not isinstance(raw, OperationResult):
         return raw
-    return await _audit_error_and_return(
-        raw,
-        audit_id=audit_id,
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        params=params,
-        params_hash=params_hash,
-        duration_ms=_elapsed_ms(started),
-    )
+    duration_ms = _elapsed_ms(started)
+    if raw.status == "error":
+        return await _audit_error_and_return(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    if raw.status not in ("awaiting_approval", "denied"):
+        return raw
+    try:
+        receipt = await audit_safe(
+            audit_id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params_hash=params_hash,
+            result_status=raw.status,
+            duration_ms=duration_ms,
+            error_extras=_error_extras_for_audit(raw),
+            require_audit=True,
+        )
+    except AuditCommitError:
+        approval_request_id = raw.extras.get("approval_request_id")
+        return result_audit_commit_failed(
+            descriptor.op_id,
+            duration_ms,
+            approval_request_id=str(approval_request_id) if approval_request_id else None,
+        )
+    return raw.model_copy(update={"audit_id": receipt})
 
 
 async def _audit_error_and_return(
@@ -2091,7 +2134,7 @@ async def _retry_after_session_invalidation(
             duration_ms=duration_ms,
         )
     else:
-        return await _audit_returned_error_result(
+        return await _audit_returned_result(
             raw,
             audit_id=audit_id,
             operator=operator,
@@ -2786,10 +2829,10 @@ async def _audit_denied_and_return(
     ``payload["error"]``, like an ordinary policy denial. For a sub-op the
     row carries the parent operation's audit id through
     :data:`~meho_backplane.operations._audit.parent_audit_id_var`, which the
-    composite branch binds for the whole handler body. Needed because the
-    dispatcher passes a handler-returned :class:`OperationResult` straight
-    through without an audit write, so without this row a refused step would
-    leave no record at all.
+    composite branch binds for the whole handler body. The parent operation
+    gets its own ``denied`` execution row from :func:`_audit_returned_result`
+    when the handler returns the refusal (#4275); this row records the step's
+    decision, so the step keeps its own record (#3733).
     """
     await audit_safe(
         audit_id=uuid.uuid4(),

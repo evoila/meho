@@ -255,24 +255,71 @@ VRLI_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
 }
 
+#: Response schema of ``vrli.event.query``: the handler's ``{events, complete}``
+#: envelope. Event row fields from the pinned VCF Operations for Logs 9.0 API
+#: file (``vcf-operations-for-logs-openapi.json``, ``events.get.response``).
+_EVENT_QUERY_RESPONSE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "events": {
+            "type": "array",
+            "description": "The matching log events, newest first.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The full text of the event."},
+                    "timestamp": {
+                        "type": "integer",
+                        "description": "When the event was reported, in epoch milliseconds.",
+                    },
+                    "timestampString": {
+                        "type": "string",
+                        "description": "When the event was reported, as ISO 8601 text.",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "description": "The extracted fields, such as hostname or source.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "The field name."},
+                                "content": {
+                                    "type": "string",
+                                    "description": "The field value, when it is not in the text.",
+                                },
+                                "startPosition": {
+                                    "type": "integer",
+                                    "description": "Where the value starts in the text.",
+                                },
+                                "length": {
+                                    "type": "integer",
+                                    "description": "The length of the value in the text.",
+                                },
+                            },
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+                "additionalProperties": True,
+            },
+        },
+        "complete": {
+            "type": "boolean",
+            "description": "False when the limit or the appliance timeout cut the result.",
+        },
+    },
+    "additionalProperties": True,
+}
+
 VRLI_EVENT_QUERY_OP = VrliTypedOp(
     op_id="vrli.event.query",
     handler_attr="event_query",
     summary="Query raw vRLI log events by constraint chain, with an optional limit.",
     description=(
-        "Queries raw vRLI (VCF Operations for Logs) events via "
-        "GET /api/v2/events/<constraints> issued directly on the connector's "
-        "session — no catalog ingest required. The constraints path segment "
-        "carries the URL-encoded, slash-delimited constraint chain (field/value "
-        "pairs, time range) vRLI's printQuery renders; compose it from field "
-        "names confirmed via the field catalog. Optional limit caps the number "
-        "of event rows. Returns {events: [...], complete: bool}; event rows carry "
-        "timestamp, text, hostname, source, and any extracted fields. The "
-        "headline read surface of vRLI — use for 'show me events where source "
-        "contains nsx and severity is error in the last 1h'. Large result sets "
-        "return a JSONFlux ResultHandle (bounded inline sample plus a fetch_more "
-        "envelope); re-run with a narrower constraint / time range to act on more "
-        "than the sample. safety_level=safe, read-only."
+        "Reads GET /api/v2/events/<constraints> on the connector session. "
+        "constraints is the slash-separated chain of field/operator value pairs "
+        "and time range, for example text/CONTAINS error/timestamp/LAST 3600000. "
+        "limit caps the rows. Returns {events: [...], complete}. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -296,15 +343,9 @@ VRLI_EVENT_QUERY_OP = VrliTypedOp(
             },
         },
         "additionalProperties": False,
+        "examples": [{"constraints": "text/CONTAINS error/timestamp/LAST 3600000", "limit": 100}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "events": {"type": "array"},
-            "complete": {"type": "boolean"},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=_EVENT_QUERY_RESPONSE,
     group_key=_EVENTS_GROUP_KEY,
     tags=("read-only", "vrli", "vcf-logs", "events", "log-query"),
     safety_level="safe",
@@ -322,8 +363,9 @@ VRLI_EVENT_QUERY_OP = VrliTypedOp(
             "limit": "Max event rows to return; omit for the appliance default.",
         },
         "output_shape": (
-            "{events: [{timestamp, text, hostname, source, ...}, ...], "
-            "complete: bool}. Large result sets return a JSONFlux ResultHandle "
+            "{events: [{text, timestamp, timestampString, fields: [{name, content}]}, "
+            "...], complete: bool}. hostname, source and other extracted values are "
+            "rows of fields[]. Large result sets return a JSONFlux ResultHandle "
             "with a bounded inline sample plus a fetch_more envelope; page it "
             "with result_query(handle_id, offset, limit) rather than expecting "
             "the full payload inline. complete=false means the limit / index "

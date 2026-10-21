@@ -80,6 +80,34 @@ flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
 the 9.1 appliance-served IaaS document above would qualify, and none is
 pinned.
 
+**Operation contracts.** The 16 typed ops (the seven reads above and the
+nine provisioning ops below) meet the VMware operation-contract check
+(`backend/tests/test_vmware_operation_contracts.py`) and have no entry in its
+gap list:
+
+- Each read's `response_schema` names the vendor fields, nested ones too
+  (`_op_schemas.py`). Provider-plane names come from the `go-vcloud-director`
+  v3.0.0 types (`TmOrg`, `Region`, `Right`, `GlobalRole`, the `OpenApiPages`
+  page: `values`, `resultTotal`, `pageCount`, `page`, `pageSize`); tenant-plane
+  names come from the pinned `vra-iaas.json` (`ProjectResult` / `Project`,
+  `DeploymentResult` / `Deployment`, `About`). Each write's schema names the
+  result keys its handler builds. Response schemas are information for the AI;
+  the dispatcher does not check an answer against them.
+- Each `parameter_schema` describes every field, nested ones too, and has one
+  example call under `examples` with neutral placeholders (`<org-name>`).
+  `backend/tests/test_vcfa_operation_examples.py` checks that every example is a
+  valid call.
+- Fields with fixed values keep their `enum`: `org_type` and the project
+  principal `type` (`user` / `group`, the values the IaaS `User` schema lists).
+  No `anyOf` was added to `role.create` for "base_role or rights": a re-run
+  that only repairs the publication of an existing role sends neither, and a
+  schema rule would refuse that valid call.
+- `llm_instructions` has `when_to_call`, `output_shape` and `next_step`; the
+  six changes also have `preconditions`.
+- The pinned IaaS `Deployment` schema lists no `status`, `blueprintId` or
+  `resources`, so the deployment response schemas do not name them; the
+  guidance says an appliance may return more fields.
+
 **Provisioning ops (#3890).** An appliance whose only org is `System`
 cannot serve the tenant plane: `POST /iaas/api/login` exchanges only a
 **tenant-org** user's API token (the System-org token is refused with

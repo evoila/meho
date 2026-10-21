@@ -135,7 +135,9 @@ _EDGE_GATEWAY_LIST_INSTRUCTIONS: dict[str, object] = {
         "numberOfOrgNetworks."
     ),
     "next_step": (
-        "Match each edge gateway's orgVdcName to a name in vcd.vdc.list to associate network "
+        "Match each edge gateway to a vcd.vdc.list row on both orgName and "
+        "orgVdcName (the VDC row's orgName and name). A VDC name alone is not "
+        "unique: different orgs can use the same one. This associates network "
         "boundaries with compute allocations, so the target-side network design "
         "covers every VDC's egress."
     ),

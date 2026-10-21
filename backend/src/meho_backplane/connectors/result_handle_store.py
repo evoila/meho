@@ -120,6 +120,7 @@ __all__ = [
     "dispose_result_handle_store",
     "get_result_handle_store",
     "reset_result_handle_store_for_testing",
+    "rows_record_bytes",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -297,6 +298,46 @@ class _StoredPayload(msgspec.Struct):
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     record_kind: str = _ROWS_RECORD
     document: Any = None
+
+
+#: A ``created_at`` stamp of the longest form :meth:`ResultHandleStore.spill`
+#: writes (microseconds and offset). :func:`rows_record_bytes` uses it so the
+#: size it reports never depends on the clock.
+_LONGEST_CREATED_AT = "2000-01-01T00:00:00.000000+00:00"
+
+
+def rows_record_bytes(
+    rows: list[dict[str, Any]],
+    *,
+    operator_sub: str,
+    op_id: str | None,
+    document: Any = None,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    """Encoded size of the complete rows record :meth:`ResultHandleStore.spill` would write.
+
+    A handler that must not lose a row (the HCX API file read, whose parts
+    rebuild one exact file) compares this against
+    ``result_handle_max_record_bytes`` before it returns. The size counts the
+    record's own fields next to *rows*, so a payload that passes here is
+    stored whole; the row-only size the handler could compute itself misses
+    those fields and lets the store cut the last row. *document* is the dict
+    of top-level fields the reducer stores beside the rows (#3633); pass the
+    payload's scalars to count the largest record the reducer can write.
+    """
+    record = _StoredPayload(
+        operator_sub=operator_sub,
+        op_id=op_id,
+        rows=rows,
+        total_rows=len(rows),
+        stored_rows=len(rows),
+        created_at=_LONGEST_CREATED_AT,
+        captured_rows=len(rows),
+        storage_coverage="complete",
+        metadata=metadata or {},
+        document=document,
+    )
+    return len(msgspec.json.encode(record))
 
 
 def _without_document(

@@ -207,8 +207,10 @@ trigger are in the `sddc-vcf5` entry of
 - **Two filters may not match the vendor reference.** The 5.0.0 reference lists
   no `domainId` filter on `GET /v1/clusters` (the 5.2 reference does), and it names
   the task filter `taskStatus` while `sddc.vcf5.task.list` sends `status`. The op
-  texts tell the AI to check each row's domain or status itself. Changing what the
-  handlers send is a separate task.
+  texts give the AI a fallback: match cluster ids against the `clusters` entries of
+  `sddc.vcf5.domain.list` (a cluster row's `domain` field is only documented from
+  5.2), and check each task row's status itself. Changing what the handlers send is
+  a separate task.
 - **Unfingerprinted targets resolve to modern.** Because the modern impl owns the
   wildcard, a `sddc` target with no fingerprint/version resolves to `sddc-rest`. In
   practice a probed VCF 5.x target fingerprints its real version and resolves here.

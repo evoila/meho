@@ -205,8 +205,9 @@ _CLUSTER_LIST = SddcVcf5TypedOp(
     llm_instructions=_instructions(
         when_to_call=(
             "Call to list vSphere clusters; pass domainId to read one domain. The "
-            "vendor reference lists the domainId filter from 5.2 on; on older 5.x "
-            "builds check the domain of each row yourself."
+            "vendor reference lists the domainId filter from 5.2 on. On older 5.x "
+            "builds list all clusters, then keep the rows whose id appears in the "
+            "clusters entries of that domain in sddc.vcf5.domain.list."
         ),
         output_shape=(
             "{elements: [{id, name, primaryDatastoreName, primaryDatastoreType, "

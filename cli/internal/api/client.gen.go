@@ -5693,6 +5693,11 @@ type HTTPValidationError struct {
 // server registers with the ones this session lists
 // (:class:`SurfaceSummary`). Both have empty defaults so older response
 // decoders keep working; the handler always fills them.
+//
+// “sandbox_mode“ (#4622) is “"on"“ or “"off"“: whether this
+// instance lets a standing grant made in the web console cover a delete
+// by a service principal. “meho status“ prints one line when it is on.
+// The default “"off"“ keeps older response decoders working.
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -5727,8 +5732,9 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
-	Operator OperatorIdentity `json:"operator"`
-	Pairings *[]PairingHealth `json:"pairings,omitempty"`
+	Operator    OperatorIdentity `json:"operator"`
+	Pairings    *[]PairingHealth `json:"pairings,omitempty"`
+	SandboxMode *string          `json:"sandbox_mode,omitempty"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
 	//
@@ -8776,6 +8782,7 @@ type ServiceGrantRead struct {
 	ConnectorId       string              `json:"connector_id"`
 	CreatedAt         time.Time           `json:"created_at"`
 	CreatedBySub      string              `json:"created_by_sub"`
+	DeleteGrant       *bool               `json:"delete_grant,omitempty"`
 	ExpiresAt         *time.Time          `json:"expires_at"`
 	Id                openapi_types.UUID  `json:"id"`
 	OpId              string              `json:"op_id"`

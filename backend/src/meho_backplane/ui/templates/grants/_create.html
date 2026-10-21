@@ -54,7 +54,11 @@
           <label class="block space-y-1"><span class="text-sm">Target name pattern selector</span><input type="text" name="target_name_pattern" value="{{ values.get('target_name_pattern', '') }}" class="input input-bordered w-full font-mono" maxlength="512" placeholder="esx-dc*" /></label>
         </div>
         <label class="block space-y-1"><span class="text-sm font-medium">Reason</span><textarea name="reason" class="textarea textarea-bordered w-full" :required="kind === 'service'" maxlength="2048" rows="3" placeholder="Why this service may run this operation unattended">{{ values.get('reason', '') }}</textarea></label>
+        {% if sandbox_mode_on %}
+        <div class="alert alert-warning text-sm" data-sandbox-delete-grant-note><span>This instance is in sandbox mode. A grant for a delete operation, or for a delete step of a multi-step operation, is a delete grant. It needs an expiry within {{ delete_grant_max_days }} days, and MEHO never renews it by itself. Composite operations require a grant for each governed child operation.</span></div>
+        {% else %}
         <div class="alert alert-warning text-sm"><span>Delete-shaped operations cannot be granted. Composite operations require a grant for each governed child operation.</span></div>
+        {% endif %}
       </fieldset>
 
       <label class="block space-y-1">

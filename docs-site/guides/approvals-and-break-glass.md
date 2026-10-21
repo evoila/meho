@@ -242,6 +242,49 @@ written to the audit log. Concretely:
   `GET /api/v1/approvals/{id}/result`. Only the caller that started the
   delete can read that result.
 
+## Sandbox mode: one exception, for disposable test systems only
+
+A MEHO instance can run in **sandbox mode**. It is only for an instance
+that holds disposable test systems: systems built for one test and
+deleted after it. On such an instance a tenant admin may give a service
+principal a standing grant that also covers deletes, a **delete grant**.
+So an automated test run can build, change and delete its own test
+systems with no wait for a person. Every other instance keeps the rules
+above; it shows `"sandbox_mode": "off"` on `/ready` and in `meho status`.
+
+What stays the same on a sandbox:
+
+- A person's delete still waits for a second person. An agent login is
+  still refused a delete. A satellite runner never gets a delete.
+- A permanent delete under a delete grant still needs the preview hash
+  of its own preview and a blast-radius statement. MEHO checks both
+  before it records the grant as used, so a refused call leaves no
+  "auto-approved" record. The record of a used grant holds the hash and
+  the blast radius.
+
+How delete grants work:
+
+- Only a tenant admin creates one, and only in the web console. The REST
+  API and the CLI refuse it, also with a person's token.
+- Every delete grant expires within 30 days. MEHO never renews one by
+  itself; the banner on every console page counts the delete grants that
+  expire within 7 days.
+- Delete grants are kept in their own table. An older MEHO build never
+  reads it, so after a rollback every delete waits for a person again.
+
+How the mode is set:
+
+- At install time, with the chart values `sandboxMode.enabled: true` and
+  `sandboxMode.confirmHost` equal to the instance's host name. The host
+  name must have a part that is exactly `sandbox` (for example
+  `meho.sandbox.example`). MEHO refuses to start otherwise.
+- MEHO stores the mode in the database at the first start and refuses to
+  start when the stored mode differs from the setting. To change the
+  mode, install a new instance with a new database.
+- Keep a sandbox on its own site: its own MEHO, Keycloak and Vault, only
+  disposable systems as targets, and no network route to any other
+  system. Those walls take the place of a person's approval.
+
 ## Proving which posture a deploy is running
 
 Break-glass leaves a trail, so an auditor never has to trust a claim

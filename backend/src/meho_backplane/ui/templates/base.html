@@ -215,6 +215,18 @@
           </div>
         </header>
 
+        {# ---------- Sandbox mode banner (#4622) ---------- #}
+        {% if sandbox_mode_active() %}
+        <div class="alert alert-warning rounded-none" role="status" data-sandbox-banner>
+          <span>
+            <strong>Sandbox mode:</strong> agents may delete systems here without a person's approval.
+            {% if sandbox_expiring_delete_grants is defined and sandbox_expiring_delete_grants %}
+            <a href="/ui/grants" class="link">{{ sandbox_expiring_delete_grants }} delete grant{% if sandbox_expiring_delete_grants != 1 %}s{% endif %} expire{% if sandbox_expiring_delete_grants == 1 %}s{% endif %} within 7 days.</a>
+            {% endif %}
+          </span>
+        </div>
+        {% endif %}
+
         {# ---------- Content slot ---------- #}
         <main class="mx-auto w-full max-w-[1500px] flex-1 px-5 py-6 lg:px-10 lg:py-9">
           {% block content %}{% endblock %}

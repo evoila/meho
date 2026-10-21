@@ -727,8 +727,15 @@ async def enforce_subop_policy(
         parameter_schema={},
     )
 
+    # #4622: the step's params reach the gate so a delete grant (sandbox
+    # mode) can store the step's proposed effect on its grant-use row. No
+    # preview hash: a ``destructive`` step stays refused under any grant.
     verdict, reason = await policy_gate(
-        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        params=params,
     )
     if verdict is PermissionVerdict.AUTO_EXECUTE:
         return None

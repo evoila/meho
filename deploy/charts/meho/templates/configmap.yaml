@@ -223,6 +223,21 @@ data:
   {{- if $mcpResourceUri }}
   MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
   {{- end }}
+  {{- /* #4622 -- sandbox mode: rendered only when on. The confirm host
+       must be the instance's own host name (ingress.host); the backplane
+       checks it again at boot against the MCP resource URI, and refuses a
+       host without a `sandbox` label. With the default (off) no sandbox
+       key is rendered at all. */}}
+  {{- if .Values.sandboxMode.enabled }}
+  {{- if not .Values.ingress.enabled }}
+  {{- fail "sandboxMode.enabled is true but ingress is disabled: sandboxMode.confirmHost must equal ingress.host, the instance's public host name." }}
+  {{- end }}
+  {{- if ne .Values.sandboxMode.confirmHost .Values.ingress.host }}
+  {{- fail (printf "sandboxMode.confirmHost (%q) must equal ingress.host (%q). Sandbox mode is only for an instance that holds disposable test systems; the confirm host proves these values belong to this instance." .Values.sandboxMode.confirmHost .Values.ingress.host) }}
+  {{- end }}
+  MEHO_SANDBOX_MODE: "true"
+  MEHO_SANDBOX_MODE_CONFIRM: {{ .Values.sandboxMode.confirmHost | quote }}
+  {{- end }}
   # #3997 — most output tokens the agent asks the model for in one answer.
   # Rendered always; it only matters when the agent runtime is in use.
   AGENT_MAX_OUTPUT_TOKENS: {{ .Values.agent.maxOutputTokens | quote }}

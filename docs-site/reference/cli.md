@@ -4406,7 +4406,7 @@ meho service-principals grants create [flags]
 - `--connector-id` — exact connector id; globs are refused (required)
 - `--expires` — optional ISO 8601 UTC expiry
 - `--json` — emit raw ServiceGrantRead JSON
-- `--op-id` — exact operation id; globs and delete-shaped ops are refused (required)
+- `--op-id` — exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)
 - `--principal` — JWT sub of the service principal (required)
 - `--reason` — operator justification for this standing grant (required)
 - `--target` — target UUID (optional; targetless is not a wildcard)

@@ -37,6 +37,7 @@ from meho_backplane.operations.service_grants import (
     GrantValidationError as ServiceGrantValidationError,
 )
 from meho_backplane.operations.service_grants import ServicePrincipalGrantService
+from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -122,15 +123,21 @@ async def _service_row(grant: ServiceGrantRead, tenant_id: UUID) -> dict[str, ob
         value for value in (grant.target_product, grant.target_name_pattern) if value
     )
     effect = "active"
+    # SQLite returns a naive datetime for a timezone-aware column; treat it
+    # as UTC so the expiry comparison works on every database.
+    expires_at = grant.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
     if grant.revoked_at is not None:
         effect = "revoked"
-    elif grant.expires_at is not None and grant.expires_at <= datetime.now(UTC):
+    elif expires_at is not None and expires_at <= datetime.now(UTC):
         effect = "expired"
     elif grant.orphaned:
         effect = "orphaned"
     return {
         "id": str(grant.id),
         "kind": "service",
+        "delete_grant": grant.delete_grant,
         "subject": subject_ref(grant.principal_sub, None),
         "op": grant.op_id,
         "connector": grant.connector_id,
@@ -211,14 +218,18 @@ async def _index(
     return response
 
 
+def _modal_context(session: UISessionContext) -> dict[str, object]:
+    return {
+        "csrf_token": mint_csrf_token(str(session.session_id)),
+        "verdicts": [v.value for v in GrantVerdict],
+        "sandbox_mode_on": sandbox_mode_active(),
+        "delete_grant_max_days": SANDBOX_DELETE_GRANT_MAX_DAYS,
+    }
+
+
 async def _create_modal(request: Request, session: UISessionContext = _session) -> HTMLResponse:
     response = get_templates().TemplateResponse(
-        request,
-        "grants/_create.html",
-        {
-            "csrf_token": mint_csrf_token(str(session.session_id)),
-            "verdicts": [v.value for v in GrantVerdict],
-        },
+        request, "grants/_create.html", _modal_context(session)
     )
     _csrf(response, session)
     return response
@@ -275,8 +286,10 @@ async def _create(
                 audit_op_class="write",
                 audit_agent_name=service_payload.principal_sub,
             )
+            # #4622: the console is the only place a delete grant can be made.
+            # The mark is set here, in server code; no form field sets it.
             await ServicePrincipalGrantService().create(
-                session.tenant_id, session.operator_sub, service_payload
+                session.tenant_id, session.operator_sub, service_payload, from_console=True
             )
         else:
             raise ValueError("choose agent or service grant")
@@ -299,8 +312,7 @@ async def _create(
             request,
             "grants/_create.html",
             {
-                "csrf_token": mint_csrf_token(str(session.session_id)),
-                "verdicts": [v.value for v in GrantVerdict],
+                **_modal_context(session),
                 "errors": errors,
                 "values": {
                     "kind": form_kind,

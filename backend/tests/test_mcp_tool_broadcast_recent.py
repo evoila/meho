@@ -24,7 +24,6 @@ live in ``tests/test_broadcast_archive_cursor.py``.
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -35,11 +34,6 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import reset_broadcast_client_for_testing
-from meho_backplane.broadcast.history import (
-    InvalidSinceError,
-    default_since_ms,
-    parse_since,
-)
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.broadcast import _handler_recent
@@ -233,33 +227,6 @@ def test_invalid_cursor_returns_invalid_params_labelled_cursor(
     canonical = message_for("cursor")
     assert canonical.lower().startswith("cursor:")
     assert message_for("since") == canonical
-
-
-def test_since_invalid_iso_rejects_with_domain_error() -> None:
-    """The stream-window parser (UI history path) raises a domain error."""
-    with pytest.raises(InvalidSinceError, match="not a valid ISO-8601"):
-        parse_since("not-a-real-timestamp")
-
-
-def test_parse_since_default_is_now_minus_30m() -> None:
-    """``parse_since(None)`` returns a bare-ms ~30 minutes in the past."""
-    before_ms = int(time.time() * 1000)
-    cursor = parse_since(None)
-    after_ms = int(time.time() * 1000)
-    assert cursor.isdigit()
-    cursor_ms = int(cursor)
-    assert before_ms - 30 * 60_000 <= cursor_ms <= after_ms - 30 * 60_000
-
-
-def test_default_since_ms_handles_clock_underflow(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A clock skew producing a negative bare-ms clamps to 0.
-
-    Documented contract; without the clamp, a misconfigured clock
-    would send a negative ``min`` to Valkey and the server would
-    reject the command, breaking every call until the clock recovers.
-    """
-    monkeypatch.setattr(time, "time", lambda: 60.0)  # ts*1000 = 60_000 ms; minus 30m = -ve
-    assert default_since_ms() == 0
 
 
 # ---------------------------------------------------------------------------

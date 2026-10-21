@@ -49,10 +49,8 @@ import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
@@ -114,18 +112,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -579,7 +565,6 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     composite_op_id: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Each composite runs to a benign business status on the direct session.
 
@@ -617,7 +602,6 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
 async def test_vm_create_happy_path_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.create: folder GET -> create POST -> NIC PATCH -> power POST."""
     recorder = _RecordingVmwareConnector()
@@ -659,7 +643,6 @@ async def test_vm_create_happy_path_sub_op_sequence(
 async def test_vm_create_rollback_on_nic_failure(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.create: a NIC-attach transport error rolls back via DELETE:/vcenter/vm/{vm}."""
     recorder = _RecordingVmwareConnector()
@@ -692,6 +675,14 @@ async def test_vm_create_rollback_on_nic_failure(
     assert result.result["status"] == "rolled_back"
     assert result.result["failed_step"] == "nic_attach"
     assert result.result["vm_id"] is None
+    # #4057: the result says which step failed, why, and that the VM is gone.
+    assert result.result["rollback"] == {"vm_id": "vm-123", "outcome": "removed"}
+    assert result.error is not None
+    assert result.error.startswith(
+        "rolled_back: vm.create failed at step 'nic_attach'; "
+        "the rollback removed the VM it created (vm-123). Cause: nic attach"
+    )
+    assert "HTTP 500" in result.error
     assert recorder.calls == [
         ("GET", "/vcenter/folder"),
         ("POST", "/vcenter/vm"),
@@ -704,7 +695,6 @@ async def test_vm_create_rollback_on_nic_failure(
 async def test_vm_clone_synchronous_deploy_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.clone: source read -> synchronous per-item deploy -> completed (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -743,7 +733,6 @@ async def test_vm_clone_synchronous_deploy_sub_op_sequence(
 async def test_vm_snapshot_revert_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.snapshot.revert: vim tree read -> match-by-name -> vim revert (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -793,7 +782,6 @@ async def test_vm_snapshot_revert_sub_op_sequence(
 async def test_vm_migrate_drs_path_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.migrate: vim drsRecommendation read -> relocate (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -837,7 +825,6 @@ async def test_vm_migrate_drs_path_sub_op_sequence(
 async def test_vm_power_bulk_fan_out_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.power.bulk: list -> per-VM power action fan-out."""
     recorder = _RecordingVmwareConnector()
@@ -866,7 +853,6 @@ async def test_vm_power_bulk_fan_out_sub_op_sequence(
 async def test_host_evacuate_recursive_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """host.evacuate: list VMs -> recursive vm.migrate per VM -> maintenance enter.
 
@@ -934,7 +920,6 @@ async def test_host_evacuate_recursive_sub_op_sequence(
 async def test_host_detach_from_vds_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """host.detach_from_vds: portgroups -> VMs -> per-NIC migrate -> vim DVS detach."""
     recorder = _RecordingVmwareConnector()
@@ -977,7 +962,6 @@ async def test_host_detach_from_vds_sub_op_sequence(
 async def test_cluster_patch_sequential_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """cluster.patch: list hosts -> per-host vim enter -> vLCM apply -> vim exit (#2970)."""
     recorder = _RecordingVmwareConnector()
@@ -1034,7 +1018,6 @@ async def test_write_composite_human_dispatch_parks_for_approval(
     composite_op_id: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A USER principal dispatching a write composite is parked at the top level.
 
@@ -1074,7 +1057,6 @@ async def test_write_composite_human_dispatch_parks_for_approval(
 async def test_vm_create_full_queue_approve_resume_execute(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.create: full queued -> approve -> resume -> execute cycle.
 
@@ -1248,7 +1230,6 @@ class _DiskGrowVmwareConnector:
 async def test_disk_grow_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.disk.grow: park (with the #2681 op-identity envelope) → approve → resume → grow.
 
@@ -1347,7 +1328,6 @@ async def test_disk_grow_queue_approve_resume_with_2681_envelope(
 async def test_disk_grow_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.disk.grow runs to ``grown`` on the direct session with ZERO ingested rows."""
     recorder = _DiskGrowVmwareConnector()
@@ -1464,7 +1444,6 @@ _CLONE_PARAMS: dict[str, Any] = {
 async def test_clone_from_template_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.clone_from_template: park (with #2681 op-identity envelope) → approve → resume → clone.
 
@@ -1565,7 +1544,6 @@ async def test_clone_from_template_queue_approve_resume_with_2681_envelope(
 async def test_clone_from_template_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.clone_from_template runs to ``cloned`` on the direct session with ZERO ingested rows."""
     recorder = _CloneFromTemplateVmwareConnector()
@@ -1601,7 +1579,6 @@ _DEPLOY_FROM_LIBRARY_PARAMS: dict[str, Any] = {
 async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.deploy_from_library: park (with #2681 op-identity envelope) → approve → resume → deploy.
 
@@ -1860,7 +1837,6 @@ _DEPLOY_CALL = ("POST", "/vcenter/ovf/library-item/li-1?action=deploy")
 async def test_deploy_rename_park_approve_resume_renames_and_deploys_nothing(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Approving a waiting rename renames the deployed VM; nothing is deployed again (#4217).
 
@@ -1915,7 +1891,6 @@ async def test_deploy_rename_park_approve_resume_renames_and_deploys_nothing(
 async def test_deploy_cleanup_park_approve_resume_deletes_and_deploys_nothing(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Approving a waiting cleanup DELETE deletes the partial VM and deploys nothing (#4217).
 
@@ -1961,7 +1936,6 @@ async def test_deploy_cleanup_park_approve_resume_deletes_and_deploys_nothing(
 async def test_deploy_cleanup_resume_deletes_the_saved_vm_not_the_vm_that_took_its_name(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An approved cleanup delete removes the saved VM, whatever the name finds now (#4217).
 
@@ -2003,7 +1977,6 @@ async def test_deploy_cleanup_resume_deletes_the_saved_vm_not_the_vm_that_took_i
 async def test_deploy_vapp_destroy_park_approve_resume_destroys_once_and_deploys_nothing(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Approving a waiting vApp destroy destroys the vApp once and deploys nothing (#4217).
 
@@ -2067,7 +2040,6 @@ def _pool_reads(recorder: _RecordingVmwareConnector) -> int:
 async def test_deploy_vapp_destroy_resume_destroys_the_saved_vapp_not_the_one_that_took_its_name(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An approved vApp destroy removes the saved vApp, whatever the pool shows now (#4217).
 
@@ -2130,7 +2102,6 @@ async def test_deploy_vapp_destroy_resume_destroys_the_saved_vapp_not_the_one_th
 async def test_deploy_each_approval_continues_and_no_write_runs_twice(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Three approvals in a row: deploy, then rename, then power-on, each run once (#4217).
@@ -2228,7 +2199,6 @@ _FIND_ITEM_CALL = ("POST", "/content/library/item?action=find")
 async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An approved deploy deploys the item its first run resolved, not what the name finds (#4217).
@@ -2303,7 +2273,6 @@ async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed
 async def test_agent_waiter_resume_of_a_parked_deploy_deploys_once_under_the_same_name(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An approved deploy runs once, under the name the person approved (#4217).
 
@@ -2385,7 +2354,6 @@ async def test_agent_waiter_resume_of_a_parked_deploy_deploys_once_under_the_sam
 async def test_vm_create_rollback_park_approve_resume_deletes_and_creates_nothing(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Approving a waiting ``vm.create`` rollback DELETE deletes the VM; no second create (#4217).
 
@@ -2435,12 +2403,18 @@ async def test_vm_create_rollback_park_approve_resume_deletes_and_creates_nothin
     assert pending.resume_parent is not None
     assert pending.resume_parent["after_main_effect"] is True
     assert pending.resume_parent["state"]["rollback"]["vm_id"] == "vm-rb-1"
+    # #4057: the first result says the VM still exists until the DELETE is approved.
+    assert result.result["rollback"] == {"vm_id": "vm-rb-1", "outcome": "awaiting_approval"}
 
     resume = await _resume(pending.id, await _approve_as(pending.id, "ops-reviewer"))
 
     assert resume.status == "error", resume.result
     assert resume.extras["error_code"] == "rolled_back"
-    assert resume.result == result.result
+    assert resume.result["rollback"] == {"vm_id": "vm-rb-1", "outcome": "removed"}
+    unchanged = ("status", "vm_id", "steps_succeeded", "failed_step", "rollback_reason")
+    assert {key: resume.result[key] for key in unchanged} == {
+        key: result.result[key] for key in unchanged
+    }
     assert recorder.calls == [*first_calls, ("DELETE", "/vcenter/vm/vm-rb-1")]
     assert await _approval_row_count() == 1
 
@@ -2449,7 +2423,6 @@ async def test_vm_create_rollback_park_approve_resume_deletes_and_creates_nothin
 async def test_import_power_on_park_approve_resume_only_powers_on(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Approving a waiting power-on of an imported VM only powers it on (#4217).
@@ -2607,7 +2580,6 @@ class _DrsRuleVmwareConnector:
 async def test_drs_rule_create_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """drs_rule.create: park (#2681 envelope + fan-out preview) → approve → resume → created.
 
@@ -2708,7 +2680,6 @@ async def test_drs_rule_create_queue_approve_resume_with_2681_envelope(
 async def test_drs_rule_create_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """drs_rule.create runs to ``created`` on the direct session with ZERO ingested rows."""
     recorder = _DrsRuleVmwareConnector()
@@ -2790,7 +2761,6 @@ class _FolderCreateVmwareConnector:
 async def test_folder_create_queue_approve_resume_with_2681_envelope(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """folder.create: park (#2681 + param-echo preview) → approve → resume → created.
 
@@ -2866,7 +2836,6 @@ async def test_folder_create_queue_approve_resume_with_2681_envelope(
 async def test_folder_create_fresh_boot_dispatchable_without_ingest(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """folder.create runs to ``created`` on the direct session with ZERO ingested rows."""
     recorder = _FolderCreateVmwareConnector()
@@ -2895,7 +2864,6 @@ async def test_folder_create_fresh_boot_dispatchable_without_ingest(
 async def test_vm_resize_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.resize: read VM info -> PATCH cpu -> PATCH memory."""
     recorder = _RecordingVmwareConnector()
@@ -2932,7 +2900,6 @@ async def test_vm_resize_sub_op_sequence(
 async def test_vm_nic_repoint_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.nic.repoint: read NIC -> resolve portgroup via /vcenter/network -> PATCH backing."""
     recorder = _RecordingVmwareConnector()
@@ -2980,7 +2947,6 @@ async def test_vm_nic_repoint_sub_op_sequence(
 async def test_vm_device_cdrom_remove_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.device.cdrom (remove): read backing -> DELETE the device."""
     recorder = _RecordingVmwareConnector()
@@ -3034,7 +3000,6 @@ async def test_hardware_write_park_carries_uniform_identity_envelope(
     composite_op_id: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked hardware-write composite carries the #2681 uniform op-identity envelope.
 
@@ -3112,7 +3077,6 @@ def _assert_no_secret(blob: str, *, surface: str) -> None:
 async def test_gosc_create_secret_hygiene_across_all_surfaces(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """GOSC create with inline secrets never leaks them to reviewer surfaces (#1503).
 
@@ -3123,8 +3087,6 @@ async def test_gosc_create_secret_hygiene_across_all_surfaces(
     reviewer-facing surface is scanned for the planted secret literals:
 
     * ``proposed_effect`` — the bespoke preview echoes IDENTITY fields only.
-    * broadcast frame — the op is pinned ``credential_write`` so the params
-      collapse to aggregate-only (no ``params`` key at all).
     * audit payload — the durable row stores only a params hash.
 
     Also asserts the #2681 uniform op-identity envelope on the parked row.
@@ -3214,27 +3176,17 @@ async def test_gosc_create_secret_hygiene_across_all_surfaces(
     assert result2.result["status"] == "created"
     assert recorder.calls == [("POST", "/vcenter/guest/customization-specs")]
 
-    # --- Surface 2: broadcast frame (params collapsed to aggregate-only) ---
-    gosc_events = [e for e in captured_events if e.op_id == op_id]
-    assert gosc_events, "no broadcast event captured for the GOSC create"
-    for event in gosc_events:
-        assert event.op_class == "credential_write"
-        # The credential-class collapse drops the params dict entirely.
-        assert "params" not in event.payload, event.payload
-        _assert_no_secret(json.dumps(event.payload, default=str), surface="broadcast")
-
 
 @pytest.mark.asyncio
-async def test_vm_customize_preview_and_broadcast_carry_no_secret(
+async def test_vm_customize_preview_carries_no_secret(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vm.customize (the apply half) echoes only a spec-name reference -- no secret.
 
     The second half of "redaction covered for both ops": ``vm.customize``
     references a saved spec by name and never carries credential material, so
-    its ``proposed_effect`` and broadcast frame are safe by construction. This
+    its ``proposed_effect`` is safe by construction. This
     pins that: the preview surfaces the VM + spec name + resolved power state,
     and no secret literal can appear (there is none in its params).
     """
@@ -3336,7 +3288,6 @@ async def _seed_composite_service_grant(*, composite_op_id: str, target_id: UUID
 async def test_vm_power_subop_park_approve_resume_executes(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """REST ``?action=`` power sub-op: park → approve → resume fires the power op.
 
@@ -3421,7 +3372,6 @@ class _Pre9RecordingVmwareConnector(_RecordingVmwareConnector):
 async def test_vm_create_vim_subop_park_approve_resume_creates_vm(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """VI-JSON ``CreateVM_Task`` sub-op: park → approve → resume → the VM exists.
 
@@ -3550,7 +3500,6 @@ async def test_vm_create_vim_subop_park_approve_resume_creates_vm(
 async def test_vm_create_multi_gate_resume_fails_closed_no_double_execute(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A later governed leg that re-gates on resume aborts, not re-parks (#3351 B1).
@@ -3673,7 +3622,6 @@ def _library_create_params() -> dict[str, Any]:
 async def test_content_library_subscribed_create_500_audits_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A 500 on the create sub-op dispatches as an error and audits as error (#3809).
 
@@ -3723,7 +3671,6 @@ async def test_content_library_subscribed_create_500_audits_error(
 async def test_content_library_subscribed_create_500_on_resume_reaches_approver(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked-then-approved create whose sub-op 500s returns an error on resume (#3809).
 
@@ -3877,7 +3824,6 @@ async def _approval_row_count() -> int:
 async def test_agent_waiter_resumes_rest_action_subop_park(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """REST ``?action=`` power sub-op: agent park → approve → agent waiter → power fires."""
     recorder = _RecordingVmwareConnector()
@@ -3923,7 +3869,6 @@ async def test_agent_waiter_resumes_rest_action_subop_park(
 async def test_agent_waiter_resumes_vim_create_subop_park(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """VI-JSON ``CreateVM_Task`` sub-op: agent park → approve → agent waiter → VM exists."""
     recorder = _Pre9RecordingVmwareConnector()
@@ -4005,7 +3950,6 @@ async def test_agent_waiter_resumes_vim_create_subop_park(
 async def test_agent_waiter_multi_gate_resume_fails_closed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The multi-gate guard fires on the agent path too (#3351 B1, #3421).
 
@@ -4058,7 +4002,6 @@ async def test_agent_waiter_multi_gate_resume_fails_closed(
 async def test_operator_and_agent_surfaces_resume_the_same_row_identically(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both resume surfaces re-enter the same parked row the same way (#3421).
@@ -4169,7 +4112,6 @@ async def _reassign_target_name(original_id: UUID, *, soft_delete: bool) -> UUID
 async def test_agent_waiter_composite_resume_runs_against_saved_target_after_rename(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The name the agent parked with now points elsewhere; the saved target wins.
@@ -4223,7 +4165,6 @@ async def test_agent_waiter_composite_resume_runs_against_saved_target_after_ren
 async def test_agent_waiter_composite_resume_refuses_deleted_target_with_reused_name(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The saved target was deleted and its name reused: refuse, run nothing.
 

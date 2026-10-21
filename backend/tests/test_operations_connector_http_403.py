@@ -51,9 +51,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -108,18 +106,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -644,9 +630,8 @@ def test_result_connector_http_422_non_list_errors_field_ignored() -> None:
 async def test_dispatch_converts_403_to_connector_http_403(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """403 write dispatch -> structured ``connector_http_403`` + audit row + event.
+    """403 write dispatch -> structured ``connector_http_403`` + audit row.
 
     The dispatcher catches the connector's :exc:`httpx.HTTPStatusError`
     (403) ahead of the generic ``except Exception`` and emits the
@@ -702,17 +687,13 @@ async def test_dispatch_converts_403_to_connector_http_403(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_converts_422_to_connector_http_422(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """422 write dispatch -> structured ``connector_http_422`` + audit row + event.
+    """422 write dispatch -> structured ``connector_http_422`` + audit row.
 
     The dispatcher catches the connector's :exc:`httpx.HTTPStatusError`
     (422) ahead of the generic ``except Exception`` and emits the
@@ -776,15 +757,11 @@ async def test_dispatch_converts_422_to_connector_http_422(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_non_403_or_422_status_error_falls_through_to_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A 500 ``HTTPStatusError`` stays ``connector_error`` -- not the 403/422 shapes.
 
@@ -832,15 +809,11 @@ async def test_dispatch_non_403_or_422_status_error_falls_through_to_connector_e
     assert result.extras["http_status"] == 500
     assert result.extras["upstream_message"] == "Server Error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_successful_write_is_unaffected(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A successful write dispatch returns ``ok`` -- the 403 arm is inert (#1649 AC)."""
     register_connector_v2(
@@ -870,15 +843,11 @@ async def test_dispatch_successful_write_is_unaffected(
     assert result.error is None
     assert result.result == {"number": 7, "state": "open"}
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "ok"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_notimplemented_still_maps_to_connector_unsupported(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#1627 regression: NotImplementedError still -> ``connector_unsupported``.
 
@@ -930,7 +899,6 @@ async def test_dispatch_notimplemented_still_maps_to_connector_unsupported(
 async def test_call_operation_envelope_carries_connector_http_403(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The serialized envelope both transports return carries the 403 shape.
 

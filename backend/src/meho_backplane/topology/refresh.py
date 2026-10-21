@@ -60,7 +60,6 @@ from sqlalchemy import and_, false, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.resolver import resolve_connector
@@ -74,7 +73,6 @@ from meho_backplane.db.models import (
     GraphHistoryChangeKind,
     GraphNode,
 )
-from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
 )
@@ -996,7 +994,7 @@ async def _reconcile_edges(
     return added, updated, removed
 
 
-async def _write_audit_and_broadcast(
+async def _write_audit(
     *,
     session: AsyncSession,
     audit_id: uuid.UUID,
@@ -1004,13 +1002,12 @@ async def _write_audit_and_broadcast(
     target_id: uuid.UUID,
     result: RefreshResult,
 ) -> None:
-    """Write the audit row in the reconcile transaction; publish fail-open.
+    """Write the audit row in the reconcile transaction.
 
     The audit row is added to the **same** session as the reconcile so
     the spec's "no success without a committed audit row" invariant
-    holds: if the audit insert fails the whole refresh rolls back. The
-    broadcast publish is fail-open per :func:`publish_event`'s contract
-    and is issued by the caller *after* the transaction commits.
+    holds: if the audit insert fails the whole refresh rolls back. No
+    Broadcast event is published (#3758).
     """
     counts = {
         "added_nodes": result.added_nodes,
@@ -1041,49 +1038,6 @@ async def _write_audit_and_broadcast(
             },
         )
     )
-
-
-async def _publish_refresh_event(
-    *,
-    audit_id: uuid.UUID,
-    operator: Operator,
-    target_name: str,
-    result: RefreshResult,
-) -> None:
-    """Emit the per-refresh broadcast event. Fail-open by contract.
-
-    The payload is aggregate-only counts plus the op metadata — no node
-    or edge names — so the read-class default holds without a redactor
-    pass (Initiative #363 item 11).
-    """
-    lineage = resolve_broadcast_lineage()
-    event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime.now(UTC),
-        tenant_id=operator.tenant_id,
-        principal_sub=operator.sub,
-        principal_name=operator.name,
-        target_name=target_name,
-        op_id=_REFRESH_OP_ID,
-        op_class=_REFRESH_OP_CLASS,
-        result_status="ok",
-        audit_id=audit_id,
-        payload={
-            "op_class": _REFRESH_OP_CLASS,
-            "result_status": "ok",
-            "target_id": str(result.target_id),
-            "added_nodes": result.added_nodes,
-            "added_edges": result.added_edges,
-            "updated_nodes": result.updated_nodes,
-            "updated_edges": result.updated_edges,
-            "removed_nodes": result.removed_nodes,
-            "removed_edges": result.removed_edges,
-        },
-        actor_sub=lineage.actor_sub,
-        agent_session_id=lineage.agent_session_id,
-        work_ref=lineage.work_ref,
-    )
-    await publish_event(event)
 
 
 async def _apply_reconcile(
@@ -1156,7 +1110,7 @@ async def _apply_reconcile(
             no_populator_for_product=no_populator_for_product,
             populated_products=populated_products,
         )
-        await _write_audit_and_broadcast(
+        await _write_audit(
             session=session,
             audit_id=audit_id,
             operator=operator,
@@ -1279,7 +1233,6 @@ async def refresh_target_topology(
     """
     started = time.perf_counter()
     target_id: uuid.UUID = target.id
-    target_name: str = getattr(target, "name", str(target_id))
     discovered_by = getattr(target, "product", "unknown")
     tenant_id = operator.tenant_id
 
@@ -1310,21 +1263,6 @@ async def refresh_target_topology(
         no_populator_for_product=no_populator_for_product,
         populated_products=populated_products,
     )
-
-    # Transaction committed (audit row included). Broadcast is fail-open.
-    try:
-        await _publish_refresh_event(
-            audit_id=audit_id,
-            operator=operator,
-            target_name=target_name,
-            result=result,
-        )
-    except Exception:
-        _log.exception(
-            "topology_refresh_broadcast_failed",
-            target_id=str(target_id),
-            tenant_id=str(tenant_id),
-        )
 
     _log.info(
         "topology_refresh_applied",

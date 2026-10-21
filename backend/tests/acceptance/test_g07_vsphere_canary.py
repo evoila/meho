@@ -165,7 +165,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
@@ -175,7 +174,6 @@ from meho_backplane.db.engine import (
     reset_engine_for_testing,
 )
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup, Target
-from meho_backplane.operations import _audit as audit_module
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._branches import _substitute_path
 from meho_backplane.operations.ingest import (
@@ -1993,12 +1991,10 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 #    criteria becomes reachable. Gated on ``G07_CANARY_REAL_LLM=1`` +
 #    ``ANTHROPIC_API_KEY``.
 # 2. vcsim dispatch — seeds a :class:`Target` row, monkey-patches
-#    :func:`publish_event` (via the dispatcher's already-bound import)
-#    + the auto-shim's no-op ``auth_headers`` (vcsim accepts any
+#    the auto-shim's no-op ``auth_headers`` (vcsim accepts any
 #    credential), then dispatches ``GET:/vcenter/cluster`` via
 #    :func:`call_operation` and asserts ``status=='ok'`` + an audit-log
-#    delta of +1 + at least one captured :class:`BroadcastEvent`. Gated
-#    on ``MEHO_VCSIM_TARGET=<base-url>``.
+#    delta of +1. Gated on ``MEHO_VCSIM_TARGET=<base-url>``.
 #
 # Both ride existing substrate — no production code changes.
 #
@@ -2272,8 +2268,8 @@ async def test_g07_canary_real_llm_eyeball(
 
 #: Opt-in env var pointing at a running vcsim instance's base URL.
 #: When set, the dispatch test seeds a :class:`Target` row, dispatches
-#: ``GET:/vcenter/cluster`` against it, and asserts the audit /
-#: broadcast contract. When unset, the test skips cleanly.
+#: ``GET:/vcenter/cluster`` against it, and asserts the audit
+#: contract. When unset, the test skips cleanly.
 _VCSIM_TARGET_ENV: str = "MEHO_VCSIM_TARGET"
 
 #: vcsim accepts any credential — the simulator is intentionally
@@ -2325,7 +2321,7 @@ def _vcsim_skip_reason() -> str | None:
         return (
             f"vcsim dispatch canary opt-in: set {_VCSIM_TARGET_ENV} to a running "
             "vcsim base URL (e.g. http://localhost:8989) to dispatch "
-            f"{_VCSIM_DISPATCH_OP_ID} and verify the audit + broadcast contract. "
+            f"{_VCSIM_DISPATCH_OP_ID} and verify the audit contract. "
             "Not run in default CI."
         )
     return None
@@ -2380,14 +2376,10 @@ async def test_g07_canary_vcsim_dispatch(
     canary_operator: Operator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end dispatch against vcsim: status ok + +1 audit row + ≥1 broadcast event.
+    """End-to-end dispatch against vcsim: status ok + +1 audit row.
 
-    Seeds a :class:`Target` row matching the env value, patches the
-    dispatcher's already-bound :func:`publish_event` import (the
-    bind site is ``meho_backplane.operations._audit``, not the
-    broadcast package — patching the package would not catch the
-    audit helper's resolved reference), and patches the auto-shim's
-    ``auth_headers`` (a class-level :class:`NotImplementedError`
+    Seeds a :class:`Target` row matching the env value and patches the
+    auto-shim's ``auth_headers`` (a class-level :class:`NotImplementedError`
     stub on :class:`GenericRestConnector`) to return ``{}`` so the
     no-auth vcsim accepts the GET.
 
@@ -2396,8 +2388,6 @@ async def test_g07_canary_vcsim_dispatch(
     * :class:`OperationResult` ``status == 'ok'``.
     * Exactly one new :class:`~meho_backplane.db.models.AuditLog`
       row with ``method='DISPATCH'`` and ``path == _VCSIM_DISPATCH_OP_ID``.
-    * At least one captured :class:`BroadcastEvent` with the same
-      ``op_id``.
     """
     _stub_client, _base_url = vcsim_ingested_canary
 
@@ -2429,20 +2419,7 @@ async def test_g07_canary_vcsim_dispatch(
         session.add(target)
         await session.commit()
 
-    # 2. Patch publish_event on the audit module's already-bound
-    #    import. Per the existing pattern documented in
-    #    backend/tests/test_operations_dispatcher.py::captured_events,
-    #    patching the broadcast package is NOT sufficient — the
-    #    audit helper resolved the symbol at import time and reaches
-    #    it via the local module attribute.
-    captured: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-
-    # 3. Patch the auto-shim's auth_headers. The shim's class is
+    # 2. Patch the auto-shim's auth_headers. The shim's class is
     #    registered under (product, version, impl_id) in the v2
     #    registry; look it up and override the method for the test.
     registry_snapshot = all_connectors_v2()
@@ -2459,7 +2436,7 @@ async def test_g07_canary_vcsim_dispatch(
 
     monkeypatch.setattr(shim_cls, "auth_headers", _no_auth)
 
-    # 4. Snapshot the audit-log delta baseline. Filter on the
+    # 3. Snapshot the audit-log delta baseline. Filter on the
     #    dispatch path so unrelated rows (e.g. the ingest's own
     #    edit_group audits earlier in the fixture) don't pollute
     #    the delta.
@@ -2475,7 +2452,7 @@ async def test_g07_canary_vcsim_dispatch(
 
     baseline_rows = await _count_dispatch_rows()
 
-    # 5. Dispatch. ``call_operation`` is the agent-surface meta-tool
+    # 4. Dispatch. ``call_operation`` is the agent-surface meta-tool
     #    the issue body names; the dispatcher resolves the target,
     #    descriptor, connector instance, and finally runs the
     #    HTTP-shaped op_id through ``dispatch_ingested``.
@@ -2493,18 +2470,11 @@ async def test_g07_canary_vcsim_dispatch(
         f"dispatch did not succeed: status={result.get('status')!r} error={result.get('error')!r}"
     )
 
-    # 6. Audit-row delta = exactly +1 with the right shape.
+    # 5. Audit-row delta = exactly +1 with the right shape.
     final_rows = await _count_dispatch_rows()
     assert final_rows - baseline_rows == 1, (
         f"expected exactly one new DISPATCH audit row for {_VCSIM_DISPATCH_OP_ID}; "
         f"baseline={baseline_rows} final={final_rows}"
-    )
-
-    # 7. At least one captured BroadcastEvent for this op_id.
-    matching_events = [e for e in captured if e.op_id == _VCSIM_DISPATCH_OP_ID]
-    assert matching_events, (
-        f"no BroadcastEvent captured for op_id={_VCSIM_DISPATCH_OP_ID}; "
-        f"captured op_ids={[e.op_id for e in captured]}"
     )
 
 

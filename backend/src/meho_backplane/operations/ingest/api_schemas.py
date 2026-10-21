@@ -236,7 +236,8 @@ class IngestRequest(BaseModel):
     omit-equals-global semantics the MCP sibling
     ``meho_connector_ingest`` documents. The operator's own tenant
     UUID targets their tenant-curated namespace; any other UUID is
-    rejected with a synchronous 403 on both the sync and async
+    rejected (unless the operator holds ``platform_admin``, #3800)
+    with a synchronous 403 on both the sync and async
     branches by :meth:`IngestionPipelineService.authorize_scope`
     (checked eagerly at the route before the async job row is
     created, #2208, and again inside the service as defence-in-depth).
@@ -274,7 +275,9 @@ class IngestRequest(BaseModel):
             "semantics as the MCP tool meho_connector_ingest "
             "(tenant_admin only). Pass your own tenant UUID for a "
             "tenant-scoped ingest; another tenant's UUID is rejected "
-            "with 403."
+            "with 403 unless the caller holds platform_admin, which "
+            "may ingest into another tenant when it names that "
+            "tenant here (the write is audited)."
         ),
     )
     #: Explicit-quadruple counterpart to the catalog row's

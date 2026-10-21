@@ -300,12 +300,9 @@ class TestClassifyOp:
     def test_approval_prefix_maps_to_approval(self, op_id: str) -> None:
         """``approval.*`` lifecycle events classify as the dedicated ``approval`` class.
 
-        :func:`~meho_backplane.operations.approval_queue.publish_approval_event`
-        emits these with ``op_id="approval.<decision>"``. The approvals
-        console bell (G10.7-T3 #1778) subscribes to
-        ``/ui/broadcast/stream?op_class=approval`` — an exact-match
-        server-side filter — so the events need their own class rather
-        than falling through to ``other`` (which would defeat the filter).
+        Approval lifecycle op-ids (``approval.<decision>``) get their own
+        class so an ``op_class=approval`` filter finds them rather than
+        mixing them into ``other``.
         """
         assert classify_op(op_id) == "approval"
 
@@ -325,8 +322,8 @@ class TestClassifyOp:
     def test_checks_transition_maps_to_checks(self) -> None:
         """``checks.transition`` classifies as the dedicated ``checks`` class.
 
-        :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
-        emits this op-id on every claimed Dashboard rollup edge (#2720);
+        This op-id was emitted on every claimed Dashboard rollup edge
+        (#2720) until #3758;
         the class is what makes ``op_class=checks`` a usable server-side
         filter on ``meho_broadcast_recent`` / ``.watch`` and the SSE
         stream.

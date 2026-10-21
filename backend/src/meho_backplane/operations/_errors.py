@@ -157,20 +157,38 @@ def result_unknown_op(op_id: str, known_op_count: int, duration_ms: float) -> Op
     )
 
 
+#: Most ``validation_errors`` entries one ``invalid_params`` envelope carries
+#: (#3669). A params object that breaks many rules would otherwise grow the
+#: response and audit envelope without bound; the rest is counted in
+#: ``extras["validation_errors_suppressed"]``.
+_MAX_VALIDATION_ERRORS: int = 10
+
+
 def result_invalid_params(
     op_id: str,
     validation_errors: list[dict[str, Any]],
     duration_ms: float,
 ) -> OperationResult:
-    """JSON Schema validation against ``parameter_schema`` failed."""
+    """JSON Schema validation against ``parameter_schema`` failed.
+
+    The ``error`` summary counts every violation. ``extras`` keeps the
+    first :data:`_MAX_VALIDATION_ERRORS` entries and records how many were
+    left out in ``validation_errors_suppressed`` (``0`` when none were).
+    """
+    total = len(validation_errors)
+    suppressed = max(0, total - _MAX_VALIDATION_ERRORS)
+    summary = f"invalid_params: {total} validation error(s)"
+    if suppressed:
+        summary += f"; showing the first {_MAX_VALIDATION_ERRORS}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"invalid_params: {len(validation_errors)} validation error(s)",
+        error=summary,
         duration_ms=duration_ms,
         extras={
             "error_code": "invalid_params",
-            "validation_errors": validation_errors,
+            "validation_errors": validation_errors[:_MAX_VALIDATION_ERRORS],
+            "validation_errors_suppressed": suppressed,
         },
     )
 

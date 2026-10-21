@@ -30,7 +30,7 @@ Reading audit_log is itself privacy-sensitive (decision #3,
 ``docs/decisions/locked-decisions.md``): a free-text broadcast of "operator
 X queried usage for tenant Y in window Z" would leak the investigation
 target. The route binds two audit overrides via the chassis contextvar
-mechanism (see :func:`meho_backplane.audit._publish_broadcast_event`):
+mechanism (see :func:`meho_backplane.audit._resolve_op_id_and_class_override`):
 
 * ``audit_op_id = "meho.retrieval.usage"`` — the canonical op_id for
   every audit row this route writes. Operators querying ``audit_log``
@@ -108,7 +108,7 @@ def _bind_request_audit_context(
     (incident postmortem hook). The two override keys
     (``audit_op_id`` / ``audit_op_class``) are honoured by the
     chassis broadcast publisher per
-    :func:`meho_backplane.audit._publish_broadcast_event`;
+    :func:`meho_backplane.audit._resolve_op_id_and_class_override`;
     ``audit_tenant_scope`` distinguishes own-tenant inspection
     from genuine cross-tenant audit-trail queries.
     """

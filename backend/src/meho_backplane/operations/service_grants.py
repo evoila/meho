@@ -39,12 +39,23 @@ Delete-shaped guardrail
 
 A grant is the *floor* of what runs unattended, never a bypass of a
 modeled destructive gate, so :meth:`ServicePrincipalGrantService.create`
-refuses delete-shaped ops: op ids matching a configured pattern set
-(``Settings.service_grant_delete_shaped_patterns`` — at minimum
-``DELETE:*`` raw ops plus ``*.delete`` / ``*.destroy`` / ``*.remove`` /
-``*.purge`` typed ops) and, best-effort when a descriptor resolves,
-anything whose descriptor carries ``method='DELETE'`` or a ``destructive``
-tag.
+refuses delete-shaped ops. Three signs on the op id or its stored row:
+
+* a configured pattern (``Settings.service_grant_delete_shaped_patterns``
+  — at minimum ``DELETE:*`` raw ops plus ``*.delete`` / ``*.destroy`` /
+  ``*.remove`` / ``*.purge`` typed ops);
+* a vendor action name that means delete (``Destroy``, ``Delete``,
+  ``Remove``, ``Unregister`` — the word list the ingest parser uses, in
+  :mod:`meho_backplane.delete_names`). VI-JSON exposes a VM destroy as
+  ``POST:/VirtualMachine/{moId}/Destroy_Task``, so neither the HTTP method
+  nor a pattern sees it. This sign does not depend on the pattern setting
+  (#4632);
+* best-effort when a descriptor resolves, the ``destructive`` safety tier,
+  ``method='DELETE'`` or a ``destructive`` tag.
+
+The action-name sign and the descriptor signs are checked again when a
+grant is consulted at dispatch (:func:`consult_and_record_grant`), so a
+grant row that already exists for such an op never lets it run.
 """
 
 from __future__ import annotations
@@ -72,6 +83,7 @@ from meho_backplane.db.models import (
     ServicePrincipalGrant,
     Target,
 )
+from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 
 __all__ = [
@@ -194,16 +206,39 @@ def _validate_expires_at(expires_at: datetime | None) -> None:
 
 
 def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
-    """Public alias for the pattern-based delete-shaped classifier (#3349).
+    """Return why *op_id* is delete-shaped by its id alone, or ``None`` (#3349).
 
-    The governed-subop discovery surface
+    Two signs need no stored row: a configured pattern and a vendor action
+    name that means delete (#4632). The governed-subop discovery surface
     (:func:`meho_backplane.operations.governed_subops.classify_subop_grantability`)
     flags a child op un-grantable through this single-sourced rule — the same
     one :meth:`ServicePrincipalGrantService.create` refuses on — so a rollback
     / delete leg is flagged on discovery exactly as it would be refused at
     grant-create time.
     """
-    return _delete_shaped_reason_by_pattern(op_id, patterns)
+    pattern_reason = _delete_shaped_reason_by_pattern(op_id, patterns)
+    if pattern_reason is not None:
+        return pattern_reason
+    return _delete_shaped_reason_by_action_name(op_id)
+
+
+def _delete_shaped_reason_by_action_name(op_id: str) -> str | None:
+    """Return a refusal reason if the op id ends in a vendor delete action name.
+
+    ``POST:/VirtualMachine/{moId}/Destroy_Task`` is a delete even though its
+    method is ``POST`` and no pattern names it. The rule and the word list
+    are the ingest parser's (:mod:`meho_backplane.delete_names`), so the
+    grant checks and the parser cannot drift. Independent of
+    ``Settings.service_grant_delete_shaped_patterns``.
+    """
+    action_name = destructive_action_name_in_op_id(op_id)
+    if action_name is None:
+        return None
+    return (
+        f"op {op_id!r} is a delete (vendor action name {action_name!r}); "
+        "delete operations are never grantable — a standing grant is the floor "
+        "of what runs unattended, not a bypass of a destructive gate"
+    )
 
 
 def _delete_shaped_reason_by_pattern(op_id: str, patterns: tuple[str, ...]) -> str | None:
@@ -413,11 +448,11 @@ class ServicePrincipalGrantService:
         _reject_wildcards(payload)
         _validate_expires_at(payload.expires_at)
 
-        pattern_reason = _delete_shaped_reason_by_pattern(
+        op_id_reason = delete_shaped_refusal_reason(
             payload.op_id, get_settings().service_grant_delete_shaped_patterns
         )
-        if pattern_reason is not None:
-            raise GrantValidationError(pattern_reason)
+        if op_id_reason is not None:
+            raise GrantValidationError(op_id_reason)
         descriptor = await _resolve_descriptor_for_classification(
             tenant_id, payload.connector_id, payload.op_id
         )
@@ -884,8 +919,8 @@ async def consult_and_record_grant(
     caller then clears the gate to ``AUTO_EXECUTE``), or ``None`` when no
     grant matches (the caller parks the op). On a hit it writes the
     grant-use audit row (``approval.decision`` shape) in its own committed
-    transaction and publishes a fail-open broadcast — same visibility as a
-    human approval decision — before returning.
+    transaction before returning. The audit row is the record; no
+    Broadcast event is published (#3758).
 
     A ``destructive``-tier op (#3183) is refused here **before** any grant
     lookup: the tier is non-grantable, so even a stale grant row that
@@ -894,8 +929,15 @@ async def consult_and_record_grant(
     :func:`_delete_shaped_reason_by_descriptor`; together they make
     "a standing grant can never satisfy a destructive op" hold whether the
     grant is being created or consulted.
+
+    An op id whose vendor action name means delete (#4632) is refused the
+    same way. A composite's inner step arrives as an in-memory record with
+    its declared level only — no method, no tags — so for it the op id is
+    the only sign.
     """
-    destructive_reason = _delete_shaped_reason_by_descriptor(descriptor)
+    destructive_reason = _delete_shaped_reason_by_action_name(
+        descriptor.op_id
+    ) or _delete_shaped_reason_by_descriptor(descriptor)
     if destructive_reason is not None:
         _log.info(
             "service_grant_refused_delete_shaped",
@@ -929,14 +971,13 @@ async def consult_and_record_grant(
     matched_by_selector = grant.target_id is None and (
         grant.target_product is not None or grant.target_name_pattern is not None
     )
-    audit_id = await _record_grant_use(
+    await _record_grant_use(
         operator=operator,
         grant=grant,
         connector_id=connector_id,
         target_id=target_id,
         matched_by_selector=matched_by_selector,
     )
-    await _publish_grant_use_event(operator=operator, grant=grant, audit_id=audit_id)
     _log.info(
         "service_grant_auto_approved",
         grant_id=str(grant.id),
@@ -972,8 +1013,21 @@ async def _record_grant_use(
     so the auto-approval is visibly distinct on the ledger from a
     concrete-target / targetless match (the operator can see the op ran on a
     runtime-created target the selector authorised, not a pre-existing one).
+
+    Lineage (#3695): the row carries the same ids the parked path stamps, so
+    an auto-approval links to the call it cleared. ``request_id`` is the
+    request's correlation id (the dispatch's ``DISPATCH`` row carries the
+    same value), ``agent_session_id`` is the agent-run or MCP session (NULL
+    for a plain REST call), and ``parent_audit_id`` is the composite parent's
+    audit id when a composite child is the call being cleared (NULL for a
+    top-level call).
     """
-    from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
+    from meho_backplane.operations._audit import (
+        parent_audit_id_var,
+        resolve_agent_session_id,
+        work_ref_var,
+    )
+    from meho_backplane.request_usage.collector import current_request_id
 
     audit_id = uuid.uuid4()
     reason = f"auto-granted by standing grant {grant.id}"
@@ -1002,11 +1056,12 @@ async def _record_grant_use(
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
             target_id=target_id,
+            parent_audit_id=parent_audit_id_var.get(),
             agent_session_id=resolve_agent_session_id(),
             method=_GRANT_USE_METHOD,
             path=_GRANT_USE_PATH,
             status_code=_GRANT_USE_STATUS_CODE,
-            request_id=None,
+            request_id=current_request_id(),
             duration_ms=Decimal("0.00"),
             payload=payload,
             work_ref=work_ref_var.get(),
@@ -1014,52 +1069,3 @@ async def _record_grant_use(
         session.add(row)
         await session.commit()
     return audit_id
-
-
-async def _publish_grant_use_event(
-    *,
-    operator: Operator,
-    grant: ServicePrincipalGrant,
-    audit_id: uuid.UUID,
-) -> None:
-    """Publish a fail-open ``approval.auto_approved`` broadcast for the grant use.
-
-    Parity with a human decision (which broadcasts ``approval.approved``).
-    Fail-open: a broadcast outage never blocks the durable grant use — the
-    audit row is the source of truth.
-    """
-    try:
-        from meho_backplane.broadcast.events import BroadcastEvent, classify_op
-        from meho_backplane.broadcast.publisher import publish_event
-        from meho_backplane.operations._audit import resolve_broadcast_lineage
-
-        op_id = "approval.auto_approved"
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=operator.tenant_id,
-            principal_sub=operator.sub,
-            op_id=op_id,
-            op_class=classify_op(op_id),
-            result_status="ok",
-            audit_id=audit_id,
-            payload={
-                "op_class": classify_op(op_id),
-                "result_status": "ok",
-                "decision": "auto-approved",
-                "grant_id": str(grant.id),
-                "connector_id": grant.connector_id,
-                "approval_op_id": grant.op_id,
-            },
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
-        )
-        await publish_event(event)
-    except Exception:
-        _log.exception(
-            "service_grant_broadcast_failed",
-            grant_id=str(grant.id),
-            op_id=grant.op_id,
-        )

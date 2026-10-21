@@ -1,0 +1,129 @@
+{{- if .Values.coreKeycloak.enabled }}
+{{- /*
+The built-in core's `bootstrap` Job (#4043; core design §3): the realm stage
+finishes the Keycloak realm after every install and upgrade. It sets the
+client secrets from the `<release>-core-*` Secrets, adds what a newer realm
+file brings, makes the first admin and the second person (temporary
+passwords in `<release>-core-first-login`) and removes the first-start
+account. Safe to run twice. Details: docs/codebase/core-bootstrap.md.
+*/}}
+{{- $bootstrapSecret := .Values.coreKeycloak.existingSecrets.bootstrap | default (printf "%s-core-keycloak-bootstrap" .Release.Name) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-core-bootstrap" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core-bootstrap
+  annotations:
+    # After every release resource is up: Keycloak must serve the realm.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    # Same policy as the secrets Job: a re-run replaces the old Job, a
+    # successful one is removed, a failed one stays for `kubectl logs`.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        # Not `meho.selectorLabels`: the backplane NetworkPolicy allows no
+        # egress to the Kubernetes API, which this Job needs.
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: core-bootstrap
+    spec:
+      # `Never`: a failed pod keeps its log, which says what to fix.
+      restartPolicy: Never
+      serviceAccountName: {{ include "meho.core.hookName" . }}
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: bootstrap
+          # The backplane image, with the same digest pin as the Deployment.
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "meho_backplane.core.bootstrap", "keycloak"]
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Names and addresses only; every secret below comes by reference.
+            - name: MEHO_CORE_KEYCLOAK_PLAN
+              value: {{ include "meho.core.keycloakPlan" . | quote }}
+            # Values for the `${...}` placeholders of the realm file, the
+            # same ones the Keycloak pod gets.
+            - name: MEHO_REALM_PUBLIC_URL
+              value: {{ printf "https://%s" .Values.coreKeycloak.hostname | quote }}
+            - name: MEHO_REALM_TENANT_ID
+              value: {{ .Values.coreKeycloak.firstTenantId | quote }}
+            - name: MEHO_REALM_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-core-keycloak-admin" .Release.Name }}
+                  key: client_secret
+            - name: MEHO_REALM_WEB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-core-ui-auth" .Release.Name }}
+                  key: client_secret
+            - name: MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-core-check-runner" .Release.Name }}
+                  key: client_secret
+            # The first-start account. Optional: once it is removed, the
+            # Job logs in as meho-admin, and the Secret may go.
+            - name: MEHO_CORE_BOOTSTRAP_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $bootstrapSecret }}
+                  key: client_id
+                  optional: true
+            - name: MEHO_CORE_BOOTSTRAP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $bootstrapSecret }}
+                  key: client_secret
+                  optional: true
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: realm
+              mountPath: /opt/meho/realm
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # The realm file the Keycloak pod imported at its first start.
+        - name: realm
+          configMap:
+            name: {{ include "coreKeycloak.fullname" . }}-realm
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

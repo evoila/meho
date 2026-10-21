@@ -13,7 +13,10 @@ import pytest
 import yaml
 
 from meho_backplane.connectors.sddc_manager.typed_ops import SDDC_TYPED_OPS
-from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
+from meho_backplane.connectors.vmware_rest.composites._register import (
+    _COMPOSITES,
+    COMPOSITES_NOT_ON_8_0,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,6 +74,13 @@ def test_vcf_regression_subsets_match_registered_sddc_and_vmware_operations() ->
     assert {
         level: set(op_ids) for level, op_ids in vmware["typed_composite_ops"].items()
     } == _safety_groups(_COMPOSITES)
+
+    vmware_8_0 = subsets["vmware-rest-8.0"]
+    assert isinstance(vmware_8_0, dict)
+    assert set(vmware_8_0["typed_op_ids"]) == {operation.op_id for operation in VMWARE_TYPED_OPS}
+    assert {
+        level: set(op_ids) for level, op_ids in vmware_8_0["typed_composite_ops"].items()
+    } == _safety_groups([spec for spec in _COMPOSITES if spec.op_id not in COMPOSITES_NOT_ON_8_0])
 
 
 @pytest.mark.parametrize(

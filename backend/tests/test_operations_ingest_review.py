@@ -40,24 +40,32 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
     EditOpWarning,
+    EndpointDescriptorProto,
     InvalidStateTransitionError,
+    OpIdCollision,
     ReviewService,
     ensure_connector_class_registered,
     parse_connector_id,
+    register_ingested_operations,
+    run_llm_grouping,
 )
+from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
 
 
@@ -527,6 +535,43 @@ async def test_review_payload_reports_stored_deletes_below_destructive() -> None
     folder = rows["DELETE:/vcenter/folder/{folder}"]
     assert folder.needs_correction is False
     assert "waits for approval at dangerous" in folder.reason
+
+
+@pytest.mark.asyncio
+async def test_review_payload_reports_stored_vendor_delete_action_names() -> None:
+    """#4632: a stored VI-JSON delete that an earlier ingest left too weak is listed.
+
+    ``POST:/VirtualMachine/{moId}/Destroy_Task`` is a POST, so neither its
+    method nor a floor marks it. Its action name does. A lookalike stays
+    off the report.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="POST:/VirtualMachine/{moId}/Destroy_Task",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="POST:/VirtualMachine/{moId}/Reset_Task",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    rows = {row.op_id: row for row in payload.delete_ops_below_destructive}
+    assert sorted(rows) == ["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    assert payload.delete_ops_needing_correction_count == 1
+    destroy = rows["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    assert destroy.method == "POST"
+    assert destroy.expected_safety_level == "dangerous"
+    assert destroy.expected_requires_approval is True
+    assert destroy.needs_correction is True
+    assert "a fresh ingest gives dangerous" in destroy.reason
 
 
 @pytest.mark.asyncio
@@ -2572,3 +2617,629 @@ async def test_review_and_enable_reads_resolve_same_row_tenant_only() -> None:
     tenant_state = await _ops_enabled_state(tenant_id=operator_tenant)
     assert tenant_state["GET:/api/v1/resource"] is True
     assert tenant_state["HEAD:/api/v1/resource"] is True
+
+
+# ---------------------------------------------------------------------------
+# Group-truth review advice (#3671)
+# ---------------------------------------------------------------------------
+
+# (op_id, summary, safety_level, requires_approval, is_enabled)
+_OpSeed = tuple[str, str, str, bool, bool]
+
+
+async def _seed_group_with_ops(
+    *,
+    tenant_id: uuid.UUID,
+    when_to_use: str,
+    ops: list[_OpSeed],
+    group_key: str = "group-0",
+) -> None:
+    """Insert one ``vmware-rest-9.0`` group holding *ops* as given."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        group_id = uuid.uuid4()
+        session.add(
+            OperationGroup(
+                id=group_id,
+                tenant_id=tenant_id,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                group_key=group_key,
+                name="Group 0",
+                when_to_use=when_to_use,
+                review_status="enabled",
+            )
+        )
+        for op_id, summary, safety_level, requires_approval, is_enabled in ops:
+            method, _, path = op_id.partition(":")
+            session.add(
+                EndpointDescriptor(
+                    tenant_id=tenant_id,
+                    product="vmware",
+                    version="9.0",
+                    impl_id="vmware-rest",
+                    op_id=op_id,
+                    source_kind="ingested",
+                    method=method,
+                    path=path,
+                    group_id=group_id,
+                    summary=summary,
+                    safety_level=safety_level,
+                    requires_approval=requires_approval,
+                    is_enabled=is_enabled,
+                )
+            )
+        await session.commit()
+
+
+async def _group_advisory(tenant_id: uuid.UUID) -> Any:
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+    assert len(payload.groups) == 1
+    return payload.groups[0].advisory
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_safety_distribution_counts_enabled_ops_only() -> None:
+    """The distribution counts enabled ops per level, approvals, and the total."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines: list, create, and delete VMs.",
+        ops=[
+            ("GET:/vcenter/vm", "List VMs", "safe", False, True),
+            ("GET:/vcenter/vm/{vm}", "Get VM", "safe", False, True),
+            ("POST:/vcenter/vm", "Create VM", "caution", False, True),
+            ("DELETE:/vcenter/vm/{vm}", "Delete VM", "dangerous", True, True),
+            ("POST:/vcenter/vm/{vm}/destroy", "Destroy VM", "destructive", True, True),
+            # Disabled: must not be counted anywhere.
+            ("DELETE:/vcenter/vm/{vm}/disk", "Delete VM disk", "dangerous", True, False),
+            ("GET:/vcenter/vm/{vm}/power", "Get VM power", "safe", False, False),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.distribution.model_dump() == {
+        "enabled_op_count": 5,
+        "safe": 2,
+        "caution": 1,
+        "dangerous": 1,
+        "destructive": 1,
+        "requires_approval_count": 2,
+    }
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_safety_distribution_is_zero_without_enabled_ops() -> None:
+    """A staged group with no enabled op reports an all-zero distribution."""
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=3)
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.distribution.enabled_op_count == 0
+    assert advisory.distribution.safe == 0
+    assert advisory.distribution.requires_approval_count == 0
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_read_only_claim_contradicted() -> None:
+    """Text that says read-only is flagged when enabled ops need approval."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Read-only inventory of virtual machines.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("DELETE:/vcenter/vm/{vm}", "Delete a virtual machine", "dangerous", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert len(advisory.flags) >= 1
+    assert any("read-only" in flag and "dangerous: 1" in flag for flag in advisory.flags)
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_read_only_claim_safe_op_needs_approval() -> None:
+    """A safe op that needs approval breaks a read-only claim and shows its count."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Read-only VM list.",
+        ops=[
+            ("GET:/vcenter/vm", "List VMs", "safe", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    read_only = [flag for flag in advisory.flags if "read-only" in flag]
+    assert len(read_only) == 1
+    assert "1 op(s) are not safe or need approval (need approval: 1)." in read_only[0]
+    assert "()" not in read_only[0]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_all_destructive_claim_contradicted() -> None:
+    """Text that says every op is destructive is flagged when some are lower."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="All VM operations in this group are destructive.",
+        ops=[
+            ("POST:/vcenter/vm/{vm}/destroy", "Destroy VM", "destructive", True, True),
+            ("GET:/vcenter/vm", "List VMs", "safe", False, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert any("destructive" in flag and "safe: 1" in flag for flag in advisory.flags)
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_all_dangerous_claim_understates_risk() -> None:
+    """Text that says every op is dangerous is flagged when one is destructive."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="All virtual machine operations in this group are dangerous.",
+        ops=[
+            ("DELETE:/vcenter/vm/{vm}", "Delete a virtual machine", "dangerous", True, True),
+            ("POST:/vcenter/vm/{vm}/destroy", "Destroy VM", "destructive", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert len(advisory.flags) == 1
+    assert "all ops are dangerous" in advisory.flags[0]
+    assert "destructive: 1" in advisory.flags[0]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_all_non_destructive_claim_is_not_a_destructive_claim() -> None:
+    """Text that says every op is non-destructive raises no flag over safe ops."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="All virtual machine operations in this group are non-destructive.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("GET:/vcenter/vm/{vm}", "Get one virtual machine", "safe", False, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_non_destructive_claim_allows_caution_ops() -> None:
+    """Text that says non-destructive is not a read-only claim; caution ops pass."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Non-destructive updates to virtual machine settings.",
+        ops=[
+            ("GET:/vcenter/vm/{vm}", "Get one virtual machine", "safe", False, True),
+            ("PATCH:/vcenter/vm/{vm}", "Update a virtual machine", "caution", False, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_non_destructive_claim_contradicted_by_destructive_op() -> None:
+    """Text that says non-destructive is flagged when an op is destructive."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Non-destructive updates to virtual machine settings.",
+        ops=[
+            ("PATCH:/vcenter/vm/{vm}", "Update a virtual machine", "caution", False, True),
+            ("POST:/vcenter/vm/{vm}/destroy", "Destroy VM", "destructive", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert len(advisory.flags) == 1
+    assert "non-destructive" in advisory.flags[0]
+    assert "1 op(s) are destructive" in advisory.flags[0]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_no_shared_words() -> None:
+    """Text that shares no word with the enabled ops is flagged."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Use this for certificate rotation and trust stores.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("GET:/vcenter/vm/{vm}", "Get one virtual machine", "safe", False, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert len(advisory.flags) == 1
+    assert "shares no word" in advisory.flags[0]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_none_when_text_matches_ops() -> None:
+    """Text that matches its enabled ops raises no flag."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Read-only listing of virtual machines and their power state.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("GET:/vcenter/vm/{vm}/power", "Get the power state", "safe", False, True),
+            # Disabled, so it does not break the read-only claim.
+            ("DELETE:/vcenter/vm/{vm}", "Delete a virtual machine", "dangerous", True, False),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_checks_all_ops_when_none_enabled() -> None:
+    """A staged group with no enabled op is checked against all of its ops."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Read-only inventory of virtual machines.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, False),
+            ("DELETE:/vcenter/vm/{vm}", "Delete a virtual machine", "dangerous", True, False),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.distribution.enabled_op_count == 0
+    assert len(advisory.flags) == 1
+    assert "read-only" in advisory.flags[0]
+    assert "No op is enabled yet" in advisory.flags[0]
+
+
+# ---------------------------------------------------------------------------
+# Re-ingest keeps operator overrides; a breaking change is a new version (#3671)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_connector_registry() -> Iterator[None]:
+    """Reset the connector registry around a test that ingests a spec."""
+    clear_registry()
+    yield
+    clear_registry()
+
+
+@pytest.fixture
+def _stub_embedding_service() -> AsyncMock:
+    service = AsyncMock()
+    service.encode_one.return_value = [0.25] * 384
+    service.encode.return_value = [[0.25] * 384]
+    service.dimension = 384
+    return service
+
+
+def _pet_proto(
+    op_id: str,
+    *,
+    summary: str,
+    parameter_schema: dict[str, Any] | None = None,
+) -> EndpointDescriptorProto:
+    method, _, path = op_id.partition(":")
+    return EndpointDescriptorProto(
+        op_id=op_id,
+        method=method,
+        path=path,
+        summary=summary,
+        description=summary,
+        tags=["pets"],
+        parameter_schema=parameter_schema or {"type": "object", "properties": {}},
+        response_schema={"type": "object"},
+        safety_level="safe" if method == "GET" else "caution",
+        requires_approval=False,
+    )
+
+
+_PET_OPS = [
+    _pet_proto("GET:/pets", summary="List pets"),
+    _pet_proto("POST:/pets", summary="Add a pet"),
+]
+
+
+async def _load_pet_rows(tenant_id: uuid.UUID) -> dict[str, EndpointDescriptor]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.tenant_id == tenant_id,
+                EndpointDescriptor.product == "petstore",
+            )
+        )
+        return {row.op_id: row for row in result.scalars().all()}
+
+
+async def _load_group(tenant_id: uuid.UUID | None, product: str, group_key: str) -> OperationGroup:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = select(OperationGroup).where(
+            OperationGroup.product == product,
+            OperationGroup.group_key == group_key,
+        )
+        if tenant_id is None:
+            stmt = stmt.where(OperationGroup.tenant_id.is_(None))
+        else:
+            stmt = stmt.where(OperationGroup.tenant_id == tenant_id)
+        return (await session.execute(stmt)).scalar_one()
+
+
+async def _group_pet_ops(tenant_id: uuid.UUID) -> None:
+    """Do what the grouping pass does: one staged group holding both pet ops."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        group_id = uuid.uuid4()
+        session.add(
+            OperationGroup(
+                id=group_id,
+                tenant_id=tenant_id,
+                product="petstore",
+                version="1.0",
+                impl_id="petstore-rest",
+                group_key="pets",
+                name="Pets",
+                when_to_use="Manage pets: list pets and add a pet.",
+                review_status="staged",
+            )
+        )
+        rows = await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.tenant_id == tenant_id,
+                EndpointDescriptor.product == "petstore",
+            )
+        )
+        for row in rows.scalars().all():
+            row.group_id = group_id
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_connector_registry")
+async def test_override_preserved_on_reingest_of_same_spec(
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """A same-spec re-ingest keeps every operator edit byte-identical."""
+    tenant_id = uuid.uuid4()
+
+    async def ingest() -> None:
+        await register_ingested_operations(
+            product="petstore",
+            version="1.0",
+            impl_id="petstore-rest",
+            spec_source="petstore.yaml",
+            operations=_PET_OPS,
+            tenant_id=tenant_id,
+            embedding_service=_stub_embedding_service,
+        )
+
+    await ingest()
+    await _group_pet_ops(tenant_id)
+
+    # Operator review: enable the connector, then curate.
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    await service.enable_connector("petstore-rest-1.0", tenant_id=tenant_id)
+    await service.edit_op(
+        "petstore-rest-1.0",
+        "GET:/pets",
+        tenant_id=tenant_id,
+        custom_description="Operator text: lists every pet in the shop.",
+    )
+    await service.edit_op("petstore-rest-1.0", "POST:/pets", tenant_id=tenant_id, is_enabled=False)
+    await service.edit_group(
+        "petstore-rest-1.0",
+        "pets",
+        tenant_id=tenant_id,
+        when_to_use="Operator text: pet inventory and adding new pets.",
+    )
+    # ``custom_notes`` has no review verb; an operator sets it on the row.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.tenant_id == tenant_id,
+                EndpointDescriptor.op_id == "GET:/pets",
+            )
+        )
+        rows.scalar_one().custom_notes = "Operator note: slow on big shops."
+        await session.commit()
+
+    def snapshot(rows: dict[str, EndpointDescriptor]) -> dict[str, tuple[Any, ...]]:
+        return {
+            op_id: (row.custom_description, row.custom_notes, row.is_enabled, row.group_id)
+            for op_id, row in rows.items()
+        }
+
+    before_ops = snapshot(await _load_pet_rows(tenant_id))
+    before_group = await _load_group(tenant_id, "petstore", "pets")
+
+    await ingest()
+    # The grouping pass that follows an ingest has nothing to do: every op
+    # is already in a group, so it never calls the LLM.
+    llm_client = AsyncMock()
+    grouping = await run_llm_grouping(
+        llm_client=llm_client,
+        operator_sub="test-operator",
+        operator_tenant_id=tenant_id,
+        product="petstore",
+        version="1.0",
+        impl_id="petstore-rest",
+        tenant_id=tenant_id,
+    )
+    assert grouping.groups_created == 0
+    assert llm_client.mock_calls == []
+
+    after_ops = snapshot(await _load_pet_rows(tenant_id))
+    after_group = await _load_group(tenant_id, "petstore", "pets")
+    assert after_ops == before_ops
+    assert after_ops["GET:/pets"][:3] == (
+        "Operator text: lists every pet in the shop.",
+        "Operator note: slow on big shops.",
+        True,
+    )
+    assert after_ops["POST:/pets"][2] is False
+    assert after_group.review_status == before_group.review_status == "enabled"
+    assert after_group.when_to_use == before_group.when_to_use
+    assert after_group.when_to_use == "Operator text: pet inventory and adding new pets."
+
+
+async def _typed_pets_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    return {}
+
+
+@pytest.mark.asyncio
+async def test_override_preserved_on_reingest_typed_group_when_to_use(
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """Typed registration does not write its ``when_to_use`` over an operator edit."""
+
+    async def register() -> None:
+        await register_typed_operation(
+            product="typedpets",
+            version="1.x",
+            impl_id="typedpets",
+            op_id="typedpets.pet.list",
+            handler=_typed_pets_handler,
+            summary="List pets.",
+            description="List pets.",
+            parameter_schema={"type": "object"},
+            group_key="pets",
+            when_to_use="Shipped text: list pets.",
+            embedding_service=_stub_embedding_service,
+        )
+
+    await register()
+    service = ReviewService(_make_operator(tenant_id=uuid.uuid4(), platform_admin=True))
+    await service.edit_group(
+        "typedpets-1.x",
+        "pets",
+        tenant_id=None,
+        when_to_use="Operator text: list every pet.",
+    )
+
+    await register()
+
+    group = await _load_group(None, "typedpets", "pets")
+    assert group.when_to_use == "Operator text: list every pet."
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_connector_registry")
+async def test_breaking_change_new_version_identity_coexists(
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """A breaking change ships as a new version; both versions stay resolvable."""
+    tenant_id = uuid.uuid4()
+    old_schema = {"type": "object", "properties": {"limit": {"type": "integer"}}}
+    new_schema = {
+        "type": "object",
+        "properties": {"page_size": {"type": "integer"}},
+        "required": ["page_size"],
+    }
+    for version, schema in (("1.0", old_schema), ("2.0", new_schema)):
+        # A new version needs a connector class that covers it. Ingest
+        # refuses a version label no registered class accepts.
+        ensure_connector_class_registered(
+            product="petstore", version=version, impl_id="petstore-rest", base_url=None
+        )
+        await register_ingested_operations(
+            product="petstore",
+            version=version,
+            impl_id="petstore-rest",
+            spec_source=f"petstore-{version}.yaml",
+            operations=[_pet_proto("GET:/pets", summary="List pets", parameter_schema=schema)],
+            tenant_id=tenant_id,
+            embedding_service=_stub_embedding_service,
+        )
+        await ReviewService(_make_operator(tenant_id=tenant_id)).edit_op(
+            f"petstore-rest-{version}", "GET:/pets", tenant_id=tenant_id, is_enabled=True
+        )
+
+    old = await lookup_descriptor(
+        tenant_id=tenant_id,
+        product="petstore",
+        version="1.0",
+        impl_id="petstore-rest",
+        op_id="GET:/pets",
+    )
+    new = await lookup_descriptor(
+        tenant_id=tenant_id,
+        product="petstore",
+        version="2.0",
+        impl_id="petstore-rest",
+        op_id="GET:/pets",
+    )
+    assert old is not None and new is not None
+    assert old.id != new.id
+    assert old.parameter_schema == old_schema
+    assert new.parameter_schema == new_schema
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_connector_registry")
+async def test_breaking_change_new_version_identity_same_key_other_spec_collides(
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """The same natural key from a different spec raises, and leaves the row as it was."""
+    tenant_id = uuid.uuid4()
+    original_schema = {"type": "object", "properties": {"limit": {"type": "integer"}}}
+    await register_ingested_operations(
+        product="petstore",
+        version="1.0",
+        impl_id="petstore-rest",
+        spec_source="petstore.yaml",
+        operations=[_pet_proto("GET:/pets", summary="List pets", parameter_schema=original_schema)],
+        tenant_id=tenant_id,
+        embedding_service=_stub_embedding_service,
+    )
+
+    with pytest.raises(OpIdCollision) as exc_info:
+        await register_ingested_operations(
+            product="petstore",
+            version="1.0",
+            impl_id="petstore-rest",
+            spec_source="petstore-v2.yaml",
+            operations=[
+                _pet_proto(
+                    "GET:/pets",
+                    summary="List pets, paged",
+                    parameter_schema={"type": "object", "required": ["page_size"]},
+                )
+            ],
+            tenant_id=tenant_id,
+            embedding_service=_stub_embedding_service,
+        )
+
+    assert exc_info.value.existing_spec_source == "petstore.yaml"
+    assert exc_info.value.incoming_spec_source == "petstore-v2.yaml"
+    rows = await _load_pet_rows(tenant_id)
+    assert rows["GET:/pets"].parameter_schema == original_schema
+    assert rows["GET:/pets"].summary == "List pets"

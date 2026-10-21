@@ -1,0 +1,8 @@
+# Fingerprints the gitleaks pre-commit hook must skip. One per line, in the
+# form the hook prints: <path>:<rule id>:<line>.
+#
+# The placeholder tenant UUID in the chart test render. It is a fixture,
+# not a credential. The hook sees it in every merge commit that brings
+# the chart workflow and its test in from main.
+.github/workflows/chart.yml:generic-api-key:300
+backend/tests/test_chart_core_secrets.py:generic-api-key:65

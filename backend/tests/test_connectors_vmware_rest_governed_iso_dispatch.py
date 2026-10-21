@@ -7,7 +7,7 @@ The recipe (``docs/codebase/vmware-rest-governed-iso-path.md``) rides
 **raw ingested ops** — no composite — so the load-bearing questions are
 all generic-dispatch questions, each pinned here through the real
 ``dispatch()`` chain (policy gate → connector resolution → session mint
-→ ``dispatch_ingested`` → audit + broadcast) against a respx-mocked
+→ ``dispatch_ingested`` → audit) against a respx-mocked
 vCenter, mirroring ``test_connectors_vmware_rest_credread.py``:
 
 * **Flat ``/api`` bodies, never the ``/rest`` envelope** (the #2973 /
@@ -23,7 +23,7 @@ vCenter, mirroring ``test_connectors_vmware_rest_credread.py``:
   dict / list payloads pass through (small sets — no JSONFlux handle).
 * **Governance engages**: the ingested writes land ``caution`` +
   ``requires_approval=False`` (auto-execute for a human operator, one
-  audit + broadcast per dispatch), and an operator who tightens
+  audit row per dispatch), and an operator who tightens
   ``requires_approval`` on the mount op parks the dispatch in the
   approval queue *before* any vendor call fires.
 
@@ -45,15 +45,14 @@ from uuid import UUID
 
 import pytest
 import respx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
@@ -116,18 +115,6 @@ def _fake_vault(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch,
         secret={"username": "svc-iso-recipe", "password": "iso-recipe-pass"},
     )
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events so the audit/broadcast leg is asserted."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -224,7 +211,6 @@ def _mock_session_routes(mock: respx.MockRouter) -> None:
 async def test_iso_mount_sends_flat_body_and_wraps_scalar_ack(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Mount rides ``?action=mount`` with the flat two-field body; string ack wraps.
 
@@ -258,8 +244,12 @@ async def test_iso_mount_sends_flat_body_and_wraps_scalar_ack(
     # Bare-string ack survives dispatch under the documented scalar envelope.
     assert result.result == {"value": "16002"}
     assert result.handle is None
-    # The governed path engaged: exactly one audit/broadcast for the dispatch.
-    assert len(captured_events) == 1
+    # The governed path engaged: exactly one audit row for the dispatch.
+    async with get_sessionmaker()() as fresh:
+        audit_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+        )
+    assert len(audit_rows) == 1
 
 
 @pytest.mark.asyncio

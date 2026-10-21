@@ -3750,12 +3750,47 @@ type ConnectorReviewDeleteOp struct {
 // review queue; “op_count“ is the cheap precomputed length for
 // the CLI's “meho connector review“ summary view (T5).
 type ConnectorReviewGroup struct {
-	GroupKey     string              `json:"group_key"`
-	Name         string              `json:"name"`
-	OpCount      int                 `json:"op_count"`
-	Ops          []ConnectorReviewOp `json:"ops"`
-	ReviewStatus string              `json:"review_status"`
-	WhenToUse    string              `json:"when_to_use"`
+	// Advisory Advice for the operator who reviews one group (#3671).
+	//
+	// ``distribution`` is what the group's enabled ops really do.
+	// ``flags`` lists short, plain notes where the group's ``when_to_use``
+	// text does not match those ops (for example the text says
+	// "read-only" but some ops need approval). Empty when nothing looks
+	// wrong.
+	//
+	// This is advice only. It never blocks a dispatch, an ingest, or the
+	// move from ``staged`` to ``enabled``. Dispatch keeps using each op's
+	// own ``safety_level``, ``requires_approval``, and policy; the group
+	// label and its text are never part of that decision.
+	Advisory     *ConnectorReviewGroupAdvisory `json:"advisory,omitempty"`
+	GroupKey     string                        `json:"group_key"`
+	Name         string                        `json:"name"`
+	OpCount      int                           `json:"op_count"`
+	Ops          []ConnectorReviewOp           `json:"ops"`
+	ReviewStatus string                        `json:"review_status"`
+	WhenToUse    string                        `json:"when_to_use"`
+}
+
+// ConnectorReviewGroupAdvisory Advice for the operator who reviews one group (#3671).
+//
+// “distribution“ is what the group's enabled ops really do.
+// “flags“ lists short, plain notes where the group's “when_to_use“
+// text does not match those ops (for example the text says
+// "read-only" but some ops need approval). Empty when nothing looks
+// wrong.
+//
+// This is advice only. It never blocks a dispatch, an ingest, or the
+// move from “staged“ to “enabled“. Dispatch keeps using each op's
+// own “safety_level“, “requires_approval“, and policy; the group
+// label and its text are never part of that decision.
+type ConnectorReviewGroupAdvisory struct {
+	// Distribution Risk levels of the enabled ops in one group (#3671).
+	//
+	// Counts only ops with ``is_enabled=True``. One count per value of the
+	// closed ``safety_level`` set, plus how many of those ops need approval
+	// and how many ops are enabled in total. Disabled ops are not counted.
+	Distribution *GroupSafetyDistribution `json:"distribution,omitempty"`
+	Flags        *[]string                `json:"flags,omitempty"`
 }
 
 // ConnectorReviewOp One operation within a group, as rendered in the review payload.
@@ -5549,6 +5584,20 @@ type GovernedSubopsResponse struct {
 // :attr:`AGENT`, so every existing caller is unaffected.
 type GrantPrincipalKind string
 
+// GroupSafetyDistribution Risk levels of the enabled ops in one group (#3671).
+//
+// Counts only ops with “is_enabled=True“. One count per value of the
+// closed “safety_level“ set, plus how many of those ops need approval
+// and how many ops are enabled in total. Disabled ops are not counted.
+type GroupSafetyDistribution struct {
+	Caution               *int `json:"caution,omitempty"`
+	Dangerous             *int `json:"dangerous,omitempty"`
+	Destructive           *int `json:"destructive,omitempty"`
+	EnabledOpCount        *int `json:"enabled_op_count,omitempty"`
+	RequiresApprovalCount *int `json:"requires_approval_count,omitempty"`
+	Safe                  *int `json:"safe,omitempty"`
+}
+
 // GroupSummaryModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
 //
@@ -5927,7 +5976,8 @@ type IngestKbRequest struct {
 // omit-equals-global semantics the MCP sibling
 // “meho_connector_ingest“ documents. The operator's own tenant
 // UUID targets their tenant-curated namespace; any other UUID is
-// rejected with a synchronous 403 on both the sync and async
+// rejected (unless the operator holds “platform_admin“, #3800)
+// with a synchronous 403 on both the sync and async
 // branches by :meth:`IngestionPipelineService.authorize_scope`
 // (checked eagerly at the route before the async job row is
 // created, #2208, and again inside the service as defence-in-depth).
@@ -5958,7 +6008,7 @@ type IngestRequest struct {
 	SpecInfoVersionsCompatible *[]string     `json:"spec_info_versions_compatible"`
 	Specs                      *[]SpecSource `json:"specs,omitempty"`
 
-	// TenantId Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) — the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403.
+	// TenantId Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) — the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403 unless the caller holds platform_admin, which may ingest into another tenant when it names that tenant here (the write is audited).
 	TenantId *openapi_types.UUID `json:"tenant_id"`
 	Version  *string             `json:"version"`
 }
@@ -10874,9 +10924,15 @@ type GetSearchApiV1OperationsSearchGetParams struct {
 	Q *string `form:"q,omitempty" json:"q,omitempty"`
 
 	// Query Deprecated alias for `q`; still honoured.
-	Query         *string `form:"query,omitempty" json:"query,omitempty"`
-	Group         *string `form:"group,omitempty" json:"group,omitempty"`
-	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Query *string `form:"query,omitempty" json:"query,omitempty"`
+	Group *string `form:"group,omitempty" json:"group,omitempty"`
+	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// OpId Exact-op mode. Look up this one operation and return its call contract (`{operation: {...}}`: the parameter schema, examples, target rule, result shape and retry guidance) instead of ranked hits. `q`, `group` and `limit` are ignored when it is set. An unknown op_id is a 404 with `detail.reason=unknown_op`.
+	OpId *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+
+	// IncludeScores Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else.
+	IncludeScores *bool   `form:"include_scores,omitempty" json:"include_scores,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -11993,9 +12049,6 @@ type UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONReque
 
 // UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody defines body for UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet for application/json ContentType.
 type UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody = UISessionContext
-
-// UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
-type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
 
 // UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody defines body for UiConnectorsEditSubmitUiConnectorsNamePatch for application/x-www-form-urlencoded ContentType.
 type UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody = BodyUiConnectorsEditSubmitUiConnectorsNamePatch
@@ -14459,10 +14512,8 @@ type ClientInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiConnectorsDetailUiConnectorsNameGet request
+	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBody request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14488,6 +14539,9 @@ type ClientInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet request
+	UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConventionsListUiConventionsGetWithBody request with any body
 	UiConventionsListUiConventionsGetWithBody(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14594,6 +14648,9 @@ type ClientInterface interface {
 	CorpusSearchUiCorpusSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiDashboardRecentOperationsUiDashboardRecentOperationsGet request
+	UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListUiEventSourcesGet request
 	ListUiEventSourcesGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19403,20 +19460,8 @@ func (c *Client) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdR
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(c.Server, name, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name, body)
+func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -19537,6 +19582,18 @@ func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx contex
 
 func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -20041,6 +20098,18 @@ func (c *Client) CorpusSearchUiCorpusSearchPostWithBody(ctx context.Context, con
 
 func (c *Client) CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCorpusSearchUiCorpusSearchPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -29155,6 +29224,38 @@ func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearc
 
 		}
 
+		if params.OpId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeScores != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_scores", runtime.ParamLocationQuery, *params.IncludeScores); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -37837,19 +37938,8 @@ func NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGrou
 	return req, nil
 }
 
-// NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
-func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server, name, "application/json", bodyReader)
-}
-
-// NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody generates requests for UiConnectorsDetailUiConnectorsNameGet with any type of body
-func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+// NewUiConnectorsDetailUiConnectorsNameGetRequest generates requests for UiConnectorsDetailUiConnectorsNameGet
+func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -37874,12 +37964,10 @@ func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name
 		return nil, err
 	}
 
-	req, err := http.NewRequest("GET", queryURL.String(), body)
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -38137,6 +38225,40 @@ func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server strin
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest generates requests for UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet
+func NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest(server string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/recent-operations", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -39140,6 +39262,33 @@ func NewCorpusSearchUiCorpusSearchPostRequestWithBody(server string, contentType
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest generates requests for UiDashboardRecentOperationsUiDashboardRecentOperationsGet
+func NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/dashboard/recent-operations")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -45404,10 +45553,8 @@ type ClientWithResponsesInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithResponse(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
-
-	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+	// UiConnectorsDetailUiConnectorsNameGetWithResponse request
+	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
@@ -45433,6 +45580,9 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse request
+	UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error)
 
 	// UiConventionsListUiConventionsGetWithBodyWithResponse request with any body
 	UiConventionsListUiConventionsGetWithBodyWithResponse(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConventionsListUiConventionsGetResponse, error)
@@ -45539,6 +45689,9 @@ type ClientWithResponsesInterface interface {
 	CorpusSearchUiCorpusSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBodyWithResponse(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
+
+	// UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse request
+	UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error)
 
 	// ListUiEventSourcesGetWithResponse request
 	ListUiEventSourcesGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUiEventSourcesGetResponse, error)
@@ -51937,6 +52090,28 @@ func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
 	return 0
 }
 
+type UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConventionsListUiConventionsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -52415,6 +52590,27 @@ func (r CorpusSearchUiCorpusSearchPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CorpusSearchUiCorpusSearchPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -57935,17 +58131,9 @@ func (c *ClientWithResponses) UiConnectorsRegistryReviewGroupUiConnectorsRegistr
 	return ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse(rsp)
 }
 
-// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
-}
-
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, body, reqEditors...)
+// UiConnectorsDetailUiConnectorsNameGetWithResponse request returning *UiConnectorsDetailUiConnectorsNameGetResponse
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -58035,6 +58223,15 @@ func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithRe
 		return nil, err
 	}
 	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse request returning *UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse
+func (c *ClientWithResponses) UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error) {
+	rsp, err := c.UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse(rsp)
 }
 
 // UiConventionsListUiConventionsGetWithBodyWithResponse request with arbitrary body returning *UiConventionsListUiConventionsGetResponse
@@ -58393,6 +58590,15 @@ func (c *ClientWithResponses) CorpusSearchUiCorpusSearchPostWithFormdataBodyWith
 		return nil, err
 	}
 	return ParseCorpusSearchUiCorpusSearchPostResponse(rsp)
+}
+
+// UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse request returning *UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse
+func (c *ClientWithResponses) UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error) {
+	rsp, err := c.UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse(rsp)
 }
 
 // ListUiEventSourcesGetWithResponse request returning *ListUiEventSourcesGetResponse
@@ -67646,6 +67852,32 @@ func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Respons
 	return response, nil
 }
 
+// ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse parses an HTTP response from a UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse call
+func ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse(rsp *http.Response) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiConventionsListUiConventionsGetResponse parses an HTTP response from a UiConventionsListUiConventionsGetWithResponse call
 func ParseUiConventionsListUiConventionsGetResponse(rsp *http.Response) (*UiConventionsListUiConventionsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -68213,6 +68445,22 @@ func ParseCorpusSearchUiCorpusSearchPostResponse(rsp *http.Response) (*CorpusSea
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse parses an HTTP response from a UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse call
+func ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse(rsp *http.Response) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

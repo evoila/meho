@@ -73,6 +73,46 @@ def test_classify_flags_delete_shaped() -> None:
     assert "delete-shaped" in (delete_leg.ungrantable_reason or "")
 
 
+def test_classify_flags_vendor_delete_action_names() -> None:
+    """A VI-JSON delete is a POST; its action name makes it un-grantable (#4632)."""
+    destroy = classify_subop_grantability("POST:/VirtualMachine/{moId}/Destroy_Task")
+    assert destroy.grantable is False
+    assert "vendor action name 'Destroy_Task'" in (destroy.ungrantable_reason or "")
+    assert classify_subop_grantability("POST:/VirtualMachine/{moId}/Reset_Task").grantable is True
+
+
+def test_classify_vendor_delete_action_name_ignores_pattern_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The action-name sign holds when SERVICE_GRANT_DELETE_SHAPED_PATTERNS is changed."""
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "acme.custom.nuke")
+    get_settings.cache_clear()
+    assert (
+        classify_subop_grantability("POST:/VirtualMachine/{moId}/Destroy_Task").grantable is False
+    )
+
+
+def test_vm_destroy_children_flag_the_vim_destroy_step() -> None:
+    """vm.destroy's governed steps: the VIM destroy is un-grantable, the read stays grantable."""
+    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+        register_vmware_governed_subops,
+    )
+
+    register_vmware_governed_subops()
+    vm_destroy = governed_subops_for("vmware.composite.vm.destroy")
+    assert vm_destroy is not None
+    by_op = {c: classify_subop_grantability(c) for c in vm_destroy.sub_op_ids}
+
+    destroy = by_op["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    assert destroy.grantable is False
+    assert destroy.ungrantable_reason is not None
+    assert "Destroy_Task" in destroy.ungrantable_reason
+
+    read = by_op["POST:/PropertyCollector/{moId}/RetrievePropertiesEx"]
+    assert read.grantable is True
+    assert read.ungrantable_reason is None
+
+
 def test_vmware_wiring_is_derived_from_manifests() -> None:
     """register_vmware_governed_subops populates the write composites from manifests.
 
@@ -99,3 +139,24 @@ def test_vmware_wiring_is_derived_from_manifests() -> None:
         c for c in vm_create.sub_op_ids if not classify_subop_grantability(c).grantable
     ]
     assert any(c.startswith("DELETE:") for c in delete_children)
+
+
+def test_vm_destroy_lists_the_delete_step_for_both_vcenter_apis() -> None:
+    """vm.destroy's manifest names the delete step of both arms.
+
+    Before vCenter 9.0 the composite deletes through the vim ``Destroy_Task``;
+    on 9.0+ it issues the REST ``DELETE:/vcenter/vm/{vm}``. Both steps run
+    through the sub-op gate, so both must be discoverable, and the REST delete
+    is flagged un-grantable like vm.create's rollback leg.
+    """
+    from meho_backplane.connectors.vmware_rest.composites import _write
+    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+        register_vmware_governed_subops,
+    )
+
+    register_vmware_governed_subops()
+    surface = governed_subops_for("vmware.composite.vm.destroy")
+    assert surface is not None
+    assert _write._OP_DESTROY_VM_TASK in surface.sub_op_ids  # before vCenter 9.0
+    assert _write._OP_DELETE_VM in surface.sub_op_ids  # vCenter 9.0 and later
+    assert classify_subop_grantability(_write._OP_DELETE_VM).grantable is False

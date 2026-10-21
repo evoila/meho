@@ -12,7 +12,7 @@ Drives the real :func:`meho_backplane.operations.dispatch` to prove:
   result byte-identical and the audit row committed.
 
 Shares the typed-op registration harness the dispatcher tests use (in-memory
-SQLite, recording broadcast publisher, autouse reset), plus a capture-enabled
+SQLite, autouse reset), plus a capture-enabled
 seeded tenant so ``should_capture`` returns True.
 """
 
@@ -29,9 +29,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -83,17 +81,6 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
-@pytest.fixture(autouse=True)
-def _capture_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
     sessionmaker = get_sessionmaker()
@@ -134,6 +121,22 @@ async def _two_child_composite(
     a = await dispatch_child(connector_id="vault-1.x", op_id="vault.kv.list", params={"p": "a"})
     b = await dispatch_child(connector_id="vault-1.x", op_id="vault.kv.list", params={"p": "b"})
     return {"a": a.status, "b": b.status}
+
+
+async def _one_step_then_error_composite(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: Any,
+) -> OperationResult:
+    await dispatch_child(connector_id="vault-1.x", op_id="vault.kv.list", params={"p": "a"})
+    return OperationResult(
+        status="error",
+        op_id="vault.composite.stops",
+        error="composite_resume_unsupported: stopped after the first step",
+        duration_ms=0.0,
+        extras={"error_code": "composite_resume_unsupported"},
+    )
 
 
 async def _large_list_handler(
@@ -313,6 +316,76 @@ async def test_composite_substeps_under_one_parent_trace(
     step_spans = [s for s in spans if s.span_kind == "composite_step"]
     assert len(step_spans) == 2
     assert {s.attributes["op_id"] for s in step_spans} == {"vault.kv.list"}
+
+
+@pytest.mark.asyncio
+async def test_composite_returning_error_result_writes_parent_row(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A composite that runs a step and then RETURNS an error result (#4274).
+
+    Its own row is written, the step row points at it, and the trace uses
+    the same id.
+    """
+    tenant_id = await _seed_capture_tenant("fr-disp-composite-error")
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.list",
+        handler=_child_handler,
+        summary="List.",
+        description="List.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    await _insert_composite_descriptor(
+        session=session,
+        op_id="vault.composite.stops",
+        handler_ref="tests.test_flight_recorder_capture_dispatch._one_step_then_error_composite",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(tenant_id),
+        connector_id="vault-1.x",
+        op_id="vault.composite.stops",
+        target=_FakeTarget(),
+        params={},
+    )
+
+    # The caller gets the handler's result as it was.
+    assert result.status == "error"
+    assert result.error == "composite_resume_unsupported: stopped after the first step"
+    assert result.extras == {"error_code": "composite_resume_unsupported"}
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        parents = list(
+            (await s.execute(select(AuditLog).where(AuditLog.path == "vault.composite.stops")))
+            .scalars()
+            .all()
+        )
+        steps = list(
+            (await s.execute(select(AuditLog).where(AuditLog.path == "vault.kv.list")))
+            .scalars()
+            .all()
+        )
+    assert len(parents) == 1
+    parent = parents[0]
+    assert parent.event_class == "operation_execution"
+    assert parent.payload["result_status"] == "error"
+    assert parent.payload["error"]["error_code"] == "composite_resume_unsupported"
+    assert result.audit_id == parent.id
+
+    assert len(steps) == 1
+    assert steps[0].parent_audit_id == parent.id
+
+    traces = await _traces()
+    assert len(traces) == 1
+    assert traces[0].audit_id == parent.id
 
 
 # ---------------------------------------------------------------------------

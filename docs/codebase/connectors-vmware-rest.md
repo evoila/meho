@@ -602,6 +602,93 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   failure). Set-shaped (JSONFlux-reduced when large), with `host_required`
   / `host_not_found` / `ambiguous_host` / `unsupported_host_target`
   covering the resolution refusals.
+- **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
+  handler `sso_admin_api_file_get`) — reads one SSO Admin API description
+  file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
+  download has the SSO Admin WSDL, so a running vCenter is the only place to
+  get it. `safe`, read-only, in its own group `vcenter-sso-admin-api-files`.
+  Registered through `VMWARE_TYPED_OPS`, so it is on both catalogs.
+
+  | Versions | Catalog |
+  |---|---|
+  | vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+  | vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+  - **Which paths it reads.** Only a path under `/sso-adminserver/` (the SSO
+    Admin service folder; the documented service address is
+    `/sso-adminserver/sdk/{domain}`). Allowed characters are letters,
+    digits and `. _ ~ / -`; no `..` or `//`; the query is empty or one of
+    `wsdl`, `xsd`, `xsd=<number>`. So a backslash, a `%` (an encoded dot or
+    slash), a scheme or a host is refused. The same rule is the `pattern` of
+    the `path` parameter, so the dispatcher refuses a bad path as
+    `invalid_params`, and the handler checks it again. A refused path sends
+    no request. Every SSO Admin call is a SOAP `POST`, so a `GET` in that
+    folder changes nothing. The exact file path of the WSDL is not documented
+    by the vendor yet; the read does not need it, and the lab pins it with
+    this read.
+  - **How it reads.** One `GET` on a new client from
+    `_ephemeral_http_client` (same SSRF and TLS settings, its own empty
+    cookie jar). No login header and no session cookie go out: the SSO Admin
+    service has its own login (a SAML token), and a WSDL holds no data. The
+    request goes through `httpx.AsyncClient.send(..., follow_redirects=False)`,
+    so a redirect is not followed (the pooled client class would follow a
+    same-origin redirect by itself). A `3xx` returns `redirect_path`; a
+    `401`, `403`, `404` or `5xx` returns its `status` with no text.
+  - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
+    `size` (bytes), `sha256` (of the file bytes), `imports`, `parts`,
+    `text_parts`, `version`, `build`, `version_error`. `imports` lists the
+    `location` / `schemaLocation` values of `wsdl:import`, `xsd:import` and
+    `xsd:include`, as written, parsed with `defusedxml`; a file that is not
+    XML gives `[]`. Only UTF-8 text comes back; other content is refused and
+    the error names its content type.
+  - **Version and build** come from `GET /api/appliance/system/version` on
+    the connector's normal login. If that read fails, the file still comes
+    back, `version` and `build` are `null`, and `version_error` says why.
+    This covers an HTTP error, a vCenter login error, and the credential
+    failures that happen before any request goes out: no credentials for
+    the target, access denied, or a credential store that cannot be reached
+    (`CredentialsReadError`, `VaultClientError`).
+  - **How to rebuild the file.** `text_parts` is a list of
+    `{index, text}`, each at most 64 KiB of UTF-8, cut only between
+    characters. Join the `text` of all parts in `index` order and encode as
+    UTF-8; the SHA-256 of the result equals `sha256`. A part is a fixed byte
+    size, not a line, because a served file can be one long line. The answer
+    has two lists (`imports` and `text_parts`), so JSONFlux keeps a large
+    answer whole as a document record behind a result handle; the inline
+    summary keeps the scalar fields (`sha256`, `size`, `parts`, `build`, ...).
+    Read the parts with `result_query` and `query={"path": "/text_parts"}`,
+    paging with a small `limit` (one answer is at most 256 KiB), and the
+    imports with `path="/imports"`. A file that does not fit in one stored
+    result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
+    stored JSON) stops with an error that names its size; the read never
+    returns a cut file.
+  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+    every stored result (the dispatcher runs
+    `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
+    that fires on the file text would rewrite a part, and the joined parts
+    would no longer match `sha256`. So the read runs the same middleware, with
+    the same connector, tenant and operation labels, on the text parts and on
+    the whole file text before it returns. The whole-file pass matters: a
+    secret that the part cut splits in two matches in no single part, so the
+    dispatcher's own redaction would store it in clear text. When the text
+    would change, the read stops with an error that names the rule and the
+    place (a part, or `file_text` for the whole file), and returns no file.
+    Redaction itself stays on. The default policy's `strip-api-key` rule fires
+    on text such as
+    `type="token:SecurityToken"`; a redaction policy registered for this
+    operation changes what the check accepts, because both use the same
+    policy lookup.
+  - **Tests.** `tests/test_connectors_vmware_rest_typed_sso_admin_api_file.py`
+    (respx: accepted and refused paths, no login on the `GET`, status and
+    redirect cases, large files, version failure including missing
+    credentials and a failed credential-store login, a file that a redaction
+    rule would change, a secret split across the part cut, and the
+    result-handle round trip through redaction,
+    storage and read-back) and the reconcile lane
+    `tests/test_connectors_vmware_rest_sso_admin_api_file_reconcile.py`
+    (the SSO Admin folder is a documentation path that the pinned 8.0 and
+    9.0 `vcenter.yaml` do not serve; both serve
+    `GET /appliance/system/version`).
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the
@@ -680,6 +767,46 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    ingested. The reconcile lane above pins the corrected body shape, against
    a fixture always and against the pinned vendor 8.0 U3 spec when the shelf
    has it.
+   **8.0 VI-JSON calls (#4333).** The same lane collects every VI-JSON
+   method the connector calls (from the source) and checks it against the
+   vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
+   version gate or an entry with the reason in the lane's exclusion list.
+   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
+   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
+   `vmware.host.vsan_health` calls it best-effort. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md).
+   **Operation summaries (#4329).** Search and the operation-group step
+   read each operation's one-line `summary`. The full vendor specs fall
+   short in two ways, and `ingest_corrections.py` fixes both at ingest
+   time, on every `vmware-rest` catalog version:
+   - The vSphere REST spec (`vcenter.yaml`) has no `summary` on any of its
+     operations (1,275 on 9.0). An operation with no summary gets the first
+     sentence of its description, at most 120 characters. A longer first
+     sentence is cut at a word and ends with `…`. Paragraphs that only hold
+     vendor notes (`***Required privileges:*** ...`) are skipped; when
+     nothing else is left the summary stays empty.
+   - The VI-JSON spec (`vi-json.yaml`) repeats one summary for the same
+     method on many managed object types (844 operations on 9.0). When two
+     or more VI-JSON operations of one spec share a summary, each gets its
+     object type in front, for example
+     `VirtualMachine: Destroys this object, ...` and
+     `Folder: Destroys this object, ...`. A VI-JSON path is
+     `/<Type>/{moId}/...`, with an optional service segment in front
+     (`/vsan/...`). A summary that no other operation shares is kept as it
+     is, and so is any summary the spec already gives.
+
+   The shared-summary fix compares operations with each other, so it is a
+   batch correction (`register_ingest_batch_correction` in
+   `ingest/spec_corrections.py`); the description fix is part of the
+   per-operation correction. The shipped minimal specs already carry
+   summaries, so a catalog ingest of them is unchanged.
+
+   **Running installs** get the new summaries on their next ingest of the
+   full vendor specs: run the same `--spec` ingest again. The summary is
+   part of the row's body hash, so the changed rows are updated and
+   embedded again for search; rows that did not change are skipped. The
+   operator's own texts (`custom_description`, `custom_notes`) are not
+   touched.
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls
@@ -688,6 +815,30 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    list. The package `__init__` then queues
    `register_typed_op_registrar(register_vmware_typed_operations)`
    (`#2257`) for the typed-op rows.
+3b. **Composites and typed ops on the 8.0 catalog (#3789).** Two more
+   registrars, `register_vmware_composite_operations_8_0` and
+   `register_vmware_typed_operations_8_0`, write the same rows under
+   `connector_id="vmware-rest-8.0"`. The resolver sends a fingerprinted
+   8.0.x target to that catalog, so an agent that picks it finds
+   `vm.disk.grow`, the guest ops, `object.collect` and the rest there. The
+   rows use the same handlers and the same safety level and approval rule
+   as on 9.0; the handlers already choose the right path per vCenter
+   release. Notes:
+   - The Supervisor and namespace composites are not on the 8.0 catalog.
+     `COMPOSITES_NOT_ON_8_0` in `composites/_register.py` lists each
+     excluded composite with its reason. The test
+     `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
+     or typed op on 9.0 is neither on 8.0 nor in that list.
+   - The governed child ops inside a composite keep their
+     `vmware-rest-9.0` keys on both catalogs. One grant set covers the
+     composite on either catalog, and approving a parked child op re-runs
+     the composite on the 9.0 catalog, where it is also registered.
+   - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
+     not work on an 8.0 GA target.
+   - When the 9.0 catalog refuses an ingested op for an 8.0.x target
+     (`unqualified_target_version`), the reason now names the catalog to
+     use: `...; use connector vmware-rest-8.0 for this target`. The 8.0
+     catalog does the same for a 9.x target.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
@@ -1301,7 +1452,15 @@ row (#4217); approving it re-runs `vm.create`, which then only deletes the
 VM the first run created (`_resumed_vm_create_rollback`) and returns the
 same `rolled_back` envelope. An approved rollback DELETE with no saved
 rollback (a request saved before #4217) is refused before anything runs
-(`composite_resume_unsupported`). The other
+(`composite_resume_unsupported`). A rolled-back `vm.create` is an
+`error` result (#3813). Its error message names the failed step, says
+what happened to the VM, and ends with the cause, which carries
+vCenter's own message (`_vsphere_fault_detail`, for a REST error body
+and for a VI-JSON method fault alike). The `rollback` field
+gives the VM moid and the outcome (#4057): `removed`,
+`awaiting_approval` (the VM exists until the DELETE is approved) or
+`not_removed` (the DELETE failed or was denied; delete the VM by hand).
+The field is absent when the run failed before any VM existed. The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert. `vm.resize`'s `partial` follows the same rule: a CPU PATCH
@@ -1514,7 +1673,8 @@ issue a single-device `ReconfigVM_Task` edit (`deviceChange=[{operation:
 "edit", device: {…VirtualDisk…, capacityInBytes: <raised>}}]`) through
 `_write_vmomi_sub_op`; poll the returned Task to terminal via
 `poll_vim_task`. The `disk` param is the REST disk id, which is the string
-form of the vim `VirtualDevice.key` — so the handler matches the device by
+form of the vim `VirtualDevice.key`. It also accepts the int key (#3789);
+the handler turns it into a string first. The handler matches the device by
 `str(key)` and the REST `GET hardware/disk/{disk}` supplies label +
 capacity for the park-time preview. The preview is a live-read from→to
 capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,
@@ -1683,7 +1843,13 @@ and a mandatory blast-radius block. Two things are connector-specific:
   version) issues the synchronous REST `DELETE:/vcenter/vm/{vm}`. The vim
   arm's `Destroy_Task` + the preview's snapshot `RetrievePropertiesEx` are
   declared in `_write._VIM_SUB_OPS_VM_DESTROY` and reconciled against the
-  pinned `vi-json.yaml` (the same lane as disk-grow).
+  pinned `vi-json.yaml` (the same lane as disk-grow). The REST arm's
+  `GET:/vcenter/vm/{vm}` read + `DELETE:/vcenter/vm/{vm}` are declared in
+  `_write._SUB_OPS_VM_DESTROY` and reconciled against the pinned
+  `vcenter.yaml`. The governed-subop discovery surface
+  (`GET /api/v1/operations/governed-subops?op_id=vmware.composite.vm.destroy`)
+  joins both lists, so an operator sees the delete step of either arm, and
+  the REST delete is flagged un-grantable (delete-shaped).
 
 The blast-radius preview builder (`_write_preview._vm_destroy_preview`)
 live-reads `Vm.Info` for object identity (moid / name / power state) plus
@@ -2952,6 +3118,40 @@ genuinely small action. The read composites register no builder.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
+- **`event.tail` always sends a filter (#3706)** — vCenter 8.0.x answers a
+  `QueryEvents` call with no body with HTTP 500 (`InvalidArgument: Invalid
+  JSON syntax`). So `event_tail_composite` always sends
+  `{"filter": <EventFilterSpec>}`, with a `_typeName` tag on every data
+  object. The body is the same on 8.0.x and 9.0; only the
+  `/sdk/vim25/{release}` path differs (9.0's optional `eventViewSpec` is not
+  sent). Optional params map onto the filter: `begin_time` / `end_time`
+  (RFC 3339, checked by a schema pattern because the validator ignores
+  `format`) → `time`, `event_type_ids` → `eventTypeId`, `entity`
+  (`{moId, type, recursion?}`, recursion defaults to `all`) → `entity`, and
+  `max_count` (default 100, max 1000) → `maxCount`. The old client-side
+  `max_events` param is gone; the handler still cuts the list to
+  `max_count` in case a server ignores `maxCount`. `disableFullMessage` is
+  sent as `false`, because the spec says an unset flag drops
+  `fullFormattedMessage`. Each event comes back as a short row
+  `{createdTime, eventTypeId, fullFormattedMessage, entity}`; `eventTypeId`
+  is the `EventEx` / `ExtendedEvent` type id or else the event class name,
+  so it can be passed back as a filter value. `entity` is the object the
+  event is about: an `EventEx` `objectId` or an `ExtendedEvent`
+  `managedObject` wins, and only an event without one falls back to the
+  inherited `Event` context members (`vm`, `ds`, `host`, `net`, `dvs`,
+  `computeResource`, `datacenter`, most specific first). Rows keep the
+  order vCenter returned. `QueryEvents` has no ESXi SOAP builder, so this
+  composite does not run against a standalone ESXi host.
+- **`performance.summary` request bodies (#4038)** — both vi-json calls
+  send `entity` as an annotated `ManagedObjectReference`
+  (`vim_body.vim_moref`), never a bare moid string: vCenter 8.0.3 answers
+  the string with 500 `InvalidArgument: Unexpected string value`. The
+  type comes from the optional `entity_type` input, or else from the moid
+  prefix (`host-` HostSystem, `vm-` VirtualMachine, `domain-c`
+  ClusterComputeResource); an unknown prefix without `entity_type` fails
+  before any call. `QueryAvailablePerfMetric` gets `entity` + `intervalId`;
+  `QueryPerf` gets `querySpec: [PerfQuerySpec{entity, intervalId,
+  maxSample}]`, the shape the pinned `vi-json.yaml` declares.
 - **VI-JSON mount for vmomi reads *and writes* — `/sdk/vim25/{release}`
   (#2466, mutating writes #2893)** —
   vmomi (VI-JSON) methods (`RetrievePropertiesEx`,

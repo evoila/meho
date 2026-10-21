@@ -34,8 +34,6 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vmware_rest.composites import _guest, _write
@@ -87,18 +85,6 @@ def _reset_module_state() -> Iterator[None]:
     yield
     reset_dispatcher_caches()
     clear_registry()
-
-
-@pytest.fixture(autouse=True)
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture

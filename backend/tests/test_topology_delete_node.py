@@ -38,7 +38,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -61,8 +60,6 @@ from meho_backplane.topology.node_delete import (
     NodeNotFoundForDeleteError,
 )
 from meho_backplane.topology.query import query_timeline
-
-_PUBLISH = "meho_backplane.topology.node_delete.publish_event"
 
 
 @pytest.fixture(autouse=True)
@@ -140,12 +137,8 @@ def _operator(tenant_id: uuid.UUID, sub: str = "op-1") -> Operator:
 async def _seed_curated_node(tenant_id: uuid.UUID, *, kind: str, name: str) -> uuid.UUID:
     """Seed a manual (``curated``, target-unbound) node; return its id."""
     sessionmaker = get_sessionmaker()
-    with (
-        patch(_PUBLISH, new=AsyncMock()),
-        patch("meho_backplane.topology.nodes.publish_event", new=AsyncMock()),
-    ):
-        async with sessionmaker() as session:
-            result = await create_or_get_node(session, _operator(tenant_id), kind=kind, name=name)
+    async with sessionmaker() as session:
+        result = await create_or_get_node(session, _operator(tenant_id), kind=kind, name=name)
     return result.node.id
 
 
@@ -161,14 +154,12 @@ async def test_delete_node_removes_row_and_writes_tombstone() -> None:
     node_id = await _seed_curated_node(tenant_id, kind="vault-role", name="rdc-vault")
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()) as publish_mock:
-        async with sessionmaker() as session:
-            result = await delete_node(session, _operator(tenant_id), node_id=node_id)
+    async with sessionmaker() as session:
+        result = await delete_node(session, _operator(tenant_id), node_id=node_id)
 
     assert result.node_id == node_id
     assert result.kind == "vault-role"
     assert result.name == "rdc-vault"
-    publish_mock.assert_awaited_once()
 
     async with sessionmaker() as session:
         # The live row is gone.
@@ -221,9 +212,8 @@ async def test_delete_node_leaves_prior_history_with_null_node_id() -> None:
     node_id = await _seed_curated_node(tenant_id, kind="service", name="keep-history")
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            await delete_node(session, _operator(tenant_id), node_id=node_id)
+    async with sessionmaker() as session:
+        await delete_node(session, _operator(tenant_id), node_id=node_id)
 
     async with sessionmaker() as session:
         rows = (
@@ -256,11 +246,9 @@ async def test_delete_node_missing_id_raises_not_found() -> None:
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()) as publish_mock:
-        async with sessionmaker() as session:
-            with pytest.raises(NodeNotFoundForDeleteError):
-                await delete_node(session, _operator(tenant_id), node_id=uuid.uuid4())
-    publish_mock.assert_not_awaited()
+    async with sessionmaker() as session:
+        with pytest.raises(NodeNotFoundForDeleteError):
+            await delete_node(session, _operator(tenant_id), node_id=uuid.uuid4())
 
 
 @pytest.mark.asyncio
@@ -271,10 +259,9 @@ async def test_delete_node_cross_tenant_id_raises_not_found() -> None:
     node_in_b = await _seed_curated_node(tenant_b, kind="vault-role", name="b-only")
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(NodeNotFoundForDeleteError):
-                await delete_node(session, _operator(tenant_a), node_id=node_in_b)
+    async with sessionmaker() as session:
+        with pytest.raises(NodeNotFoundForDeleteError):
+            await delete_node(session, _operator(tenant_a), node_id=node_in_b)
 
     # The tenant-B row is untouched.
     async with sessionmaker() as session:
@@ -288,12 +275,11 @@ async def test_second_delete_raises_not_found() -> None:
     node_id = await _seed_curated_node(tenant_id, kind="vault-role", name="once")
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
+    async with sessionmaker() as session:
+        await delete_node(session, _operator(tenant_id), node_id=node_id)
+    async with sessionmaker() as session:
+        with pytest.raises(NodeNotFoundForDeleteError):
             await delete_node(session, _operator(tenant_id), node_id=node_id)
-        async with sessionmaker() as session:
-            with pytest.raises(NodeNotFoundForDeleteError):
-                await delete_node(session, _operator(tenant_id), node_id=node_id)
 
 
 # ---------------------------------------------------------------------------
@@ -330,12 +316,10 @@ async def test_delete_node_refuses_auto_source() -> None:
         )
         await session.commit()
 
-    with patch(_PUBLISH, new=AsyncMock()) as publish_mock:
-        async with sessionmaker() as session:
-            with pytest.raises(NodeNotDeletableError) as excinfo:
-                await delete_node(session, _operator(tenant_id), node_id=node_id)
+    async with sessionmaker() as session:
+        with pytest.raises(NodeNotDeletableError) as excinfo:
+            await delete_node(session, _operator(tenant_id), node_id=node_id)
     assert excinfo.value.source == "auto"
-    publish_mock.assert_not_awaited()
 
     async with sessionmaker() as session:
         assert await session.get(GraphNode, node_id) is not None
@@ -380,10 +364,9 @@ async def test_delete_node_refuses_target_bound_node() -> None:
         )
         await session.commit()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            with pytest.raises(NodeNotDeletableError) as excinfo:
-                await delete_node(session, _operator(tenant_id), node_id=node_id)
+    async with sessionmaker() as session:
+        with pytest.raises(NodeNotDeletableError) as excinfo:
+            await delete_node(session, _operator(tenant_id), node_id=node_id)
     assert excinfo.value.target_id == target_id
 
 
@@ -430,12 +413,10 @@ async def test_delete_node_refuses_when_live_edge_references_it() -> None:
     edge_id = await _seed_edge(tenant_id, from_id=node_a, to_id=node_b, last_seen=datetime.now(UTC))
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()) as publish_mock:
-        async with sessionmaker() as session:
-            with pytest.raises(NodeHasLiveEdgesError) as excinfo:
-                await delete_node(session, _operator(tenant_id), node_id=node_a)
+    async with sessionmaker() as session:
+        with pytest.raises(NodeHasLiveEdgesError) as excinfo:
+            await delete_node(session, _operator(tenant_id), node_id=node_a)
     assert excinfo.value.edge_ids == [edge_id]
-    publish_mock.assert_not_awaited()
 
     async with sessionmaker() as session:
         assert await session.get(GraphNode, node_a) is not None
@@ -450,9 +431,8 @@ async def test_delete_node_ignores_soft_deleted_edges() -> None:
     await _seed_edge(tenant_id, from_id=node_a, to_id=node_b, last_seen=None)
     sessionmaker = get_sessionmaker()
 
-    with patch(_PUBLISH, new=AsyncMock()):
-        async with sessionmaker() as session:
-            result = await delete_node(session, _operator(tenant_id), node_id=node_a)
+    async with sessionmaker() as session:
+        result = await delete_node(session, _operator(tenant_id), node_id=node_a)
     assert result.node_id == node_a
 
     async with sessionmaker() as session:

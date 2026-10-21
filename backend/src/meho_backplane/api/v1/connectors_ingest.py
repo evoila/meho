@@ -410,7 +410,8 @@ def get_llm_client_factory() -> LlmClientFactory:
             "description": (
                 "The body's ``tenant_id`` is neither omitted/null "
                 "(built-in / global scope) nor the caller's own tenant "
-                "UUID. Rejected synchronously on both the sync and "
+                "UUID, and the caller does not hold platform_admin. "
+                "Rejected synchronously on both the sync and "
                 "async branches; no job row is created."
             ),
             "content": {
@@ -682,7 +683,7 @@ async def _spawn_async_ingest(
             job.job_id,
             pipeline_call=_pipeline_call,
             dispatchability_check=partial(
-                _ingest_result_dispatchable, tenant_id=operator.tenant_id
+                _ingest_result_dispatchable, tenant_id=resolved.tenant_id or operator.tenant_id
             ),
         ),
         name=f"ingest-job-{job.job_id}",
@@ -717,11 +718,13 @@ async def _ingest_result_dispatchable(
     ``False`` persisted nothing the dispatcher can route, so the job
     ends ``degraded`` rather than lying with ``succeeded``.
 
-    ``tenant_id`` is the calling operator's JWT tenant (not the
-    body-resolved write scope): ``connector_exists`` unions built-ins
-    (``tenant_id IS NULL``) with the operator's own rows, so both
-    write scopes #2085 permits are inside the probed set. Bound via
-    :func:`functools.partial` at the :func:`run_ingest_job` call.
+    ``tenant_id`` is the body-resolved write scope when one was named,
+    else the calling operator's JWT tenant: ``connector_exists`` unions
+    built-ins (``tenant_id IS NULL``) with that tenant's rows, so the
+    built-in scope, the operator's own tenant, and a ``platform_admin``
+    write into another tenant (#3800) are all inside the probed set.
+    Bound via :func:`functools.partial` at the :func:`run_ingest_job`
+    call.
     """
     probe_product, probe_version, probe_impl_id = parse_connector_id(result.connector_id)
     return await connector_exists(
@@ -789,6 +792,7 @@ async def get_ingest_job_endpoint(
             job_id,
             tenant_id=operator.tenant_id,
             is_tenant_admin=operator.tenant_role is TenantRole.TENANT_ADMIN,
+            is_platform_admin=operator.platform_admin,
         )
     except IngestJobNotFoundError as exc:
         raise HTTPException(

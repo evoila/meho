@@ -84,6 +84,11 @@ _HASH_SUFFIX_LEN: Final[int] = 12
 #: log2(16^4) = 16 bits.
 _MASK_SUFFIX_LEN: Final[int] = 4
 
+#: Name of the optional capture group that marks the secret part of a
+#: match. When a pattern defines it, only that part is replaced; the
+#: rest of the match stays in the output. See :mod:`.patterns`.
+_VALUE_GROUP: Final[str] = "value"
+
 
 class RedactionManifestEntry(BaseModel):
     """One firing of one rule on one leaf. See module docstring."""
@@ -266,7 +271,7 @@ def _apply_to_str(
             pattern=rule.pattern,
             action=rule.action,
             count=len(matches),
-            span=(first.start(), first.end()),
+            span=_secret_span(first),
             reason=rule.reason,
             path=path,
         ),
@@ -274,20 +279,41 @@ def _apply_to_str(
     if not mutate:
         return leaf
     return pattern.sub(
-        lambda m: _replacement_for(rule, m),
+        lambda m: _substitute(rule, m),
         leaf,
     )
 
 
-def _replacement_for(rule: RedactionRule, match: re.Match[str]) -> str:
-    """Return the per-match replacement string for *rule*'s action.
+def _secret_span(match: re.Match[str]) -> tuple[int, int]:
+    """Return the span the engine replaces for *match*.
+
+    Most patterns capture only the secret, so that is the whole match.
+    A pattern that has to include variable-width context before the
+    secret (``bind_key_secret``, see :mod:`.patterns`) names the secret
+    part ``value``; only that group is replaced and reported.
+    """
+    if _VALUE_GROUP in match.re.groupindex:
+        return match.span(_VALUE_GROUP)
+    return match.span()
+
+
+def _substitute(rule: RedactionRule, match: re.Match[str]) -> str:
+    """Rewrite *match*: replace the secret span, keep the rest."""
+    start, end = _secret_span(match)
+    whole = match.group(0)
+    offset = match.start()
+    replacement = _replacement_for(rule, match.string[start:end])
+    return whole[: start - offset] + replacement + whole[end - offset :]
+
+
+def _replacement_for(rule: RedactionRule, matched: str) -> str:
+    """Return the replacement string for *matched* under *rule*'s action.
 
     Centralised so the three actions stay alignable; adding a new
     action (e.g. ``tokenize`` for the secret-broker integration #581)
     is one literal here plus one entry in the
     :data:`~meho_backplane.redaction.policy.RedactionAction` union.
     """
-    matched = match.group(0)
     if rule.action == "redact":
         return f"[REDACTED:{rule.pattern}]"
     if rule.action == "mask":

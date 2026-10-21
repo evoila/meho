@@ -1357,8 +1357,8 @@ CONFIG_OPS: tuple[Bind9Op, ...] = (
         response_schema=_BIND9_CONFIG_SHOW_RESPONSE_SCHEMA,
         group_key="config",
         tags=("read-only", "config"),
-        safety_level="safe",
-        requires_approval=False,
+        safety_level="caution",
+        requires_approval=True,
         llm_instructions=BIND9_CONFIG_SHOW_LLM_INSTRUCTIONS,
     ),
     Bind9Op(

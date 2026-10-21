@@ -1047,3 +1047,59 @@ async def test_get_result_handle_store_builds_dedicated_client_and_disposes_it(
     finally:
         store_module.reset_result_handle_store_for_testing()
         get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("max_rows", "max_record_bytes", "storage_coverage"),
+    [
+        pytest.param(3, 10_000, "complete", id="uncapped"),
+        pytest.param(2, 10_000, "partial", id="row-capped"),
+        pytest.param(3, None, "partial", id="byte-capped"),
+    ],
+)
+async def test_spill_keeps_source_coverage_unknown_on_every_cap_path(
+    monkeypatch: pytest.MonkeyPatch,
+    max_rows: int,
+    max_record_bytes: int | None,
+    storage_coverage: str,
+) -> None:
+    """Storage and source coverage are independent (#3676).
+
+    A cap only says the stored handle dropped captured rows. It never
+    says anything about how much of the vendor's data the call captured,
+    so source coverage stays ``unknown`` whether or not a cap fired.
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.connectors.result_handle_store import _StoredPayload
+
+    fixed = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(
+        store_module, "datetime", type("Clock", (), {"now": staticmethod(lambda _tz: fixed)})
+    )
+    rows = [{"i": i, "text": "x" * 20} for i in range(3)]
+    if max_record_bytes is None:
+        # Room for exactly one row, so the byte cap drops the other two.
+        max_record_bytes = len(
+            msgspec.json.encode(
+                _StoredPayload("op", None, rows[:1], 3, 1, fixed.isoformat(), 3, "partial")
+            )
+        )
+    fake = _FakeRedis()
+    stored = (
+        await ResultHandleStore(fake).spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=rows,
+            total_rows=len(rows),
+            ttl_seconds=60,
+            max_rows=max_rows,
+            max_record_bytes=max_record_bytes,
+        )
+    ).stored_rows
+    assert stored > 0
+    payload = msgspec.json.decode(next(iter(fake.store.values())), type=_StoredPayload)
+    assert payload.storage_coverage == storage_coverage
+    assert payload.source_coverage == "unknown"

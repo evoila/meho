@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "corePostgres.fullname" . }}
+  labels:
+    {{- include "corePostgres.labels" . | nindent 4 }}
+spec:
+  # Selects the PostgreSQL pod itself, so its port is closed to every pod
+  # this policy does not name, whatever the parent chart's policy says.
+  podSelector:
+    matchLabels:
+      {{- include "corePostgres.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # The backplane pods. The migration step and the helm test pod carry
+        # the same labels.
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.backplanePodLabels | nindent 14 }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        # The built-in Keycloak pods (database `keycloak`).
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.keycloakPodLabels | nindent 14 }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- range .Values.networkPolicy.extraAllowedSelectors }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: 5432
+          protocol: TCP
+{{- end }}

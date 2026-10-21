@@ -549,6 +549,7 @@ func TestRenderStatusMapping(t *testing.T) {
 		{"ok", nil},
 		{"error", ErrOpError},
 		{"denied", ErrOpError},
+		{StatusRateLimited, ErrOpError},
 	}
 	for _, tc := range cases {
 		cmd := &cobra.Command{}

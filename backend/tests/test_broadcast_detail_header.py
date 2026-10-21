@@ -5,11 +5,8 @@
 
 Coverage matrix (Task #380 / G6.3-T3 acceptance criteria):
 
-* ``X-Broadcast-Detail: full`` flips the published broadcast event to
-  ``detail="full"`` -- verified by capturing the published event via
-  monkey-patched :func:`publish_event` and asserting the rendered
-  payload includes ``params`` (the full-detail shape, not the
-  aggregate shape).
+* ``X-Broadcast-Detail: full`` is bound by the middleware; the audit
+  row records the effective detail (``broadcast_detail_effective``).
 * ``X-Broadcast-Detail: aggregate`` on a normally-full route does NOT
   downgrade -- the header value is logged at info but discarded,
   matching the "opt-in only" Initiative #376 DoD.
@@ -42,9 +39,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-import meho_backplane.audit as audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
     create_engine_for_url,
@@ -135,21 +130,6 @@ async def _fetch_audit_rows(engine: AsyncEngine) -> list[AuditLog]:
         return list(result.scalars().all())
 
 
-def _capture_publish(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with an in-memory recorder.
-
-    Patches the import as seen by :mod:`meho_backplane.audit` -- that's
-    the call site for the HTTP-audit publish hook.
-    """
-    captured: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return captured
-
-
 def _hit_health(monkeypatch: pytest.MonkeyPatch, **headers: str) -> Any:
     """Issue an authenticated ``GET /api/v1/health`` with optional extra headers."""
     key = _make_rsa_keypair("kid-bdh")
@@ -173,14 +153,12 @@ async def test_no_header_uses_default_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Missing header → resolver gets ``request_override=None`` → default branch."""
-    captured = _capture_publish(monkeypatch)
     response = _hit_health(monkeypatch)
     assert response.status_code == 200
     rows = await _fetch_audit_rows(isolated_audit_engine)
     assert len(rows) == 1
     assert rows[0].payload["broadcast_detail_origin"] == "default"
     assert rows[0].payload["broadcast_detail_effective"] == "full"
-    assert len(captured) == 1
 
 
 @pytest.mark.asyncio
@@ -201,13 +179,11 @@ async def test_full_header_keeps_default_origin_for_non_sensitive_route(
     is exercised by :mod:`tests.test_broadcast_overrides_resolver`
     (which calls the resolver directly).
     """
-    captured = _capture_publish(monkeypatch)
     response = _hit_health(monkeypatch, **{"X-Broadcast-Detail": "full"})
     assert response.status_code == 200
     rows = await _fetch_audit_rows(isolated_audit_engine)
     assert rows[0].payload["broadcast_detail_origin"] == "default"
     assert rows[0].payload["broadcast_detail_effective"] == "full"
-    assert len(captured) == 1
 
 
 @pytest.mark.asyncio
@@ -221,13 +197,11 @@ async def test_aggregate_header_does_not_downgrade(
     only ``"full"`` is accepted by the middleware. The request
     succeeds with the route's default detail unchanged.
     """
-    captured = _capture_publish(monkeypatch)
     response = _hit_health(monkeypatch, **{"X-Broadcast-Detail": "aggregate"})
     assert response.status_code == 200
     rows = await _fetch_audit_rows(isolated_audit_engine)
     assert rows[0].payload["broadcast_detail_origin"] == "default"
     assert rows[0].payload["broadcast_detail_effective"] == "full"
-    assert len(captured) == 1
 
 
 @pytest.mark.asyncio
@@ -242,13 +216,11 @@ async def test_malformed_header_value_logged_and_dropped(
     request still succeeds with the default detail; the value
     never reaches the resolver.
     """
-    captured = _capture_publish(monkeypatch)
     response = _hit_health(monkeypatch, **{"X-Broadcast-Detail": "vErBoSe"})
     assert response.status_code == 200
     rows = await _fetch_audit_rows(isolated_audit_engine)
     assert rows[0].payload["broadcast_detail_origin"] == "default"
     assert rows[0].payload["broadcast_detail_effective"] == "full"
-    assert len(captured) == 1
 
 
 @pytest.mark.asyncio
@@ -264,7 +236,6 @@ async def test_case_insensitive_header_value(
     invocations. The contract is still that only ``"full"`` (in any
     case) is honored.
     """
-    captured = _capture_publish(monkeypatch)
     response = _hit_health(monkeypatch, **{"X-Broadcast-Detail": "Full"})
     assert response.status_code == 200
     rows = await _fetch_audit_rows(isolated_audit_engine)
@@ -275,7 +246,6 @@ async def test_case_insensitive_header_value(
     # asserted via caplog in a full structlog harness).
     assert rows[0].payload["broadcast_detail_origin"] == "default"
     assert rows[0].payload["broadcast_detail_effective"] == "full"
-    assert len(captured) == 1
 
 
 # ---------------------------------------------------------------------------

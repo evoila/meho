@@ -237,6 +237,30 @@ def test_mask_action_preserves_suffix() -> None:
     assert result.redacted == f"tenant={expected_mask}"
 
 
+def test_value_group_limits_the_replacement_to_the_secret() -> None:
+    """A pattern with a ``value`` group keeps the rest of the match.
+
+    ``bind_key_secret`` matches the keyword, any comments, and the
+    quoted value. Only the value is masked, and the manifest span
+    points at the value.
+    """
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: mask-bind
+              pattern: bind_key_secret
+              action: mask
+              reason: "keep the keyword"
+            """,
+        ),
+    )
+    leaf = 'secret /* note */ "' + "abcdefgh" + 'ijkl";'
+    result = redact(leaf, policy)
+    assert result.redacted == 'secret /* note */ **********jkl";'
+    start, end = result.manifest[0].span
+    assert leaf[start:end] == '"abcdefghijkl"'
+
+
 def test_hash_action_returns_stable_sha_prefix() -> None:
     policy = _policy_with_rules(
         textwrap.dedent(

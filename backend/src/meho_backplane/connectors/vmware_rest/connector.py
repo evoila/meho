@@ -655,6 +655,8 @@ class VmwareRestConnector(HttpConnector):
         the 8.0 subclass the 8.0.x line. A dispatch whose descriptor is owned
         by this class but whose fingerprinted target falls outside the class's
         ``[floor, ceiling)`` is rejected before any connector is constructed.
+        When another vSphere catalog covers the target version, the reason
+        names it (``use connector vmware-rest-8.0 for this target``, #3789).
         """
         if descriptor_source_kind != "ingested":
             return None
@@ -666,14 +668,23 @@ class VmwareRestConnector(HttpConnector):
             version = Version(target_version)
         except InvalidVersion:
             return "target version is invalid"
-        if not cls._catalog_version_floor <= version < cls._catalog_version_ceiling:
-            return (
+        if not cls._catalog_covers(version):
+            reason = (
                 "target version is outside the supported "
                 f"{cls._catalog_version_band_label} catalog boundary"
             )
+            alternative = _vsphere_catalog_for(version)
+            if alternative is not None:
+                reason += f"; use connector {alternative} for this target"
+            return reason
         if selected_target_connector is None:
             return "target connector could not be resolved"
         return None
+
+    @classmethod
+    def _catalog_covers(cls, version: Version) -> bool:
+        """True when *version* is inside this catalog's ``[floor, ceiling)`` band."""
+        return cls._catalog_version_floor <= version < cls._catalog_version_ceiling
 
     # Outranks the GenericRestConnector auto-shim's priority=0 if both
     # somehow register for the same triple; the idempotency check in
@@ -2909,6 +2920,26 @@ class VmwareRestConnector(HttpConnector):
 
         return await tasks_recent_impl(self, operator, target, params)
 
+    async def sso_admin_api_file_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcenter.sso_admin.api_file.get`` -- read one SSO Admin WSDL or XSD file.
+
+        A ``source_kind="typed"`` read. Sends one ``GET`` without login to a
+        path under ``/sso-adminserver/`` and reads the vCenter version and
+        build. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file.sso_admin_api_file_get_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
+            sso_admin_api_file_get_impl,
+        )
+
+        return await sso_admin_api_file_get_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 
@@ -3032,3 +3063,23 @@ class VmwareRest80Connector(VmwareRestConnector):
     _catalog_version_floor = Version("8.0")
     _catalog_version_ceiling = Version("8.1")
     _catalog_version_band_label = "8.0.x"
+
+
+#: The versioned vSphere catalogs, in the order the boundary error checks them.
+_VSPHERE_CATALOG_CLASSES: tuple[type[VmwareRestConnector], ...] = (
+    VmwareRestConnector,
+    VmwareRest80Connector,
+)
+
+
+def _vsphere_catalog_for(version: Version) -> str | None:
+    """Return the connector id of the vSphere catalog whose band covers *version*.
+
+    Used by the catalog boundary error (#3789), so a refused dispatch names
+    the catalog to use for the target (``vmware-rest-8.0`` for an 8.0.3
+    target on the 9.0 catalog). ``None`` when no catalog covers it.
+    """
+    for catalog in _VSPHERE_CATALOG_CLASSES:
+        if catalog._catalog_covers(version):
+            return f"{catalog.impl_id}-{catalog.version}"
+    return None

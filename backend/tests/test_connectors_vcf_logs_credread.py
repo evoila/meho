@@ -54,9 +54,7 @@ import respx
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -147,18 +145,6 @@ def stub_embedding_service() -> AsyncMock:
 
 
 @pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Record broadcast events so the audit/broadcast leg is asserted."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
-@pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
     """AsyncSession against the autouse-migrated per-worker SQLite engine."""
     sessionmaker = get_sessionmaker()
@@ -231,7 +217,6 @@ async def _seed_descriptor(session: AsyncSession, embedding: list[float]) -> Non
 async def test_dispatch_executes_full_credread_chain_returns_ok(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The full dispatch->loader->session-login->vRLI chain returns status="ok"."""
@@ -284,8 +269,6 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     # The downstream op carried the Bearer session token returned by login.
     sent_auth = op_route.calls[0].request.headers.get("authorization")
     assert sent_auth == f"Bearer {_SESSION_TOKEN}"
-    # One audit + one broadcast for the dispatched op.
-    assert len(captured_events) == 1
 
 
 @pytest.mark.asyncio
@@ -362,7 +345,6 @@ async def test_credread_chain_reconnects_after_session_401_relogin(
 async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No credential value appears in the OperationResult or any captured log event."""
@@ -398,10 +380,6 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     log_blob = repr(captured)
     assert _CANARY_PASSWORD not in log_blob
     assert _CANARY_USERNAME not in log_blob
-
-    events_blob = repr(captured_events)
-    assert _CANARY_PASSWORD not in events_blob
-    assert _CANARY_USERNAME not in events_blob
 
 
 @pytest.mark.asyncio

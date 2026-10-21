@@ -161,7 +161,9 @@ SDDC_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Changes that build a workload domain: create a network pool, check "
         "and add ESXi hosts, check and create the domain. The two checks "
         "change nothing. Creating a pool, adding hosts and creating a domain "
-        "wait for a person's approval. Follow each one with sddc.task.get."
+        "wait for a person's approval. Creating a pool returns the pool; keep "
+        "its id for sddc.host.validate. Adding hosts and creating a domain "
+        "return a task; follow them with sddc.task.get."
     ),
 }
 

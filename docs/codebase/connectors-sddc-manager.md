@@ -304,10 +304,12 @@ resolves). A custom park-time blast-radius preview builder (the vcf-installer
 
 **The governed WLD build sequence** (the caller's responsibility — runbook or
 the meho-automation add-on — not the dispatcher's): `network_pool.create` →
-`host.validate` → `host.commission` → `domain.validate` → `domain.create`. The
-create calls are `202`-async (they return a `Task` in seconds while the build
-runs for hours on the appliance); poll `sddc.task.get` with the returned task id
-and `sddc.domain.status` once the domain object exists, to a terminal state.
+`host.validate` → `host.commission` → `domain.validate` → `domain.create`.
+`network_pool.create` returns the new pool at once; keep its id for
+`host.validate`. `host.commission` and `domain.create` are `202`-async (they
+return a `Task` in seconds while the build runs for hours on the appliance);
+poll `sddc.task.get` with the returned task id and `sddc.domain.status` once
+the domain object exists, to a terminal state.
 
 **NFS-principal shape.** For an NFS-principal domain
 the `DomainCreationSpec` uses

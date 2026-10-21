@@ -1,0 +1,24 @@
+{% set values = values | default({}) %}
+<form class="space-y-4 rounded-box border border-warning p-4" hx-post="/ui/grants/service/renew-delete-grants" hx-target="#grants-renew-container" hx-swap="innerHTML" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}' hx-confirm="Renew every live delete grant of this service principal with the new expiry?" hx-disabled-elt="find button[type=submit]" aria-labelledby="renew-delete-grants-heading" data-renew-delete-grants>
+  <div>
+    <h3 id="renew-delete-grants-heading" class="text-base font-semibold">Renew delete grants as a set</h3>
+    <p class="text-sm opacity-70">Filter the list by one service principal and review its delete grants together. Then give them one new expiry, within {{ delete_grant_max_days | default(30) }} days. Each grant is checked like a new grant; one failed check renews nothing. Expired and revoked grants are not renewed.</p>
+  </div>
+  {% if error is defined and error %}<div class="alert alert-error text-sm" role="alert">{{ error }}</div>{% endif %}
+  <div class="grid gap-4 sm:grid-cols-2">
+    <label class="block space-y-1">
+      <span class="text-sm font-medium">Service principal sub</span>
+      <input type="text" name="principal_sub" value="{{ values.get('principal_sub', principal | default('')) }}" required maxlength="512" class="input input-bordered w-full font-mono" placeholder="Exact JWT sub" />
+    </label>
+    <label class="block space-y-1">
+      <span class="text-sm font-medium">New expiry</span>
+      <input type="text" name="expires_at" value="{{ values.get('expires_at', '') }}" required class="input input-bordered w-full font-mono" placeholder="2026-10-01T12:00:00Z" />
+      <span class="block text-xs opacity-60">A future ISO-8601 timestamp with its UTC offset, within {{ delete_grant_max_days | default(30) }} days.</span>
+    </label>
+  </div>
+  <label class="block space-y-1">
+    <span class="text-sm font-medium">Reason (optional)</span>
+    <textarea name="reason" class="textarea textarea-bordered w-full" maxlength="2048" rows="2" placeholder="Leave blank to keep each grant's recorded reason">{{ values.get('reason', '') }}</textarea>
+  </label>
+  <div><button type="submit" class="btn btn-warning btn-sm">Renew delete grants</button></div>
+</form>

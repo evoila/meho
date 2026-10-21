@@ -61,6 +61,7 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from starlette.requests import Request
 
+from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.ui.maturity import surface_maturity
 from meho_backplane.ui.paths import templates_dir
 from meho_backplane.version import deployed_version_label
@@ -117,6 +118,10 @@ def get_jinja_env() -> Environment:
         # tier server-side at render time — no per-route context
         # threading, no REST round-trip.
         _ENV.globals["surface_maturity"] = surface_maturity
+        # Sandbox mode banner (#4622): a function, read at render time, so
+        # every page shows the banner when the mode is on and nothing when
+        # it is off. No per-route context threading.
+        _ENV.globals["sandbox_mode_active"] = sandbox_mode_active
     return _ENV
 
 
@@ -174,10 +179,24 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     so the processor itself issues zero IO.
     """
     ready = bool(getattr(request.state, "ui_ready", False))
+    # #4622: the sandbox banner's count of delete grants that expire soon,
+    # stashed by the session middleware (one count query per page, only
+    # with the mode on); ``None`` when unknown.
+    sandbox = {
+        "sandbox_expiring_delete_grants": getattr(
+            request.state, "sandbox_expiring_delete_grants", None
+        ),
+    }
     session_ctx = getattr(request.state, "ui_session", None)
     if session_ctx is None:
-        return {"session_tenant": None, "session_operator_sub": None, "ready": ready}
+        return {
+            "session_tenant": None,
+            "session_operator_sub": None,
+            "ready": ready,
+            **sandbox,
+        }
     return {
+        **sandbox,
         "session_tenant": {
             "id": str(session_ctx.tenant_id),
             "slug": session_ctx.tenant_slug,

@@ -35,6 +35,14 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.vcf_automation._op_schemas import (
+    RIGHT_FIELDS,
+    ROLE_FIELDS,
+    cloudapi_page,
+    field,
+    guidance,
+    obj,
+)
 from meho_backplane.connectors.vcf_automation._paths import (
     OAUTH_REGISTER_PATH,
     PROVIDER_GLOBAL_ROLES_PATH,
@@ -52,10 +60,9 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
 
 __all__ = ["VCFA_PROVISIONING_OPS"]
 
-_STATUS_ENVELOPE_NOTE = (
-    "Returns {status: 'created' | 'unchanged' | 'invalid_request', …, guidance}: "
-    "'unchanged' = it already exists (nothing written), 'invalid_request' = a name "
-    "did not resolve (nothing written)."
+_STATUS_NOTE = (
+    "'unchanged' means it already exists and nothing was written; 'invalid_request' "
+    "means a name did not resolve and nothing was written."
 )
 
 # ---------------------------------------------------------------------------
@@ -67,15 +74,20 @@ _NAME_FRAGMENT: dict[str, Any] = {"type": "string", "minLength": 1, "maxLength":
 _FIQL_NAME: dict[str, Any] = {**_NAME_FRAGMENT, "pattern": "^[^,;]+$"}
 
 _PAGING: dict[str, Any] = {
-    "page": {"type": "integer", "minimum": 1, "description": "1-based page number."},
-    "pageSize": {"type": "integer", "minimum": 1, "maximum": 128, "description": "Max 128."},
+    "page": {"type": "integer", "minimum": 1, "description": "The page number, starting at 1."},
+    "pageSize": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 128,
+        "description": "Items per page (at most 128).",
+    },
 }
 _NAME_CONTAINS: dict[str, Any] = {
     "name_contains": {
         **_NAME_FRAGMENT,
         # Rides a FIQL wildcard literal: no FIQL-reserved characters.
         "pattern": "^[^,;()*=!<>'\"]+$",
-        "description": "Case-insensitive name substring filter (FIQL name==*value*).",
+        "description": "Optional part of the name to match (FIQL name==*value*).",
     }
 }
 
@@ -84,8 +96,8 @@ _PASSWORD_SECRET_PROPS: dict[str, Any] = {
         "type": "string",
         "minLength": 1,
         "description": (
-            "Vault KV-v2 path holding the user's password, read under your identity. "
-            "The password is NEVER passed inline."
+            "Vault KV-v2 path that holds the user's password, read under your identity. "
+            "Never pass the password itself."
         ),
     },
     "password_secret_mount": {
@@ -96,7 +108,7 @@ _PASSWORD_SECRET_PROPS: dict[str, Any] = {
     "password_secret_key": {
         "type": "string",
         "minLength": 1,
-        "description": "Field of the secret holding the password (default 'password').",
+        "description": "Field of the secret that holds the password (default 'password').",
     },
 }
 
@@ -106,48 +118,59 @@ _ORG_USER_PROPS: dict[str, Any] = {
     "token_name": {
         "type": "string",
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
-        "description": "API token (OAuth client) name, unique per user.",
+        "description": "API token name (the OAuth client name), unique per user.",
     },
     **_PASSWORD_SECRET_PROPS,
 }
 
-_PRINCIPALS: dict[str, Any] = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "email": {"type": "string", "minLength": 1, "description": "User or group name."},
-            "type": {"type": "string", "enum": ["user", "group"]},
-        },
-        "required": ["email"],
-        "additionalProperties": False,
-    },
-}
-
-_LIST_RESPONSE: dict[str, Any] = {
+_PRINCIPALS_ITEM: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "values": {"type": ["array", "null"]},
-        "resultTotal": {"type": ["integer", "null"]},
+        "email": {"type": "string", "minLength": 1, "description": "User email or group name."},
+        "type": {
+            "type": "string",
+            "enum": ["user", "group"],
+            "description": "'user' (the default) or 'group'.",
+        },
     },
-    "additionalProperties": True,
+    "required": ["email"],
+    "additionalProperties": False,
 }
 
 
-def _write_response(resource: str, statuses: list[str]) -> dict[str, Any]:
+def _principals(role: str) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "items": _PRINCIPALS_ITEM,
+        "description": f"Optional project {role}: users or groups.",
+    }
+
+
+_CREATE_STATUSES = ["created", "unchanged", "invalid_request"]
+
+
+def _status_field(statuses: list[str]) -> dict[str, Any]:
+    return field("string", "What the op did: " + ", ".join(statuses) + ".", enum=statuses)
+
+
+_GUIDANCE_FIELD = field(["string", "null"], "A short note on what to do next, or null.")
+
+
+def _write_response(resource: str, resource_fields: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "status": {"type": "string", "enum": statuses},
-            resource: {"type": ["object", "null"]},
-            "guidance": {"type": ["string", "null"]},
+            "status": _status_field(_CREATE_STATUSES),
+            resource: {
+                **obj(f"The {resource}; null when nothing was found or made.", resource_fields),
+                "type": ["object", "null"],
+            },
+            "guidance": _GUIDANCE_FIELD,
         },
         "required": ["status", "guidance"],
         "additionalProperties": True,
     }
 
-
-_CREATE_STATUSES = ["created", "unchanged", "invalid_request"]
 
 # ---------------------------------------------------------------------------
 # Reads
@@ -158,32 +181,34 @@ _RIGHT_LIST = VcfaTypedOp(
     handler_attr="provider_right_list",
     plane="provider",
     path=PROVIDER_RIGHTS_PATH,
-    summary="List VCFA rights, optionally by name substring (provider plane).",
+    summary="List VCF Automation rights, optionally by part of the name (provider plane).",
     description=(
-        "Lists the rights the appliance knows via GET /cloudapi/1.0.0/rights, "
-        "optionally narrowed by a name substring. Use to find exact right names "
-        "(e.g. 'API Tokens: Manage') before vcfa.provider.role.create. Returns "
-        "{values: [{id, name, description, category, rightType}], resultTotal}. "
-        "safety_level=safe, read-only."
+        "Lists the rights the appliance knows with GET /cloudapi/1.0.0/rights. Use "
+        "it to find the exact right names, for example 'API Tokens: Manage', before "
+        "vcfa.provider.role.create."
     ),
     parameter_schema={
         "type": "object",
         "properties": {**_NAME_CONTAINS, **_PAGING},
         "additionalProperties": False,
+        "examples": [{"name_contains": "API Tokens"}],
     },
-    response_schema=_LIST_RESPONSE,
+    response_schema=cloudapi_page("rights", RIGHT_FIELDS),
     group_key="vcfa-provider-reads",
     tags=("read-only", "vcfa", "provider", "rbac"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call to find the exact name of a right before building a custom role, "
-            "e.g. name_contains='Token'."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call to find the exact name of a right before you build a custom role, "
+            "for example name_contains='Token'."
         ),
-        "output_shape": "{values: [{id, name, category, ...}], resultTotal}.",
-        "next_step": "Pass exact right names to vcfa.provider.role.create 'rights'.",
-    },
+        output_shape=(
+            "{values: [{id, name, description, category, rightType, impliedRights}], "
+            "resultTotal, pageCount, page, pageSize}."
+        ),
+        next_step="Pass the exact right names to vcfa.provider.role.create 'rights'.",
+    ),
 )
 
 _ROLE_LIST = VcfaTypedOp(
@@ -191,38 +216,41 @@ _ROLE_LIST = VcfaTypedOp(
     handler_attr="provider_role_list",
     plane="provider",
     path=PROVIDER_GLOBAL_ROLES_PATH,
-    summary="List VCFA global roles, or the roles available in one org (provider plane).",
+    summary="List VCF Automation global roles, or the roles of one org (provider plane).",
     description=(
-        "Without 'org': lists global roles via GET /cloudapi/1.0.0/globalRoles -- the "
-        "roles tenants consume once published. With 'org': lists that org's roles via "
-        "GET /cloudapi/1.0.0/roles under the org's tenant context -- the roles a user "
-        "create can reference (a published global role appears here). Optional name "
-        "substring filter. Returns {values: [{id, name, description, readOnly, "
-        "bundleKey}], resultTotal}. An unknown org is a connector_error. "
-        "safety_level=safe, read-only."
+        "Without 'org': lists the global roles (GET /cloudapi/1.0.0/globalRoles). "
+        "With 'org': lists the roles that org can give a user (GET "
+        "/cloudapi/1.0.0/roles); a published global role shows up there. An "
+        "unknown org is an error."
     ),
     parameter_schema={
         "type": "object",
         "properties": {
-            "org": {**_FIQL_NAME, "description": "Org name to scope to (omit for global roles)."},
+            "org": {**_FIQL_NAME, "description": "Org name to list roles for (omit for global)."},
             **_NAME_CONTAINS,
             **_PAGING,
         },
         "additionalProperties": False,
+        "examples": [{"org": "<org-name>"}],
     },
-    response_schema=_LIST_RESPONSE,
+    response_schema=cloudapi_page("roles", ROLE_FIELDS),
     group_key="vcfa-provider-reads",
     tags=("read-only", "vcfa", "provider", "rbac"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call to pick a base role for vcfa.provider.role.create (no org), or to check "
-            "which roles an org can assign before vcfa.provider.user.create (with org)."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call without 'org' to pick a base role for vcfa.provider.role.create, or "
+            "with 'org' to check which roles an org can give before "
+            "vcfa.provider.user.create."
         ),
-        "output_shape": "{values: [{id, name, readOnly, bundleKey}], resultTotal}.",
-        "next_step": "vcfa.provider.role.create (base_role) or vcfa.provider.user.create (role).",
-    },
+        output_shape=(
+            "{values: [{id, name, description, readOnly, bundleKey, publishAll}], "
+            "resultTotal, pageCount, page, pageSize}. publishAll is set on global "
+            "roles only."
+        ),
+        next_step="vcfa.provider.role.create (base_role) or vcfa.provider.user.create (role).",
+    ),
 )
 
 _LOGIN_TEST = VcfaTypedOp(
@@ -230,24 +258,46 @@ _LOGIN_TEST = VcfaTypedOp(
     handler_attr="tenant_login_test",
     plane="tenant",
     path=TENANT_SESSION_PATH,
-    summary="Test the tenant-plane login only; no data call (tenant plane).",
+    summary="Test only the tenant-plane login; no data call (tenant plane).",
     description=(
-        "Runs only the tenant-plane login (POST /iaas/api/login -- the refresh-token "
-        "exchange when the target secret carries 'refresh_token') and reports whether it "
-        "authenticated. No authenticated data call is made; the minted bearer is "
-        "discarded, never cached or returned. api_version comes from the unauthenticated "
-        "GET /iaas/api/about. A refused login is a result (authenticated=false + error), "
-        "not an op failure. Returns {authenticated, login_flow, api_version, error: "
-        "{cause, status_code, message} | null}. safety_level=safe."
+        "Runs only the tenant login (POST /iaas/api/login) with the target's secret "
+        "and says whether it worked. It makes no data call, and the new token is "
+        "thrown away. A refused login is a result (authenticated=false), not an "
+        "op failure."
     ),
-    parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    parameter_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+        "examples": [{}],
+    },
     response_schema={
         "type": "object",
         "properties": {
-            "authenticated": {"type": "boolean"},
-            "login_flow": {"type": "string"},
-            "api_version": {"type": ["string", "null"]},
-            "error": {"type": ["object", "null"]},
+            "authenticated": field("boolean", "True when the tenant login worked."),
+            "login_flow": field(
+                "string",
+                "Which login ran: 'refresh_token' (an API token) or 'username_password'.",
+            ),
+            "api_version": field(
+                ["string", "null"], "The newest API version from GET /iaas/api/about, or null."
+            ),
+            "error": {
+                **obj(
+                    "Why the login failed; null when it worked.",
+                    {
+                        "cause": field(
+                            "string",
+                            "The failure kind, for example session_establish_400.",
+                        ),
+                        "status_code": field(
+                            ["integer", "null"], "The HTTP status of the login, if any."
+                        ),
+                        "message": field("string", "The error message."),
+                    },
+                ),
+                "type": ["object", "null"],
+            },
         },
         "required": ["authenticated", "error"],
         "additionalProperties": False,
@@ -256,17 +306,19 @@ _LOGIN_TEST = VcfaTypedOp(
     tags=("read-only", "vcfa", "tenant", "health"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call after storing a new tenant API token in the target secret, to prove "
-            "the tenant plane accepts it before running tenant reads/writes."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call after you store a new tenant API token in the target secret, to "
+            "check that the tenant plane accepts it before tenant reads or changes."
         ),
-        "output_shape": "{authenticated, login_flow, api_version, error}.",
-        "next_step": (
-            "authenticated=true → vcfa.tenant.project.list; false → read error.cause "
-            "(session_establish_400 = the token was refused)."
+        output_shape=(
+            "{authenticated, login_flow, api_version, error: {cause, status_code, message} | null}."
         ),
-    },
+        next_step=(
+            "authenticated=true: go on with vcfa.tenant.project.list. false: read "
+            "error.cause (session_establish_400 means the token was refused)."
+        ),
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -278,14 +330,12 @@ _ORG_CREATE = VcfaTypedOp(
     handler_attr="provider_org_create",
     plane="provider",
     path=PROVIDER_ORGS_PATH,
-    summary="Create a VCFA tenant organization (provider plane, idempotent on name).",
+    summary="Create a VCF Automation tenant org (provider plane); safe to run twice.",
     description=(
-        "Creates an org via POST /cloudapi/1.0.0/orgs. org_type='vm_apps' (default) sets "
-        "isClassicTenant=true -- a VM Apps org, which needs no region, VPC or quota; "
-        "'all_apps' needs a region + quota afterwards. The appliance may need the "
-        "CLASSIC_TENANT_CREATION / MIXED_TENANCY_MODE feature flags for a VM Apps org. "
-        f"{_STATUS_ENVELOPE_NOTE} org = {{id, name, displayName, isEnabled, type}}. "
-        "safety_level=caution, requires approval."
+        "Creates an org with POST /cloudapi/1.0.0/orgs. org_type 'vm_apps' (the "
+        "default) makes a VM Apps org, which needs no region, VPC or quota; "
+        "'all_apps' needs a region and a quota later. An org with the same name "
+        "answers 'unchanged'."
     ),
     parameter_schema={
         "type": "object",
@@ -293,28 +343,58 @@ _ORG_CREATE = VcfaTypedOp(
             "name": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,62}$",
-                "description": "Org name (URL slug).",
+                "description": "Org name, used in URLs: letters, digits and '-'.",
             },
-            "display_name": {**_NAME_FRAGMENT, "description": "Display name (default name)."},
-            "description": {"type": "string", "maxLength": 256},
-            "org_type": {"type": "string", "enum": ["vm_apps", "all_apps"]},
-            "is_enabled": {"type": "boolean", "description": "Default true."},
+            "display_name": {**_NAME_FRAGMENT, "description": "Display name (default: name)."},
+            "description": {
+                "type": "string",
+                "maxLength": 256,
+                "description": "Optional org description.",
+            },
+            "org_type": {
+                "type": "string",
+                "enum": ["vm_apps", "all_apps"],
+                "description": (
+                    "'vm_apps' (default): a VM Apps org. 'all_apps': an All Apps org, "
+                    "which needs a region and a quota."
+                ),
+            },
+            "is_enabled": {"type": "boolean", "description": "Enable the org (default true)."},
         },
         "required": ["name"],
         "additionalProperties": False,
+        "examples": [{"name": "example-org", "display_name": "Example Org"}],
     },
-    response_schema=_write_response("org", _CREATE_STATUSES),
+    response_schema=_write_response(
+        "org",
+        {
+            "id": field(["string", "null"], "The org id (a URN); null while it is being made."),
+            "name": field("string", "The org name."),
+            "displayName": field(["string", "null"], "The display name."),
+            "isEnabled": field(["boolean", "null"], "True when the org is enabled."),
+            "type": field(["string", "null"], "'vm_apps' or 'all_apps'."),
+        },
+    ),
     group_key="vcfa-provider-writes",
     tags=("write", "vcfa", "provider", "org"),
     safety_level="caution",
     requires_approval=True,
-    llm_instructions={
-        "when_to_call": "Call to create the tenant org a VCFA tenant plane needs.",
-        "output_shape": "{status, org: {id, name, displayName, isEnabled, type}, guidance}.",
-        "next_step": (
+    llm_instructions=guidance(
+        when_to_call="Call to create the tenant org that a VCF Automation tenant plane needs.",
+        preconditions=(
+            "The name is not 'System'. A VM Apps org may need the appliance feature "
+            "flags CLASSIC_TENANT_CREATION and MIXED_TENANCY_MODE. A person must "
+            "approve the call."
+        ),
+        output_shape=(
+            "{status: created | unchanged | invalid_request, org: {id, name, "
+            f"displayName, isEnabled, type}}, guidance}}. {_STATUS_NOTE} When the "
+            "appliance makes the org in the background, org.id is null at first."
+        ),
+        next_step=(
             "vcfa.provider.role.create with publish_to_org=<name>, then vcfa.provider.user.create."
         ),
-    },
+    ),
 )
 
 _ROLE_CREATE = VcfaTypedOp(
@@ -322,59 +402,105 @@ _ROLE_CREATE = VcfaTypedOp(
     handler_attr="provider_role_create",
     plane="provider",
     path=PROVIDER_GLOBAL_ROLES_PATH,
-    summary="Create a custom VCFA global role from a base role + extra rights (provider plane).",
+    summary="Create a custom VCF Automation global role from a base role and rights.",
     description=(
-        "Creates a custom global role: resolves every right of 'base_role' plus each "
-        "exact right name in 'rights', then POST /cloudapi/1.0.0/globalRoles, PUT its "
-        "rights, and optionally publishes it to one org (publish_to_org) or all orgs "
-        "(publish_all). Use it because the stock 'Organization Administrator' role is "
-        "read-only and lacks 'API Tokens: Manage'. Every name is resolved before any "
-        f"write. {_STATUS_ENVELOPE_NOTE} Also returns rights_count, published_to and "
-        "reconciled. Re-running repairs a half-built role: an existing role with no "
-        "rights gets the requested rights and a requested publication that is missing "
-        "is applied ('updated'); rights already present are never replaced. A failed "
-        "rights update right after the create deletes the new role. "
-        "safety_level=caution, requires approval."
+        "Creates a global role with every right of 'base_role' plus each right in "
+        "'rights', then may publish it to one org or to all orgs. Every name is "
+        "checked before any write. Run it again to repair a half-built role."
     ),
     parameter_schema={
         "type": "object",
         "properties": {
-            "name": {**_FIQL_NAME, "description": "New global role name."},
-            "description": {"type": "string", "maxLength": 256},
+            "name": {**_FIQL_NAME, "description": "The new global role name."},
+            "description": {
+                "type": "string",
+                "maxLength": 256,
+                "description": "Optional role description.",
+            },
             "base_role": {**_FIQL_NAME, "description": "Global role whose rights are copied."},
             "rights": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1},
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "One exact right name.",
+                },
                 "maxItems": 64,
                 "uniqueItems": True,
                 "description": "Exact right names to add (see vcfa.provider.right.list).",
             },
-            "publish_to_org": {**_FIQL_NAME, "description": "Publish to this org."},
-            "publish_all": {"type": "boolean", "description": "Publish to every org."},
+            "publish_to_org": {**_FIQL_NAME, "description": "Publish the role to this org."},
+            "publish_all": {"type": "boolean", "description": "Publish the role to every org."},
         },
         "required": ["name"],
         "additionalProperties": False,
+        "examples": [
+            {
+                "name": "<role-name>",
+                "base_role": "Organization Administrator",
+                "rights": ["API Tokens: Manage"],
+                "publish_to_org": "<org-name>",
+            }
+        ],
     },
-    response_schema=_write_response("role", [*_CREATE_STATUSES, "updated"]),
+    response_schema={
+        "type": "object",
+        "properties": {
+            "status": _status_field([*_CREATE_STATUSES, "updated"]),
+            "role": {
+                **obj(
+                    "The role; null when nothing was found or made.",
+                    {
+                        "id": field("string", "The role id (a URN)."),
+                        "name": field("string", "The role name."),
+                    },
+                ),
+                "type": ["object", "null"],
+            },
+            "rights_count": field(["integer", "null"], "How many rights the role has."),
+            "published_to": {
+                "type": ["array", "string"],
+                "description": "The org names the role was published to now, or 'all'.",
+                "items": {"type": "string"},
+            },
+            "reconciled": {
+                "type": "array",
+                "description": "On 'updated': what was repaired, 'rights' and/or 'publication'.",
+                "items": {"type": "string"},
+            },
+            "guidance": _GUIDANCE_FIELD,
+        },
+        "required": ["status", "guidance"],
+        "additionalProperties": True,
+    },
     group_key="vcfa-provider-writes",
     tags=("write", "vcfa", "provider", "rbac"),
     safety_level="caution",
     requires_approval=True,
-    llm_instructions={
-        "when_to_call": (
-            "Call to build an org-admin role that can mint API tokens: base_role="
-            "'Organization Administrator', rights=['API Tokens: Manage'], "
-            "publish_to_org=<org>."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call to build an org admin role that can make API tokens, because the "
+            "built-in 'Organization Administrator' role cannot be changed and lacks "
+            "'API Tokens: Manage': base_role='Organization Administrator', "
+            "rights=['API Tokens: Manage'], publish_to_org=<org>."
         ),
-        "output_shape": (
-            "{status: created|updated|unchanged|invalid_request, role: {id, name}, "
-            "rights_count, published_to, reconciled, guidance}."
+        preconditions=(
+            "Pass base_role or rights (or both) for a new role. Look up exact right "
+            "names with vcfa.provider.right.list; the publish_to_org org must exist. "
+            "A person must approve the call."
         ),
-        "next_step": "vcfa.provider.user.create with role=<this role name>.",
-        "parameter_hints": {
-            "rights": "Exact names; resolve them with vcfa.provider.right.list first.",
+        output_shape=(
+            "{status: created | updated | unchanged | invalid_request, role: {id, "
+            f"name}}, rights_count, published_to, reconciled, guidance}}. {_STATUS_NOTE} "
+            "'updated' means an existing role got its missing rights or publication; "
+            "rights already on a role are never replaced. If adding the rights fails "
+            "right after the create, the new role is deleted."
+        ),
+        next_step="vcfa.provider.user.create with role=<this role name>.",
+        parameter_hints={
+            "rights": "Exact names; look them up with vcfa.provider.right.list first.",
         },
-    },
+    ),
 )
 
 _USER_CREATE = VcfaTypedOp(
@@ -382,44 +508,77 @@ _USER_CREATE = VcfaTypedOp(
     handler_attr="provider_user_create",
     plane="provider",
     path=PROVIDER_USERS_PATH,
-    summary="Create a local VCFA org user with a role (provider plane, idempotent).",
+    summary="Create a local VCF Automation org user with a role; safe to run twice.",
     description=(
-        "Creates a LOCAL user in an org via POST /cloudapi/1.0.0/users under the org's "
-        "tenant context, holding one org-scoped role (a published global role). The "
-        "password is read from Vault at password_secret_ref under your identity -- it is "
-        "never an op param and never returned. "
-        f"{_STATUS_ENVELOPE_NOTE} user = {{id, username, org, role}}. "
-        "safety_level=caution, requires approval."
+        "Creates a local user in an org with POST /cloudapi/1.0.0/users, holding one "
+        "org role (a published global role). The password is read from Vault at "
+        "password_secret_ref; it is never a parameter and never returned."
     ),
     parameter_schema={
         "type": "object",
         "properties": {
-            "org": {**_FIQL_NAME, "description": "Org the user is created in."},
-            "username": {**_FIQL_NAME, "description": "Login name."},
-            "role": {**_FIQL_NAME, "description": "Org role name (vcfa.provider.role.list org)."},
+            "org": {**_FIQL_NAME, "description": "The org the user is created in."},
+            "username": {**_FIQL_NAME, "description": "The login name."},
+            "role": {
+                **_FIQL_NAME,
+                "description": "Org role name (see vcfa.provider.role.list with org).",
+            },
             **_PASSWORD_SECRET_PROPS,
-            "email": {"type": "string", "maxLength": 256},
-            "full_name": {"type": "string", "maxLength": 256},
-            "description": {"type": "string", "maxLength": 256},
-            "enabled": {"type": "boolean", "description": "Default true."},
+            "email": {
+                "type": "string",
+                "maxLength": 256,
+                "description": "Optional email address of the user.",
+            },
+            "full_name": {
+                "type": "string",
+                "maxLength": 256,
+                "description": "Optional full name of the user.",
+            },
+            "description": {
+                "type": "string",
+                "maxLength": 256,
+                "description": "Optional user description.",
+            },
+            "enabled": {"type": "boolean", "description": "Enable the user (default true)."},
         },
         "required": ["org", "username", "role", "password_secret_ref"],
         "additionalProperties": False,
+        "examples": [
+            {
+                "org": "<org-name>",
+                "username": "<username>",
+                "role": "<role-name>",
+                "password_secret_ref": "<vault-path>",
+            }
+        ],
     },
-    response_schema=_write_response("user", _CREATE_STATUSES),
+    response_schema=_write_response(
+        "user",
+        {
+            "id": field(["string", "null"], "The user id (a URN)."),
+            "username": field("string", "The login name."),
+            "org": field("string", "The org name."),
+            "role": field("string", "The role name; set on 'created'."),
+        },
+    ),
     group_key="vcfa-provider-writes",
     tags=("write", "vcfa", "provider", "user", "credential"),
     safety_level="caution",
     requires_approval=True,
-    llm_instructions={
-        "when_to_call": (
-            "Call after the org exists and the role is published to it. Store the "
-            "password in Vault first (vault.kv.put) and pass its path."
+    llm_instructions=guidance(
+        when_to_call="Call to create the local org user that will own the tenant API token.",
+        preconditions=(
+            "The org exists and the role is published to it. Store the password in "
+            "Vault first (vault.kv.put) and pass its path. A person must approve "
+            "the call."
         ),
-        "output_shape": "{status, user: {id, username, org, role}, guidance}.",
-        "next_step": "vcfa.provider.api_token.create for this user.",
-        "parameter_hints": {"password_secret_ref": "Vault path; never the password itself."},
-    },
+        output_shape=(
+            "{status: created | unchanged | invalid_request, user: {id, username, "
+            f"org, role}}, guidance}}. {_STATUS_NOTE}"
+        ),
+        next_step="vcfa.provider.api_token.create for this user.",
+        parameter_hints={"password_secret_ref": "A Vault path; never the password itself."},
+    ),
 )
 
 _API_TOKEN_CREATE = VcfaTypedOp(
@@ -427,27 +586,12 @@ _API_TOKEN_CREATE = VcfaTypedOp(
     handler_attr="provider_api_token_create",
     plane="provider",
     path=OAUTH_REGISTER_PATH,
-    summary="Mint an org user's VCFA API token straight into Vault; never returned.",
+    summary="Create an org user's VCF Automation API token and store it in Vault; never returned.",
     description=(
-        "Logs in as <username>@<org> (password from password_secret_ref), registers an "
-        "OAuth client (POST /oauth/tenant/<org>/register, or /oauth/provider/... for "
-        "System) and runs the jwt-bearer grant to mint the API (refresh) token. The token "
-        "is written to Vault at store_secret_ref/store_field (default field "
-        "'refresh_token', the field the connector's tenant login reads) through the "
-        "governed KV write handlers on vault_target -- the Vault-connector target whose "
-        "Vault role performs the write, exactly as vault.kv.patch on that target would -- "
-        "and is NEVER returned: the result carries only the Vault target and ref, "
-        "version, SHA-256 and length. The park card carries a permission_preflight "
-        "for that write; when it says the write will be denied, the call is refused "
-        "(write_capability_denied) and nothing parks. Before any appliance call your "
-        "MEHO policy for vault.kv.patch/put on vault_target is evaluated: deny refuses; "
-        "needs-approval is satisfied by this op's own approval park (an auto-executed "
-        "dispatch is refused). "
-        "The user's role needs 'API Tokens: Manage'. "
-        "Returns {status: 'created' | 'unchanged' | 'invalid_request', client_id, stored, "
-        "guidance} (the token's id is urn:vcloud:token:<client_id>); 'unchanged' = a token "
-        "with that name exists (nothing minted). "
-        "safety_level=dangerous (credential material), requires approval."
+        "Logs in as the org user, registers an OAuth client and gets the user's API "
+        "token, then writes it to Vault at store_secret_ref through vault_target. "
+        "The token is never returned: the result has only where it is stored, a "
+        "SHA-256 and the length."
     ),
     parameter_schema={
         "type": "object",
@@ -463,16 +607,19 @@ _API_TOKEN_CREATE = VcfaTypedOp(
                 "minLength": 1,
                 "maxLength": 255,
                 "description": (
-                    "Name of the Vault-connector target (list_targets) whose Vault role "
-                    "writes store_secret_ref -- the same target a vault.kv.patch of that "
-                    "path would be dispatched on."
+                    "Name of the Vault target (list_targets) whose Vault role writes "
+                    "store_secret_ref: the target you would run vault.kv.patch on."
                 ),
             },
-            "store_mount": {"type": "string", "minLength": 1, "description": "Default 'secret'."},
+            "store_mount": {
+                "type": "string",
+                "minLength": 1,
+                "description": "KV-v2 mount of store_secret_ref (default 'secret').",
+            },
             "store_field": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Field name (default 'refresh_token').",
+                "description": "Field the token is written to (default 'refresh_token').",
             },
         },
         "required": [
@@ -484,17 +631,44 @@ _API_TOKEN_CREATE = VcfaTypedOp(
             "vault_target",
         ],
         "additionalProperties": False,
+        "examples": [
+            {
+                "org": "<org-name>",
+                "username": "<username>",
+                "token_name": "meho-token",
+                "password_secret_ref": "<vault-path>",
+                "store_secret_ref": "<vault-path>",
+                "vault_target": "<vault-target-name>",
+            }
+        ],
     },
     response_schema={
         "type": "object",
         "properties": {
-            "status": {"type": "string", "enum": _CREATE_STATUSES},
-            "org": {"type": "string"},
-            "username": {"type": "string"},
-            "token_name": {"type": "string"},
-            "client_id": {"type": ["string", "null"]},
-            "stored": {"type": ["object", "null"]},
-            "guidance": {"type": ["string", "null"]},
+            "status": _status_field(_CREATE_STATUSES),
+            "org": field("string", "The org name."),
+            "username": field("string", "The org user."),
+            "token_name": field("string", "The API token name."),
+            "client_id": field(
+                ["string", "null"],
+                "The OAuth client id; the token id is urn:vcloud:token:<client_id>.",
+            ),
+            "stored": {
+                **obj(
+                    "Where the token was stored; null when nothing was made.",
+                    {
+                        "vault_target": field("string", "The Vault target that wrote it."),
+                        "mount": field("string", "The KV-v2 mount."),
+                        "secret_ref": field("string", "The KV-v2 path."),
+                        "field": field("string", "The field that holds the token."),
+                        "version": field(["integer", "null"], "The new secret version."),
+                        "value_sha256": field("string", "SHA-256 of the token, to compare."),
+                        "length": field("integer", "The token length."),
+                    },
+                ),
+                "type": ["object", "null"],
+            },
+            "guidance": _GUIDANCE_FIELD,
         },
         "required": ["status", "guidance"],
         "additionalProperties": False,
@@ -503,30 +677,37 @@ _API_TOKEN_CREATE = VcfaTypedOp(
     tags=("write", "vcfa", "provider", "credential", "token"),
     safety_level="dangerous",
     requires_approval=True,
-    llm_instructions={
-        "when_to_call": (
-            "Call to give the tenant plane a credential: mint the org user's API token "
-            "into the target's Vault secret (store_field='refresh_token'). Pass "
-            "vault_target = the Vault target whose role may write store_secret_ref (the one "
-            "you would dispatch vault.kv.patch on). If the call is refused with "
-            "write_capability_denied, that target's role cannot write the path: fix the "
-            "grant or pick another vault_target, then call again."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call to give the tenant plane a credential: create the org user's API "
+            "token in the target's Vault secret (store_field='refresh_token', the "
+            "field the tenant login reads). If the call is refused with "
+            "write_capability_denied, the vault_target's role cannot write the path: "
+            "fix the grant or pick another vault_target, then call again."
         ),
-        "output_shape": (
-            "{status, client_id, stored: {vault_target, mount, secret_ref, field, version, "
-            "value_sha256, length}, guidance} -- the token value is never in the result."
+        preconditions=(
+            "The org user exists and its role has 'API Tokens: Manage'. The user's "
+            "password is in Vault at password_secret_ref. Your MEHO policy for "
+            "vault.kv.patch / vault.kv.put on vault_target must not deny. A person "
+            "must approve the call; a run without that approval is refused."
         ),
-        "parameter_hints": {
+        output_shape=(
+            "{status: created | unchanged | invalid_request, org, username, "
+            "token_name, client_id, stored: {vault_target, mount, secret_ref, field, "
+            "version, value_sha256, length}, guidance}. The token value is never in "
+            "the result. 'unchanged' means a token with that name exists and nothing "
+            "was made."
+        ),
+        parameter_hints={
             "vault_target": (
-                "Target NAME of a Vault-connector target that carries its own "
-                "extras.vault_role with create+update on the path; the write runs under that "
-                "role. A Vault target WITHOUT a vault_role falls back to your own identity's "
-                "role, which typically cannot write the path. Your policy for vault.kv.patch "
-                "on that target must not deny."
+                "Target NAME of a Vault target that has its own extras.vault_role with "
+                "create and update on the path; the write runs under that role. A Vault "
+                "target WITHOUT a vault_role uses your own identity's role, which "
+                "usually cannot write the path."
             ),
         },
-        "next_step": "vcfa.tenant.login.test on a target whose secret holds the token.",
-    },
+        next_step="vcfa.tenant.login.test on a target whose secret holds the token.",
+    ),
 )
 
 _API_TOKEN_REVOKE = VcfaTypedOp(
@@ -534,27 +715,35 @@ _API_TOKEN_REVOKE = VcfaTypedOp(
     handler_attr="provider_api_token_revoke",
     plane="provider",
     path=PROVIDER_TOKEN_PATH,
-    summary="Revoke an org user's VCFA API token by name (provider plane).",
+    summary="Revoke an org user's VCF Automation API token by name (provider plane).",
     description=(
-        "Logs in as <username>@<org> (password from password_secret_ref), finds the "
-        "user's API token named token_name and revokes it via DELETE "
-        "/cloudapi/1.0.0/tokens/{id} (the OAuth client it was minted under). Anything "
-        "still using the token stops working. A missing token is 'unchanged'. The Vault "
-        "copy is not touched. Returns {status: 'revoked' | 'unchanged' | "
-        "'invalid_request', client_id, guidance}. safety_level=dangerous, requires approval."
+        "Logs in as the org user, finds the API token named token_name and revokes "
+        "it with DELETE /cloudapi/1.0.0/tokens/{id}. Anything that still uses the "
+        "token stops working. The Vault copy is not touched."
     ),
     parameter_schema={
         "type": "object",
         "properties": dict(_ORG_USER_PROPS),
         "required": ["org", "username", "token_name", "password_secret_ref"],
         "additionalProperties": False,
+        "examples": [
+            {
+                "org": "<org-name>",
+                "username": "<username>",
+                "token_name": "meho-token",
+                "password_secret_ref": "<vault-path>",
+            }
+        ],
     },
     response_schema={
         "type": "object",
         "properties": {
-            "status": {"type": "string", "enum": ["revoked", "unchanged", "invalid_request"]},
-            "client_id": {"type": ["string", "null"]},
-            "guidance": {"type": ["string", "null"]},
+            "status": _status_field(["revoked", "unchanged", "invalid_request"]),
+            "org": field("string", "The org name."),
+            "username": field("string", "The org user."),
+            "token_name": field("string", "The API token name."),
+            "client_id": field(["string", "null"], "The OAuth client id of the token."),
+            "guidance": _GUIDANCE_FIELD,
         },
         "required": ["status", "guidance"],
         "additionalProperties": True,
@@ -563,11 +752,20 @@ _API_TOKEN_REVOKE = VcfaTypedOp(
     tags=("write", "vcfa", "provider", "credential", "token"),
     safety_level="dangerous",
     requires_approval=True,
-    llm_instructions={
-        "when_to_call": "Call to retire an API token that is unused, leaked or superseded.",
-        "output_shape": "{status, client_id, guidance}.",
-        "next_step": "Remove the dead Vault copy with vault.kv.patch or vault.kv.delete.",
-    },
+    llm_instructions=guidance(
+        when_to_call="Call to retire an API token that is not used, leaked or replaced.",
+        preconditions=(
+            "Nothing still needs the token: every client that uses it stops working. "
+            "The user's password is in Vault at password_secret_ref. A person must "
+            "approve the call."
+        ),
+        output_shape=(
+            "{status: revoked | unchanged | invalid_request, org, username, "
+            "token_name, client_id, guidance}. 'unchanged' means no token with that "
+            "name exists."
+        ),
+        next_step="Remove the old Vault copy with vault.kv.patch or vault.kv.delete.",
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -579,37 +777,59 @@ _PROJECT_CREATE = VcfaTypedOp(
     handler_attr="tenant_project_create",
     plane="tenant",
     path=TENANT_PROJECTS_PATH,
-    summary="Create a project in the tenant organization (tenant plane, idempotent on name).",
+    summary="Create a project in the tenant org (tenant plane); safe to run twice.",
     description=(
-        "Creates a project via POST /iaas/api/projects?apiVersion=2021-07-15 on the "
-        "tenant plane (the target's tenant login), with optional administrators, "
-        "members and viewers ({email, type: user|group}). "
-        f"{_STATUS_ENVELOPE_NOTE} project = {{id, name, organizationId}}. A 403 means "
-        "the tenant user lacks project-create rights. safety_level=caution, requires "
-        "approval."
+        "Creates a project with POST /iaas/api/projects on the tenant plane, with "
+        "optional administrators, members and viewers. A project with the same "
+        "name answers 'unchanged'. A 403 means the tenant user may not create "
+        "projects."
     ),
     parameter_schema={
         "type": "object",
         "properties": {
-            "name": {**_NAME_FRAGMENT, "description": "Project name."},
-            "description": {"type": "string", "maxLength": 1024},
-            "administrators": _PRINCIPALS,
-            "members": _PRINCIPALS,
-            "viewers": _PRINCIPALS,
+            "name": {**_NAME_FRAGMENT, "description": "The project name."},
+            "description": {
+                "type": "string",
+                "maxLength": 1024,
+                "description": "Optional project description.",
+            },
+            "administrators": _principals("administrators"),
+            "members": _principals("members"),
+            "viewers": _principals("viewers"),
         },
         "required": ["name"],
         "additionalProperties": False,
+        "examples": [
+            {
+                "name": "<project-name>",
+                "administrators": [{"email": "<user-email>", "type": "user"}],
+            }
+        ],
     },
-    response_schema=_write_response("project", _CREATE_STATUSES),
+    response_schema=_write_response(
+        "project",
+        {
+            "id": field(["string", "null"], "The project id."),
+            "name": field("string", "The project name."),
+            "organizationId": field(["string", "null"], "The id of the tenant org."),
+        },
+    ),
     group_key="vcfa-tenant-writes",
     tags=("write", "vcfa", "tenant", "project"),
     safety_level="caution",
     requires_approval=True,
-    llm_instructions={
-        "when_to_call": "Call to seed a project in the tenant org (the deployment scope).",
-        "output_shape": "{status, project: {id, name, organizationId}, guidance}.",
-        "next_step": "vcfa.tenant.project.list to confirm.",
-    },
+    llm_instructions=guidance(
+        when_to_call="Call to create a project (the scope for deployments) in the tenant org.",
+        preconditions=(
+            "The target's tenant login works (check with vcfa.tenant.login.test) and "
+            "its user may create projects. A person must approve the call."
+        ),
+        output_shape=(
+            "{status: created | unchanged | invalid_request, project: {id, name, "
+            f"organizationId}}, guidance}}. {_STATUS_NOTE}"
+        ),
+        next_step="vcfa.tenant.project.list to confirm.",
+    ),
 )
 
 #: The provisioning ops, reads first then writes in bootstrap order.

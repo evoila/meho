@@ -1338,8 +1338,9 @@ the same writer a policy denial and the #3542 preflight refusal use:
 `payload.error.error_code`. No approval row is written and nothing reaches
 the vendor. A refused `destructive` step inside a multi-step operation
 (`composite.enforce_subop_policy`) writes the same row on the step's path,
-linked to the parent operation's audit id in `parent_audit_id`, because the
-dispatcher writes no row for a `denied` result a handler returns.
+linked to the parent operation's audit id in `parent_audit_id`. The parent
+operation gets its own `denied` execution row from the dispatcher when the
+handler returns the refusal (#4275).
 
 Two system faults in `_handle_needs_approval` write no audit row on
 purpose. Neither is a decision about the call; both are a MEHO-side fault
@@ -1576,9 +1577,10 @@ ride under `payload["error"]`) and publish one `denied` broadcast event, the
 same as an ordinary policy denial. They share one writer,
 `dispatcher._audit_denied_and_return`. For a refused step inside a
 multi-step operation the row is written by the sub-op gate and carries the
-parent operation's audit id in `parent_audit_id`. This matters because the
-parent returns the step's result as is, and the dispatcher writes no audit
-row for a result a handler returns. Every row the step gate writes (this
+parent operation's audit id in `parent_audit_id`. The parent returns the
+step's result as is and gets its own `denied` execution row from the
+dispatcher (#4275); the step's row records the step's decision. A plain
+policy "no" for a step writes the same step row. Every row the step gate writes (this
 `denied` row and the `approval.request` row of a step that waits) carries
 the step's own policy result in `policy_decision`, `needs-approval`, not
 the parent's (#4646). The gate binds the step's result for its own call
@@ -1904,14 +1906,17 @@ service principal whose composite parked a child on the direct seam wrote
 `parent_audit_id = NULL` — an orphan approval the replay walk could not
 tie back to its composite.
 
-Note that a composite which returns the child's `awaiting_approval`
-result **verbatim** (the usual write-composite shape) writes no composite
-DISPATCH row of its own — the dispatcher passes a handler-returned
-`OperationResult` straight through. The child's row still records the
-composite's `audit_id` as its parent; whether that parent row is later
-persisted (a composite that continues past the park) is orthogonal to the
-lineage stamp. Reproducing the whole composite step on approve is a
-separate concern (#3351, below).
+A composite which returns the child's `awaiting_approval` result
+**verbatim** (the usual write-composite shape) gets its own DISPATCH row
+from the dispatcher since #4275: an `operation_execution` row with
+`result_status="awaiting_approval"` under the composite's `audit_id`,
+saved last, after the handler returns. The child's `approval.request` row
+records that id as its parent, so the parent row exists once the call
+returns. The composite's row keeps `awaiting_approval` forever; the
+approved work gets the second run's row, whose parent is the
+`approval.request` row. See "Results a handler returns" in
+[`audit_query.md`](audit_query.md). Reproducing the whole composite step
+on approve is a separate concern (#3351, below).
 
 ### Composite-child resume: re-enter the parent, not the child key (#3351)
 
@@ -2276,6 +2281,42 @@ Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*
 of what runs unattended, never a bypass of a modeled destructive gate).
 Full design: [`service-principal-grants.md`](service-principal-grants.md).
+
+## Sandbox mode (#4622)
+
+On an instance in **sandbox mode** (decision record
+[`docs/decisions/sandbox-mode.md`](../decisions/sandbox-mode.md)) the
+destructive-tier rule above has one exception: a standing grant made in
+the web console by a tenant admin, a **delete grant**, may cover a delete
+by a service principal. The instance holds only disposable test systems,
+so nothing waits for a person there. Everything else in this document
+stays as it is: people and agents keep their rules, a run approval never
+covers a delete, satellites get no delete, and self-approval stays
+forbidden.
+
+- The mode is one instance-wide switch, set at install time and fixed for
+  the life of the database (`meho_backplane/sandbox_mode.py`). Every other
+  instance shows `"sandbox_mode": "off"` on `/ready` and
+  `GET /api/v1/health`, and every audit row carries
+  `audit_log.sandbox_mode = false`.
+- A `destructive` call under a delete grant still needs its preview hash
+  and a valid blast radius. The gate runs the same checks the park path
+  runs (`_destructive_binding_refusal`) before it records the grant use,
+  so a refused call leaves no `approval.decision` row. The grant-use row
+  stores the hash and the blast radius in `payload`.
+- A delete below `destructive` (the verb `DELETE`, the `destructive` tag,
+  a delete name, a delete step) runs under a delete grant with no hash;
+  its grant-use row stores the proposed effect.
+- A `destructive` step gate or child call stays refused: it cannot carry a
+  preview hash (`preview_binding_required`, as today).
+- Delete grants live in `sandbox_delete_grant`, which an older build and an
+  instance with the mode off never read: after a rollback every delete
+  waits for a person again.
+- With the mode on, the park reasons add that a delete grant made in the
+  web console may cover the delete; with it off every reason text is
+  unchanged.
+
+Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
 
 ## References
 

@@ -58,19 +58,23 @@ func TestBuildGrantCreateBodyTargetNameSelector(t *testing.T) {
 }
 
 func TestBuildGrantCreateBodyRejectsUnsafeInput(t *testing.T) {
-	cases := []struct{ name, op, connector, target, product, pattern string }{
-		{"glob operation", "vmware.*", "vmware-rest-9.0", "", "", ""},
-		{"glob connector", "vmware.vm.power", "vmware-*", "", "", ""},
-		{"delete operation", "DELETE:/vcenter/vm", "vmware-rest-9.0", "", "", ""},
-		{"typed delete operation", "vmware.vm.delete", "vmware-rest-9.0", "", "", ""},
-		{"composite operation", "vmware.composite.vm.power", "vmware-rest-9.0", "", "", ""},
-		{"selector plus target", "vmware.vm.power", "vmware-rest-9.0", testGrantID, "vmware", "dc-*"},
-		{"invalid target", "vmware.vm.power", "vmware-rest-9.0", "not-a-uuid", "", ""},
+	cases := []struct{ name, op, connector, target, product, pattern, wantMsg string }{
+		{"glob operation", "vmware.*", "vmware-rest-9.0", "", "", "", "globs are not allowed"},
+		{"glob connector", "vmware.vm.power", "vmware-*", "", "", "", "globs are not allowed"},
+		{"delete operation", "DELETE:/vcenter/vm", "vmware-rest-9.0", "", "", "", "delete grant is made in the web console"},
+		{"typed delete operation", "vmware.vm.delete", "vmware-rest-9.0", "", "", "", "only on an instance in sandbox mode"},
+		{"composite operation", "vmware.composite.vm.power", "vmware-rest-9.0", "", "", "", "is a composite"},
+		{"selector plus target", "vmware.vm.power", "vmware-rest-9.0", testGrantID, "vmware", "dc-*", "mutually exclusive"},
+		{"invalid target", "vmware.vm.power", "vmware-rest-9.0", "not-a-uuid", "", "", "not a valid UUID"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := buildGrantCreateBody("svc:automation", tc.op, tc.connector, tc.target, tc.product, tc.pattern, "reason", ""); err == nil {
+			_, err := buildGrantCreateBody("svc:automation", tc.op, tc.connector, tc.target, tc.product, tc.pattern, "reason", "")
+			if err == nil {
 				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error %q does not say %q", err.Error(), tc.wantMsg)
 			}
 		})
 	}

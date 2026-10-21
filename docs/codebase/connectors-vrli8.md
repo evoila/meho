@@ -60,6 +60,9 @@ triple:
 |---|---|---|
 | `vrli-events` | `vrli.event.query` | `GET /api/v2/events/{constraints}` |
 
+The op metadata (summary, response schema, example, guidance) is the modern
+connector's, taken from the 9.0 API file.
+
 The op_id and group key are shared with the modern impl on purpose (distinct
 `endpoint_descriptor` / `OperationGroup` rows, scoped by the full connector triple).
 The modern connector types only the event query; the rest of its browse surface

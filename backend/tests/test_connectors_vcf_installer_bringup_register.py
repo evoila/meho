@@ -132,3 +132,26 @@ async def test_bringup_row_handler_ref_resolves_to_the_handler(
     row = await _fetch_bringup_row()
     assert row is not None
     assert row.handler_ref == derive_handler_ref(_bringup.installer_sddc_bringup_composite)
+
+
+@pytest.mark.asyncio
+async def test_bringup_group_text_comes_from_the_typed_ops_module(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The composite alone lands the same ``installer-bringup`` text as the typed ops.
+
+    The group text is defined once, in ``typed_ops``. So whichever registrar runs
+    first, the group row gets that text.
+    """
+    from meho_backplane.connectors.vcf_installer.typed_ops import (
+        INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP,
+    )
+    from meho_backplane.db.models import OperationGroup
+
+    await register_installer_composite_operations(embedding_service=stub_embedding_service)
+    row = await _fetch_bringup_row()
+    assert row is not None
+    async with get_sessionmaker()() as fresh:
+        group = await fresh.get(OperationGroup, row.group_id)
+    assert group is not None
+    assert group.when_to_use == INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP["installer-bringup"]

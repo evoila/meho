@@ -131,89 +131,42 @@ def parse_photon_version(content: str) -> str | None:
 #: per the bind9 / pfSense precedent).
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "identity": (
-        "Use for Holodeck appliance identity questions before any "
-        "per-pod or per-service drill-in: 'which Holodeck version "
-        "is this HoloRouter running, on which Photon OS, and what "
-        "is the pod identifier?'. The single ``holodeck.about`` op "
-        "returns vendor / product / version (parsed Holodeck "
-        "release), the Photon OS version, and the pod ID. Call this "
-        "first when the agent needs to confirm the HoloRouter is "
-        "reachable via SSH + pwsh before issuing higher-level "
-        "pod / service / log ops -- Holodeck has no REST API, so "
-        "this op also confirms the PowerShell-over-SSH transport "
-        "is functional."
+        "Which Holodeck appliance is this? holodeck.about returns the Holodeck "
+        "version, Photon OS version and pod id, and shows that MEHO can reach "
+        "the HoloRouter over SSH. Call it first."
     ),
     "config": (
-        "Use for Holodeck appliance configuration questions: "
-        "``holodeck.config.show`` returns the full Get-HoloDeckConfig "
-        "dict (vendor + product + pod ID + services block). For just "
-        "the identifying fields, ``holodeck.about`` is faster. "
-        "Transport: pwsh-over-SSH (no REST surface)."
+        "The Holodeck configuration of the appliance: holodeck.config.show "
+        "returns the Get-HoloDeckConfig answer. For just the version, use "
+        "holodeck.about."
     ),
-    "pod": (
-        "Use for Holodeck nested-pod operations: list the active "
-        "pods (``holodeck.pod.list``) or pull per-pod detail "
-        "(``holodeck.pod.info <pod_id>``). Pod lists carry state, "
-        "primary networking, and VM count; per-pod info adds the VM "
-        "list and FRR/BGP attachment. Transport: pwsh-over-SSH."
-    ),
+    "pod": ("Holodeck pods: holodeck.pod.list lists them, holodeck.pod.info shows one pod by id."),
     "service": (
-        "Use for Holodeck Photon service health: "
-        "``holodeck.service.list`` returns the bundled services "
-        "(DHCP, DNS, NTP, FRR-BGP, Webtop, K8s-in-appliance) and "
-        "their Status. Pair with ``holodeck.logs.tail`` for "
-        "drill-in. Transport: pwsh-over-SSH."
+        "Holodeck services on the appliance: holodeck.service.list returns each "
+        "'Holo*' service and its state. Read logs with holodeck.logs.tail."
     ),
     "k8s": (
-        "Use for read-only inspection of the K8s cluster bundled on "
-        "the HoloRouter appliance via ``holodeck.k8s.exec`` "
-        "(``kubectl get``/``describe``/``logs``/``top``/``explain``/"
-        "``api-resources``/``api-versions``/``cluster-info``/"
-        "``version``). Mutating verbs are rejected fail-closed at "
-        "the schema layer and re-checked by the handler. Transport: "
-        "plain SSH to the appliance (no pwsh wrapper); the in-"
-        "appliance ``kubectl`` reaches the cluster directly."
+        "Read-only look at the Kubernetes cluster on the HoloRouter: "
+        "holodeck.k8s.exec runs one kubectl read command (get, describe, logs, "
+        "...). A person must approve each call. Cleanup is in the k8s-write group."
     ),
     "logs": (
-        "Use for Holodeck runtime log inspection: "
-        "``holodeck.logs.tail component=<slug> [lines=N]`` runs "
-        "``tail`` over ``/holodeck-runtime/logs/<component>*.log``. "
-        "Slugs map to bundled services (``dhcp``, ``dns``, ``frr``, "
-        "``webtop``, ``k8s``); lines defaults to 200, clamped at "
-        "[1, 5000]. Transport: plain SSH."
+        "Holodeck log files: holodeck.logs.tail returns the last lines of "
+        "/holodeck-runtime/logs/<component>*.log, for example dhcp, dns or frr."
     ),
     "networking": (
-        "Use for the HoloRouter's networking-surface snapshot: "
-        "``holodeck.networking.show`` composes FRR/BGP summary + "
-        "kernel routes + DNS zone summary + DHCP leases into a "
-        "single envelope with per-sub-section ``ok`` flags. "
-        "Pair with ``holodeck.logs.tail component=frr`` for FRR log "
-        "drill-in. Transport: plain SSH for vtysh + dhcpd.leases; "
-        "pwsh-over-SSH for the DNS zone summary."
+        "The HoloRouter network in one call: holodeck.networking.show returns "
+        "BGP peers, routes, DNS zones and DHCP leases."
     ),
     "diagnostics": (
-        "Use for the HoloRouter's disk-pressure snapshot before a "
-        "root-fs fill evicts pods: ``holodeck.disk.usage`` returns "
-        "root-fs total/used/available bytes + percent-used plus the "
-        "byte usage of the two known growth directories "
-        "(``/var/backups``, ``/holodeck-runtime``), each with its own "
-        "``ok`` flag. Takes no path argument -- the measured dirs are "
-        "fixed in code, never operator input. Poll it for early "
-        "warning on the 74 GB root fs (VCF-9.x backup fill). "
-        "Transport: plain SSH (``df`` / ``du``)."
+        "Disk space on the HoloRouter: holodeck.disk.usage returns root disk "
+        "usage and the size of /var/backups and /holodeck-runtime. Good for a "
+        "regular check before the disk is full."
     ),
     "backups": (
-        "Use to inventory backup artefacts under ``/var/backups`` on the "
-        "HoloRouter: ``holodeck.backups.list [path=<sub-dir>]`` returns one "
-        "row per file ({path, mtime, size_bytes}) newest-first. Call it "
-        "before approving a ``holodeck.backups.prune`` -- the rows past "
-        "index ``keep_newest`` are exactly what that prune would delete, so "
-        "a destructive prune is never approved blind -- and as a routine "
-        "backup-landing health check (is the hourly backup still landing? "
-        "how old is the newest file?). This is the safe read half of the "
-        "``backups`` surface; ``holodeck.backups.prune`` (group "
-        "``backups-write``) is the approval-gated delete. Transport: plain "
-        "SSH (``find``)."
+        "Backup files in /var/backups: holodeck.backups.list lists them newest "
+        "first. Call it before holodeck.backups.prune (backups-write group) to "
+        "see which files a prune would remove."
     ),
     # G3.18-T2 (#2154) approval-gated remediation write groups. The keys
     # carry a ``-write`` suffix so they never collide with the read-op

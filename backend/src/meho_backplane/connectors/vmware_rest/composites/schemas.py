@@ -54,7 +54,7 @@ Conventions
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
@@ -172,16 +172,19 @@ __all__ = [
 #: The ``issues`` field a write composite adds when it did not complete (#3813).
 #: An ``error``-severity entry makes the dispatcher record the call as failed
 #: (``status="error"``, audit ``result_status="error"``), not ``ok``.
+#: One ``{category, severity, message}`` entry of an ``issues`` list.
+_ISSUE_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string"},
+        "severity": {"type": "string", "enum": ["error", "warning", "info"]},
+        "message": {"type": "string"},
+    },
+}
+
 _HARD_FAILURE_ISSUES_PROPERTY: dict[str, Any] = {
     "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "category": {"type": "string"},
-            "severity": {"type": "string", "enum": ["error", "warning", "info"]},
-            "message": {"type": "string"},
-        },
-    },
+    "items": _ISSUE_ITEM_SCHEMA,
     "description": (
         "Present only when the operation did not complete (timeout, rollback, "
         "partial apply, failed sub-step). Each entry is ``{category, severity, "
@@ -999,7 +1002,7 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "unique across datacenters (every datacenter ships a "
                 "default VM folder named ``vm``), so a multi-match "
                 "lookup is re-scoped to the placement pins' datacenter "
-                "via ``filter.datacenters`` (#3115); a residual "
+                "via ``filter.datacenters``; a residual "
                 "ambiguity fails with a structured ``rolled_back`` "
                 "carrying ``candidate_folders`` — pass ``folder`` to "
                 "disambiguate. Ignored when ``folder`` is supplied."
@@ -1009,8 +1012,8 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Optional VM folder moid pin (#3115), mirroring the "
-                "#3096 placement-pin pattern. When present the "
+                "Optional VM folder moid pin, like the other "
+                "placement pins. When present the "
                 "``folder_name`` display-name lookup is skipped "
                 "entirely and this moid rides the CreateSpec "
                 "``placement`` (REST arm) / ``CreateVM_Task`` parent "
@@ -1023,13 +1026,13 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Optional ResourcePool moid pin (#3096). Threaded into "
+                "Optional ResourcePool moid pin. Threaded into "
                 "the CreateSpec ``placement`` alongside the resolved "
                 "folder moid. The pinned spec marks ``resource_pool`` as "
                 "currently required when neither host nor cluster is "
                 "given, so multi-host clusters should pin it; absent, "
                 "vCenter's placement defaulting applies. On a pre-9.0 "
-                "target it is REQUIRED (#3099): vim CreateVM_Task takes "
+                "target it is REQUIRED: vim CreateVM_Task takes "
                 "an explicit pool and has no placement defaulting."
             ),
         },
@@ -1037,12 +1040,12 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Optional Datastore moid pin (#3096) for the VM home and "
+                "Optional Datastore moid pin for the VM home and "
                 "disk storage. Threaded into the CreateSpec "
                 "``placement``; absent, vCenter's placement defaulting "
                 "applies — on hosts with host-local datastores the "
                 "default may land the VM on the wrong store. On a "
-                "pre-9.0 target it is REQUIRED (#3099): the vim arm "
+                "pre-9.0 target it is REQUIRED: the vim arm "
                 "resolves its display name into the "
                 "``files.vmPathName`` VM home."
             ),
@@ -1051,7 +1054,7 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Optional HostSystem moid pin (#3096). Threaded into the "
+                "Optional HostSystem moid pin. Threaded into the "
                 "CreateSpec ``placement``; per the pinned spec a "
                 "``resource_pool`` given alongside it must belong to "
                 "that host. Absent, vCenter's placement defaulting "
@@ -1069,7 +1072,7 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Guest-OS identifier (e.g. ``UBUNTU_64``). Drives the "
                 "ConfigSpec.guestOS field on ``POST:/vcenter/vm``. On a "
-                "pre-9.0 target (#3099) it is mapped to the vim guestId "
+                "pre-9.0 target it is mapped to the vim guestId "
                 "(``VMKERNEL_8`` -> ``vmkernel8Guest``); an identifier "
                 "outside the curated mapping fails closed with a "
                 "structured ``rolled_back`` before any write."
@@ -1119,7 +1122,7 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``POST:/vcenter/vm/{vm}/hardware/ethernet`` adapter "
                 "create (the network rides the ``backing`` spec) after "
                 "the VM is created. Empty list creates the VM with no "
-                "NICs. On a pre-9.0 target (#3099) NICs fold into the "
+                "NICs. On a pre-9.0 target NICs fold into the "
                 "CreateVM_Task ConfigSpec as vmxnet3 ``deviceChange`` "
                 "adds (distributed or standard portgroup backing; "
                 "``OPAQUE_NETWORK`` has no vim expression there and "
@@ -1143,7 +1146,7 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                         "enum": ["thin", "thick", "eagerzeroedthick"],
                         "default": "thin",
                         "description": (
-                            "Disk provisioning policy (#3256). ``thin`` — "
+                            "Disk provisioning policy. ``thin`` — "
                             "allocate-on-write (``thinProvisioned=true``); "
                             "``thick`` — lazy-zeroed thick "
                             "(``thinProvisioned=false``, ``eagerlyScrub=false``); "
@@ -1162,7 +1165,7 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                         "enum": ["none", "multi_writer"],
                         "default": "none",
                         "description": (
-                            "Per-disk multi-writer sharing (#3256), distinct "
+                            "Per-disk multi-writer sharing, distinct "
                             "from SCSI bus-sharing. ``multi_writer`` sets the "
                             "backing's ``sharing=sharingMultiWriter`` so several "
                             "VMs may open the same VMDK concurrently — the mode "
@@ -1181,10 +1184,10 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             },
             "default": [],
             "description": (
-                "Optional data disks to create with the VM (#3117). On the "
+                "Optional data disks to create with the VM. On the "
                 "REST arm each entry threads into the CreateSpec ``disks`` "
                 "as a SCSI ``new_vmdk`` sized in bytes (vCenter fabricates "
-                "the controller). On the pre-9.0 vim arm (#3099) — where "
+                "the controller). On the pre-9.0 vim arm — where "
                 "``CreateVM_Task`` builds the VM verbatim and adds no "
                 "controller — the arm ALWAYS folds a "
                 "``VirtualLsiLogicSASController`` (so a fresh VM has a "
@@ -1194,9 +1197,8 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``fileOperation: create`` per entry, bound to it. "
                 "``provisioning`` defaults to ``thin`` (the datastore default "
                 "on the REST arm); a non-default ``provisioning`` or "
-                "``sharing`` value routes the create through the vim arm "
-                "(#3256). Empty list keeps the REST create body byte-identical "
-                "to a pre-#3117 call."
+                "``sharing`` value routes the create through the vim arm. "
+                "An empty list adds no disk."
             ),
         },
         "scsi_bus_sharing": {
@@ -1204,7 +1206,7 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "enum": ["none", "virtual", "physical"],
             "default": "none",
             "description": (
-                "SCSI bus-sharing mode for the VM's SCSI controller (#3256), "
+                "SCSI bus-sharing mode for the VM's SCSI controller, "
                 "distinct from per-disk multi-writer. ``none`` — private bus "
                 "(``noSharing``); ``virtual`` — bus shared between VMs on the "
                 "same host (``virtualSharing``); ``physical`` — bus shared "
@@ -1254,6 +1256,16 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         {"required": ["folder"]},
     ],
     "additionalProperties": False,
+    "examples": [
+        {
+            "name": "<vm-name>",
+            "guest_os": "UBUNTU_64",
+            "folder_name": "<vm-folder-name>",
+            "cpu_count": 2,
+            "memory_mib": 4096,
+            "nics": [{"network": "dvportgroup-42", "backing_type": "DISTRIBUTED_PORTGROUP"}],
+        }
+    ],
 }
 
 
@@ -1291,6 +1303,13 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["source_vm", "target_name", "library_item"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "source_vm": "vm-42",
+            "target_name": "<new-vm-name>",
+            "library_item": "<template-library-item-id>",
+        }
+    ],
 }
 
 
@@ -1401,6 +1420,16 @@ VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["source_template", "new_vm_name", "folder", "resource_pool", "datastore"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "source_template": "<template-name>",
+            "new_vm_name": "<new-vm-name>",
+            "folder": "group-v42",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-15",
+            "power_on": True,
+        }
+    ],
 }
 
 
@@ -1428,6 +1457,7 @@ VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "snapshot_name"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "snapshot_name": "<snapshot-name>"}],
 }
 
 
@@ -1464,6 +1494,7 @@ VM_DESTROY_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42"}],
 }
 
 
@@ -1498,8 +1529,12 @@ VM_MIGRATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "cluster"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "cluster": "domain-c7"}],
 }
 
+
+#: ``Vcenter.Vm.Power.State`` values a VM filter may match.
+_VM_POWER_STATES: Final[list[str]] = ["POWERED_OFF", "POWERED_ON", "SUSPENDED"]
 
 #: ``vmware.composite.vm.power.bulk`` parameter schema.
 #:
@@ -1510,11 +1545,54 @@ VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "filter": {
             "type": "object",
+            "properties": {
+                "vms": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": "VM moids, like ``vm-42``.",
+                },
+                "names": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": "Exact VM display names.",
+                },
+                "folders": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": "Folder moids; matches VMs directly in these folders.",
+                },
+                "datacenters": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": "Datacenter moids.",
+                },
+                "hosts": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": "Host moids.",
+                },
+                "clusters": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": "Cluster moids.",
+                },
+                "resource_pools": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": "Resource pool moids.",
+                },
+                "power_states": {
+                    "anyOf": [
+                        {"type": "string", "enum": _VM_POWER_STATES},
+                        {"type": "array", "items": {"type": "string", "enum": _VM_POWER_STATES}},
+                    ],
+                    "description": "Power states to match: one state or a list of states.",
+                },
+            },
             "description": (
-                "Free-form filter dict forwarded to "
-                "``GET:/vcenter/vm`` as ``filter.*`` query params. The "
-                "handler does not introspect the keys; vSphere REST "
-                "validates them server-side."
+                "VM filter sent to ``GET:/vcenter/vm`` as ``filter.<key>`` "
+                "query params (``Vcenter.VM.FilterSpec``). Filters are ANDed. "
+                "An empty filter matches every VM, so always narrow it."
             ),
             "default": {},
         },
@@ -1537,6 +1615,7 @@ VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["action"],
     "additionalProperties": False,
+    "examples": [{"filter": {"names": ["<vm-name-1>", "<vm-name-2>"]}, "action": "start"}],
 }
 
 
@@ -1575,6 +1654,7 @@ VM_POWER_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "verb"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "verb": "guest_shutdown"}],
 }
 
 
@@ -1699,6 +1779,7 @@ VM_DISK_GROW_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "disk", "capacity_bytes"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "disk": "2000", "capacity_bytes": 107374182400}],
 }
 
 
@@ -1783,6 +1864,15 @@ VM_DISK_ATTACH_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "vmdk_path", "controller_key", "unit_number"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "vm": "vm-42",
+            "vmdk_path": "[<datastore-name>] <folder>/<disk-name>.vmdk",
+            "controller_key": 1000,
+            "unit_number": 1,
+            "sharing": "multi_writer",
+        }
+    ],
 }
 
 
@@ -2084,7 +2174,7 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "pattern": VM_FOLDER_MOID_PATTERN,
             "description": (
                 "Optional folder ID (moid, ``group-v...``) of the parent VM "
-                "folder, the #3115 ``vm.create`` ``folder`` pattern. When "
+                "folder, like the ``vm.create`` ``folder`` field. When "
                 "present the name lookup is skipped and the folder is created "
                 "under this ID. One of ``parent_folder`` / ``parent_folder_id`` "
                 "is required."
@@ -2112,6 +2202,7 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         {"required": ["parent_folder_id"]},
     ],
     "additionalProperties": False,
+    "examples": [{"parent_folder_id": "group-v42", "folder_name": "<new-folder-name>"}],
 }
 
 
@@ -2358,11 +2449,11 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Per-step success ledger: ``folder_lookup``, "
                 "``create``, ``disk_attach``, ``nic_attach``, "
-                "``nested_hv``, ``power_on``. ``disk_attach`` (#3117) is "
+                "``nested_hv``, ``power_on``. ``disk_attach`` is "
                 "present when the request carried ``disks`` (folded into "
                 "the create on both arms). ``folder_lookup`` is omitted "
                 "when the request pinned the folder moid via the "
-                "``folder`` param (#3115 — no lookup ran)."
+                "``folder`` param (no lookup ran)."
             ),
         },
         "failed_step": {
@@ -2370,8 +2461,8 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Name of the first failing step on rollback; ``null`` "
                 "when ``status='created'``. Both arms fail closed on an "
-                "invalid ``disks`` entry with ``disk_spec`` (#3117). The "
-                "pre-9.0 vim arm (#3099) adds fail-closed resolution "
+                "invalid ``disks`` entry with ``disk_spec``. The "
+                "pre-9.0 vim arm adds fail-closed resolution "
                 "steps: ``guest_id_mapping``, ``placement_params``, "
                 "``datastore_lookup``, ``network_lookup``."
             ),
@@ -2393,7 +2484,7 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 },
             },
             "description": (
-                "What happened to the VM this run created (#4057). Present only "
+                "What happened to the VM this run created. Present only "
                 "when a step after the create failed. ``removed``: the rollback "
                 "deleted the VM. ``awaiting_approval``: the delete waits for "
                 "approval and the VM exists until then. ``not_removed``: the "
@@ -2404,9 +2495,8 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "nested_hv": {
             "type": "boolean",
             "description": (
-                "Applied VHV state (#3093). Present only when the request "
-                "carried the ``nested_hv`` param — a param-absent call "
-                "keeps the pre-#3093 envelope byte-identical. ``true`` "
+                "Applied VHV state. Present only when the request "
+                "carried the ``nested_hv`` param. ``true`` "
                 "iff the ``ReconfigVM_Task`` leg completed."
             ),
         },
@@ -2414,8 +2504,8 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Folder moids an ambiguous ``folder_name`` matched "
-                "(#3115). Present only on a ``folder_lookup`` rollback "
+                "Folder moids an ambiguous ``folder_name`` matched. "
+                "Present only on a ``folder_lookup`` rollback "
                 "when the name matched more than one folder (or matched "
                 "only outside the placement pins' datacenter); re-issue "
                 "with the intended moid as the ``folder`` param."
@@ -2444,7 +2534,7 @@ VM_CLONE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Always ``null``: the pinned deploy operation is "
                 "synchronous (no cis task). Key retained for "
-                "response-envelope stability (#2970)."
+                "response-envelope stability."
             ),
         },
         "vm_id": {
@@ -2573,7 +2663,13 @@ VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "candidates": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Snapshot name."},
+                    "snapshot": {"type": "string", "description": "Snapshot moid."},
+                },
+            },
             "description": (
                 "Ambiguity-resolution candidates -- present only when ``status='ambiguous'``."
             ),
@@ -3268,7 +3364,7 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "folder MoRef; ``'parent_not_found'`` — the parent name matched no "
                 "VM folder; ``'ambiguous_parent'`` — it matched more than one. "
                 "Both refusals happen before any write and fail the operation "
-                "(an ``error`` issue, so the audit row reads ``error``, #3588)."
+                "(an ``error`` issue, so the audit row reads ``error``)."
             ),
         },
         "parent_folder": {
@@ -3305,7 +3401,7 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "issues": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _ISSUE_ITEM_SCHEMA,
             "description": (
                 "Structured problems. A resolution refusal carries one "
                 "``error``-severity entry; empty on ``created``."
@@ -3537,6 +3633,7 @@ VM_RESIZE_PARAMETER_SCHEMA: dict[str, Any] = {
         {"required": ["memory_mib"]},
     ],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "cpu_count": 4, "memory_mib": 8192}],
 }
 
 
@@ -3607,6 +3704,14 @@ VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "nic", "portgroup_name"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "vm": "vm-42",
+            "nic": "4000",
+            "portgroup_name": "<portgroup-name>",
+            "backing_type": "DISTRIBUTED_PORTGROUP",
+        }
+    ],
 }
 
 
@@ -3642,6 +3747,36 @@ VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "backing": {
             "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["ISO_FILE", "HOST_DEVICE", "CLIENT_DEVICE"],
+                    "description": (
+                        "Backing kind (``Cdrom.BackingType``). ``CLIENT_DEVICE`` "
+                        "un-pins the VM from a host-local ISO."
+                    ),
+                },
+                "iso_file": {
+                    "type": "string",
+                    "description": (
+                        "Datastore path of the ISO, like ``[datastore] dir/image.iso``. "
+                        "Only with ``type='ISO_FILE'``."
+                    ),
+                },
+                "host_device": {
+                    "type": "string",
+                    "description": "Host CD-ROM device name. Only with ``type='HOST_DEVICE'``.",
+                },
+                "device_access_type": {
+                    "type": "string",
+                    "enum": ["EMULATION", "PASSTHRU", "PASSTHRU_EXCLUSIVE"],
+                    "description": (
+                        "How the guest reaches a physical or client device. Only "
+                        "with ``HOST_DEVICE`` or ``CLIENT_DEVICE``."
+                    ),
+                },
+            },
+            "required": ["type"],
             "additionalProperties": True,
             "description": (
                 "New CD-ROM backing spec when ``action='update'`` (e.g. "
@@ -3652,6 +3787,9 @@ VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "cdrom", "action"],
     "additionalProperties": False,
+    "examples": [
+        {"vm": "vm-42", "cdrom": "16000", "action": "update", "backing": {"type": "CLIENT_DEVICE"}}
+    ],
 }
 
 
@@ -3747,6 +3885,18 @@ VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "current_backing": {
             "type": ["object", "null"],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": (
+                        "STANDARD_PORTGROUP / HOST_DEVICE / DISTRIBUTED_PORTGROUP / OPAQUE_NETWORK."
+                    ),
+                },
+                "network": {"type": ["string", "null"], "description": "Network moid."},
+                "network_name": {"type": ["string", "null"], "description": "Network name."},
+                "distributed_switch_uuid": {"type": ["string", "null"]},
+                "distributed_port": {"type": ["string", "null"]},
+            },
             "description": "The NIC's backing before the repoint (type, network, network_name).",
         },
         "requested_backing": {
@@ -3769,7 +3919,14 @@ VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "candidates": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "network": {"type": "string", "description": "Network moid."},
+                    "name": {"type": "string", "description": "Network name."},
+                    "type": {"type": "string", "description": "Network type."},
+                },
+            },
             "description": (
                 "Matching portgroup rows when ``status='ambiguous'`` / "
                 "``'invalid_request'`` (empty otherwise)."
@@ -3810,6 +3967,16 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "current_backing": {
             "type": ["object", "null"],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "ISO_FILE / HOST_DEVICE / CLIENT_DEVICE.",
+                },
+                "iso_file": {"type": ["string", "null"], "description": "ISO datastore path."},
+                "host_device": {"type": ["string", "null"]},
+                "auto_detect": {"type": ["boolean", "null"]},
+                "device_access_type": {"type": ["string", "null"]},
+            },
             "description": (
                 "The CD-ROM backing read before the change (the host-local "
                 "ISO path the approver needs to see)."
@@ -3823,6 +3990,16 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "requested_backing": {
             "type": ["object", "null"],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "ISO_FILE / HOST_DEVICE / CLIENT_DEVICE.",
+                },
+                "iso_file": {"type": ["string", "null"], "description": "ISO datastore path."},
+                "host_device": {"type": ["string", "null"]},
+                "auto_detect": {"type": ["boolean", "null"]},
+                "device_access_type": {"type": ["string", "null"]},
+            },
             "description": "Echoed target backing when ``action='update'``; ``null`` otherwise.",
         },
         "guidance": {
@@ -4216,8 +4393,8 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Content-library OVF/OVA item id (passthrough). Rides the deploy "
                 "path as ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}"
-                "?action=deploy``. Supply this **or** ``library_item_name`` — not "
-                "both needed; ``library_item`` wins when both are present."
+                "?action=deploy``. Give exactly one of ``library_item`` and "
+                "``library_item_name``; both or neither is refused before the call."
             ),
         },
         "library_item_name": {
@@ -4229,7 +4406,7 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``type='ovf'``). A name matching no item returns "
                 "``status='item_not_found'``, more than one "
                 "``status='ambiguous_item'`` with the candidate ids — no deploy "
-                "fires. Ignored when ``library_item`` is given."
+                "fires. Give it instead of ``library_item``, never with it."
             ),
         },
         "library_name": {
@@ -4288,7 +4465,7 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``invalid_reference``). While the deploy runs the VM carries a "
                 "unique deploy name (``<name>-meho-<token>``, cut to vCenter's "
                 "80-character limit) and is renamed to this name once the deploy "
-                "succeeds (#3697). A failed deploy finds and deletes only the VM "
+                "succeeds. A failed deploy finds and deletes only the VM "
                 "(or vApp, with its VMs) that carries its own deploy name, so an "
                 "older or another caller's same-name VM is never touched."
             ),
@@ -4352,7 +4529,19 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["resource_pool"],
+    "oneOf": [{"required": ["library_item"]}, {"required": ["library_item_name"]}],
     "additionalProperties": False,
+    "examples": [
+        {
+            "library_item_name": "<ovf-item-name>",
+            "library_name": "<library-name>",
+            "resource_pool": "resgroup-8",
+            "folder": "group-v42",
+            "datastore": "datastore-15",
+            "name": "<vm-name>",
+            "network_mappings": {"<ovf-network-name>": "dvportgroup-42"},
+        }
+    ],
 }
 
 
@@ -4391,11 +4580,11 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "structured message with the vCenter status carried in ``issues`` "
                 "rather than a raw vendor error. ``'resolve_error'`` and "
                 "``'invalid_reference'`` also cover the OVF summary read that "
-                "supplies the default VM name when ``name`` is omitted (#3697). "
+                "supplies the default VM name when ``name`` is omitted. "
                 "Every non-``deployed`` status is reached before or without a "
                 "successful mutation: when a failed deploy leaves a partial VM "
-                "or vApp behind, the composite removes it and reports the cleanup "
-                "in ``issues`` (#3697)."
+                "or vApp behind, the composite tries to remove it and reports the "
+                "outcome in ``issues``."
             ),
         },
         "vm_id": {
@@ -4429,7 +4618,7 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "issues": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _ISSUE_ITEM_SCHEMA,
             "description": (
                 "Per-issue projections ``{category, severity, message}`` drawn "
                 "from the OVF deploy report (errors / warnings / information) or "
@@ -4438,12 +4627,12 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "or vApp it found: severity ``info`` when it was removed, "
                 "``warning`` when it could not be removed, its removal waits for "
                 "an approval request (named in the message; approving it runs "
-                "only that removal), or the check itself faulted (#3697). A "
+                "only that removal), or the check itself faulted. A "
                 "``category='rename'`` warning means the deploy succeeded but the "
                 "VM still carries its deploy name; the message names both names "
                 "and, for a parked rename, the approval request. Approving a "
                 "waiting rename or power-on runs only that step on the deployed "
-                "VM; it never deploys again (#4217)."
+                "VM; it never deploys again."
             ),
         },
         "candidates": {
@@ -4475,8 +4664,9 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Content-library OVF/OVA item id (passthrough). Supply this **or** "
-                "``library_item_name``; ``library_item`` wins when both are present."
+                "Content-library OVF/OVA item id (passthrough). Give exactly one of "
+                "``library_item`` and ``library_item_name``; both or neither is "
+                "refused before the call."
             ),
         },
         "library_item_name": {
@@ -4487,7 +4677,7 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``POST:/content/library/item?action=find`` (filtered to "
                 "``type='ovf'``). No match returns ``status='item_not_found'``, more "
                 "than one ``status='ambiguous_item'`` with candidate ids — no import "
-                "fires. Ignored when ``library_item`` is given."
+                "fires. Give it instead of ``library_item``, never with it."
             ),
         },
         "library_name": {
@@ -4582,7 +4772,17 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["resource_pool", "datastore"],
+    "oneOf": [{"required": ["library_item"]}, {"required": ["library_item_name"]}],
     "additionalProperties": False,
+    "examples": [
+        {
+            "library_item": "<ovf-library-item-id>",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-15",
+            "name": "<vm-name>",
+            "storage_provisioning": "thin",
+        }
+    ],
 }
 
 
@@ -4604,7 +4804,7 @@ VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "resolve_error",
             ],
             "description": (
-                "The ``deploy_from_library`` envelope family (#3071), reused so the "
+                "The ``deploy_from_library`` envelope family, reused so the "
                 "import and deploy paths share one contract: ``'deployed'`` — the "
                 "lease import completed and the VM was created; ``'deploy_failed'`` — "
                 "``OvfManager.CreateImportSpec`` rejected the descriptor (bad network "
@@ -4649,7 +4849,7 @@ VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "issues": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _ISSUE_ITEM_SCHEMA,
             "description": (
                 "Per-issue projections ``{category, severity, message}`` from the OVF "
                 "descriptor validation, lease fault, disk-upload fault, resolution, or "
@@ -4658,7 +4858,17 @@ VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "transfer": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Disk file path in the OVF package."},
+                    "device_id": {
+                        "type": "string",
+                        "description": "Lease device id the file went to.",
+                    },
+                    "size_bytes": {"type": "integer", "description": "Bytes sent."},
+                },
+            },
             "description": (
                 "Per-disk transfer manifest ``{path, device_id, size_bytes}`` for the "
                 "files streamed to the lease. Empty unless ``status='deployed'``."
@@ -7111,6 +7321,7 @@ VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {"vm": _VM_MOID_PARAM},
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42"}],
 }
 
 #: ``vmware.composite.vm.resource_allocation.show`` response schema.
@@ -7173,6 +7384,7 @@ VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         {"required": ["memory_reservation_mb"]},
     ],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "cpu_limit_mhz": -1, "memory_reservation_mb": 2048}],
 }
 
 #: ``vmware.composite.vm.resource_allocation.set`` response schema.
@@ -7205,6 +7417,12 @@ VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         "name": {"type": ["string", "null"]},
         "requested": {
             "type": "object",
+            "properties": {
+                "cpu_limit_mhz": {"type": "integer"},
+                "cpu_reservation_mhz": {"type": "integer"},
+                "memory_limit_mb": {"type": "integer"},
+                "memory_reservation_mb": {"type": "integer"},
+            },
             "description": "The allocation params that were passed (only those are sent).",
         },
         "before": _VM_ALLOCATION_PAIR_SCHEMA,
@@ -7387,12 +7605,30 @@ FOLDER_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["folder"],
     "additionalProperties": False,
+    "examples": [{"folder": "group-v1234"}],
 }
 
 #: ``vmware.composite.folder.delete`` response schema.
 FOLDER_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "precondition_failed", "still_present", "timeout"],
     _DELETE_STATUS_COMMON + " ``'timeout'`` -- Destroy_Task outran the poll bound.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``folder``."},
+        "moid": {"type": "string", "description": "Folder moid."},
+        "name": {"type": ["string", "null"], "description": "Folder name."},
+        "parent": {"type": ["string", "null"], "description": "Parent object moid."},
+        "child_type": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Object types the folder can hold (vim ``childType``).",
+        },
+        "child_count": {"type": "integer", "description": "Number of objects in the folder."},
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "vim type of the child, like VirtualMachine."},
+        "moid": {"type": "string", "description": "Child moid."},
+        "name": {"type": ["string", "null"], "description": "Child name."},
+    },
 )
 
 #: ``vmware.composite.cluster.drs_rule.delete`` parameter schema.

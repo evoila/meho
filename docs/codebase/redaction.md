@@ -657,10 +657,12 @@ The propagation hook is a pair of contextvars in
 `operations/_audit.py`:
 
 - `agent_session_id_var` — bound by the `AgentInvoker` around the
-  loop; read by `write_audit_row` straight into the real
-  `audit_log.agent_session_id` column (already on the schema via
-  migration `0014`, G8.2-T1 #1009). `None` outside an agent run, so
-  the chassis HTTP / MCP dispatch path is unchanged.
+  loop. `write_audit_row` reads it through `resolve_agent_session_id()`
+  into the real `audit_log.agent_session_id` column (already on the
+  schema via migration `0014`, G8.2-T1 #1009). Inside an agent run the
+  run id wins; outside one the helper falls back to the MCP session id
+  of a direct MCP call (#4672), and to `None` for a chassis HTTP call
+  with no session.
 - `agent_run_audit_meta_var` — carries `AgentRunAuditMeta(model,
   provider, cost)`. The dispatcher's `_build_audit_payload` writes
   the three fields into the audit row's JSON payload under

@@ -87,6 +87,7 @@ import re
 import shlex
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.holodeck._response_schemas import HOLODECK_RESPONSE_SCHEMAS
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
@@ -407,41 +408,30 @@ async def holodeck_images_import(
 
 
 # ---------------------------------------------------------------------------
-# Curated when_to_use blurbs (one per write op group)
+# Group texts (one per write op group)
 # ---------------------------------------------------------------------------
 
 _WHEN_TO_USE_K8S_WRITE = (
-    "Use to reclaim terminal (Failed / Succeeded) pods on the HoloRouter's "
-    "in-appliance K8s cluster: ``holodeck.k8s.pods.gc`` runs "
-    "``kubectl delete pods --field-selector status.phase=Failed`` (and "
-    "``=Succeeded``). It is approval-gated -- a dispatch parks for a human "
-    "to approve before anything is deleted -- and it CANNOT target a named "
-    "pod, a label selector, or a live phase (Running / Pending). The right "
-    "op when terminal-pod garbage is filling the node and the operator wants "
-    "a bounded cleanup, not an arbitrary ``kubectl delete``. " + SSH_TRANSPORT_NOTE
+    "Cleanup of pods that have ended (Failed or Succeeded) on the HoloRouter's "
+    "Kubernetes cluster: holodeck.k8s.pods.gc. A person must approve each call. "
+    "It cannot delete a named pod or a running pod. For reads, use the k8s group."
 )
 
 _WHEN_TO_USE_BACKUPS_WRITE = (
-    "Use to prune old backup artefacts under ``/var/backups`` on the "
-    "HoloRouter: ``holodeck.backups.prune keep_newest=N`` keeps the newest N "
-    "entries and removes the rest. Approval-gated. Every candidate path is "
-    "confined to ``/var/backups/**`` -- a traversal or absolute-path escape "
-    "is rejected before anything is removed. The right op when a backup-fill "
-    "outage needs disk reclaimed without hand-run root SSH. " + SSH_TRANSPORT_NOTE
+    "Removal of old backup files in /var/backups on the HoloRouter: "
+    "holodeck.backups.prune keeps the newest N files. A person must approve each "
+    "call. List the files first with holodeck.backups.list (backups group)."
 )
 
 _WHEN_TO_USE_IMAGES_WRITE = (
-    "Use to seed a container image into the HoloRouter's containerd from a "
-    "pre-staged tarball: ``holodeck.images.import tar_path=/root/"
-    "containerd-images/<name>.tar`` runs ``ctr -n k8s.io images import`` so "
-    "the image becomes visible to kubelet. Approval-gated; the tar path must "
-    "match ``/root/containerd-images/*.tar``. The right op when recovering a "
-    "cluster whose registry is unreachable and images must be side-loaded. " + SSH_TRANSPORT_NOTE
+    "Loading a container image into the HoloRouter's containerd from a tar file "
+    "in /root/containerd-images: holodeck.images.import. A person must approve "
+    "each call. Use it when the image registry cannot be reached."
 )
 
-#: Curated ``when_to_use`` blurb per write op group. Keys carry a ``-write``
-#: suffix so they never collide with the read-op group keys the connector's
-#: ``register_operations`` walk merges alongside them.
+#: Group text per write op group. Keys carry a ``-write`` suffix so they never
+#: collide with the read-op group keys the connector's ``register_operations``
+#: walk merges alongside them.
 HOLODECK_WHEN_TO_USE_WRITE_BY_GROUP: dict[str, str] = {
     "k8s-write": _WHEN_TO_USE_K8S_WRITE,
     "backups-write": _WHEN_TO_USE_BACKUPS_WRITE,
@@ -453,86 +443,85 @@ HOLODECK_WHEN_TO_USE_WRITE_BY_GROUP: dict[str, str] = {
 # Op metadata
 # ---------------------------------------------------------------------------
 
-_WRITE_CONFIRM_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": True,
-}
-
-
 WRITE_OPS: tuple[HolodeckOp, ...] = (
     HolodeckOp(
         op_id="holodeck.k8s.pods.gc",
         handler_attr="k8s_pods_gc",
-        summary="Delete terminal (Failed/Succeeded) pods on the in-appliance K8s (approval-gated).",
+        summary="Delete pods that have ended (Failed or Succeeded) on the appliance's Kubernetes.",
         description=(
-            "Runs ``kubectl delete pods --field-selector status.phase=Failed`` "
-            "and/or ``status.phase=Succeeded`` on the HoloRouter's "
-            "in-appliance Kubernetes cluster to reclaim terminal-pod garbage. "
-            "There is NO name, label-selector, or arbitrary-field surface: "
-            "the only inputs are the terminal-phase set (default both; each "
-            "element must be Failed or Succeeded) and an optional bounded "
-            "namespace. A live phase (Running/Pending) or a malformed "
-            "namespace is rejected before any SSH traffic. kubectl's "
-            "--field-selector supports only equality, so one delete runs per "
-            "phase. safety_level=dangerous, requires_approval=True -- parks "
-            "for human approval before deleting anything."
+            "Runs 'kubectl delete pods --field-selector status.phase=<phase>' on "
+            "the HoloRouter, once per phase (Failed, Succeeded). It cannot delete "
+            "a named pod or a running pod. A person must approve each call."
         ),
         parameter_schema={
             "type": "object",
             "properties": {
                 "phases": {
                     "type": "array",
-                    "items": {"type": "string", "enum": list(_TERMINAL_POD_PHASES)},
+                    "items": {
+                        "type": "string",
+                        "enum": list(_TERMINAL_POD_PHASES),
+                        "description": "One pod phase: Failed or Succeeded.",
+                    },
                     "minItems": 1,
                     "uniqueItems": True,
                     "description": (
-                        "Terminal pod phases to garbage-collect. Only "
-                        "'Failed' and 'Succeeded' are allowed; omit to target "
-                        "both. Running/Pending/Unknown are rejected."
+                        "Pod phases to clean up: 'Failed', 'Succeeded' or both. "
+                        "Leave it out for both."
                     ),
                 },
                 "namespace": {
                     "type": "string",
                     "pattern": r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
                     "description": (
-                        "Optional Kubernetes namespace to scope the GC to "
-                        "(RFC-1123 label). Omit for the cluster default."
+                        "Optional Kubernetes namespace (lower-case letters, digits "
+                        "and '-', at most 63). Leave it out for the default "
+                        "namespace."
                     ),
                 },
             },
             "additionalProperties": False,
+            "examples": [{"phases": ["Failed"], "namespace": "default"}],
         },
-        response_schema=_WRITE_CONFIRM_SCHEMA,
+        response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.k8s.pods.gc"],
         group_key="k8s-write",
         tags=("write", "k8s", "kubectl", "gc", "holodeck"),
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
-            "when_to_use": _WHEN_TO_USE_K8S_WRITE,
+            "when_to_call": (
+                "Call when pods that have ended (Failed or Succeeded) fill the "
+                "HoloRouter's Kubernetes node and you want to remove them. It "
+                "cannot target a named pod, a label or a running pod. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. Check first with "
+                "holodeck.k8s.exec ('kubectl get pods -A --field-selector "
+                "status.phase=Failed') which pods would go."
+            ),
             "parameter_hints": {
-                "phases": "Omit to GC both Failed and Succeeded; never accepts Running.",
-                "namespace": "Optional; RFC-1123 label. Omit for the default namespace.",
+                "phases": "Leave it out for both Failed and Succeeded. Running is never allowed.",
+                "namespace": "Optional. Leave it out for the default namespace.",
             },
             "output_shape": (
-                "{deleted, phases, namespace, deletes: [{phase, command, "
-                "stdout, stderr, exit_status}]}. One deletes[] entry per "
-                "phase. On a bound violation: {deleted: false, error}."
+                "{deleted, phases, namespace, deletes: [{phase, command, stdout, "
+                "stderr, exit_status}]}, one entry per phase. When a value is "
+                "refused: {deleted: false, error}."
+            ),
+            "next_step": (
+                "Check exit_status of each entry. Then list the pods again with holodeck.k8s.exec."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.backups.prune",
         handler_attr="backups_prune",
-        summary="Prune old backups under /var/backups keeping newest-N (approval-gated).",
+        summary="Remove old backup files in /var/backups on the HoloRouter, keep the newest N.",
         description=(
-            "Removes backup artefacts under /var/backups on the HoloRouter, "
-            "keeping the newest ``keep_newest`` entries (by mtime). An "
-            "optional ``path`` sub-directory is resolved and confined to "
-            "/var/backups/** -- any traversal or absolute-path escape is "
-            "rejected before anything is removed. The listing runs at "
-            "-maxdepth 1 so the prune never recurses into a subtree. "
-            "safety_level=dangerous, requires_approval=True -- parks for "
-            "human approval before deleting anything."
+            "Removes the files in /var/backups (or a folder inside it, not "
+            "recursive) on the HoloRouter, except the newest 'keep_newest' files. "
+            "A path outside /var/backups is refused. A person must approve each "
+            "call."
         ),
         parameter_schema={
             "type": "object",
@@ -540,53 +529,59 @@ WRITE_OPS: tuple[HolodeckOp, ...] = (
                 "keep_newest": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": (
-                        "How many newest backup entries to KEEP; everything "
-                        "older is removed. Required."
-                    ),
+                    "description": "How many of the newest files to keep; older files are removed.",
                 },
                 "path": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Optional sub-path under /var/backups (absolute or "
-                        "relative to it). Must resolve strictly within "
-                        "/var/backups/**. Omit to prune the root."
+                        "Optional folder inside /var/backups, as a full path or "
+                        "relative to it. Must stay inside /var/backups. Leave it "
+                        "out for /var/backups itself."
                     ),
                 },
             },
             "required": ["keep_newest"],
             "additionalProperties": False,
+            "examples": [{"keep_newest": 5}],
         },
-        response_schema=_WRITE_CONFIRM_SCHEMA,
+        response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.backups.prune"],
         group_key="backups-write",
         tags=("write", "backups", "prune", "holodeck"),
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
-            "when_to_use": _WHEN_TO_USE_BACKUPS_WRITE,
+            "when_to_call": (
+                "Call when old backups fill the HoloRouter disk and you want to "
+                "keep only the newest N files. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. Call holodeck.backups.list first "
+                "with the same path: the rows from index keep_newest on are the "
+                "files this call removes. Removed files cannot be brought back."
+            ),
             "parameter_hints": {
-                "keep_newest": "Count of newest entries to keep (>=1); the rest are removed.",
-                "path": "Optional; must stay within /var/backups/**. Omit to prune the root.",
+                "keep_newest": "Number of newest files to keep (1 or more); the rest are removed.",
+                "path": "Optional; must stay inside /var/backups. Leave it out for the top folder.",
             },
             "output_shape": (
                 "{pruned, directory, keep_newest, command, stdout, stderr, "
-                "exit_status}. On a bound violation: {pruned: false, error}."
+                "exit_status}. When a value is refused: {pruned: false, error}."
+            ),
+            "next_step": (
+                "Check the result with holodeck.backups.list and the free space "
+                "with holodeck.disk.usage."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.images.import",
         handler_attr="images_import",
-        summary="Import a seed-image tarball into containerd (k8s.io) (approval-gated).",
+        summary="Load a container image tar file into the HoloRouter's containerd (k8s.io).",
         description=(
-            "Runs ``ctr -n k8s.io images import <tar>`` on the HoloRouter to "
-            "side-load a container image from a pre-staged tarball so kubelet "
-            "can see it. The tar path must match /root/containerd-images/*.tar "
-            "(single .tar file, no nesting, no traversal) -- any other path "
-            "is rejected before any SSH traffic. safety_level=dangerous, "
-            "requires_approval=True -- parks for human approval before "
-            "importing."
+            "Runs 'ctr -n k8s.io images import <tar>' on the HoloRouter, so "
+            "Kubernetes can use the image. The file must be a .tar directly in "
+            "/root/containerd-images. A person must approve each call."
         ),
         parameter_schema={
             "type": "object",
@@ -595,27 +590,40 @@ WRITE_OPS: tuple[HolodeckOp, ...] = (
                     "type": "string",
                     "pattern": r"^/root/containerd-images/[A-Za-z0-9._-]+\.tar$",
                     "description": (
-                        "Absolute path to the image tarball; must match "
-                        "/root/containerd-images/*.tar."
+                        "Full path of the image file; must be /root/containerd-images/<name>.tar."
                     ),
                 },
             },
             "required": ["tar_path"],
             "additionalProperties": False,
+            "examples": [{"tar_path": "/root/containerd-images/example-image.tar"}],
         },
-        response_schema=_WRITE_CONFIRM_SCHEMA,
+        response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.images.import"],
         group_key="images-write",
         tags=("write", "images", "containerd", "ctr", "holodeck"),
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
-            "when_to_use": _WHEN_TO_USE_IMAGES_WRITE,
+            "when_to_call": (
+                "Call when the HoloRouter's Kubernetes cannot pull an image "
+                "because the registry cannot be reached, and the image is "
+                "already on the appliance as a tar file. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. The tar file must already be in "
+                "/root/containerd-images on the appliance; MEHO does not copy it "
+                "there."
+            ),
             "parameter_hints": {
                 "tar_path": "Must be /root/containerd-images/<name>.tar; nothing else is accepted.",
             },
             "output_shape": (
-                "{imported, tar_path, command, stdout, stderr, exit_status}. "
-                "On a bound violation: {imported: false, error}."
+                "{imported, tar_path, command, stdout, stderr, exit_status}. When "
+                "the path is refused: {imported: false, error}."
+            ),
+            "next_step": (
+                "Check exit_status, then check the pods that needed the image with "
+                "holodeck.k8s.exec."
             ),
         },
     ),

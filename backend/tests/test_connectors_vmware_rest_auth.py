@@ -1030,13 +1030,13 @@ async def test_close_session_with_an_older_token_keeps_the_cached_session() -> N
         login = mock.post("/api/session").respond(200, json="token-2")
         revoke = mock.delete("/api/session").respond(204)
         await connector.auth_headers(_TARGET_A, _make_operator())
-        assert connector.cached_session_token(_TARGET_A) == "token-2"
+        assert connector._session_tokens.get(target_cache_key(_TARGET_A)) == "token-2"
 
         assert await connector.close_session(_TARGET_A, token="token-1") is True
 
         assert revoke.call_count == 1
         assert revoke.calls[0].request.headers["vmware-api-session-id"] == "token-1"
-        assert connector.cached_session_token(_TARGET_A) == "token-2"
+        assert connector._session_tokens.get(target_cache_key(_TARGET_A)) == "token-2"
         await connector.auth_headers(_TARGET_A, _make_operator())
 
     assert login.call_count == 1
@@ -1057,5 +1057,5 @@ async def test_close_session_with_the_cached_token_evicts_it() -> None:
         assert await connector.close_session(_TARGET_A, token="token-1") is True
 
     assert revoke.calls[0].request.headers["vmware-api-session-id"] == "token-1"
-    assert connector.cached_session_token(_TARGET_A) is None
+    assert connector._session_tokens.get(target_cache_key(_TARGET_A)) is None
     await connector.aclose()

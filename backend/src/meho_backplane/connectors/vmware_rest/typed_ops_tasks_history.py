@@ -23,19 +23,24 @@ ingested descriptor, zero catalog ingest):
 The op returns only when the collector is confirmed gone. A failed
 destroy is retried (``_DESTROY_ATTEMPTS`` tries in all). When it keeps
 failing, the op closes the vCenter session that owns the collector
-(:meth:`VmwareRestConnector.close_session` with the token read right
-after the create call): a collector dies with its session. If the
-connector has logged in again since (max-age re-login, auth recovery),
-only the old session is closed and the new one stays. Otherwise the
-cached session is evicted too, so the next call logs in again on a clean
-session and leaked collectors cannot pile up. ``collector_cleanup``
-reports which path ran. When neither path is confirmed, the call fails
-with :class:`CollectorCleanupError` (a read error that happened first is
-raised instead, and the cleanup failure is only logged).
+(:meth:`VmwareRestConnector.close_session` with the token the create
+request was sent with, recorded by :class:`SessionTokenUsed`): a
+collector dies with its session. If the connector has logged in again
+since (max-age re-login, auth recovery, even while the create request
+was in flight), only the old session is closed and the new one stays.
+Otherwise the cached session is evicted too, so the next call logs in
+again on a clean session and leaked collectors cannot pile up.
+``collector_cleanup`` reports which path ran. When neither path is
+confirmed, the call fails with :class:`CollectorCleanupError` (a read
+error that happened first is raised instead, and the cleanup failure is
+only logged).
 
-Cleanup also runs when the call is cancelled, and a cancel that arrives
-during the cleanup waits for it to finish (:func:`_run_to_completion`).
-The cancel is raised again afterwards. So no collector survives the call.
+Cleanup also runs when the call is cancelled. A cancel while the create
+request is pending lets that request finish first, because vCenter may
+have created the collector already; the collector is then removed. A
+cancel that arrives during the cleanup waits for it to finish
+(:func:`_run_to_completion`). The cancel is raised again afterwards. So
+no collector survives the call.
 
 ``TaskFilterSpec`` has no operation filter, so ``description_ids`` is
 applied here, on the rows read. The scan is bounded by
@@ -55,7 +60,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
+from meho_backplane.connectors.vmware_rest.session import SessionTokenUsed, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
     _moref_value,
@@ -243,6 +248,21 @@ async def _destroy_collector(
     return False
 
 
+async def _wait_done(task: asyncio.Future[Any]) -> asyncio.CancelledError | None:
+    """Wait until *task* is done, even when the calling task is cancelled.
+
+    *task* is never cancelled here. Returns the cancel that arrived while
+    waiting (the last one), or ``None``; the caller raises it again.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait([task])
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    return cancelled
+
+
 async def _run_to_completion[T](coro: Coroutine[Any, Any, T]) -> T:
     """Await *coro* and finish it even when the calling task is cancelled.
 
@@ -250,12 +270,7 @@ async def _run_to_completion[T](coro: Coroutine[Any, Any, T]) -> T:
     cleanup, so a cancelled call still leaves no collector behind.
     """
     task = asyncio.ensure_future(coro)
-    cancelled: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.wait([task])
-        except asyncio.CancelledError as exc:
-            cancelled = exc
+    cancelled = await _wait_done(task)
     if cancelled is not None:
         raise cancelled
     return task.result()
@@ -291,6 +306,60 @@ async def _remove_collector(
     return None
 
 
+def _collector_moid(created: Any) -> str | None:
+    """The collector reference of a ``CreateCollectorForTasks`` answer."""
+    return _moref_value(unwrap_vim_value(_unwrap_value(created)))
+
+
+async def _create_collector(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    filter_spec: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Create the collector; return its moid and the session token it lives in.
+
+    The token is the one the create request was sent with, not the cached
+    token afterwards: the connector may replace the session while the
+    request is in flight, and the cleanup must close the session that
+    owns the collector.
+
+    A cancel while the request is pending lets the request finish, because
+    vCenter may create the collector before the cancel lands. When it
+    did, the collector is removed before the cancel is raised again.
+    """
+    session = SessionTokenUsed()
+    create = asyncio.ensure_future(
+        connector._post_vmomi_json(
+            target,
+            _CREATE_COLLECTOR_PATH,
+            operator=operator,
+            json={"filter": filter_spec},
+            session_used=session,
+        )
+    )
+    cancelled = await _wait_done(create)
+    if cancelled is None:
+        collector_moid = _collector_moid(create.result())
+        if collector_moid is None:
+            raise RuntimeError(
+                "vmware.tasks.history: CreateCollectorForTasks returned no collector reference"
+            )
+        return collector_moid, session.token
+    if create.exception() is None:
+        collector_moid = _collector_moid(create.result())
+        if collector_moid is not None:
+            _log.info(
+                "vmware_tasks_history_cancelled_during_create",
+                target=target.name,
+                collector=collector_moid,
+            )
+            await _run_to_completion(
+                _remove_collector(connector, operator, target, collector_moid, session.token)
+            )
+    raise cancelled
+
+
 async def tasks_history_impl(
     connector: VmwareRestConnector,
     operator: Operator,
@@ -299,7 +368,9 @@ async def tasks_history_impl(
 ) -> dict[str, Any]:
     """Implementation of ``vmware.tasks.history``: create, page, destroy.
 
-    The collector is removed on the success path and on the error path.
+    The collector is removed on the success path, on the error path and
+    on a cancel, also a cancel that lands while the create request is
+    pending.
     Returns ``{"tasks": [...], "truncated", "scanned", "collector_cleanup"}``,
     oldest task first. Raises :class:`CollectorCleanupError` when the read
     worked but the collector could not be confirmed gone; a read error wins
@@ -312,18 +383,9 @@ async def tasks_history_impl(
     raw_ids = params.get("description_ids")
     description_ids = {str(d) for d in raw_ids} if isinstance(raw_ids, list) and raw_ids else None
 
-    created = await connector._post_vmomi_json(
-        target, _CREATE_COLLECTOR_PATH, operator=operator, json={"filter": filter_spec}
+    collector_moid, session_token = await _create_collector(
+        connector, operator, target, filter_spec
     )
-    # The collector lives in the session the create call ran on. Read that
-    # session now, so the cleanup can still name it after a re-login.
-    session_token = connector.cached_session_token(target)
-    collector_moid = _moref_value(unwrap_vim_value(_unwrap_value(created)))
-    if collector_moid is None:
-        raise RuntimeError(
-            "vmware.tasks.history: CreateCollectorForTasks returned no collector reference"
-        )
-
     try:
         rows, truncated, scanned = await _read_pages(
             connector,

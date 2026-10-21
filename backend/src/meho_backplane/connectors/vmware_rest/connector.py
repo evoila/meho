@@ -137,6 +137,7 @@ from meho_backplane.connectors.vmware_rest.host_target import (
     classify_host_target,
 )
 from meho_backplane.connectors.vmware_rest.session import (
+    SessionTokenUsed,
     VsphereSessionLoader,
     VsphereTargetLike,
     load_session_credentials_from_vault,
@@ -910,6 +911,7 @@ class VmwareRestConnector(HttpConnector):
         operator: Operator,
         json: dict[str, Any] | None = None,
         promote_managed_object_not_found: bool = False,
+        session_used: SessionTokenUsed | None = None,
     ) -> dict[str, Any]:
         """POST a typed vmomi (VI-JSON) method on the documented ``/sdk/vim25`` base.
 
@@ -959,6 +961,12 @@ class VmwareRestConnector(HttpConnector):
         as ``not_found``. It defaults to ``False`` so shared task polling and
         destructive-composite preflight reads retain their existing transport
         failure semantics (#3479).
+
+        ``session_used`` (#3701) is filled with the session token the call
+        sent, see :class:`SessionTokenUsed`. With it, every request of this
+        call pins the token it was built with, so the recorded token is the
+        one on the wire even when the connector replaces the session while
+        the request is in flight. Without it (the default), nothing changes.
         """
         await self._session_token(target, operator)
         # ESXi SOAP branch (#3363). ``_session_token`` established the flavor
@@ -978,7 +986,12 @@ class VmwareRestConnector(HttpConnector):
             )
         try:
             return await self._post_vmomi_json_vcenter(
-                target, vmomi_path, operator, json, promote_managed_object_not_found
+                target,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+                session_used=session_used,
             )
         except httpx.HTTPStatusError as exc:
             fault_type = _vijson_auth_fault_type(exc)
@@ -1000,7 +1013,12 @@ class VmwareRestConnector(HttpConnector):
         await self._session_token(target, operator)
         try:
             return await self._post_vmomi_json_vcenter(
-                target, vmomi_path, operator, json, promote_managed_object_not_found
+                target,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+                session_used=session_used,
             )
         except httpx.HTTPStatusError as exc:
             fault_type = _vijson_auth_fault_type(exc)
@@ -1022,6 +1040,8 @@ class VmwareRestConnector(HttpConnector):
         operator: Operator,
         json: dict[str, Any] | None,
         promote_managed_object_not_found: bool,
+        *,
+        session_used: SessionTokenUsed | None = None,
     ) -> dict[str, Any]:
         """Run one vCenter VI-JSON call with the mount resolution of :meth:`_post_vmomi_json`."""
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
@@ -1034,6 +1054,7 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
             )
 
         api_path = mounted_path(session_path, vmomi_path)
@@ -1047,6 +1068,7 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
             )
 
         vijson_path = vmomi_mounted_path(release, vmomi_path)
@@ -1058,6 +1080,7 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
@@ -1072,6 +1095,7 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -1089,10 +1113,24 @@ class VmwareRestConnector(HttpConnector):
         operator: Operator,
         body: dict[str, Any] | None,
         promote_managed_object_not_found: bool,
+        *,
+        session_used: SessionTokenUsed | None = None,
     ) -> dict[str, Any]:
-        """POST one VI-JSON path, optionally promoting an explicit missing object."""
+        """POST one VI-JSON path, optionally promoting an explicit missing object.
+
+        With ``session_used``, the session header is resolved here and
+        pinned on the request (``extra_headers`` wins over the headers
+        :meth:`_post_json` resolves itself), so the token recorded is the
+        token sent, see :class:`SessionTokenUsed`.
+        """
+        extra_headers: dict[str, str] | None = None
+        if session_used is not None:
+            extra_headers = await self.auth_headers(target, operator)
+            session_used.token = extra_headers.get(_SESSION_HEADER)
         try:
-            return await self._post_json(target, path, operator=operator, json=body)
+            return await self._post_json(
+                target, path, operator=operator, json=body, extra_headers=extra_headers
+            )
         except httpx.HTTPStatusError as exc:
             if promote_managed_object_not_found:
                 self._raise_managed_object_not_found(exc, vmomi_path, body)
@@ -3072,17 +3110,6 @@ class VmwareRestConnector(HttpConnector):
             )
             return False
         return True
-
-    def cached_session_token(self, target: VsphereTargetLike) -> str | None:
-        """Return the session token cached for *target* right now, or ``None``.
-
-        A typed op that creates server-side state tied to the session (the
-        ``TaskHistoryCollector`` of ``vmware.tasks.history``, #3701) reads
-        this right after the create call, so its cleanup can later name the
-        session that owns that state (:meth:`close_session` with ``token``).
-        A plain dict read; no lock is needed.
-        """
-        return self._session_tokens.get(target_cache_key(target))
 
     async def close_session(self, target: VsphereTargetLike, *, token: str | None = None) -> bool:
         """End a vCenter session for *target* on the server.

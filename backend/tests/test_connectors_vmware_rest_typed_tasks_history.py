@@ -5,13 +5,16 @@
 
 The op creates a ``TaskHistoryCollector``, pages it with
 ``ReadNextTasks`` and destroys it before it returns. The handler tests use
-a fake connector that records every vmomi POST, so they check the call
-order (create -> read -> destroy), that the destroy also runs on the error
-path and on a cancel (also a cancel while the create request is pending),
-the destroy retries and the session-close fallback (tied to the session
-the create request was sent with), and the row parse.
+a fake connector that records every vmomi POST and the session token it
+was sent with, so they check the call order (create -> read -> destroy),
+that the read and the destroy stay on the session that created the
+collector, that the destroy also runs on the error path and on a cancel
+(also a cancel while the create request is pending), the destroy retries
+and the one cleanup rule (the session is closed unless the owning session
+confirmed the collector gone, also after a create whose answer was lost),
+and the row parse.
 Transport tests send the calls through the real connector over respx to
-pin the wire paths and bodies.
+pin the wire paths, bodies and session headers.
 """
 
 from __future__ import annotations
@@ -65,13 +68,24 @@ def _no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _not_found_fault() -> httpx.HTTPStatusError:
-    """A VI-JSON ``ManagedObjectNotFound`` fault, as vCenter reports it (HTTP 500)."""
+def _vim_fault(type_name: str) -> httpx.HTTPStatusError:
+    """A VI-JSON method fault, as vCenter reports it (HTTP 500, the fault as the body)."""
     request = httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/8.0.3.0" + _DESTROY_PATH)
-    response = httpx.Response(
-        500, json={"_typeName": "ManagedObjectNotFound", "obj": {}}, request=request
-    )
+    response = httpx.Response(500, json={"_typeName": type_name}, request=request)
     return httpx.HTTPStatusError("500", request=request, response=response)
+
+
+def _not_found_fault() -> httpx.HTTPStatusError:
+    return _vim_fault("ManagedObjectNotFound")
+
+
+def _not_authenticated_fault() -> httpx.HTTPStatusError:
+    return _vim_fault("NotAuthenticated")
+
+
+def _lost_answer() -> httpx.ReadTimeout:
+    """The request went out, the answer never came back."""
+    return httpx.ReadTimeout("read timed out")
 
 
 def _make_operator() -> Operator:
@@ -139,6 +153,7 @@ class _FakeConnector:
         *,
         pages: list[Any],
         create_result: Any = _COLLECTOR_REF,
+        create_error: Exception | None = None,
         read_error: Exception | None = None,
         destroy_errors: list[Exception] | None = None,
         close_session_result: bool = True,
@@ -146,6 +161,7 @@ class _FakeConnector:
     ) -> None:
         self._pages = list(pages)
         self._create_result = create_result
+        self._create_error = create_error
         self._read_error = read_error
         # One error per destroy call, in order; a call past the list succeeds.
         self._destroy_errors = list(destroy_errors or [])
@@ -155,6 +171,9 @@ class _FakeConnector:
         # a held call is pending, like a re-login by another request.
         self.session_token: str | None = _OWNER_TOKEN
         self.calls: list[tuple[str, dict[str, Any] | None]] = []
+        # The token each vmomi call went out with: the pinned one, else the
+        # cached one at the time of the call.
+        self.tokens: list[tuple[str, str | None]] = []
         # Set when a test wants a call on that path to block until released.
         self.hold: dict[str, asyncio.Event] = {}
         self.entered: dict[str, asyncio.Event] = {}
@@ -168,16 +187,21 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
         session_used: SessionTokenUsed | None = None,
+        session_token: str | None = None,
     ) -> Any:
         del target, operator
         self.calls.append((path, json))
+        sent_with = session_token if session_token is not None else self.session_token
+        self.tokens.append((path, sent_with))
         if session_used is not None:
-            session_used.token = self.session_token
+            session_used.token = sent_with
         if path in self.hold:
             self.entered[path].set()
             await self.hold[path].wait()
             self.finished.append(path)
         if path == _CREATE_PATH:
+            if self._create_error is not None:
+                raise self._create_error
             return self._create_result
         if path == _READ_PATH:
             if self._read_error is not None:
@@ -194,6 +218,10 @@ class _FakeConnector:
     async def close_session(self, target: Any, *, token: str | None = None) -> bool:
         del target
         self.calls.append((_CLOSE_SESSION, {"token": token}))
+        if _CLOSE_SESSION in self.hold:
+            self.entered[_CLOSE_SESSION].set()
+            await self.hold[_CLOSE_SESSION].wait()
+            self.finished.append(_CLOSE_SESSION)
         return self._close_session_result
 
     def hold_path(self, path: str) -> None:
@@ -290,6 +318,8 @@ async def test_create_read_destroy_in_order() -> None:
     assert conn.calls[0][1] == {"filter": build_task_filter_spec({"since": "2026-10-20T08:00:00Z"})}
     assert conn.calls[1][1] == {"maxCount": _PAGE_SIZE}
     assert conn.calls[2][1] is None
+    # Every call on the collector goes to the session that created it.
+    assert conn.tokens == [(p, _OWNER_TOKEN) for p in conn.paths]
     assert [t["task"] for t in out["tasks"]] == ["task-1", "task-2"]
     assert out["truncated"] is False
     assert out["scanned"] == 2
@@ -419,8 +449,72 @@ async def test_cleanup_closes_the_session_the_create_was_sent_with() -> None:
     conn.release(_CREATE_PATH)
     out = await task
     assert conn.paths.count(_DESTROY_PATH) == _DESTROY_ATTEMPTS
+    # The read and the destroys stay on the first session too.
+    assert {t for _, t in conn.tokens} == {_OWNER_TOKEN}
     assert conn.calls[-1] == (_CLOSE_SESSION, {"token": _OWNER_TOKEN})
     assert out["collector_cleanup"] == "session_closed"
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_session_does_not_hide_the_collector() -> None:
+    """The session is replaced after the create: a ManagedObjectNotFound counts only from the owner.
+
+    The destroy is sent to the first session, so its ManagedObjectNotFound
+    answer really means the collector is gone. No session is closed.
+    """
+    conn = _FakeConnector(pages=[[_task_info(1)]], destroy_errors=[_not_found_fault()])
+    task = await _start_and_wait_at(conn, _CREATE_PATH)
+    conn.session_token = "tok-replacement"
+    conn.release(_CREATE_PATH)
+    out = await task
+    assert conn.tokens == [
+        (_CREATE_PATH, _OWNER_TOKEN),
+        (_READ_PATH, _OWNER_TOKEN),
+        (_DESTROY_PATH, _OWNER_TOKEN),
+    ]
+    assert _CLOSE_SESSION not in conn.paths
+    assert out["collector_cleanup"] == "destroyed"
+
+
+@pytest.mark.asyncio
+async def test_a_gone_owning_session_counts_as_destroyed() -> None:
+    """The owning session answers NotAuthenticated: it is gone, and the collector with it."""
+    conn = _FakeConnector(pages=[[_task_info(1)]], destroy_errors=[_not_authenticated_fault()])
+    out = await _run(conn, {"since": "2026-10-20T08:00:00Z"})
+    assert conn.paths.count(_DESTROY_PATH) == 1
+    assert _CLOSE_SESSION not in conn.paths
+    assert out["collector_cleanup"] == "destroyed"
+
+
+@pytest.mark.asyncio
+async def test_a_lost_create_answer_closes_the_session() -> None:
+    """The create went out but its answer was lost: the session it was sent with is closed."""
+    conn = _FakeConnector(pages=[], create_error=_lost_answer())
+    with pytest.raises(httpx.ReadTimeout):
+        await _run(conn, {"since": "2026-10-20T08:00:00Z"})
+    assert conn.calls == [
+        (_CREATE_PATH, {"filter": build_task_filter_spec({"since": "2026-10-20T08:00:00Z"})}),
+        (_CLOSE_SESSION, {"token": _OWNER_TOKEN}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_create_closes_the_session_even_when_the_close_fails() -> None:
+    """The create error is the one raised; the failed close is only logged."""
+    conn = _FakeConnector(pages=[], create_error=_lost_answer(), close_session_result=False)
+    with pytest.raises(httpx.ReadTimeout):
+        await _run(conn, {"since": "2026-10-20T08:00:00Z"})
+    assert conn.paths == [_CREATE_PATH, _CLOSE_SESSION]
+
+
+@pytest.mark.asyncio
+async def test_a_create_that_was_never_sent_closes_nothing() -> None:
+    """No session token was recorded, so the create never reached vCenter."""
+    conn = _FakeConnector(pages=[], create_error=RuntimeError("login failed"))
+    conn.session_token = None
+    with pytest.raises(RuntimeError, match="login failed"):
+        await _run(conn, {"since": "2026-10-20T08:00:00Z"})
+    assert conn.paths == [_CREATE_PATH]
 
 
 @pytest.mark.asyncio
@@ -495,15 +589,56 @@ async def test_cancel_during_the_create_closes_the_session_when_the_destroy_fail
 
 
 @pytest.mark.asyncio
-async def test_cancel_during_the_create_without_a_collector_has_nothing_to_remove() -> None:
-    """The create answer carries no reference: the cancel propagates, no destroy runs."""
+async def test_cancel_during_the_create_without_a_collector_closes_the_session() -> None:
+    """The create answer carries no reference: the session is closed, then the cancel propagates."""
     conn = _FakeConnector(pages=[], create_result={})
     task = await _start_and_wait_at(conn, _CREATE_PATH)
     task.cancel()
     conn.release(_CREATE_PATH)
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert conn.paths == [_CREATE_PATH]
+    assert conn.calls == [
+        (_CREATE_PATH, {"filter": build_task_filter_spec({"since": "2026-10-20T08:00:00Z"})}),
+        (_CLOSE_SESSION, {"token": _OWNER_TOKEN}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_the_create_with_a_lost_answer_closes_the_session() -> None:
+    """Cancelled while the create is pending and the create then fails: the session is closed.
+
+    vCenter may have created the collector before the answer was lost, so
+    the session it was sent with is closed. The cancel is raised afterwards.
+    """
+    conn = _FakeConnector(pages=[], create_error=_lost_answer())
+    task = await _start_and_wait_at(conn, _CREATE_PATH)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    conn.release(_CREATE_PATH)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert conn.finished == [_CREATE_PATH]
+    assert conn.calls[-1] == (_CLOSE_SESSION, {"token": _OWNER_TOKEN})
+    assert conn.paths == [_CREATE_PATH, _CLOSE_SESSION]
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_the_create_waits_for_the_session_close() -> None:
+    """A second cancel during the session close does not cut it short."""
+    conn = _FakeConnector(pages=[], create_error=_lost_answer())
+    conn.hold_path(_CLOSE_SESSION)
+    task = await _start_and_wait_at(conn, _CREATE_PATH)
+    task.cancel()
+    conn.release(_CREATE_PATH)
+    await asyncio.wait_for(conn.entered[_CLOSE_SESSION].wait(), timeout=5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    conn.release(_CLOSE_SESSION)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert conn.finished == [_CREATE_PATH, _CLOSE_SESSION]
 
 
 @pytest.mark.asyncio
@@ -568,11 +703,11 @@ async def test_bad_params_create_no_collector() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_collector_reference_raises_without_destroy() -> None:
+async def test_missing_collector_reference_closes_the_session_without_destroy() -> None:
     conn = _FakeConnector(pages=[], create_result={})
     with pytest.raises(RuntimeError, match="no collector reference"):
         await _run(conn, {"since": "2026-10-20T08:00:00Z"})
-    assert conn.paths == [_CREATE_PATH]
+    assert conn.paths == [_CREATE_PATH, _CLOSE_SESSION]
 
 
 @pytest.mark.asyncio
@@ -729,8 +864,9 @@ async def test_wire_cleanup_closes_the_session_that_owns_the_collector() -> None
 
     The collector was created on the first session. Its max-age runs out
     before the destroy, so the connector re-logs in (second token) and the
-    first session lives on, with the collector in it. The failed destroys
-    must end that first session; the second one stays cached.
+    first session lives on, with the collector in it. The destroys go to
+    that first session; when they fail, it is the one closed, and the
+    second one stays cached.
     """
     connector = _make_connector()
     base = "/sdk/vim25/8.0.3.0"
@@ -759,7 +895,7 @@ async def test_wire_cleanup_closes_the_session_that_owns_the_collector() -> None
             assert login.call_count == 2
             assert destroy.call_count == _DESTROY_ATTEMPTS
             assert [c.request.headers["vmware-api-session-id"] for c in destroy.calls] == [
-                "tok-2"
+                "tok-1"
             ] * _DESTROY_ATTEMPTS
             assert revoke.call_count == 1
             assert revoke.calls[0].request.headers["vmware-api-session-id"] == "tok-1"
@@ -775,9 +911,9 @@ async def test_wire_cleanup_closes_the_session_the_create_was_sent_with() -> Non
 
     The create request goes out with the first token. Before its answer
     arrives, another request has logged in again (the cache now holds a
-    second token). The read and the destroys run on the second session,
-    but the collector lives in the first one, so the revoke must carry
-    the first token and the second session stays cached.
+    second token). The collector lives in the first session, so the read,
+    the destroys and the revoke all carry the first token, and the second
+    session stays cached.
     """
     connector = _make_connector()
     base = "/sdk/vim25/8.0.3.0"
@@ -802,12 +938,118 @@ async def test_wire_cleanup_closes_the_session_the_create_was_sent_with() -> Non
             out = await connector.tasks_history(
                 _make_operator(), target, {"since": "2026-10-20T08:00:00Z"}
             )
-            assert read.calls.last.request.headers["vmware-api-session-id"] == "tok-2"
+            assert read.calls.last.request.headers["vmware-api-session-id"] == "tok-1"
             assert destroy.call_count == _DESTROY_ATTEMPTS
+            assert destroy.calls.last.request.headers["vmware-api-session-id"] == "tok-1"
             assert revoke.call_count == 1
             assert revoke.calls[0].request.headers["vmware-api-session-id"] == "tok-1"
             assert out["collector_cleanup"] == "session_closed"
             assert connector._session_tokens == {key: "tok-2"}
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wire_not_found_counts_only_from_the_session_that_owns_the_collector() -> None:
+    """The session is replaced while the create is pending; the owner answers ManagedObjectNotFound.
+
+    The destroy carries the first token, so the fault comes from the
+    session that owns the collector and means it is gone. No session is
+    closed and the second session stays cached.
+    """
+    connector = _make_connector()
+    base = "/sdk/vim25/8.0.3.0"
+    target = _Target()
+    key = target_cache_key(target)
+
+    def _replace_the_session(_request: httpx.Request) -> httpx.Response:
+        connector._session_tokens[key] = "tok-2"
+        return httpx.Response(200, json=_COLLECTOR_REF)
+
+    try:
+        # Routes that must stay unused are registered too, so a stray call
+        # fails here instead of being swallowed by the connector.
+        async with respx.mock(base_url="https://vc.test.invalid", assert_all_called=False) as mock:
+            mock.post("/api/session").respond(200, json="tok-1")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.post(f"{base}{_CREATE_PATH}").mock(side_effect=_replace_the_session)
+            read = mock.post(f"{base}{_READ_PATH}").respond(200, json=[_IMPORT_FAILED])
+            destroy = mock.post(f"{base}{_DESTROY_PATH}").respond(
+                500, json={"_typeName": "ManagedObjectNotFound", "obj": {}}
+            )
+            revoke = mock.delete("/api/session").respond(204)
+            out = await connector.tasks_history(
+                _make_operator(), target, {"since": "2026-10-20T08:00:00Z"}
+            )
+            assert read.calls.last.request.headers["vmware-api-session-id"] == "tok-1"
+            assert destroy.call_count == 1
+            assert destroy.calls.last.request.headers["vmware-api-session-id"] == "tok-1"
+            assert revoke.call_count == 0
+            assert out["collector_cleanup"] == "destroyed"
+            assert connector._session_tokens == {key: "tok-2"}
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wire_a_lost_create_answer_ends_the_session() -> None:
+    """The create request times out: DELETE /api/session runs with the token it was sent with."""
+    connector = _make_connector()
+    base = "/sdk/vim25/8.0.3.0"
+    try:
+        # Routes that must stay unused are registered too, so a stray call
+        # fails here instead of being swallowed by the connector.
+        async with respx.mock(base_url="https://vc.test.invalid", assert_all_called=False) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.post(f"{base}{_CREATE_PATH}").mock(side_effect=httpx.ReadTimeout("lost"))
+            destroy = mock.post(f"{base}{_DESTROY_PATH}").respond(204)
+            revoke = mock.delete("/api/session").respond(204)
+            with pytest.raises(httpx.ReadTimeout):
+                await connector.tasks_history(
+                    _make_operator(), _Target(), {"since": "2026-10-20T08:00:00Z"}
+                )
+            assert destroy.call_count == 0
+            assert revoke.call_count == 1
+            assert revoke.calls[0].request.headers["vmware-api-session-id"] == "tok"
+            assert connector._session_tokens == {}
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wire_a_gone_owning_session_is_not_replaced_by_a_new_login() -> None:
+    """The owning session dies mid-read: no re-login for the collector calls, nothing to close.
+
+    ``NotAuthenticated`` on the pinned read is raised as is (a new session
+    would not hold the collector). The destroy goes to the same session,
+    and its ``NotAuthenticated`` answer confirms the collector is gone.
+    """
+    connector = _make_connector()
+    base = "/sdk/vim25/8.0.3.0"
+    try:
+        # Routes that must stay unused are registered too, so a stray call
+        # fails here instead of being swallowed by the connector.
+        async with respx.mock(base_url="https://vc.test.invalid", assert_all_called=False) as mock:
+            login = mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.post(f"{base}{_CREATE_PATH}").respond(200, json=_COLLECTOR_REF)
+            read = mock.post(f"{base}{_READ_PATH}").respond(
+                500, json={"_typeName": "NotAuthenticated"}
+            )
+            destroy = mock.post(f"{base}{_DESTROY_PATH}").respond(
+                500, json={"_typeName": "NotAuthenticated"}
+            )
+            revoke = mock.delete("/api/session").respond(204)
+            with pytest.raises(httpx.HTTPStatusError):
+                await connector.tasks_history(
+                    _make_operator(), _Target(), {"since": "2026-10-20T08:00:00Z"}
+                )
+            assert login.call_count == 1
+            assert read.call_count == 1
+            assert destroy.call_count == 1
+            assert destroy.calls.last.request.headers["vmware-api-session-id"] == "tok"
+            assert revoke.call_count == 0
     finally:
         await connector.aclose()
 

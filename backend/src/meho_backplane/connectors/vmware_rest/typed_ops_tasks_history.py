@@ -20,27 +20,37 @@ ingested descriptor, zero catalog ingest):
 3. ``TaskHistoryCollector.DestroyCollector`` on the success path and on
    the error path.
 
-The op returns only when the collector is confirmed gone. A failed
-destroy is retried (``_DESTROY_ATTEMPTS`` tries in all). When it keeps
-failing, the op closes the vCenter session that owns the collector
-(:meth:`VmwareRestConnector.close_session` with the token the create
-request was sent with, recorded by :class:`SessionTokenUsed`): a
-collector dies with its session. If the connector has logged in again
-since (max-age re-login, auth recovery, even while the create request
-was in flight), only the old session is closed and the new one stays.
-Otherwise the cached session is evicted too, so the next call logs in
-again on a clean session and leaked collectors cannot pile up.
-``collector_cleanup`` reports which path ran. When neither path is
-confirmed, the call fails with :class:`CollectorCleanupError` (a read
-error that happened first is raised instead, and the cleanup failure is
-only logged).
+A collector lives in the vCenter session that created it. The create
+request records the session token it was sent with
+(:class:`SessionTokenUsed`), and every later request on the collector
+(``ReadNextTasks``, ``DestroyCollector``) is pinned to that session, even
+when the connector has logged in again in between (max-age re-login,
+auth recovery, another request replacing the session while the create was
+in flight).
+
+One cleanup rule decides whether the call is clean. The collector is
+confirmed gone only when ``DestroyCollector`` succeeds on the owning
+session, or when that session answers ``ManagedObjectNotFound`` (the
+collector is already gone) or ``NotAuthenticated`` (the session is gone,
+and the collector with it). In every other case the op closes the owning
+session (:meth:`VmwareRestConnector.close_session` with the recorded
+token): a destroy that keeps failing after ``_DESTROY_ATTEMPTS`` tries, a
+timeout or a lost answer, and a create request that was sent but did not
+return a collector reference (vCenter may have created the collector
+before the answer was lost). A collector dies with its session. When the
+closed session is still the cached one, the cache entry is evicted too,
+so the next call logs in again on a clean session and leaked collectors
+cannot pile up; a newer cached session stays. ``collector_cleanup``
+reports which path ran. When neither path is confirmed, the call fails
+with :class:`CollectorCleanupError` (a read error that happened first is
+raised instead, and the cleanup failure is only logged).
 
 Cleanup also runs when the call is cancelled. A cancel while the create
 request is pending lets that request finish first, because vCenter may
-have created the collector already; the collector is then removed. A
-cancel that arrives during the cleanup waits for it to finish
-(:func:`_run_to_completion`). The cancel is raised again afterwards. So
-no collector survives the call.
+have created the collector already; the collector is then removed, or
+the session is closed when the request failed. A cancel that arrives
+during the cleanup waits for it to finish (:func:`_run_to_completion`).
+The cancel is raised again afterwards. So no collector survives the call.
 
 ``TaskFilterSpec`` has no operation filter, so ``description_ids`` is
 applied here, on the rows read. The scan is bounded by
@@ -102,6 +112,8 @@ _MAX_TASKS_CAP = 1000
 _DESTROY_ATTEMPTS = 3
 #: Pause between two ``DestroyCollector`` tries.
 _DESTROY_RETRY_DELAY_SECONDS = 0.5
+#: VI-JSON faults from the owning session that confirm the collector is gone.
+_GONE_FAULT_TYPES = frozenset({"ManagedObjectNotFound", "NotAuthenticated"})
 
 CollectorCleanup = Literal["destroyed", "session_closed"]
 
@@ -111,8 +123,8 @@ TASKS_HISTORY_GROUP_KEY = "vmware-tasks-history"
 class CollectorCleanupError(RuntimeError):
     """The temporary task history collector could not be removed.
 
-    Raised after every ``DestroyCollector`` try failed and the vCenter
-    session that owns the collector could not be closed either. The
+    Raised when ``DestroyCollector`` did not succeed on the session that
+    owns the collector and that session could not be closed either. The
     collector then lives until vCenter times out that session.
     """
 
@@ -185,16 +197,21 @@ async def _read_pages(
     target: VsphereTargetLike,
     read_path: str,
     *,
+    session_token: str | None,
     max_tasks: int,
     description_ids: set[str] | None,
 ) -> tuple[list[dict[str, Any]], bool, int]:
-    """Page the collector; return ``(rows, truncated, scanned)``."""
+    """Page the collector on its owning session; return ``(rows, truncated, scanned)``."""
     rows: list[dict[str, Any]] = []
     scanned = 0
     for _ in range(_MAX_PAGES):
         page = _page_rows(
             await connector._post_vmomi_json(
-                target, read_path, operator=operator, json={"maxCount": _PAGE_SIZE}
+                target,
+                read_path,
+                operator=operator,
+                json={"maxCount": _PAGE_SIZE},
+                session_token=session_token,
             )
         )
         scanned += len(page)
@@ -211,12 +228,17 @@ async def _read_pages(
     return rows, True, scanned
 
 
-def _collector_already_gone(exc: Exception) -> bool:
-    """``DestroyCollector`` faulted because the collector no longer exists."""
+def _collector_confirmed_gone(exc: Exception) -> bool:
+    """The owning session answered that the collector cannot exist any more.
+
+    ``ManagedObjectNotFound``: the collector is already gone.
+    ``NotAuthenticated``: the session is gone, and the collector with it.
+    Both come as a VI-JSON fault (HTTP 500 with the fault as the body).
+    """
     return (
         isinstance(exc, httpx.HTTPStatusError)
         and exc.response.status_code == 500
-        and method_fault_type(exc.response.text) == "ManagedObjectNotFound"
+        and method_fault_type(exc.response.text) in _GONE_FAULT_TYPES
     )
 
 
@@ -225,15 +247,21 @@ async def _destroy_collector(
     operator: Operator,
     target: VsphereTargetLike,
     collector_moid: str,
+    session_token: str | None,
 ) -> bool:
-    """Call ``DestroyCollector`` up to ``_DESTROY_ATTEMPTS`` times."""
+    """Call ``DestroyCollector`` on the owning session, up to ``_DESTROY_ATTEMPTS`` times.
+
+    ``True`` only when that session confirmed the collector is gone.
+    """
     path = f"/TaskHistoryCollector/{collector_moid}/DestroyCollector"
     for attempt in range(1, _DESTROY_ATTEMPTS + 1):
         try:
-            await connector._post_vmomi_json(target, path, operator=operator)
+            await connector._post_vmomi_json(
+                target, path, operator=operator, session_token=session_token
+            )
             return True
         except Exception as exc:
-            if _collector_already_gone(exc):
+            if _collector_confirmed_gone(exc):
                 return True
             _log.warning(
                 "vmware_tasks_history_destroy_failed",
@@ -276,21 +304,19 @@ async def _run_to_completion[T](coro: Coroutine[Any, Any, T]) -> T:
     return task.result()
 
 
-async def _remove_collector(
+async def _close_owning_session(
     connector: VmwareRestConnector,
-    operator: Operator,
     target: VsphereTargetLike,
-    collector_moid: str,
     session_token: str | None,
+    collector_moid: str | None,
 ) -> CollectorCleanup | None:
-    """Make sure the collector is gone; ``None`` when that cannot be confirmed.
+    """Close the session that owns the collector, so vCenter drops it now.
 
-    First ``DestroyCollector`` (with retries). When that keeps failing,
-    close the vCenter session that owns the collector (*session_token*, the
-    session the create call ran on), so vCenter drops it now.
+    ``None`` when the close could not be confirmed, or when there is no
+    session to close (the create request was never sent).
     """
-    if await _destroy_collector(connector, operator, target, collector_moid):
-        return "destroyed"
+    if session_token is None:
+        return None
     if await connector.close_session(target, token=session_token):
         _log.warning(
             "vmware_tasks_history_session_closed",
@@ -306,9 +332,28 @@ async def _remove_collector(
     return None
 
 
-def _collector_moid(created: Any) -> str | None:
-    """The collector reference of a ``CreateCollectorForTasks`` answer."""
-    return _moref_value(unwrap_vim_value(_unwrap_value(created)))
+async def _remove_collector(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    collector_moid: str,
+    session_token: str | None,
+) -> CollectorCleanup | None:
+    """Make sure the collector is gone; ``None`` when that cannot be confirmed.
+
+    First ``DestroyCollector`` on the owning session (with retries). When
+    that session does not confirm the collector gone, close that session.
+    """
+    if await _destroy_collector(connector, operator, target, collector_moid, session_token):
+        return "destroyed"
+    return await _close_owning_session(connector, target, session_token, collector_moid)
+
+
+def _collector_moid(created: asyncio.Future[Any]) -> str | None:
+    """The collector reference of a finished ``CreateCollectorForTasks`` call, if any."""
+    if created.exception() is not None:
+        return None
+    return _moref_value(unwrap_vim_value(_unwrap_value(created.result())))
 
 
 async def _create_collector(
@@ -321,12 +366,19 @@ async def _create_collector(
 
     The token is the one the create request was sent with, not the cached
     token afterwards: the connector may replace the session while the
-    request is in flight, and the cleanup must close the session that
-    owns the collector.
+    request is in flight, and every later call on the collector must go
+    to the session that owns it.
 
-    A cancel while the request is pending lets the request finish, because
-    vCenter may create the collector before the cancel lands. When it
-    did, the collector is removed before the cancel is raised again.
+    A create request that was sent but returned no collector reference
+    (a timeout, a lost answer, a fault, an empty answer) closes that
+    session: vCenter may have created the collector before the answer
+    was lost, and closing the session is the one way to be sure it is
+    gone. The create error is then raised.
+
+    A cancel while the request is pending lets the request finish,
+    because vCenter may create the collector before the cancel lands.
+    The collector is then removed (or the session closed) before the
+    cancel is raised again.
     """
     session = SessionTokenUsed()
     create = asyncio.ensure_future(
@@ -339,24 +391,33 @@ async def _create_collector(
         )
     )
     cancelled = await _wait_done(create)
-    if cancelled is None:
-        collector_moid = _collector_moid(create.result())
-        if collector_moid is None:
-            raise RuntimeError(
-                "vmware.tasks.history: CreateCollectorForTasks returned no collector reference"
-            )
-        return collector_moid, session.token
-    if create.exception() is None:
-        collector_moid = _collector_moid(create.result())
-        if collector_moid is not None:
-            _log.info(
-                "vmware_tasks_history_cancelled_during_create",
+    collector_moid = _collector_moid(create)
+    if collector_moid is None:
+        create_error = create.exception()
+        if session.token is not None:
+            _log.warning(
+                "vmware_tasks_history_create_unconfirmed",
                 target=target.name,
-                collector=collector_moid,
+                cancelled=cancelled is not None,
+                error_type=type(create_error).__name__ if create_error is not None else None,
             )
-            await _run_to_completion(
-                _remove_collector(connector, operator, target, collector_moid, session.token)
-            )
+        await _run_to_completion(_close_owning_session(connector, target, session.token, None))
+        if cancelled is not None:
+            raise cancelled
+        create.result()
+        raise RuntimeError(
+            "vmware.tasks.history: CreateCollectorForTasks returned no collector reference"
+        )
+    if cancelled is None:
+        return collector_moid, session.token
+    _log.info(
+        "vmware_tasks_history_cancelled_during_create",
+        target=target.name,
+        collector=collector_moid,
+    )
+    await _run_to_completion(
+        _remove_collector(connector, operator, target, collector_moid, session.token)
+    )
     raise cancelled
 
 
@@ -368,9 +429,11 @@ async def tasks_history_impl(
 ) -> dict[str, Any]:
     """Implementation of ``vmware.tasks.history``: create, page, destroy.
 
+    Every request on the collector goes to the session that created it.
     The collector is removed on the success path, on the error path and
     on a cancel, also a cancel that lands while the create request is
-    pending.
+    pending; when removal is not confirmed on that session, the session
+    is closed.
     Returns ``{"tasks": [...], "truncated", "scanned", "collector_cleanup"}``,
     oldest task first. Raises :class:`CollectorCleanupError` when the read
     worked but the collector could not be confirmed gone; a read error wins
@@ -392,6 +455,7 @@ async def tasks_history_impl(
             operator,
             target,
             f"/TaskHistoryCollector/{collector_moid}/ReadNextTasks",
+            session_token=session_token,
             max_tasks=max_tasks,
             description_ids=description_ids,
         )
@@ -408,9 +472,9 @@ async def tasks_history_impl(
     if cleanup is None:
         raise CollectorCleanupError(
             "vmware.tasks.history: the temporary task history collector could not "
-            f"be removed: DestroyCollector failed {_DESTROY_ATTEMPTS} times and the "
-            "vCenter session that owns it could not be closed. vCenter drops the "
-            "collector when that session times out. Try again later."
+            f"be removed: DestroyCollector failed {_DESTROY_ATTEMPTS} times on the "
+            "vCenter session that owns it and that session could not be closed. "
+            "vCenter drops the collector when that session times out. Try again later."
         )
 
     _log.info(
@@ -560,8 +624,10 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "enum": ["destroyed", "session_closed"],
             "description": (
                 "How the temporary history collector was removed: 'destroyed' "
-                "(DestroyCollector accepted) or 'session_closed' (destroy kept "
-                "failing, so MEHO closed the vCenter session that owned it)."
+                "(the vCenter session that owns it accepted DestroyCollector, or "
+                "answered that the collector or the session is already gone) or "
+                "'session_closed' (that was not confirmed, so MEHO closed the "
+                "vCenter session that owned it)."
             ),
         },
     },

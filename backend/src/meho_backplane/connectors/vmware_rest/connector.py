@@ -912,6 +912,7 @@ class VmwareRestConnector(HttpConnector):
         json: dict[str, Any] | None = None,
         promote_managed_object_not_found: bool = False,
         session_used: SessionTokenUsed | None = None,
+        session_token: str | None = None,
     ) -> dict[str, Any]:
         """POST a typed vmomi (VI-JSON) method on the documented ``/sdk/vim25`` base.
 
@@ -967,6 +968,16 @@ class VmwareRestConnector(HttpConnector):
         call pins the token it was built with, so the recorded token is the
         one on the wire even when the connector replaces the session while
         the request is in flight. Without it (the default), nothing changes.
+
+        ``session_token`` (#3701) pins the call to that vCenter session: the
+        request carries this token, not the cached one. For a call on
+        server-side state that lives in one session (the collector of
+        ``vmware.tasks.history``), the cached session is the wrong one as
+        soon as the connector has logged in again. A ``NotAuthenticated``
+        fault on a pinned call is **not** retried on a new login: it means
+        that session is gone, and with it the state the call was about. The
+        fault then propagates as the plain :exc:`httpx.HTTPStatusError`, so
+        the caller can read it. Without it (the default), nothing changes.
         """
         await self._session_token(target, operator)
         # ESXi SOAP branch (#3363). ``_session_token`` established the flavor
@@ -992,6 +1003,7 @@ class VmwareRestConnector(HttpConnector):
                 json,
                 promote_managed_object_not_found,
                 session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             fault_type = _vijson_auth_fault_type(exc)
@@ -999,6 +1011,10 @@ class VmwareRestConnector(HttpConnector):
                 raise
             if fault_type != _VIJSON_RELOGIN_FAULT_TYPE:
                 raise _vijson_auth_error(fault_type, target, vmomi_path, exc) from exc
+            if session_token is not None:
+                # The pinned session is gone. A new login cannot bring back
+                # what lived in it, so the caller gets the fault as is.
+                raise
         # NotAuthenticated: drop the cached session and retry this one call on
         # a fresh login (#3566). The rejected call never ran, so the retry is
         # safe for a write too. Retrying only this call (not the whole
@@ -1019,6 +1035,7 @@ class VmwareRestConnector(HttpConnector):
                 json,
                 promote_managed_object_not_found,
                 session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             fault_type = _vijson_auth_fault_type(exc)
@@ -1042,6 +1059,7 @@ class VmwareRestConnector(HttpConnector):
         promote_managed_object_not_found: bool,
         *,
         session_used: SessionTokenUsed | None = None,
+        session_token: str | None = None,
     ) -> dict[str, Any]:
         """Run one vCenter VI-JSON call with the mount resolution of :meth:`_post_vmomi_json`."""
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
@@ -1055,6 +1073,7 @@ class VmwareRestConnector(HttpConnector):
                 json,
                 promote_managed_object_not_found,
                 session_used=session_used,
+                session_token=session_token,
             )
 
         api_path = mounted_path(session_path, vmomi_path)
@@ -1069,6 +1088,7 @@ class VmwareRestConnector(HttpConnector):
                 json,
                 promote_managed_object_not_found,
                 session_used=session_used,
+                session_token=session_token,
             )
 
         vijson_path = vmomi_mounted_path(release, vmomi_path)
@@ -1081,6 +1101,7 @@ class VmwareRestConnector(HttpConnector):
                 json,
                 promote_managed_object_not_found,
                 session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
@@ -1096,6 +1117,7 @@ class VmwareRestConnector(HttpConnector):
                 json,
                 promote_managed_object_not_found,
                 session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -1115,16 +1137,20 @@ class VmwareRestConnector(HttpConnector):
         promote_managed_object_not_found: bool,
         *,
         session_used: SessionTokenUsed | None = None,
+        session_token: str | None = None,
     ) -> dict[str, Any]:
         """POST one VI-JSON path, optionally promoting an explicit missing object.
 
+        With ``session_token``, the request carries that session header.
         With ``session_used``, the session header is resolved here and
-        pinned on the request (``extra_headers`` wins over the headers
-        :meth:`_post_json` resolves itself), so the token recorded is the
-        token sent, see :class:`SessionTokenUsed`.
+        pinned on the request, so the token recorded is the token sent, see
+        :class:`SessionTokenUsed`. Either way ``extra_headers`` wins over
+        the headers :meth:`_post_json` resolves itself.
         """
         extra_headers: dict[str, str] | None = None
-        if session_used is not None:
+        if session_token is not None:
+            extra_headers = {_SESSION_HEADER: session_token}
+        elif session_used is not None:
             extra_headers = await self.auth_headers(target, operator)
             session_used.token = extra_headers.get(_SESSION_HEADER)
         try:

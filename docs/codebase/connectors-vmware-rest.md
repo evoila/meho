@@ -573,36 +573,52 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       the new `TaskHistoryCollector` with `ReadNextTasks` (100 rows per
       page, oldest first), and calls `DestroyCollector` on the success
       path and on the error path. The op returns only when the collector
-      is confirmed gone. A failed destroy is retried (3 tries in all,
-      logged as `vmware_tasks_history_destroy_failed`); a
-      `ManagedObjectNotFound` fault counts as already gone. When the
-      destroy keeps failing, the op closes the vCenter session that owns
-      the collector (`VmwareRestConnector.close_session` with the token
-      the create request was sent with: `DELETE` at the session path
-      with that token). The create call records that token in a
-      `SessionTokenUsed` (`session.py`) and pins it on the request, so
-      it is the token on the wire, not the cached token before or after
-      the call. A collector dies with its session
-      (`vmware_tasks_history_session_closed`). When that session is still
-      the cached one, the cache entry is evicted too, so the next call on
-      the target logs in again on a clean session and leaked collectors
-      cannot pile up. When the connector has already logged in again in
-      between (the session max-age ran out, a `NotAuthenticated` fault
-      forced a re-login, or another request replaced the session while
-      the create request was in flight), only the old session is closed
-      and the new one stays. When the session close fails too, the call fails with
+      is confirmed gone.
+    - **Every call on the collector goes to the session that created
+      it.** A collector lives in one vCenter session. The create call
+      records the session token it was sent with in a `SessionTokenUsed`
+      (`session.py`): the connector pins that token on the request, so it
+      is the token on the wire, not the cached token before or after the
+      call. The reads and the destroys are then sent with that token
+      (`_post_vmomi_json(..., session_token=...)`), even when the
+      connector has logged in again in between (the session max-age ran
+      out, a `NotAuthenticated` fault on another call forced a re-login,
+      or another request replaced the session while the create was in
+      flight). A `NotAuthenticated` fault on such a pinned call is not
+      retried on a new login: that session is gone, and a new one would
+      not hold the collector.
+    - **One cleanup rule.** The collector counts as gone only when the
+      owning session accepts `DestroyCollector`, or answers
+      `ManagedObjectNotFound` (already gone) or `NotAuthenticated` (the
+      session is gone, and the collector with it). A failed destroy is
+      retried (3 tries in all, logged as
+      `vmware_tasks_history_destroy_failed`). In every other case the op
+      closes the owning session (`VmwareRestConnector.close_session` with
+      the recorded token: `DELETE` at the session path with that token),
+      because a collector dies with its session
+      (`vmware_tasks_history_session_closed`). That covers a destroy that
+      keeps failing, a timeout or a lost answer, and a create request
+      that was sent but returned no collector reference (a timeout, a
+      lost answer, a fault, an empty answer;
+      `vmware_tasks_history_create_unconfirmed`): vCenter may have
+      created the collector before the answer was lost. When the closed
+      session is still the cached one, the cache entry is evicted too, so
+      the next call on the target logs in again on a clean session and
+      leaked collectors cannot pile up. When the connector has already
+      logged in again, only the old session is closed and the new one
+      stays. When the session close fails too, the call fails with
       `CollectorCleanupError` (`vmware_tasks_history_collector_leaked`);
       vCenter then drops the collector when that session times out. A
-      read error always wins over a cleanup error, so cleanup never hides
-      why the read failed.
+      read error (or a create error) always wins over a cleanup error, so
+      cleanup never hides why the call failed.
     - **Cancel-safe.** The cleanup also runs when the call is cancelled
       (for example by a timeout) while a page is being read. A cancel
       while the create request is pending lets that request finish,
       because vCenter may have created the collector already; the op then
-      removes it (`vmware_tasks_history_cancelled_during_create`). A
-      cancel that arrives during the cleanup waits for the cleanup to
-      finish and is raised again afterwards. So no collector survives the
-      call.
+      removes it (`vmware_tasks_history_cancelled_during_create`), or
+      closes the session when the request failed. A cancel that arrives
+      during the cleanup waits for the cleanup to finish and is raised
+      again afterwards. So no collector survives the call.
     - **Params.** `since` (required) and `until` filter on the task's
       queued time (ISO-8601; a time without a zone is UTC). `entity` +
       `entity_type` filter on the object the task ran on;
@@ -612,8 +628,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       after the read. `max_tasks` caps the rows (default 200, at most
       1,000).
     - **Output.** `{tasks, truncated, scanned, collector_cleanup}`.
-      `collector_cleanup` is `destroyed` (the normal case) or
-      `session_closed` (the fallback above ran). Rows have the same
+      `collector_cleanup` is `destroyed` (the owning session confirmed
+      the collector gone) or `session_closed` (the session close above
+      ran). Rows have the same
       shape as `tasks.recent` (one shared parser).
       A long list goes through the normal JSONFlux result handle.
     - **Limits.** vCenter caps how many collectors one session may hold

@@ -461,7 +461,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cache-refresh read `datastore.refresh` — + 42 dangerous/destructive
   writes + 8 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
-  implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
+  implied by the spec, not by global defaults. The AI guidance
+  (`llm_instructions`) of the VM and folder writes and the VM allocation
+  reads lives in `composites/_vm_llm_instructions.py`, one entry per op id;
+  their example calls sit under `examples` in each parameter schema. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`
@@ -560,6 +563,92 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     state (`queued`/`running`/`success`/`error`), progress, cancelled
     flag, the queue/start/complete timestamps, and the localized error
     message when a task faulted.
+  - **`vmware.tasks.history`** (`typed_ops_tasks_history.py`, handler
+    `tasks_history`, `#3701`) — vCenter tasks in a past time window.
+    Use it when a task has already left the recent list.
+    - **Recent vs history.** `tasks.recent` reads
+      `TaskManager.recentTask`, which keeps only the last few minutes.
+      Classic vim tasks (an OVF deploy from a content library, a clone, a
+      relocate) are not CIS task providers, so `/cis/tasks` cannot see
+      them. `tasks.history` is the read for those older tasks.
+    - **One dispatch, no lasting server state.** The op calls
+      `TaskManager.CreateCollectorForTasks` with a `TaskFilterSpec`, pages
+      the new `TaskHistoryCollector` with `ReadNextTasks` (100 rows per
+      page, oldest first), and calls `DestroyCollector` on the success
+      path and on the error path. The op returns only when the collector
+      is confirmed gone.
+    - **Every call on the collector goes to the session that created
+      it.** A collector lives in one vCenter session. The create call
+      records the session token it was sent with in a `SessionTokenUsed`
+      (`session.py`): the connector pins that token on the request, so it
+      is the token on the wire, not the cached token before or after the
+      call. The reads and the destroys are then sent with that token
+      (`_post_vmomi_json(..., session_token=...)`), even when the
+      connector has logged in again in between (the session max-age ran
+      out, a `NotAuthenticated` fault on another call forced a re-login,
+      or another request replaced the session while the create was in
+      flight). A `NotAuthenticated` fault on such a pinned call is not
+      retried on a new login: that session is gone, and a new one would
+      not hold the collector.
+    - **One cleanup rule.** The collector counts as gone only when the
+      owning session accepts `DestroyCollector`, or answers
+      `ManagedObjectNotFound` (already gone) or `NotAuthenticated` (the
+      session is gone, and the collector with it). A failed destroy is
+      retried (3 tries in all, logged as
+      `vmware_tasks_history_destroy_failed`). In every other case the op
+      closes the owning session (`VmwareRestConnector.close_session` with
+      the recorded token: `DELETE` at the session path with that token),
+      because a collector dies with its session
+      (`vmware_tasks_history_session_closed`). That covers a destroy that
+      keeps failing, a timeout or a lost answer, and a create request
+      that was sent but returned no collector reference (a timeout, a
+      lost answer, a fault, an empty answer;
+      `vmware_tasks_history_create_unconfirmed`): vCenter may have
+      created the collector before the answer was lost. When the closed
+      session is still the cached one, the cache entry is evicted too, so
+      the next call on the target logs in again on a clean session and
+      leaked collectors cannot pile up. When the connector has already
+      logged in again, only the old session is closed and the new one
+      stays. Only a 2xx answer to that `DELETE` counts as closed; an
+      error answer, a transport error, or a redirect the shared client
+      did not follow counts as a failed close. When the session close
+      fails too, the call fails with
+      `CollectorCleanupError` (`vmware_tasks_history_collector_leaked`);
+      vCenter then drops the collector when that session times out. A
+      read error (or a create error) always wins over a cleanup error, so
+      cleanup never hides why the call failed.
+    - **Cancel-safe.** The cleanup also runs when the call is cancelled
+      (for example by a timeout) while a page is being read. A cancel
+      while the create request is pending lets that request finish,
+      because vCenter may have created the collector already; the op then
+      removes it (`vmware_tasks_history_cancelled_during_create`), or
+      closes the session when the request failed. A cancel that arrives
+      during the cleanup waits for the cleanup to finish and is raised
+      again afterwards. So no collector survives the call.
+    - **Params.** `since` (required) and `until` filter on the task's
+      queued time (ISO-8601; a time without a zone is UTC). `entity` +
+      `entity_type` filter on the object the task ran on;
+      `include_children` widens that to child objects. `description_ids`
+      keeps only some operations (for example `ResourcePool.ImportVApp`).
+      `TaskFilterSpec` has no operation filter, so MEHO applies this one
+      after the read. `max_tasks` caps the rows (default 200, at most
+      1,000).
+    - **Output.** `{tasks, truncated, scanned, collector_cleanup}`.
+      `collector_cleanup` is `destroyed` (the owning session confirmed
+      the collector gone) or `session_closed` (the session close above
+      ran). Rows have the same
+      shape as `tasks.recent` (one shared parser).
+      A long list goes through the normal JSONFlux result handle.
+    - **Limits.** vCenter caps how many collectors one session may hold
+      (create fails with `InvalidState` above the cap) and keeps task
+      history only as long as its own settings allow. A wide window can
+      hit `max_tasks` or the 50-page scan budget; then `truncated` is
+      `true` and the caller should narrow the window. vCenter only: a
+      standalone ESXi host does not serve the collector.
+    - **Safety level `safe`.** The collector is a temporary,
+      session-scoped read cursor that the op removes before it returns. It
+      changes no inventory or configuration, and vCenter needs only the
+      `System.View` privilege to create it.
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input
@@ -2227,8 +2316,11 @@ vApp deploy, and the property read that polls them and finds such a vApp
 — ride the governed VI-JSON seam and live in the
 `_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` lane.
 
-**Item resolution.** `library_item` (an id) is a passthrough. Otherwise
-`library_item_name` is resolved to an id via
+**Item resolution.** The caller gives exactly one of `library_item` (an id)
+and `library_item_name`. The parameter schema says so with a `oneOf`, so
+MEHO refuses both or neither before the call; `vm.import_from_library`
+has the same rule. `library_item` is a passthrough. `library_item_name` is
+resolved to an id via
 `POST:/content/library/item?action=find` (a *read* — returns a bare id
 array — issued un-gated through the `_find_content_library_ids` helper,
 which rides `_post_json` since find is POST-shaped). The `FindSpec` is sent
@@ -3096,6 +3188,57 @@ every reviewer surface that renders `proposed_effect` verbatim (REST
 `GET /api/v1/approvals`, `meho_approvals_list` / `.get`, `meho
 approvals show`), so "blast-radius unknown" is distinguishable from a
 genuinely small action. The read composites register no builder.
+
+### Version check for typed operations (`_version_gate.py`, #4316)
+
+Some vCenter calls exist only from a given version on. Examples: the
+Supervisor backup and restore jobs, the 9.1.1 Supervisor paths, and the
+vSphere 9 host settings. A typed operation that needs such a call uses
+`connectors/vmware_rest/_version_gate.py`, so every operation stops the
+same way and says the same thing.
+
+**When to use it.** Use it in a typed operation whose vendor call is
+missing on some vCenter versions that the connector serves. Do not use
+it for a call that every served version has.
+
+**In the handler.** Call `require_vcenter_version(target, op_id=...,
+minimum=..., feature=...)` first, before any vendor call. It reads the
+target's version with `resolve_target_version` (the probed version
+first, then the version the operator set). When that version is lower
+than `minimum`, it raises `NotImplementedError`. The dispatcher already
+turns this error into `connector_unsupported` (cause
+`unsupported_feature`), puts the message in `extras.detail`, and writes
+the audit row (#1627). No vendor call runs.
+
+When the version is unknown, or does not parse, the call goes on. The
+vendor's own error is then classified as usual.
+
+**The message shape.** Other connectors copy it in their own package:
+
+```
+<op_id>: <feature> needs vCenter <minimum> or newer; this target is <version>.
+```
+
+For example: `vmware.supervisor.backup.list: Supervisor backup jobs
+needs vCenter 9.0 or newer; this target is 8.0.3.`
+
+**In the approval request.** A call that waits for approval reaches the
+approval queue before the handler runs. So the approver must see the
+problem in the approval request:
+
+- A version-limited change with no preview builder registers
+  `version_gated_preview(minimum=..., feature=..., echo=(...))`. The
+  preview shows the params named in `echo` (name only params that hold
+  no secrets) and, on a target that lacks the call, a `version_problem`
+  line.
+- An operation that already has a preview builder (for example a
+  `destructive` one) calls `add_version_problem(preview, ctx.target,
+  op_id=..., minimum=..., feature=...)` on its own result.
+
+The line has the same text as the error above. The handler still
+refuses the call after approval.
+
+Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
 
 ## Dependencies
 

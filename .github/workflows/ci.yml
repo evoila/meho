@@ -324,7 +324,7 @@ jobs:
         # The Python version comes from backend/.python-version (3.14, the
         # same as the image's python:3.14-slim). uv reads that file for every
         # uv command in CI: they all run in backend/ or pass --project backend.
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           version: "0.13.0"
           enable-cache: true
@@ -640,7 +640,7 @@ jobs:
         # same lockfile are near-instant, so the four shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           version: "0.13.0"
           enable-cache: true
@@ -1175,7 +1175,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1372,7 +1372,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1660,10 +1660,11 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1759,7 +1760,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1790,17 +1791,22 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.26.9` directive. golangci-lint
+          # Tracks `cli/go.mod`'s `go 1.26.10` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
           # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer.
-          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.9
+          # crypto/tls, net/textproto) need go1.26.9 or newer, and
+          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
+          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
           # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
           # an older 1.26.x fail the build instead of shipping the CVEs.
+          # check-latest: the runner image can cache an older 1.26.x
+          # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
+          # uses a cached match unless asked to check for a newer one.
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
@@ -1954,6 +1960,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Ensure make is available
@@ -1981,7 +1988,7 @@ jobs:
         # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
         # and calls app.openapi()), so the backend env must resolve. Same
         # action + cache shape as the Python lanes.
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"

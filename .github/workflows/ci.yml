@@ -1790,14 +1790,15 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.26.9` directive. golangci-lint
+          # Tracks `cli/go.mod`'s `go 1.26.10` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
           # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer.
-          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.9
+          # crypto/tls, net/textproto) need go1.26.9 or newer, and
+          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
+          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
           # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
           # an older 1.26.x fail the build instead of shipping the CVEs.
           go-version: '1.26'

@@ -647,6 +647,7 @@ async def enforce_subop_policy(
     from meho_backplane.agent.invoke import current_agent_run_id_var
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+    from meho_backplane.operations._audit import policy_decision_var
     from meho_backplane.operations._errors import (
         result_awaiting_approval,
         result_composite_resume_multi_gate_unsupported,
@@ -732,79 +733,107 @@ async def enforce_subop_policy(
     if verdict is PermissionVerdict.AUTO_EXECUTE:
         return None
 
-    duration_ms = (time.monotonic() - started) * 1000.0
-    if verdict is PermissionVerdict.NEEDS_APPROVAL:
-        # #3351 review B1 — fail-closed multi-gate resume guard. The approved
-        # sub-op already cleared above (``_subop_resume_cleared`` returned), so
-        # reaching NEEDS_APPROVAL while :data:`composite_resume_scope_var` is set
-        # means a *second* governed sub-op would park during a resume. Parking it
-        # would create a second approval whose own resume re-enters the composite
-        # from the top and re-runs every earlier governed leg (this mechanism
-        # clears one sub-op and has no completed-leg guard), double-executing
-        # writes. No shipped composite reaches here — every governed sub-op is
-        # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
-        # auto-executes in the single resume pass. Refuse instead of parking.
-        #
-        # #4217 relaxes this guard for an ``after_main_effect`` step: it saved
-        # the state its resume continues from (checked above), so its own
-        # resume repeats no earlier write, and it may wait for approval here.
-        resume_scope = composite_resume_scope_var.get()
-        if resume_scope is not None and not after_main_effect:
-            approved_op_id, _approved_hash = resume_scope
-            composite_ctx = composite_dispatch_var.get()
-            composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
-            _log.error(
-                "composite_resume_multi_gate_unsupported",
-                composite_op_id=composite_op_id,
-                approved_op_id=approved_op_id,
-                blocked_op_id=op_id,
-            )
-            return result_composite_resume_multi_gate_unsupported(
-                composite_op_id=composite_op_id,
-                approved_op_id=approved_op_id,
-                blocked_op_id=op_id,
-                duration_ms=duration_ms,
-            )
+    # #4646: the rows this gate writes read the verdict off
+    # ``policy_decision_var`` (the ``approval.request`` row of a parked step,
+    # the ``denied`` row of a refused park). The parent composite's
+    # ``dispatch()`` bound its own verdict; bind the step's for the rest of
+    # this call and put the parent's back on return, so the parent's own
+    # audit row keeps the parent's verdict.
+    verdict_token = policy_decision_var.set(verdict.value)
+    try:
+        duration_ms = (time.monotonic() - started) * 1000.0
+        if verdict is PermissionVerdict.NEEDS_APPROVAL:
+            # #3351 review B1 — fail-closed multi-gate resume guard. The approved
+            # sub-op already cleared above (``_subop_resume_cleared`` returned), so
+            # reaching NEEDS_APPROVAL while :data:`composite_resume_scope_var` is set
+            # means a *second* governed sub-op would park during a resume. Parking it
+            # would create a second approval whose own resume re-enters the composite
+            # from the top and re-runs every earlier governed leg (this mechanism
+            # clears one sub-op and has no completed-leg guard), double-executing
+            # writes. No shipped composite reaches here — every governed sub-op is
+            # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
+            # auto-executes in the single resume pass. Refuse instead of parking.
+            #
+            # #4217 relaxes this guard for an ``after_main_effect`` step: it saved
+            # the state its resume continues from (checked above), so its own
+            # resume repeats no earlier write, and it may wait for approval here.
+            resume_scope = composite_resume_scope_var.get()
+            if resume_scope is not None and not after_main_effect:
+                approved_op_id, _approved_hash = resume_scope
+                composite_ctx = composite_dispatch_var.get()
+                composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
+                _log.error(
+                    "composite_resume_multi_gate_unsupported",
+                    composite_op_id=composite_op_id,
+                    approved_op_id=approved_op_id,
+                    blocked_op_id=op_id,
+                )
+                return result_composite_resume_multi_gate_unsupported(
+                    composite_op_id=composite_op_id,
+                    approved_op_id=approved_op_id,
+                    blocked_op_id=op_id,
+                    duration_ms=duration_ms,
+                )
 
-        # #294 (security review S06): build a real ``proposed_effect`` via the
-        # dispatcher's shared helper so this parked sub-op row carries
-        # ``safety_level`` + the blast-radius/preview block, exactly like a
-        # dispatcher-parked write. Without it ``create_pending_request`` fell
-        # back to the identifier-only envelope, which silently disabled the
-        # tier-keyed self-approval carve-out (#3290 -- ``_check_self_approval``
-        # reads ``proposed_effect['safety_level']``) and blanked the reviewer
-        # row's severity / blast-radius (#1855 / #3197). Reusing the dispatcher's
-        # ``_build_proposed_effect`` keeps one stamping path rather than
-        # diverging; it is fail-soft (returns ``None`` only when connector /
-        # preview resolution raises, exactly as the dispatcher park path).
-        proposed_effect = await _build_proposed_effect(
-            op_id=op_id,
-            connector_id=connector_id,
-            descriptor=descriptor,
-            operator=operator,
-            target=target,
-            params=params,
-        )
-
-        # #294: a ``destructive``-tier sub-op must fail closed rather than park
-        # with only the identifier-only envelope -- the same binding the
-        # dispatcher enforces (#3197). The composite seam presents no
-        # ``preview_hash``, so this refuses at the binding check (no approval
-        # row written) for a destructive sub-op. Defense-in-depth: no shipped
-        # caller passes ``destructive`` today, but the seam must never write a
-        # weaker row than the dispatcher would for the same tier. #4647: the
-        # refusal is audited as a ``denied`` row on the sub-op's path, linked
-        # to the parent's audit id, like the preflight refusal below.
-        if descriptor.safety_level == "destructive":
-            refusal = await _destructive_binding_refusal(
+            # #294 (security review S06): build a real ``proposed_effect`` via the
+            # dispatcher's shared helper so this parked sub-op row carries
+            # ``safety_level`` + the blast-radius/preview block, exactly like a
+            # dispatcher-parked write. Without it ``create_pending_request`` fell
+            # back to the identifier-only envelope, which silently disabled the
+            # tier-keyed self-approval carve-out (#3290 -- ``_check_self_approval``
+            # reads ``proposed_effect['safety_level']``) and blanked the reviewer
+            # row's severity / blast-radius (#1855 / #3197). Reusing the dispatcher's
+            # ``_build_proposed_effect`` keeps one stamping path rather than
+            # diverging; it is fail-soft (returns ``None`` only when connector /
+            # preview resolution raises, exactly as the dispatcher park path).
+            proposed_effect = await _build_proposed_effect(
                 op_id=op_id,
                 connector_id=connector_id,
+                descriptor=descriptor,
                 operator=operator,
                 target=target,
                 params=params,
-                preview_hash=None,
-                proposed_effect=proposed_effect,
-                duration_ms=duration_ms,
+            )
+
+            # #294: a ``destructive``-tier sub-op must fail closed rather than park
+            # with only the identifier-only envelope -- the same binding the
+            # dispatcher enforces (#3197). The composite seam presents no
+            # ``preview_hash``, so this refuses at the binding check (no approval
+            # row written) for a destructive sub-op. Defense-in-depth: no shipped
+            # caller passes ``destructive`` today, but the seam must never write a
+            # weaker row than the dispatcher would for the same tier. #4647: the
+            # refusal is audited as a ``denied`` row on the sub-op's path, linked
+            # to the parent's audit id, like the preflight refusal below.
+            if descriptor.safety_level == "destructive":
+                refusal = await _destructive_binding_refusal(
+                    op_id=op_id,
+                    connector_id=connector_id,
+                    operator=operator,
+                    target=target,
+                    params=params,
+                    preview_hash=None,
+                    proposed_effect=proposed_effect,
+                    duration_ms=duration_ms,
+                )
+                if refusal is not None:
+                    return await _audit_denied_and_return(
+                        refusal,
+                        operator=operator,
+                        descriptor=descriptor,
+                        target=target,
+                        params=params,
+                        params_hash=params_hash,
+                        duration_ms=duration_ms,
+                    )
+
+            # #3542: same refusal as the dispatcher park — a sub-op whose
+            # permission preflight says the write will be denied does not park.
+            # The parent composite returns this result as is and the dispatcher
+            # writes no audit row for a handler-returned result, so the refusal
+            # is recorded here, on the sub-op's path, linked to the parent's
+            # audit id. Same writer as the dispatcher park.
+            refusal = _preflight_denied_refusal(
+                op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
             )
             if refusal is not None:
                 return await _audit_denied_and_return(
@@ -817,65 +846,47 @@ async def enforce_subop_policy(
                     duration_ms=duration_ms,
                 )
 
-        # #3542: same refusal as the dispatcher park — a sub-op whose
-        # permission preflight says the write will be denied does not park.
-        # The parent composite returns this result as is and the dispatcher
-        # writes no audit row for a handler-returned result, so the refusal
-        # is recorded here, on the sub-op's path, linked to the parent's
-        # audit id. Same writer as the dispatcher park.
-        refusal = _preflight_denied_refusal(
-            op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
-        )
-        if refusal is not None:
-            return await _audit_denied_and_return(
-                refusal,
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params=params,
-                params_hash=params_hash,
-                duration_ms=duration_ms,
+            run_id = current_agent_run_id_var.get()
+            sessionmaker = get_sessionmaker()
+            async with sessionmaker() as session:
+                request = await create_pending_request(
+                    session,
+                    operator=operator,
+                    connector_id=connector_id,
+                    op_id=op_id,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    run_id=run_id,
+                    # #294: stamp the resolved effect so the row carries its
+                    # severity + blast-radius/preview instead of the identifier-only
+                    # default the tier-keyed guards silently misread.
+                    proposed_effect=proposed_effect,
+                    # #3351: record the parent composite so the approval-resume
+                    # re-enters it (this sub-op's key + gate params are not a
+                    # dispatchable descriptor call), with the state its re-entry
+                    # continues from (#4217). ``None`` outside a composite.
+                    resume_parent=_resume_parent_for_current_composite(
+                        resume_state, after_main_effect=after_main_effect
+                    ),
+                    # #4217: a step that waits again while an approved request is
+                    # re-run belongs to the requester of that request, not to the
+                    # reviewer who runs the re-run. ``None`` outside a re-run.
+                    requester=resume_requester_var.get(),
+                )
+                await session.commit()
+            # Record AFTER commit so a step event can never outlive a failed
+            # transaction; the helper is fail-open.
+            await record_approval_step_event(
+                tenant_id=operator.tenant_id,
+                request=request,
+                decision="pending",
+                audit_id=request._audit_id,  # type: ignore[attr-defined]
             )
+            return result_awaiting_approval(op_id, request.id, duration_ms)
 
-        run_id = current_agent_run_id_var.get()
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            request = await create_pending_request(
-                session,
-                operator=operator,
-                connector_id=connector_id,
-                op_id=op_id,
-                target=target,
-                params=params,
-                params_hash=params_hash,
-                run_id=run_id,
-                # #294: stamp the resolved effect so the row carries its
-                # severity + blast-radius/preview instead of the identifier-only
-                # default the tier-keyed guards silently misread.
-                proposed_effect=proposed_effect,
-                # #3351: record the parent composite so the approval-resume
-                # re-enters it (this sub-op's key + gate params are not a
-                # dispatchable descriptor call), with the state its re-entry
-                # continues from (#4217). ``None`` outside a composite.
-                resume_parent=_resume_parent_for_current_composite(
-                    resume_state, after_main_effect=after_main_effect
-                ),
-                # #4217: a step that waits again while an approved request is
-                # re-run belongs to the requester of that request, not to the
-                # reviewer who runs the re-run. ``None`` outside a re-run.
-                requester=resume_requester_var.get(),
-            )
-            await session.commit()
-        # Record AFTER commit so a step event can never outlive a failed
-        # transaction; the helper is fail-open.
-        await record_approval_step_event(
-            tenant_id=operator.tenant_id,
-            request=request,
-            decision="pending",
-            audit_id=request._audit_id,  # type: ignore[attr-defined]
-        )
-        return result_awaiting_approval(op_id, request.id, duration_ms)
-
-    # DENY, or any unexpected verdict — fail closed: the sub-op never
-    # runs. Only an explicit AUTO_EXECUTE clears the gate.
-    return result_denied(op_id, reason or "policy denied", duration_ms)
+        # DENY, or any unexpected verdict — fail closed: the sub-op never
+        # runs. Only an explicit AUTO_EXECUTE clears the gate.
+        return result_denied(op_id, reason or "policy denied", duration_ms)
+    finally:
+        policy_decision_var.reset(verdict_token)

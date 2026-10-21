@@ -204,6 +204,14 @@ LCM spec (the #2272 datetime-crash artifact):
   Wraps Fleet's bare environments array under an `environments` key
   (the vSphere typed-reads envelope shape).
 
+Both ops meet the VMware operation-contract check
+(`backend/tests/test_vmware_operation_contracts.py`): a short summary and
+description, one example call (`{}`) each, and a response schema with a
+description per field. The `environments[]` row fields (`environmentId`,
+`environmentName`, `environmentStatus`, `products`) are the names the op
+already used; no vendor API file for this surface is on the spec shelf yet,
+so they are not checked against one.
+
 `register_operations` walks `FLEET_TYPED_OPS`, resolves each op's
 `handler_attr` to the bound method on the connector, and routes it through
 `register_typed_operation` — the argocd / bind9 / vmware_rest mold. The

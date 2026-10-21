@@ -137,6 +137,7 @@ from meho_backplane.connectors.vmware_rest.host_target import (
     classify_host_target,
 )
 from meho_backplane.connectors.vmware_rest.session import (
+    SessionTokenUsed,
     VsphereSessionLoader,
     VsphereTargetLike,
     load_session_credentials_from_vault,
@@ -910,6 +911,8 @@ class VmwareRestConnector(HttpConnector):
         operator: Operator,
         json: dict[str, Any] | None = None,
         promote_managed_object_not_found: bool = False,
+        session_used: SessionTokenUsed | None = None,
+        session_token: str | None = None,
     ) -> dict[str, Any]:
         """POST a typed vmomi (VI-JSON) method on the documented ``/sdk/vim25`` base.
 
@@ -959,6 +962,22 @@ class VmwareRestConnector(HttpConnector):
         as ``not_found``. It defaults to ``False`` so shared task polling and
         destructive-composite preflight reads retain their existing transport
         failure semantics (#3479).
+
+        ``session_used`` (#3701) is filled with the session token the call
+        sent, see :class:`SessionTokenUsed`. With it, every request of this
+        call pins the token it was built with, so the recorded token is the
+        one on the wire even when the connector replaces the session while
+        the request is in flight. Without it (the default), nothing changes.
+
+        ``session_token`` (#3701) pins the call to that vCenter session: the
+        request carries this token, not the cached one. For a call on
+        server-side state that lives in one session (the collector of
+        ``vmware.tasks.history``), the cached session is the wrong one as
+        soon as the connector has logged in again. A ``NotAuthenticated``
+        fault on a pinned call is **not** retried on a new login: it means
+        that session is gone, and with it the state the call was about. The
+        fault then propagates as the plain :exc:`httpx.HTTPStatusError`, so
+        the caller can read it. Without it (the default), nothing changes.
         """
         await self._session_token(target, operator)
         # ESXi SOAP branch (#3363). ``_session_token`` established the flavor
@@ -978,7 +997,13 @@ class VmwareRestConnector(HttpConnector):
             )
         try:
             return await self._post_vmomi_json_vcenter(
-                target, vmomi_path, operator, json, promote_managed_object_not_found
+                target,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+                session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             fault_type = _vijson_auth_fault_type(exc)
@@ -986,6 +1011,10 @@ class VmwareRestConnector(HttpConnector):
                 raise
             if fault_type != _VIJSON_RELOGIN_FAULT_TYPE:
                 raise _vijson_auth_error(fault_type, target, vmomi_path, exc) from exc
+            if session_token is not None:
+                # The pinned session is gone. A new login cannot bring back
+                # what lived in it, so the caller gets the fault as is.
+                raise
         # NotAuthenticated: drop the cached session and retry this one call on
         # a fresh login (#3566). The rejected call never ran, so the retry is
         # safe for a write too. Retrying only this call (not the whole
@@ -1000,7 +1029,13 @@ class VmwareRestConnector(HttpConnector):
         await self._session_token(target, operator)
         try:
             return await self._post_vmomi_json_vcenter(
-                target, vmomi_path, operator, json, promote_managed_object_not_found
+                target,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+                session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             fault_type = _vijson_auth_fault_type(exc)
@@ -1022,6 +1057,9 @@ class VmwareRestConnector(HttpConnector):
         operator: Operator,
         json: dict[str, Any] | None,
         promote_managed_object_not_found: bool,
+        *,
+        session_used: SessionTokenUsed | None = None,
+        session_token: str | None = None,
     ) -> dict[str, Any]:
         """Run one vCenter VI-JSON call with the mount resolution of :meth:`_post_vmomi_json`."""
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
@@ -1034,6 +1072,8 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
+                session_token=session_token,
             )
 
         api_path = mounted_path(session_path, vmomi_path)
@@ -1047,6 +1087,8 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
+                session_token=session_token,
             )
 
         vijson_path = vmomi_mounted_path(release, vmomi_path)
@@ -1058,6 +1100,8 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
@@ -1072,6 +1116,8 @@ class VmwareRestConnector(HttpConnector):
                 operator,
                 json,
                 promote_managed_object_not_found,
+                session_used=session_used,
+                session_token=session_token,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -1089,10 +1135,28 @@ class VmwareRestConnector(HttpConnector):
         operator: Operator,
         body: dict[str, Any] | None,
         promote_managed_object_not_found: bool,
+        *,
+        session_used: SessionTokenUsed | None = None,
+        session_token: str | None = None,
     ) -> dict[str, Any]:
-        """POST one VI-JSON path, optionally promoting an explicit missing object."""
+        """POST one VI-JSON path, optionally promoting an explicit missing object.
+
+        With ``session_token``, the request carries that session header.
+        With ``session_used``, the session header is resolved here and
+        pinned on the request, so the token recorded is the token sent, see
+        :class:`SessionTokenUsed`. Either way ``extra_headers`` wins over
+        the headers :meth:`_post_json` resolves itself.
+        """
+        extra_headers: dict[str, str] | None = None
+        if session_token is not None:
+            extra_headers = {_SESSION_HEADER: session_token}
+        elif session_used is not None:
+            extra_headers = await self.auth_headers(target, operator)
+            session_used.token = extra_headers.get(_SESSION_HEADER)
         try:
-            return await self._post_json(target, path, operator=operator, json=body)
+            return await self._post_json(
+                target, path, operator=operator, json=body, extra_headers=extra_headers
+            )
         except httpx.HTTPStatusError as exc:
             if promote_managed_object_not_found:
                 self._raise_managed_object_not_found(exc, vmomi_path, body)
@@ -2920,6 +2984,49 @@ class VmwareRestConnector(HttpConnector):
 
         return await tasks_recent_impl(self, operator, target, params)
 
+    async def tasks_history(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.tasks.history`` -- vCenter tasks in a past time window (#3701).
+
+        A ``source_kind="typed"`` op, the time-window sibling of
+        :meth:`tasks_recent`. Creates a ``TaskHistoryCollector``, pages it,
+        and destroys it before returning, all in this one call.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_tasks_history.tasks_history_impl`
+        (imported lazily, like the other typed ops). Returns
+        ``{"tasks": [...], "truncated", "scanned", "collector_cleanup"}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_tasks_history import (
+            tasks_history_impl,
+        )
+
+        return await tasks_history_impl(self, operator, target, params)
+
+    async def sso_admin_api_file_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcenter.sso_admin.api_file.get`` -- read one SSO Admin WSDL or XSD file.
+
+        A ``source_kind="typed"`` read. Sends one ``GET`` without login to a
+        path under ``/sso-adminserver/`` and reads the vCenter version and
+        build. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file.sso_admin_api_file_get_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
+            sso_admin_api_file_get_impl,
+        )
+
+        return await sso_admin_api_file_get_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 
@@ -2986,29 +3093,95 @@ class VmwareRestConnector(HttpConnector):
             # a future code path ever caches a token without recording
             # its endpoint.
             revoke_path = paths.get(cache_key, SESSION_PATH_MODERN)
-            try:
-                resp = await client.request(
-                    "DELETE",
-                    revoke_path,
-                    headers={_SESSION_HEADER: token},
-                    extensions=extensions,
-                )
-                # Log non-2xx but don't raise — shutdown proceeds.
-                if resp.status_code >= 400:
-                    _log.warning(
-                        "vsphere_session_revoke_non_2xx",
-                        target=cache_key,
-                        status_code=resp.status_code,
-                        session_path=revoke_path,
-                    )
-            except (httpx.HTTPError, OSError) as exc:
-                _log.warning(
-                    "vsphere_session_revoke_failed",
-                    target=cache_key,
-                    error=f"{type(exc).__name__}: {exc}",
-                    session_path=revoke_path,
-                )
+            await self._vcenter_revoke_quiet(client, cache_key, token, revoke_path, extensions)
         await super().aclose()
+
+    @staticmethod
+    async def _vcenter_revoke_quiet(
+        client: httpx.AsyncClient,
+        cache_key: tuple[str, str],
+        token: str,
+        revoke_path: str,
+        extensions: dict[str, Any],
+    ) -> bool:
+        """``DELETE`` one vCenter session; log a failure instead of raising.
+
+        Returns ``True`` only when vCenter accepted the revoke (a 2xx answer),
+        so the caller knows the server-side session, and everything that
+        lived in it, is gone. Any other answer or a transport error is logged
+        and returns ``False`` -- shutdown and the cleanup paths that call this
+        must not block on an unreachable target. A 3xx counts as not closed
+        too: the shared client returns a cross-origin redirect unfollowed, so
+        the ``DELETE`` never reached a session endpoint.
+        """
+        try:
+            resp = await client.request(
+                "DELETE",
+                revoke_path,
+                headers={_SESSION_HEADER: token},
+                extensions=extensions,
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            _log.warning(
+                "vsphere_session_revoke_failed",
+                target=cache_key,
+                error=f"{type(exc).__name__}: {exc}",
+                session_path=revoke_path,
+            )
+            return False
+        if not resp.is_success:
+            _log.warning(
+                "vsphere_session_revoke_non_2xx",
+                target=cache_key,
+                status_code=resp.status_code,
+                session_path=revoke_path,
+            )
+            return False
+        return True
+
+    async def close_session(self, target: VsphereTargetLike, *, token: str | None = None) -> bool:
+        """End a vCenter session for *target* on the server.
+
+        :meth:`invalidate_session` only drops the cached token; the vCenter
+        session itself lives on until vCenter times it out. This method also
+        sends the ``DELETE`` at the recorded session path, so server-side
+        objects tied to the session (a ``TaskHistoryCollector`` whose
+        ``DestroyCollector`` keeps failing, #3701) are released now rather
+        than at the idle timeout.
+
+        ``token`` names the session to close. ``None`` means the session
+        cached right now. When ``token`` is the cached session (or ``None``),
+        the cache entry is evicted too, so the next call on *target* logs in
+        again on a clean session. When ``token`` is an older session that the
+        connector already replaced (a max-age re-login, #3773, or the
+        ``NotAuthenticated`` re-login of :meth:`_post_vmomi_json` happened
+        in between), only that older session is closed: the cached session
+        stays, because the collector never lived in it.
+
+        Returns ``True`` when vCenter accepted the revoke. Returns ``False``
+        when there was nothing to close (no token given and none cached),
+        when the revoke failed, or for an ESXi-flavored session (its SOAP
+        ``Logout`` inside :meth:`invalidate_session` is best-effort and
+        reports no outcome).
+        """
+        cache_key = target_cache_key(target)
+        async with self._session_lock:
+            cached = self._session_tokens.get(cache_key)
+            flavor = self._session_flavors.get(cache_key)
+            revoke_path = self._session_paths.get(cache_key, SESSION_PATH_MODERN)
+            extensions = dict(self._session_extensions.get(cache_key) or {})
+        if token is None:
+            token = cached
+        if token is None:
+            return False
+        if token == cached:
+            await self.invalidate_session(target)
+        if flavor == HOST_FLAVOR_ESXI:
+            return False
+        client = self._pooled_client_for(cache_key)
+        if client is None:
+            return False
+        return await self._vcenter_revoke_quiet(client, cache_key, token, revoke_path, extensions)
 
 
 class VmwareRest80Connector(VmwareRestConnector):

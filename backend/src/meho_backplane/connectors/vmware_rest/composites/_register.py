@@ -791,7 +791,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         description=(
             "Creates a new VM in a folder, adds its NICs and optional data disks, "
             "and can turn on nested virtualization and power it on. If a step after "
-            "the create fails, the VM is removed again. Like 'govc vm.create'."
+            "the create fails, MEHO tries to remove the VM again; rollback.outcome "
+            "says whether it did. Like 'govc vm.create'."
         ),
         parameter_schema=VM_CREATE_PARAMETER_SCHEMA,
         response_schema=VM_CREATE_RESPONSE_SCHEMA,

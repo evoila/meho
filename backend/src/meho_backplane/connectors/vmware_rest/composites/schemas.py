@@ -54,7 +54,7 @@ Conventions
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
@@ -1533,6 +1533,9 @@ VM_MIGRATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``Vcenter.Vm.Power.State`` values a VM filter may match.
+_VM_POWER_STATES: Final[list[str]] = ["POWERED_OFF", "POWERED_ON", "SUSPENDED"]
+
 #: ``vmware.composite.vm.power.bulk`` parameter schema.
 #:
 #: Resolve filter -> per-VM power action. Partial-failure tolerated
@@ -1579,9 +1582,11 @@ VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
                     "description": "Resource pool moids.",
                 },
                 "power_states": {
-                    "type": ["array", "string"],
-                    "items": {"type": "string", "enum": ["POWERED_OFF", "POWERED_ON", "SUSPENDED"]},
-                    "description": "Power states to match.",
+                    "anyOf": [
+                        {"type": "string", "enum": _VM_POWER_STATES},
+                        {"type": "array", "items": {"type": "string", "enum": _VM_POWER_STATES}},
+                    ],
+                    "description": "Power states to match: one state or a list of states.",
                 },
             },
             "description": (
@@ -4553,8 +4558,8 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "supplies the default VM name when ``name`` is omitted. "
                 "Every non-``deployed`` status is reached before or without a "
                 "successful mutation: when a failed deploy leaves a partial VM "
-                "or vApp behind, the composite removes it and reports the cleanup "
-                "in ``issues``."
+                "or vApp behind, the composite tries to remove it and reports the "
+                "outcome in ``issues``."
             ),
         },
         "vm_id": {

@@ -40,12 +40,23 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         },
         "output_shape": (
             "{status: created|rolled_back, vm_id, steps_succeeded: [...], failed_step, "
-            "rollback_reason, rollback, nested_hv, candidate_folders, issues}. On "
-            "rolled_back the VM was removed again; failed_step and issues say why."
+            "rollback_reason, rollback: {vm_id, outcome: removed|awaiting_approval|"
+            "not_removed}, nested_hv, candidate_folders, issues}. On rolled_back, "
+            "failed_step and issues say why. rollback is present only when a VM was "
+            "already created; its outcome says what happened to that VM: removed = "
+            "the VM is gone; awaiting_approval = the delete waits for approval and "
+            "the VM exists until then; not_removed = the delete failed or was not "
+            "allowed and the VM still exists. Never report the VM as gone unless the "
+            "outcome is removed."
         ),
         "next_step": (
-            "Read the new VM with vmware.vm.info (vm_id). If the folder name was "
-            "ambiguous, call again with one of candidate_folders as folder."
+            "On created, read the new VM with vmware.vm.info (vm_id). On rolled_back "
+            "without a rollback field, or with outcome removed, nothing is left: fix "
+            "the cause named by failed_step and call again. On awaiting_approval, "
+            "wait for the delete to be approved before calling again; approving it "
+            "only removes rollback.vm_id and creates nothing. On not_removed, delete "
+            "rollback.vm_id with vm.destroy before calling again. If the folder name "
+            "was ambiguous, call again with one of candidate_folders as folder."
         ),
     },
     _P + "vm.clone": {
@@ -115,13 +126,18 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "next_step": (
             "On deployed, read vm_id with vmware.vm.info. On deploy_failed, read "
             "issues (often a network mapping or placement problem) and fix the "
-            "params. On ambiguous_item, call again with one of candidates as "
+            "params; a cleanup warning in issues means a partial VM or vApp is still "
+            "there. On ambiguous_item, call again with one of candidates as "
             "library_item."
         ),
         "notes": (
-            "A failed deploy removes what it left; the cleanup is reported in issues. "
-            "Approving a waiting rename, power-on or cleanup step runs only that step; "
-            "it never deploys again."
+            "A failed deploy tries to remove what it left and adds one cleanup issue "
+            "per object. Severity info means the object was removed. Severity warning "
+            "means it is still there: its delete failed, waits for approval (the "
+            "message names the request) or could not be checked. On a warning, approve "
+            "the delete or remove the object by hand; do not report the cleanup as "
+            "done. Approving a waiting rename, power-on or cleanup step runs only that "
+            "step; it never deploys again."
         ),
     },
     _P + "vm.import_from_library": {

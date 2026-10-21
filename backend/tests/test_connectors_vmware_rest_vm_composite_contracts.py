@@ -10,6 +10,8 @@ Checks what these operations tell the AI, without calling vCenter:
 * the "library item id or name" rule of ``vm.deploy_from_library`` and
   ``vm.import_from_library`` is a ``oneOf``, so a call with both or neither
   fails before the call reaches the handler;
+* the ``power_states`` filter of ``vm.power.bulk`` takes only vCenter power
+  states, as one string or as a list;
 * every op has ``llm_instructions`` with the keys the AI reads.
 """
 
@@ -101,4 +103,22 @@ def test_library_item_is_id_or_name_never_both(
     schema, extra = _LIBRARY_SCHEMAS[short_id]
     params = {"resource_pool": "resgroup-8", **extra, **item}
     errors = validate_params(schema, params)
+    assert (errors == []) is accepted, errors
+
+
+@pytest.mark.parametrize(
+    ("power_states", "accepted"),
+    [
+        ("POWERED_OFF", True),
+        (["POWERED_OFF", "SUSPENDED"], True),
+        ("invalid-state", False),
+        (["POWERED_ON", "invalid-state"], False),
+    ],
+    ids=["string", "list", "bad-string", "bad-list-item"],
+)
+def test_bulk_power_state_filter_takes_only_vcenter_states(
+    power_states: str | list[str], accepted: bool
+) -> None:
+    params = {"filter": {"power_states": power_states}, "action": "start"}
+    errors = validate_params(schemas.VM_POWER_BULK_PARAMETER_SCHEMA, params)
     assert (errors == []) is accepted, errors

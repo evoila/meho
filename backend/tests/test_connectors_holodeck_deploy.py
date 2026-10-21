@@ -136,7 +136,7 @@ def test_deploy_ops_safety_and_approval() -> None:
 def test_deploy_ops_carry_transport_note_and_instructions() -> None:
     for op in DEPLOY_OPS:
         instr = op.llm_instructions or {}
-        assert "Holodeck has no REST API" in instr.get("when_to_use", ""), op.op_id
+        assert "Holodeck has no REST API" in instr.get("when_to_call", ""), op.op_id
         assert instr.get("output_shape"), f"{op.op_id} missing output_shape"
 
 

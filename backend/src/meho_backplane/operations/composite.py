@@ -600,15 +600,19 @@ async def enforce_subop_policy(
       :class:`~meho_backplane.db.models.ApprovalRequest` for the sub-op
       via :func:`~meho_backplane.operations.approval_queue.create_pending_request`
       and returns an ``awaiting_approval`` :class:`OperationResult`. The
-      handler returns it verbatim, and the dispatcher passes a
-      handler-returned :class:`OperationResult` straight through, so the
-      write **queues** instead of executing.
-    * ``deny`` → returns a ``denied`` :class:`OperationResult`; the write
-      never runs.
+      handler returns it verbatim; the dispatcher then writes the parent
+      operation's own ``awaiting_approval`` execution row (#4275) and
+      returns the result to the caller, so the write **queues** instead of
+      executing.
+    * ``deny`` → writes a ``denied`` decision row for the step, linked to
+      the parent's audit id, and returns a ``denied``
+      :class:`OperationResult`; the write never runs. A handler that returns
+      it gets the parent operation's own ``denied`` execution row from the
+      dispatcher (#4275).
 
     The seam ships the mechanism only; it does not execute the sub-op or
-    write its audit row (the top-level composite op owns the row that
-    attributes the writes). The chosen model, the rejected
+    write an execution row for it (the top-level composite op owns the row
+    that attributes the writes). The chosen model, the rejected
     "top-level-sufficiency" alternative, and the call-site example are
     documented in ``docs/architecture/operations-substrate.md`` under
     "Preserving write-composite policy on the direct path".
@@ -828,10 +832,10 @@ async def enforce_subop_policy(
 
             # #3542: same refusal as the dispatcher park — a sub-op whose
             # permission preflight says the write will be denied does not park.
-            # The parent composite returns this result as is and the dispatcher
-            # writes no audit row for a handler-returned result, so the refusal
-            # is recorded here, on the sub-op's path, linked to the parent's
-            # audit id. Same writer as the dispatcher park.
+            # The refusal is the step's own decision, so it is recorded here, on
+            # the sub-op's path, linked to the parent's audit id, with the same
+            # writer as the dispatcher park. The parent composite returns this
+            # result as is and gets its own ``denied`` execution row (#4275).
             refusal = _preflight_denied_refusal(
                 op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
             )
@@ -886,7 +890,18 @@ async def enforce_subop_policy(
             return result_awaiting_approval(op_id, request.id, duration_ms)
 
         # DENY, or any unexpected verdict — fail closed: the sub-op never
-        # runs. Only an explicit AUTO_EXECUTE clears the gate.
-        return result_denied(op_id, reason or "policy denied", duration_ms)
+        # runs. Only an explicit AUTO_EXECUTE clears the gate. #4275: the step
+        # gets its own ``denied`` decision row, linked to the parent's audit
+        # id, like a step refused before it could wait above. The parent
+        # operation's own ``denied`` execution row is the dispatcher's job.
+        return await _audit_denied_and_return(
+            result_denied(op_id, reason or "policy denied", duration_ms),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     finally:
         policy_decision_var.reset(verdict_token)

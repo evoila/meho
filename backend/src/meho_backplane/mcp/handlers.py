@@ -120,7 +120,11 @@ from meho_backplane.mcp.server import (
     register_method,
 )
 from meho_backplane.operations.delivery_budget import tool_result_text
-from meho_backplane.request_usage.collector import note_request_route, note_request_status
+from meho_backplane.request_usage.collector import (
+    current_request_id,
+    note_request_route,
+    note_request_status,
+)
 
 __all__ = [
     "handle_resources_list",
@@ -699,6 +703,9 @@ async def _write_tool_call_row(
             status_code=status_code,
             duration_ms=duration_ms,
             payload=audit_payload,
+            # #4672: the tool row and the operation rows the tool wrote
+            # share one request id, like the REST wrapper row does.
+            request_id=current_request_id(),
         )
     except Exception:
         # Fail-closed: an audit-write failure invalidates the call.

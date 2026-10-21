@@ -3,8 +3,8 @@
 
 """The audit mark ``audit_log.sandbox_mode`` (#4622).
 
-One model default sets the mark for every writer: the column's Python
-default reads the process flag, so no writer names it. This file proves:
+One model default sets the mark for every writer: the ORM insert hook on
+the model reads the process flag, so no writer names it. This file proves:
 
 * no ``AuditLog(...)`` construction in ``src/`` passes ``sandbox_mode``
   (the inventory of ``test_audit_event_class.py``), so the one default is

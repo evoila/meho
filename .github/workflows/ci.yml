@@ -193,12 +193,12 @@ jobs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
       - name: Checkout
-        # fetch-depth: 0 so the PR base commit is present for the
-        # three-dot diff below (the default shallow fetch would not
-        # reach the merge-base).
+        # On a PR, HEAD is the test merge: the PR on top of the newest
+        # `main`. Its first parent (HEAD^1) is that `main` commit, so
+        # depth 2 is enough for the diff below.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 2
       - name: Detect migration-related + docs-only changes
         id: detect
         run: |
@@ -210,13 +210,18 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             # push / merge_group: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only} (full run)"
-          elif ! changed="$(git diff --name-only --no-renames "${{ github.event.pull_request.base.sha }}...HEAD")"; then
+          # HEAD^1, not `github.event.pull_request.base.sha`: the event's
+          # base sha is `main` as of when the PR was opened. Once `main`
+          # moves, a diff against it also lists other PRs' files and a
+          # docs-only PR loses the fast path (#4657).
+          elif ! changed="$(git diff --name-only --no-renames HEAD^1 HEAD)"; then
             # Diff unavailable -> keep fail-safe defaults (full run + migration gate on).
             echo "git diff failed -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           elif [ -z "${changed}" ]; then
             # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
             echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           else
+            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
             # --- migration classification (#2140, unchanged) ---
             # Files that make the migration suite meaningful to run: the
             # alembic tree, the relocated migration test suite, the db

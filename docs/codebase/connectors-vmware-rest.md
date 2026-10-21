@@ -2932,6 +2932,31 @@ carries it in the `<_this type="Datastore">` self-reference over SOAP. The
 two POST legs are reconciled against `vi-json.yaml` by
 `test_connectors_vmware_rest_composites_read_reconcile.py`.
 
+### AI guidance of the guest, event, performance and typed reads
+
+The six guest operations (`vm.guest.*`), `event.tail`,
+`performance.summary` and the seven typed reads (`vmware.host.usage`,
+`.host.network_uplinks`, `.host.storage_devices`, `.host.vsan_health`,
+`vmware.object.collect`, `vmware.tasks.recent`, `vmware.vm.info`) each
+carry `llm_instructions` with `when_to_call`, `output_shape` and
+`next_step`, plus `preconditions` for the guest file read and the two guest
+writes. The guidance of the eight multi-step operations lives in
+`composites/_guest_event_perf_llm_instructions.py`; the typed reads keep
+theirs on their `VmwareTypedOp` row. Descriptions stay short. Each
+parameter schema has one example call under `examples`.
+
+The guest and performance reads pass vSphere data objects through as
+vCenter sends them, so their nested response fields use the VI-JSON names
+(`GuestProcessInfo`, `GuestNicInfo`, `GuestStackInfo`,
+`GuestFileAttributes`, `PerfMetricId`, `PerfEntityMetric`). Those parts live
+in `composites/_guest_perf_response_schemas.py`. `host.usage` reshapes its
+answer, so its schema (`_typed_response_schemas.py`) follows the handler.
+`test_connectors_vmware_rest_guest_event_typed_read_contracts.py` checks
+that every example validates and every list names its fields.
+`vm.guest.file.read` stays `caution` without `requires_approval`: an agent's
+call waits for approval, a person's call runs at once. That is the one
+listed exception for these operations in the contract check's gap list.
+
 ### Per-entity capacity sensing (`filter_names`, #2758)
 
 `datastore.usage` takes an exact-match `filter_names` param (array of

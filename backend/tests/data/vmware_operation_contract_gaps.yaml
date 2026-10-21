@@ -573,10 +573,6 @@ vmware-rest:
     - summary
     - llm_instructions
     - examples
-  vmware.composite.event.tail:
-    - summary
-    - llm_instructions
-    - examples
   vmware.composite.folder.create:
     - summary
     - llm_instructions
@@ -656,10 +652,6 @@ vmware-rest:
     - field_descriptions
     - llm_instructions
     - examples
-  vmware.composite.performance.summary:
-    - summary
-    - llm_instructions
-    - examples
   vmware.composite.resource_pool.create:
     - summary
     - field_descriptions
@@ -734,32 +726,11 @@ vmware-rest:
     - summary
     - llm_instructions
     - examples
-  vmware.composite.vm.guest.env.read:
-    - summary
-    - llm_instructions
-    - examples
+  # Kept on purpose: vm.guest.file.read stays "caution" without approval. It
+  # reads a file from a guest; an agent's call waits for approval, a person's
+  # call runs at once.
   vmware.composite.vm.guest.file.read:
-    - summary
-    - llm_instructions
-    - examples
     - requires_approval
-  vmware.composite.vm.guest.file.write:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.vm.guest.net.show:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.vm.guest.process.list:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.composite.vm.guest.program.run:
-    - summary
-    - llm_instructions
-    - examples
-    - no_ticket_numbers
   vmware.composite.vm.import_from_library:
     - summary
     - llm_instructions
@@ -799,35 +770,6 @@ vmware-rest:
     - llm_instructions
     - examples
     - no_ticket_numbers
-  vmware.host.network_uplinks:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.host.storage_devices:
-    - summary
-    - llm_instructions
-    - examples
-    - no_ticket_numbers
-  vmware.host.usage:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.host.vsan_health:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.object.collect:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.tasks.recent:
-    - summary
-    - llm_instructions
-    - examples
-  vmware.vm.info:
-    - summary
-    - llm_instructions
-    - examples
 vrli-rest:
   vrli.event.query:
     - summary

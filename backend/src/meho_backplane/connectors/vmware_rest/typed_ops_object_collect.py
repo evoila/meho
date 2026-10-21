@@ -428,6 +428,13 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["type", "moid", "properties"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "type": "Datastore",
+            "moid": "datastore-12",
+            "properties": ["summary.freeSpace", "summary.capacity"],
+        }
+    ],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -526,29 +533,12 @@ OBJECT_COLLECT_WHEN_TO_USE = (
 VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
     op_id="vmware.object.collect",
     handler_attr="object_collect",
-    summary="Bounded generic PropertyCollector read of one managed object.",
+    summary="Read chosen properties of one vSphere managed object, by type and moid.",
     description=(
-        "Reads a caller-specified set of property paths off a single "
-        "managed object addressed by 'type' + 'moid', returning "
-        "{properties: {path: value}, missing: [path], missing_properties: "
-        "[{path, fault_type?}], missing_fault_summary: {fault_type: count}, "
-        "session_health_reset?: 1}. session_health_reset is present only when "
-        "MEHO found the cached session dead, logged in again and read the "
-        "object a second time. The bounded generic "
-        "escape hatch for the long tail of one-off managed-object reads: "
-        "no purpose-built op needed. Bounded by construction to keep it a "
-        "dumb substrate -- exactly one object, no TraversalSpec (cannot "
-        "walk the inventory), at most 64 property paths each a dotted vim "
-        "identifier up to 16 segments deep; an oversized / malformed "
-        "request fails parameter validation as a structured invalid_params "
-        "error before any read is issued. Reads via PropertyCollector "
-        "directly on the connector session, so it works with zero catalog "
-        "ingest. Prefer a purpose-built typed op when one covers the "
-        "property set. vCenter 8.0.x rejects a path into a cluster's "
-        "'configurationEx' (for example 'configurationEx.rule', "
-        "'configurationEx.group' or 'configurationEx.drsConfig') with an "
-        "InvalidProperty error: request 'configurationEx' and pick the field "
-        "from the result. safety_level=safe, read-only."
+        "Reads up to 64 property paths of one managed object. Returns type, moid, properties, "
+        "missing, missing_properties, missing_fault_summary and, after a session reset, "
+        "session_health_reset. vCenter 8.0.x refuses 'configurationEx.<field>': request "
+        "'configurationEx' whole. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -557,14 +547,13 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call to read specific vim25 property paths off one managed "
-            "object when no dedicated typed op fits. Supply the object 'type' "
-            "and 'moid' and the exact 'properties' list. Bounded: one object, "
-            "no traversal, <=64 paths. Prefer vm.info / host.usage / "
-            "host.vsan_health when they cover what you need. Use it for "
-            "distributed switch and distributed portgroup config reads "
-            "(type 'DistributedVirtualPortgroup' or "
+        "when_to_call": (
+            "Call to read some vim25 property paths of one managed object when no "
+            "dedicated typed op fits. Give the object 'type' and 'moid' and the exact "
+            "'properties' list. It reads one object, follows no links and takes at most "
+            "64 paths. Prefer vm.info, host.usage or host.vsan_health when they cover "
+            "what you need. Use it for distributed switch and distributed portgroup "
+            "settings (type 'DistributedVirtualPortgroup' or "
             "'VmwareDistributedVirtualSwitch')."
         ),
         "parameter_hints": {
@@ -584,14 +573,17 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
             ),
         },
         "output_shape": (
-            "{type, moid, properties: {path: raw_value, ...}, missing: "
-            "[path, ...], missing_properties: [{path, fault_type?}, ...], "
-            "missing_fault_summary: {fault_type: count}}. 'missing' names "
-            "paths the collector could not read; 'missing_properties' adds "
-            "each one's vim fault type name (names only, no fault text) so a "
-            "permission/auth/invalid fault is distinguishable from a "
-            "genuinely-unset property, and 'missing_fault_summary' counts "
-            "them by type."
+            "{type, moid, properties: {path: raw_value}, missing: [path], "
+            "missing_properties: [{path, fault_type}], missing_fault_summary: "
+            "{fault_type: count}, session_health_reset}. Values are raw VI-JSON. "
+            "fault_type is a vim fault name only (never fault text); an entry with no "
+            "fault_type is a property that is not set. session_health_reset is there "
+            "only when MEHO logged in again and read a second time."
+        ),
+        "next_step": (
+            "For a path in missing with fault_type InvalidProperty, read the parent path "
+            "whole. With NoPermission, the MEHO account cannot see it; report that. A "
+            "moref value in properties ({type, value}) can be read next with this op."
         ),
     },
 )

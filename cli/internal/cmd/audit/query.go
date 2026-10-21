@@ -109,7 +109,7 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&resultStatus, "result-status", "",
 		"narrow to one result-status (ok|error|denied|pending); pending is history: "+
 			"the run stopped to wait for approval and the row stays pending after the "+
-			"decision; use `meho approvals list` to see what waits now")
+			"decision; use 'meho approvals list' to see what waits now")
 	cmd.Flags().StringVar(&since, "since", "",
 		"earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601")
 	cmd.Flags().StringVar(&until, "until", "",

@@ -1255,6 +1255,10 @@ DEPLOY_OPS: tuple[HolodeckOp, ...] = (
                 "holodeck.config.apply. For not_applicable, check the module "
                 "version by hand before you deploy."
             ),
+            # The op is credential-class for broadcast, so the reducer copies
+            # no scalar by default; keep these non-secret flags next to
+            # ``patches[]`` when that list is reduced.
+            "result_scalars": {"keys": ["patched", "verify_only", "hr_version"]},
         },
     ),
 )

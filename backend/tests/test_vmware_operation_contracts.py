@@ -224,7 +224,9 @@ def check_examples(op: OperationContract) -> list[str]:
             problems.append(f"example {index} is not an object")
             continue
         for error in validate_params(dict(op.parameter_schema), dict(example)):
-            problems.append(f"example {index} does not validate: {error['message']}")
+            problems.append(
+                f"example {index} does not validate: {error['path']} expects {error['expected']}"
+            )
     return problems
 
 

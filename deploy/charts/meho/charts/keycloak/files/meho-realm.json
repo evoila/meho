@@ -99,6 +99,14 @@
           "true"
         ]
       }
+    },
+    {
+      "name": "MEHO-Platform-Admins",
+      "attributes": {
+        "platform_admin": [
+          "true"
+        ]
+      }
     }
   ],
   "clients": [
@@ -217,6 +225,22 @@
           "config": {
             "user.attribute": "approver",
             "claim.name": "approver",
+            "jsonType.label": "boolean",
+            "aggregate.attrs": "false",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "platform-admin",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "platform_admin",
+            "claim.name": "platform_admin",
             "jsonType.label": "boolean",
             "aggregate.attrs": "false",
             "multivalued": "false",
@@ -355,6 +379,22 @@
           }
         },
         {
+          "name": "platform-admin",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "platform_admin",
+            "claim.name": "platform_admin",
+            "jsonType.label": "boolean",
+            "aggregate.attrs": "false",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
           "name": "groups-claim",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-group-membership-mapper",
@@ -469,6 +509,22 @@
           "config": {
             "user.attribute": "approver",
             "claim.name": "approver",
+            "jsonType.label": "boolean",
+            "aggregate.attrs": "false",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "platform-admin",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "platform_admin",
+            "claim.name": "platform_admin",
             "jsonType.label": "boolean",
             "aggregate.attrs": "false",
             "multivalued": "false",

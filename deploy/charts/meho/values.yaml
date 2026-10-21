@@ -1178,6 +1178,25 @@ coreKeycloak:
     # `client_id` and `client_secret`). Empty = the install makes
     # `<release>-core-keycloak-bootstrap`.
     bootstrap: ""
+  # The two people the install makes at the first start (the realm stage of
+  # the bootstrap Job, docs/codebase/core-bootstrap.md). Their temporary
+  # passwords are in `<release>-core-first-login`; Keycloak asks for a new
+  # password at the first login. A change here after the first install has
+  # no effect: the Secret and the users already exist.
+  firstLogin:
+    # -- User name of the first admin (in MEHO-Admins, with platform_admin).
+    adminUsername: admin
+    # -- User name of the second person, who can approve (MEHO-SA-Operators).
+    approverUsername: approver
+  # A login for automated install proofs. Off by default; turn it on only
+  # on a test install. When on, the bootstrap Job makes the service client
+  # `meho-ci` (a tenant admin of the first tenant, secret in
+  # `<release>-core-ci-login`) and the group `MEHO-CI-Admins` for a second
+  # tenant.
+  ci:
+    enabled: false
+    # -- The second tenant's id (a UUID). Required when `ci.enabled` is true.
+    tenantId: ""
 
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store

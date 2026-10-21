@@ -139,9 +139,10 @@ def classify_subop_grantability(op_id: str) -> SubopGrantability:
     :func:`meho_backplane.operations.service_grants.delete_shaped_refusal_reason`
     — the exact rule ``ServicePrincipalGrantService.create`` refuses on — so
     an un-grantable rollback / delete leg is flagged on the discovery surface
-    identically to how it would be refused at grant-create time. Pattern-only
-    here (no descriptor lookup): the surface classifies by op-id shape, and
-    the caller layers a best-effort descriptor ``safety_level`` on top.
+    identically to how it would be refused at grant-create time. Op-id only
+    here (no descriptor lookup): a configured pattern or a vendor delete
+    action name such as ``POST:/VirtualMachine/{moId}/Destroy_Task`` (#4632).
+    The caller layers a best-effort descriptor ``safety_level`` on top.
     """
     from meho_backplane.operations.service_grants import delete_shaped_refusal_reason
     from meho_backplane.settings import get_settings

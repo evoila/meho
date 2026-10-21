@@ -177,6 +177,7 @@ async def _seed_descriptor(
     tenant_id: uuid.UUID | None = None,
     group_id: uuid.UUID | None = None,
     llm_instructions: dict[str, Any] | None = None,
+    parameter_schema: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     sessionmaker = get_sessionmaker()
     descriptor_id = uuid.uuid4()
@@ -197,7 +198,7 @@ async def _seed_descriptor(
                 description=description,
                 group_id=group_id,
                 tags=[],
-                parameter_schema={"type": "object"},
+                parameter_schema=parameter_schema or {"type": "object"},
                 response_schema=None,
                 llm_instructions=llm_instructions,
                 safety_level="safe",
@@ -899,6 +900,52 @@ async def test_post_call_rate_limited_rides_200_envelope(
     assert body["status"] == "rate_limited", body
     assert body["extras"]["error_code"] == "rate_limited"
     assert body["extras"]["retry_after_seconds"] == 30
+
+
+@pytest.mark.asyncio
+async def test_post_call_invalid_params_rides_enriched_envelope(client: TestClient) -> None:
+    """#3669: REST returns the same enriched ``invalid_params`` entries.
+
+    The route returns the dispatcher's ``OperationResult`` as is, so each
+    ``validation_errors`` entry carries ``path``, ``validator``,
+    ``expected`` and ``remediation``, plus the ``validation_errors_suppressed``
+    count. The CLI prints ``extras`` verbatim, so it shows the same keys.
+    """
+    await _seed_descriptor(
+        op_id="vault.kv.read",
+        parameter_schema={
+            "type": "object",
+            "properties": {"version": {"type": "integer"}},
+            "additionalProperties": False,
+        },
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": None,
+                "params": {"version": "not-a-number"},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == "invalid_params"
+    assert body["extras"]["validation_errors"] == [
+        {
+            "path": "$.version",
+            "validator": "type",
+            "expected": "type: integer",
+            "remediation": "send a value of type integer at this path",
+        }
+    ]
+    assert body["extras"]["validation_errors_suppressed"] == 0
+    assert "not-a-number" not in response.text
 
 
 @pytest.mark.asyncio

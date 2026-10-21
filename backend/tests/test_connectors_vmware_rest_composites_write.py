@@ -616,6 +616,138 @@ async def test_vm_create_nic_failure_rolls_back_via_delete(gate: _GateRecorder) 
     }
 
 
+_VCENTER_NIC_FAULT = {
+    "error_type": "INVALID_ARGUMENT",
+    "messages": [
+        {
+            "id": "com.vmware.api.vcenter.vm.hardware.ethernet.invalid_backing",
+            "default_message": "The backing type does not match the network.",
+        }
+    ],
+}
+
+
+def _vm_create_nic_fault_connector(delete_response: Any) -> _RecordingConnector:
+    """Folder lookup, create, a NIC attach vCenter refuses, then the rollback DELETE."""
+    return _RecordingConnector(
+        [
+            [{"folder": "folder-1", "name": "Prod"}],
+            {"value": "vm-77"},
+            _http_error_with_body(
+                400, "https://vc/api/vcenter/vm/vm-77/hardware/ethernet", _VCENTER_NIC_FAULT
+            ),
+            delete_response,
+        ]
+    )
+
+
+_VM_CREATE_NIC_PARAMS = {
+    "folder_name": "Prod",
+    "name": "web-02",
+    "guest_os": "RHEL_9_64",
+    "nics": [{"network": "dvportgroup-5"}],
+}
+
+
+@pytest.mark.asyncio
+async def test_vm_create_rollback_error_names_step_vcenter_message_and_removal(
+    gate: _GateRecorder,
+) -> None:
+    """A rolled-back create says which step failed, why, and that the VM is gone (#4057)."""
+    conn = _vm_create_nic_fault_connector({})
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_VM_CREATE_NIC_PARAMS,
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "nic_attach"
+    assert out["rollback"] == {"vm_id": "vm-77", "outcome": "removed"}
+    assert out["rollback_reason"] == (
+        "nic attach for network='dvportgroup-5' failed: HTTP 400 (INVALID_ARGUMENT): "
+        "The backing type does not match the network."
+    )
+    [error] = out["issues"]
+    assert error["severity"] == "error"
+    assert error["message"] == (
+        "vm.create failed at step 'nic_attach'; the rollback removed the VM it created "
+        "(vm-77). Cause: nic attach for network='dvportgroup-5' failed: HTTP 400 "
+        "(INVALID_ARGUMENT): The backing type does not match the network."
+    )
+
+
+@pytest.mark.asyncio
+async def test_vm_create_rollback_delete_failure_says_the_vm_is_still_there(
+    gate: _GateRecorder,
+) -> None:
+    """A failed rollback DELETE keeps the original failure and asks for a manual delete (#4057)."""
+    conn = _vm_create_nic_fault_connector(
+        _http_error_with_body(
+            500,
+            "https://vc/api/vcenter/vm/vm-77",
+            {"error_type": "RESOURCE_BUSY", "messages": [{"default_message": "VM is busy."}]},
+        )
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_VM_CREATE_NIC_PARAMS,
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "nic_attach"
+    assert out["rollback"] == {"vm_id": "vm-77", "outcome": "not_removed"}
+    message = out["issues"][0]["message"]
+    assert message.startswith(
+        "vm.create failed at step 'nic_attach'; the rollback could not remove the VM it "
+        "created (vm-77): HTTP 500 (RESOURCE_BUSY): VM is busy. Delete the VM by hand."
+    )
+    assert "The backing type does not match the network." in message
+
+
+@pytest.mark.asyncio
+async def test_vm_create_rollback_delete_waiting_for_approval_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback DELETE that waits for approval is not reported as removed (#4057)."""
+    _install_gate(monkeypatch, _GateRecorder({_DELETE_VM_OP: _awaiting(_DELETE_VM_OP)}))
+    conn = _vm_create_nic_fault_connector({})
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_VM_CREATE_NIC_PARAMS,
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert ("DELETE", "/api/vcenter/vm/vm-77") not in [(c["method"], c["path"]) for c in conn.calls]
+    assert out["status"] == "rolled_back"
+    assert out["rollback"] == {"vm_id": "vm-77", "outcome": "awaiting_approval"}
+    assert (
+        "removing the VM it created (vm-77) waits for approval. The VM exists until then."
+        in out["issues"][0]["message"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_vm_create_rollback_delete_denied_asks_for_a_manual_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback DELETE the policy refuses leaves the VM; the message says so (#4057)."""
+    denied = OperationResult(
+        status="denied", op_id=_DELETE_VM_OP, result=None, duration_ms=1.0, error="denied"
+    )
+    _install_gate(monkeypatch, _GateRecorder({_DELETE_VM_OP: denied}))
+    conn = _vm_create_nic_fault_connector({})
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_VM_CREATE_NIC_PARAMS,
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["rollback"] == {"vm_id": "vm-77", "outcome": "not_removed"}
+    assert "Delete the VM by hand." in out["issues"][0]["message"]
+
+
 @contextmanager
 def _resuming(composite_op_id: str, approved_op_id: str, state: dict[str, Any]) -> Iterator[None]:
     """Bind what an approval resume of an ``after_main_effect`` park binds (#4217).
@@ -662,11 +794,15 @@ async def test_vm_create_resumed_rollback_deletes_and_creates_nothing(
         "steps_succeeded": ["folder_lookup", "create"],
         "failed_step": "nic_attach",
         "rollback_reason": "nic attach failed",
+        "rollback": {"vm_id": "vm-77", "outcome": "removed"},
         "issues": [
             {
                 "category": "connector",
                 "severity": "error",
-                "message": "vm.create failed at step 'nic_attach': nic attach failed",
+                "message": (
+                    "vm.create failed at step 'nic_attach'; the rollback removed the VM it "
+                    "created (vm-77). Cause: nic attach failed"
+                ),
             }
         ],
     }
@@ -997,6 +1133,79 @@ async def test_vm_create_nested_hv_transport_fault_rolls_back(gate: _GateRecorde
     assert out["vm_id"] is None
     assert out["failed_step"] == "nested_hv"
     assert "nested_hv reconfigure failed" in out["rollback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_nested_hv_vim_fault_keeps_type_and_message(gate: _GateRecorder) -> None:
+    """A VI-JSON fault on the VHV reconfigure keeps vCenter's fault class and text (#4057)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-1", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-77"},
+            "/api/vcenter/vm/vm-77": {},  # DELETE rollback
+        },
+        vmomi={
+            "/VirtualMachine/vm-77/ReconfigVM_Task": _http_error_with_body(
+                500,
+                "https://vc/sdk/vim25/8.0.3.0/VirtualMachine/vm-77/ReconfigVM_Task",
+                {
+                    "_typeName": "InvalidArgument",
+                    "faultstring": "A specified parameter was not correct: nestedHVEnabled",
+                },
+            )
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "esx-nested-02",
+            "guest_os": "VMKERNEL_8",
+            "nested_hv": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "nested_hv"
+    assert out["rollback"] == {"vm_id": "vm-77", "outcome": "removed"}
+    assert out["rollback_reason"] == (
+        "nested_hv reconfigure failed: HTTP 500 (InvalidArgument): "
+        "A specified parameter was not correct: nestedHVEnabled"
+    )
+    assert out["issues"][0]["message"] == (
+        "vm.create failed at step 'nested_hv'; the rollback removed the VM it created "
+        "(vm-77). Cause: nested_hv reconfigure failed: HTTP 500 (InvalidArgument): "
+        "A specified parameter was not correct: nestedHVEnabled"
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            {"_typeName": "InvalidArgument", "faultstring": "bad guestId"},
+            "HTTP 500 (InvalidArgument): bad guestId",
+            id="flattened",
+        ),
+        pytest.param(
+            {
+                "_typeName": "LocalizedMethodFault",
+                "localizedMessage": "The operation is not allowed in the current state.",
+                "fault": {"_typeName": "InvalidState"},
+            },
+            "HTTP 500 (InvalidState): The operation is not allowed in the current state.",
+            id="wrapped",
+        ),
+        pytest.param({"_typeName": "NotAuthenticated"}, "HTTP 500 (NotAuthenticated)", id="bare"),
+    ],
+)
+def test_vsphere_fault_detail_reads_vi_json_method_faults(
+    body: dict[str, Any], expected: str
+) -> None:
+    """Both VI-JSON fault shapes render like a REST error: status, class, text (#4057)."""
+    exc = _http_error_with_body(500, "https://vc/sdk/vim25/8.0.3.0/VirtualMachine/vm-1/X", body)
+    assert _write._vsphere_fault_detail(exc) == expected
 
 
 @pytest.mark.asyncio

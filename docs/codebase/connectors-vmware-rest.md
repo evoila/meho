@@ -602,6 +602,93 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   failure). Set-shaped (JSONFlux-reduced when large), with `host_required`
   / `host_not_found` / `ambiguous_host` / `unsupported_host_target`
   covering the resolution refusals.
+- **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
+  handler `sso_admin_api_file_get`) — reads one SSO Admin API description
+  file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
+  download has the SSO Admin WSDL, so a running vCenter is the only place to
+  get it. `safe`, read-only, in its own group `vcenter-sso-admin-api-files`.
+  Registered through `VMWARE_TYPED_OPS`, so it is on both catalogs.
+
+  | Versions | Catalog |
+  |---|---|
+  | vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+  | vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+  - **Which paths it reads.** Only a path under `/sso-adminserver/` (the SSO
+    Admin service folder; the documented service address is
+    `/sso-adminserver/sdk/{domain}`). Allowed characters are letters,
+    digits and `. _ ~ / -`; no `..` or `//`; the query is empty or one of
+    `wsdl`, `xsd`, `xsd=<number>`. So a backslash, a `%` (an encoded dot or
+    slash), a scheme or a host is refused. The same rule is the `pattern` of
+    the `path` parameter, so the dispatcher refuses a bad path as
+    `invalid_params`, and the handler checks it again. A refused path sends
+    no request. Every SSO Admin call is a SOAP `POST`, so a `GET` in that
+    folder changes nothing. The exact file path of the WSDL is not documented
+    by the vendor yet; the read does not need it, and the lab pins it with
+    this read.
+  - **How it reads.** One `GET` on a new client from
+    `_ephemeral_http_client` (same SSRF and TLS settings, its own empty
+    cookie jar). No login header and no session cookie go out: the SSO Admin
+    service has its own login (a SAML token), and a WSDL holds no data. The
+    request goes through `httpx.AsyncClient.send(..., follow_redirects=False)`,
+    so a redirect is not followed (the pooled client class would follow a
+    same-origin redirect by itself). A `3xx` returns `redirect_path`; a
+    `401`, `403`, `404` or `5xx` returns its `status` with no text.
+  - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
+    `size` (bytes), `sha256` (of the file bytes), `imports`, `parts`,
+    `text_parts`, `version`, `build`, `version_error`. `imports` lists the
+    `location` / `schemaLocation` values of `wsdl:import`, `xsd:import` and
+    `xsd:include`, as written, parsed with `defusedxml`; a file that is not
+    XML gives `[]`. Only UTF-8 text comes back; other content is refused and
+    the error names its content type.
+  - **Version and build** come from `GET /api/appliance/system/version` on
+    the connector's normal login. If that read fails, the file still comes
+    back, `version` and `build` are `null`, and `version_error` says why.
+    This covers an HTTP error, a vCenter login error, and the credential
+    failures that happen before any request goes out: no credentials for
+    the target, access denied, or a credential store that cannot be reached
+    (`CredentialsReadError`, `VaultClientError`).
+  - **How to rebuild the file.** `text_parts` is a list of
+    `{index, text}`, each at most 64 KiB of UTF-8, cut only between
+    characters. Join the `text` of all parts in `index` order and encode as
+    UTF-8; the SHA-256 of the result equals `sha256`. A part is a fixed byte
+    size, not a line, because a served file can be one long line. The answer
+    has two lists (`imports` and `text_parts`), so JSONFlux keeps a large
+    answer whole as a document record behind a result handle; the inline
+    summary keeps the scalar fields (`sha256`, `size`, `parts`, `build`, ...).
+    Read the parts with `result_query` and `query={"path": "/text_parts"}`,
+    paging with a small `limit` (one answer is at most 256 KiB), and the
+    imports with `path="/imports"`. A file that does not fit in one stored
+    result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
+    stored JSON) stops with an error that names its size; the read never
+    returns a cut file.
+  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+    every stored result (the dispatcher runs
+    `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
+    that fires on the file text would rewrite a part, and the joined parts
+    would no longer match `sha256`. So the read runs the same middleware, with
+    the same connector, tenant and operation labels, on the text parts and on
+    the whole file text before it returns. The whole-file pass matters: a
+    secret that the part cut splits in two matches in no single part, so the
+    dispatcher's own redaction would store it in clear text. When the text
+    would change, the read stops with an error that names the rule and the
+    place (a part, or `file_text` for the whole file), and returns no file.
+    Redaction itself stays on. The default policy's `strip-api-key` rule fires
+    on text such as
+    `type="token:SecurityToken"`; a redaction policy registered for this
+    operation changes what the check accepts, because both use the same
+    policy lookup.
+  - **Tests.** `tests/test_connectors_vmware_rest_typed_sso_admin_api_file.py`
+    (respx: accepted and refused paths, no login on the `GET`, status and
+    redirect cases, large files, version failure including missing
+    credentials and a failed credential-store login, a file that a redaction
+    rule would change, a secret split across the part cut, and the
+    result-handle round trip through redaction,
+    storage and read-back) and the reconcile lane
+    `tests/test_connectors_vmware_rest_sso_admin_api_file_reconcile.py`
+    (the SSO Admin folder is a documentation path that the pinned 8.0 and
+    9.0 `vcenter.yaml` do not serve; both serve
+    `GET /appliance/system/version`).
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the
@@ -680,6 +767,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    ingested. The reconcile lane above pins the corrected body shape, against
    a fixture always and against the pinned vendor 8.0 U3 spec when the shelf
    has it.
+   **8.0 VI-JSON calls (#4333).** The same lane collects every VI-JSON
+   method the connector calls (from the source) and checks it against the
+   vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
+   version gate or an entry with the reason in the lane's exclusion list.
+   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
+   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
+   `vmware.host.vsan_health` calls it best-effort. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md).
    **Operation summaries (#4329).** Search and the operation-group step
    read each operation's one-line `summary`. The full vendor specs fall
    short in two ways, and `ingest_corrections.py` fixes both at ingest
@@ -1357,7 +1452,15 @@ row (#4217); approving it re-runs `vm.create`, which then only deletes the
 VM the first run created (`_resumed_vm_create_rollback`) and returns the
 same `rolled_back` envelope. An approved rollback DELETE with no saved
 rollback (a request saved before #4217) is refused before anything runs
-(`composite_resume_unsupported`). The other
+(`composite_resume_unsupported`). A rolled-back `vm.create` is an
+`error` result (#3813). Its error message names the failed step, says
+what happened to the VM, and ends with the cause, which carries
+vCenter's own message (`_vsphere_fault_detail`, for a REST error body
+and for a VI-JSON method fault alike). The `rollback` field
+gives the VM moid and the outcome (#4057): `removed`,
+`awaiting_approval` (the VM exists until the DELETE is approved) or
+`not_removed` (the DELETE failed or was denied; delete the VM by hand).
+The field is absent when the run failed before any VM existed. The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert. `vm.resize`'s `partial` follows the same rule: a CPU PATCH
@@ -1740,7 +1843,13 @@ and a mandatory blast-radius block. Two things are connector-specific:
   version) issues the synchronous REST `DELETE:/vcenter/vm/{vm}`. The vim
   arm's `Destroy_Task` + the preview's snapshot `RetrievePropertiesEx` are
   declared in `_write._VIM_SUB_OPS_VM_DESTROY` and reconciled against the
-  pinned `vi-json.yaml` (the same lane as disk-grow).
+  pinned `vi-json.yaml` (the same lane as disk-grow). The REST arm's
+  `GET:/vcenter/vm/{vm}` read + `DELETE:/vcenter/vm/{vm}` are declared in
+  `_write._SUB_OPS_VM_DESTROY` and reconciled against the pinned
+  `vcenter.yaml`. The governed-subop discovery surface
+  (`GET /api/v1/operations/governed-subops?op_id=vmware.composite.vm.destroy`)
+  joins both lists, so an operator sees the delete step of either arm, and
+  the REST delete is flagged un-grantable (delete-shaped).
 
 The blast-radius preview builder (`_write_preview._vm_destroy_preview`)
 live-reads `Vm.Info` for object identity (moid / name / power state) plus

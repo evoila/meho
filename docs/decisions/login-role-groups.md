@@ -33,9 +33,11 @@ each site has one tenant, so all five groups carry the same
 
 1. **One group per person.** A person is in exactly one of the five
    groups. If a person is in two, Keycloak puts one of the two values
-   into the token, and you cannot tell which one. A separate Task
-   ([#4594](https://github.com/evoila/meho/issues/4594)) makes MEHO
-   refuse such a login.
+   into the token, and you cannot tell which one. So MEHO refuses such
+   a login with `401 multiple_role_groups` and names the groups
+   ([#4594](https://github.com/evoila/meho/issues/4594)). The check
+   reads the `groups` claim and the group names in `JWT_ROLE_GROUPS`
+   (default: the five groups above).
 2. **No group, no access.** A person in none of the five groups gets
    no `tenant_id`. MEHO refuses the login with
    `401 missing_tenant_claim`.

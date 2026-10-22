@@ -794,6 +794,100 @@ async def test_secret_the_stored_result_redaction_misses_is_replaced(
     assert answer["size"] == len(body.encode())
 
 
+@pytest.mark.parametrize(
+    ("body", "content_type", "value", "cleaned"),
+    [
+        (
+            _swagger_yaml_with('password: "made\n  up"'),
+            "application/yaml",
+            "made\n  up",
+            None,
+        ),
+        (
+            _swagger_yaml_with("password: 'made\n  up'"),
+            "application/yaml",
+            "made\n  up",
+            None,
+        ),
+        (
+            _swagger_yaml_with("x:\n  password: | # note\n    made up\n    and more"),
+            "application/yaml",
+            "made up",
+            _swagger_yaml_with(f"x:\n  password: {REDACTED} # note"),
+        ),
+        (_swagger_yaml_with("password: made up"), "application/yaml", "made up", None),
+        (_swagger_yaml_with("password: made up # note"), "application/yaml", "made up", None),
+        (
+            '<?xml version="1.0"?>\n<api>\n  <password>made<!-- note -->up</password>\n</api>\n',
+            "application/xml",
+            "made<!-- note -->up",
+            None,
+        ),
+        (
+            '<?xml version="1.0"?>\n<api>\n  <password>ma<![CDATA[de]]>up</password>\n</api>\n',
+            "application/xml",
+            "ma<![CDATA[de]]>up",
+            None,
+        ),
+    ],
+    ids=[
+        "yaml-double-quoted-value-over-two-lines",
+        "yaml-single-quoted-value-over-two-lines",
+        "yaml-block-scalar-with-a-comment-after-the-indicator",
+        "yaml-value-with-a-space-inside",
+        "yaml-value-with-a-space-inside-and-a-comment",
+        "xml-element-text-split-by-a-comment",
+        "xml-element-text-split-by-a-cdata-section",
+    ],
+)
+async def test_value_over_lines_comments_or_spaces_is_replaced_whole(
+    body: str, content_type: str, value: str, cleaned: str | None
+) -> None:
+    """The second review's YAML and XML layouts: the whole value goes, nothing is left over."""
+    # The stored-result redaction alone leaves these values in clear text.
+    redaction = _redact_like_the_dispatcher({"text": body})
+    assert redaction.manifest == () and redaction.redacted == redaction.raw
+
+    answer = await _read(_SWAGGER_PATH, body.encode(), content_type)
+    _assert_cleaned(answer, body.encode(), value, 1, cleaned)
+    text = _joined(answer).decode()
+    for leftover in ("made", "up", "more", "note -->"):
+        assert leftover not in text.replace("# note", "")
+
+
+@pytest.mark.parametrize(
+    ("kind", "snippet", "value", "before_cut"),
+    [
+        ("xml", "<password>made<!-- note -->up</password>", "made<!-- note -->up", 20),
+        ("xml", "<password>made<!-- note -->up</password>", "made<!-- note -->up", 28),
+        ("yaml", 'password: "made\n  up"', "made\n  up", 16),
+        ("yaml", "password: made up", "made up", 15),
+    ],
+    ids=[
+        "xml-cut-inside-the-comment",
+        "xml-cut-after-the-comment",
+        "yaml-cut-at-the-line-break-inside-the-quotes",
+        "yaml-cut-at-the-space-inside-the-value",
+    ],
+)
+async def test_value_over_lines_or_comments_split_across_the_part_cut_is_replaced(
+    kind: str, snippet: str, value: str, before_cut: int
+) -> None:
+    """The scan runs on the whole text, so a part cut inside a comment or a value hides nothing."""
+    head, joint, tail, content_type = {
+        "xml": ('<?xml version="1.0"?>\n<api>\n<!-- ', " -->\n", "\n</api>\n", "application/xml"),
+        "yaml": ("swagger: '2.0'\n# ", "\n", "\npaths: {}\n", "application/yaml"),
+    }[kind]
+    pad = "/" * (PART_MAX_BYTES - before_cut - len(head) - len(joint))
+    body = f"{head}{pad}{joint}{snippet}{tail}"
+    assert body.index(snippet) == PART_MAX_BYTES - before_cut
+    parts = split_text_parts(body.encode())
+    assert parts[0].endswith(snippet[:before_cut]) and parts[1].startswith(snippet[before_cut:])
+
+    answer = await _read(_SWAGGER_PATH, body.encode(), content_type)
+    _assert_cleaned(answer, body.encode(), value, 1, body.replace(value, REDACTED))
+
+
 async def test_every_secret_value_is_counted() -> None:
     body = _SWAGGER.replace(
         '"paths"',

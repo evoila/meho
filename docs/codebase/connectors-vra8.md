@@ -340,18 +340,22 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
      (JSON), bare at the start of a line or after a list dash (YAML, a
      properties file), bare in a flow mapping (`{password: abc}`) or bare
      before `=` (an attribute, a query string). The value follows `:` or
-     `=`, on the same line or on the next non-empty line: a quoted string
-     (an apostrophe or a doubled quote inside counts), a bare word, a
-     number or a YAML block scalar with its indented lines. An empty
-     string, `null`, `true`, `false`, a comment, an object or list (a
-     schema property named `password`), a key whose children follow on
-     the next lines (`password:` then `type: string`) and a secret-named
-     word in running text (`the token: in the header`) are not values, so
-     a schema comes back whole. The element rule follows the pfSense
-     configuration read (`connectors/pfsense/redaction.py`): a
-     secret-named element loses its text (with or without a namespace
-     prefix, attributes or a CDATA section), and an element with child
-     elements is checked child by child.
+     `=`, on the same line or on the next non-empty line, and goes whole:
+     a quoted string up to its closing quote, also over several lines (an
+     apostrophe or a doubled quote inside counts; a quote that never
+     closes takes the rest of its line), a bare value with the spaces
+     inside it (`made up`) up to the end of the line, a stop character or
+     a ` #` comment, or a YAML block scalar with its indented lines (a
+     comment after the `|` stays). An empty string, `null`, `true`,
+     `false`, a comment, an object or list (a schema property named
+     `password`), a key whose children follow on the next lines
+     (`password:` then `type: string`) and a secret-named word in running
+     text (`the token: in the header`) are not values, so a schema comes
+     back whole. The element rule follows the pfSense configuration read
+     (`connectors/pfsense/redaction.py`): a secret-named element loses its
+     text (with or without a namespace prefix or attributes; comments and
+     CDATA sections inside the text go with it), and an element with
+     child elements is checked child by child.
   2. The stored-result redaction itself, with the connector, tenant and
      operation labels the dispatcher will use, on the whole cleaned text.
      It replaces a labelled pair such as `api_key=...` (also one that a
@@ -376,8 +380,11 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   cut, a password in an HTML script block with its value on the next
   line, in an XML element and in an HTML attribute, the same split across
   the part cut, credential fields in JSON and YAML (quoted, short, with an
-  apostrophe, a license key, a flow mapping, a value on the next line) and
-  a private key block, the count of several values, schemas and pages
+  apostrophe, a license key, a flow mapping, a value on the next line), a
+  private key block, YAML values that run over two lines, hold a space or
+  follow a `| # comment` indicator, XML element text split by a comment or
+  a CDATA section, the same split across the part cut, the count of
+  several values, schemas and pages
   that name `password` without a value, a file with more parts than the
   row limit, and the result-handle round trip);
   [`test_connectors_vra8_api_file_redaction.py`](../../backend/tests/test_connectors_vra8_api_file_redaction.py)

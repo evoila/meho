@@ -54,6 +54,16 @@ def test_placeholder_is_the_one_the_governed_vault_read_writes() -> None:
         ("example: {password: made-up}\n", f"example: {{password: {REDACTED}}}\n"),
         ("examples: [{token: made-up}]\n", f"examples: [{{token: {REDACTED}}}]\n"),
         ("password: made-up # note\n", f"password: {REDACTED} # note\n"),
+        # A bare value with a space inside goes whole; the comment after it stays.
+        ("password: made up\n", f"password: {REDACTED}\n"),
+        ("password: made up # note\n", f"password: {REDACTED} # note\n"),
+        ("- token: made up, and more\n", f"- token: {REDACTED}, and more\n"),
+        # A quoted value over two lines (a YAML quoted scalar) goes up to its closing quote.
+        ('password: "made\n  up"\n', f'password: "{REDACTED}"\n'),
+        ("password: 'made\n  up'\n", f"password: '{REDACTED}'\n"),
+        ('"password":\n  "made\n  up"\nnext: 1\n', f'"password":\n  "{REDACTED}"\nnext: 1\n'),
+        # A quote that never closes takes the rest of its line.
+        ('password: "made\n', f"password: {REDACTED}\n"),
         # A YAML block scalar: the indented lines below the indicator go too.
         (
             "a:\n  password: |\n    line-one\n    line-two\n  next: 1\n",
@@ -64,6 +74,12 @@ def test_placeholder_is_the_one_the_governed_vault_read_writes() -> None:
             f"a:\n  password: {REDACTED}\n  next: 1\n",
         ),
         ("password: |\n  line-one\n", f"password: {REDACTED}\n"),
+        # A comment after the indicator stays; the indented lines still go.
+        (
+            "a:\n  password: | # comment\n    line-one\n    line-two\n  next: 1\n",
+            f"a:\n  password: {REDACTED} # comment\n  next: 1\n",
+        ),
+        ("- password: >-   # c\n    line-one\n", f"- password: {REDACTED}   # c\n"),
         # A properties file, a query string.
         ("password = made-up\n", f"password = {REDACTED}\n"),
         ("url?password=made-up&x=1", f"url?password={REDACTED}"),
@@ -74,6 +90,13 @@ def test_placeholder_is_the_one_the_governed_vault_read_writes() -> None:
             f'<ns:password type="x">{REDACTED}</ns:password>',
         ),
         ("<password><![CDATA[made<up]]></password>", f"<password>{REDACTED}</password>"),
+        # Text split by a comment or a CDATA section goes whole.
+        ("<password>made<!-- note -->up</password>", f"<password>{REDACTED}</password>"),
+        ("<password>ma<![CDATA[de]]>up</password>", f"<password>{REDACTED}</password>"),
+        (
+            "<ns:token><!-- a -->made<![CDATA[-]]>up<!-- b --></ns:token>",
+            f"<ns:token>{REDACTED}</ns:token>",
+        ),
         (
             "<credentials><user>bob</user><password>made-up</password></credentials>",
             f"<credentials><user>bob</user><password>{REDACTED}</password></credentials>",
@@ -127,6 +150,7 @@ def test_one_secret_value_is_replaced_and_the_rest_stays(text: str, cleaned: str
         '<input type="password" name="password" placeholder="Password">',
         '<xs:element name="password" type="xs:string"/>',
         "<password></password><password>  </password>",
+        "<password><!-- set at install --></password><password><![CDATA[]]></password>",
         "<!DOCTYPE html>\n<html><body>\n<p>Docs: the token: see the header [not: yaml: {</p>\n"
         "</body></html>\n",
         ".token { color: red }\n--token-color: red;\n",

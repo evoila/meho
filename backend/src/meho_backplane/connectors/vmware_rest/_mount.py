@@ -62,6 +62,16 @@ VSAN_PATH_PREFIX = "/vsan"
 #: The first vCenter major version whose VI/JSON API has the vSAN methods.
 VSAN_VI_JSON_MIN_MAJOR = 9
 
+#: The service parts a VI-JSON path can start with (#4775). The vendor
+#: ``vi-json.yaml`` of 9.0 puts these paths under the same
+#: ``/sdk/vim25/{release}`` base as the plain ``/{MoType}/{moId}/{method}``
+#: ones: vSAN management (``/vsan``), storage providers (``/sms``), storage
+#: policies (``/pbm``), ESX Agent Manager (``/eam``) and First Class Disks
+#: (``/vslm``). :func:`is_vmomi_path` must know them: their first segment
+#: is lower case, so the managed-object-type check alone would send them
+#: to ``/api``, where vCenter answers 404 (the #3534 fault again).
+VI_JSON_SERVICE_PREFIXES = (VSAN_PATH_PREFIX, "/sms", "/pbm", "/eam", "/vslm")
+
 # vSphere's list FilterSpec query params carry a ``filter.`` prefix on the
 # legacy ``/rest`` mount (``filter.datastores``, ``filter.hosts``, ...) but
 # are addressed by their bare name on the modern ``/api`` mount
@@ -74,6 +84,7 @@ __all__ = [
     "SESSION_PATH_LEGACY",
     "SESSION_PATH_MODERN",
     "VI_JSON_MOUNT_PREFIX",
+    "VI_JSON_SERVICE_PREFIXES",
     "VSAN_PATH_PREFIX",
     "VSAN_VI_JSON_MIN_MAJOR",
     "VsanMethod",
@@ -155,13 +166,23 @@ def is_vmomi_path(descriptor_path: str) -> bool:
 
     ``vi-json.yaml`` paths start with a PascalCase managed-object type
     (``/DistributedVirtualPortgroup/{moId}/config``,
-    ``/PropertyCollector/{moId}/RetrievePropertiesEx``). Every vSphere
-    Automation path in ``vcenter.yaml`` starts with a lower-case segment
-    (``/vcenter``, ``/appliance``, ``/cis`` ...), and an already-mounted
-    path starts with ``/api``, ``/rest`` or ``/sdk``. So the case of the
-    first character tells the two spec families apart without a lookup.
+    ``/PropertyCollector/{moId}/RetrievePropertiesEx``), or with one of
+    the :data:`VI_JSON_SERVICE_PREFIXES` followed by such a type
+    (``/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary``).
+    Every vSphere Automation path in ``vcenter.yaml`` starts with another
+    lower-case segment (``/vcenter``, ``/appliance``, ``/cis`` ...), and
+    an already-mounted path starts with ``/api``, ``/rest`` or ``/sdk``.
+    So the case of the first character after an optional service part
+    tells the two spec families apart without a lookup. The check works
+    on the filled-in path as well as the template: it never looks at the
+    ``{moId}`` segment.
     """
-    first = descriptor_path.lstrip("/")[:1]
+    path = f"/{descriptor_path.lstrip('/')}"
+    for prefix in VI_JSON_SERVICE_PREFIXES:
+        if path.startswith(f"{prefix}/"):
+            path = path[len(prefix) :]
+            break
+    first = path[1:2]
     return first.isascii() and first.isupper()
 
 

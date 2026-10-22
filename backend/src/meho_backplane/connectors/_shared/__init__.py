@@ -43,7 +43,10 @@ Exports:
   file or a documentation page an appliance serves. It finds the value
   of every secret-named key, element and attribute, whatever the file
   format, and replaces it with the placeholder the governed Vault read
-  uses, or reports where it is so the read can refuse the file.
+  uses, or reports where it is so the read can refuse the file. Its
+  pieces sit next to it: ``api_file_collections`` (objects and lists
+  under a secret-named key) and ``api_file_text`` (keys, values, lines
+  and names).
 
 New cross-connector shared modules land alongside these — keep each
 module focused on a single concern (auth, retries, pagination, etc.)

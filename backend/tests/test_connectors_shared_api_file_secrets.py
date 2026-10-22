@@ -6,8 +6,9 @@
 Every secret here is made up. The refused cases are the ones the
 independent reviewer found passing the earlier per-format checks of the
 API file reads: comment lines before a YAML value, an alias with a
-trailing comment, an XML element, an HTML attribute, a JSON value on the
-next line inside a script block, and the rest.
+trailing comment, an XML element, an HTML attribute (quoted or bare), a
+JSON value on the next line inside a script block, a value inside an
+object or a list under a secret-named key, and the rest.
 """
 
 from __future__ import annotations
@@ -189,6 +190,58 @@ _REFUSED = {
         1,
         "password",
     ),
+    # The reviewer's examples on the third round: bare attribute values,
+    # and an object or a list under a secret-named key.
+    "html-input-unquoted-name": ('<input name=password value="madeup">', 1, "value"),
+    "html-input-unquoted-value": ('<input name="password" value=madeup>', 1, "value"),
+    "html-input-both-unquoted": ("<input name=password value=madeup>", 1, "value"),
+    "html-input-unquoted-self-closing": ("<input name=password value=madeup/>", 1, "value"),
+    "json-object-under-credentials": ('{"credentials":{"value":"madeup"}}', 1, "value"),
+    "json-list-under-licence-key": ('{"licenseKey":["MADEUP-MADEUP"]}', 1, "licenseKey"),
+    "yaml-mapping-under-credentials": ("credentials:\n  value: madeup\n", 1, "value"),
+    "yaml-list-under-licence-key": ("licenseKey:\n  - MADEUP-MADEUP\n", 1, "licenseKey"),
+    "json-object-nested-under-credentials": (
+        '{"credentials":{"type":"x","inner":{"value":"madeup"}}}',
+        1,
+        "value",
+    ),
+    "json-secret-key-inside-a-schema-example": (
+        '{"credentials":{"example":{"token":{"value":"madeup"}}}}',
+        1,
+        "value",
+    ),
+    "json-list-of-objects-under-credentials": ('{"credentials":[{"pass":"madeup"}]}', 1, "pass"),
+    "json-value-of-words-under-credentials": (
+        '{"credentials":{"value":"made up of words"}}',
+        1,
+        "value",
+    ),
+    "json-object-on-the-next-line-under-credentials": (
+        '{"credentials":\n  {"value": "madeup"}}',
+        1,
+        "value",
+    ),
+    "yaml-list-of-mappings-under-credentials": (
+        "credentials:\n  - pass: madeup\n",
+        1,
+        "pass",
+    ),
+    "yaml-block-scalar-inside-credentials": ("credentials:\n  value: |\n    madeup\n", 1, "value"),
+    "yaml-hidden-sibling-then-value": (
+        "credentials:\n  - type: x\n    value: madeup\n",
+        1,
+        "value",
+    ),
+    "yaml-anchored-mapping-aliased-by-a-password": (
+        "pw: &pw {value: madeup}\npassword: *pw\n",
+        2,
+        "value",
+    ),
+    "script-object-under-credentials": (
+        "window.cfg = {credentials: {value: 'madeup'}};",
+        1,
+        "value",
+    ),
 }
 
 
@@ -245,6 +298,26 @@ _ACCEPTED = {
     "html-password-input-without-a-value": '<input type="password" name="password">',
     "empty-elements": "<password/><password></password><password><!-- none --></password>",
     "script-with-credentials-flag": "fetch(url, {withCredentials: true});\n",
+    # A collection under a secret-named key that describes an API.
+    "path-item-named-after-a-password": (
+        '{"paths":{"/users/{id}/reset-password":{"post":{"tags":["users"],"summary":"Reset",'
+        '"operationId":"reset_password","parameters":[{"name":"sort","in":"query",'
+        '"schema":{"type":"string","default":"asc","enum":["asc","desc"]}}],'
+        '"responses":{"200":{"description":"Done","content":{"text/html":'
+        '{"schema":{"type":"string"}}}}},"security":[{"OAuth2":["read"]}]}}}}'
+    ),
+    "oauth-password-flow": (
+        "components:\n  securitySchemes:\n    oauth:\n      type: oauth2\n      flows:\n"
+        "        password:\n          tokenUrl: https://login.example/token\n"
+        "          scopes:\n            read: Read access\n"
+    ),
+    "schema-with-an-example": '{"password": {"type": "string", "example": "example-only"}}',
+    "numbers-and-literals-under-credentials": '{"credentials":{"port":8443,"on":true,"n":null}}',
+    "description-block-under-credentials": "credentials:\n  description: |\n    value: words\n",
+    "stubs-in-a-list-under-a-token": "token:\n  - string\n  - <token>\n",
+    "placeholder-in-brackets-under-credentials": (
+        f"credentials:\n  value: {REDACTED}\n  - {REDACTED}\n"
+    ),
 }
 
 
@@ -284,6 +357,8 @@ def test_the_description_names_the_field_and_the_place_never_the_value() -> None
     assert hit.description == "the attribute 'value' at character 33"
     (hit,) = find_api_file_secrets('<input id="login-field" name="password" value="madeup">')
     assert hit.description == "the attribute 'value' at character 47"
+    (hit,) = find_api_file_secrets('{"credentials":{"value":"madeup"}}')
+    assert hit.description == "the field 'value' at character 25"
     (hit,) = find_api_file_secrets(_PEM_HEADER + "\nMADEUP\n" + _PEM_FOOTER)
     assert hit.description == "a PEM private key (RSA PRIVATE KEY) at character 32"
 
@@ -296,8 +371,11 @@ def test_the_description_names_the_field_and_the_place_never_the_value() -> None
         + "".join(f"x{i}: &a{i} madeup\n" for i in range(5_000)),
         '"password": "madeup", ' * 20_000,
         "password:\n" * 20_000,
+        '{"token":' * 20_000 + '"madeup"' + "}" * 20_000,
+        '{"credentials":[' + '"madeup",' * 50_000 + '"madeup"]}',
+        "credentials:\n" + "  - a: madeup\n" * 50_000,
     ],
-    ids=["open-tags", "aliases", "keys", "empty-keys"],
+    ids=["open-tags", "aliases", "keys", "empty-keys", "nested-objects", "list", "block-list"],
 )
 def test_many_repeated_shapes_scan_in_one_pass(text: str) -> None:
     # Each shape once scanned a quadratic path; the scan must stay linear.

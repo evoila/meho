@@ -16,7 +16,7 @@ inventory read ('what's deployed')"*) to **typed** ops that dispatch as
 Basic session against the LCM-local user store — no catalog ingest, no
 spec dependency.
 
-Three ops ship here, two per audited bucket and one for the vendor files:
+Three ops ship here: one per audited bucket and one for the vendor files:
 
 * ``fleet.about`` — ``GET /lcm/lcops/api/v2/about`` — the appliance
   identity / health probe. **Known regression:** this endpoint returns

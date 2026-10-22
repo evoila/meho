@@ -291,7 +291,7 @@ async def test_typed_ops_registered_with_no_ingested_rows(
         .all()
     )
     op_ids = {r.op_id for r in rows}
-    assert op_ids == {"fleet.about", "fleet.environment.list"}
+    assert op_ids == {"fleet.about", "fleet.environment.list", "fleet.api_file.get"}
     assert all(r.source_kind == "typed" for r in rows)
 
 
@@ -301,10 +301,11 @@ async def test_typed_ops_registered_with_no_ingested_rows(
 
 
 def test_typed_ops_are_read_only_and_ungated() -> None:
-    """Both typed ops are safe, read-only, and require no approval."""
+    """Every typed op is safe, read-only, and requires no approval."""
     assert {op.op_id for op in FLEET_TYPED_OPS} == {
         "fleet.about",
         "fleet.environment.list",
+        "fleet.api_file.get",
     }
     for op in FLEET_TYPED_OPS:
         assert op.safety_level == "safe", op.op_id

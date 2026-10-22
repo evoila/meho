@@ -66,10 +66,16 @@ constants (probe / about / environments) plus the
 ``_FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS`` tuple. The connector dispatches
 **GET-only** — HTTP Basic on every request, no session-establish POST — so every
 literal declares ``GET:``.
+
+The documentation pages and folders that ``fleet.api_file.get`` reads
+(``api_file.DOCS_PAGES`` and ``api_file.DOCS_FOLDERS``) are listed as ``GET``
+too, marked "documentation path, not in the API file", and left out of the
+served check: an API file never lists the path that serves it.
 """
 
 from __future__ import annotations
 
+from meho_backplane.connectors.vcf_fleet import api_file as _api_file
 from meho_backplane.connectors.vcf_fleet import connector as _connector
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -82,6 +88,13 @@ _SPEC_DIR = "vcf-fleet-9.0"
 #: vRSLCM 1.3.0 LCM REST OpenAPI, fetched from the appliance Swagger backend.
 _SPEC_FILE = "vrslcm-lcm-openapi.json"
 _SPEC_LABEL = f"{_SPEC_DIR}/{_SPEC_FILE}"
+
+#: Documentation paths, not in the API file: the pages and folders that serve
+#: the API descriptions (``fleet.api_file.get``). Listed for completeness, left
+#: out of the served check.
+_DOCUMENTATION_OP_IDS = frozenset(
+    f"GET:{path}" for path in (*_api_file.DOCS_PAGES, *_api_file.DOCS_FOLDERS)
+)
 
 
 def _path_constants() -> dict[str, str]:
@@ -141,6 +154,13 @@ def test_hand_coded_path_surface_is_pinned() -> None:
         "GET:/lcm/lcops/api/v2/version",
         "GET:/lcm/locker/api/v2/about",
     }
+    assert {
+        "GET:/api/swagger-ui.html",
+        "GET:/lcm/cms/api/swagger-ui.html",
+        "GET:/api/swagger-ui/",
+        "GET:/lcm/cms/api/swagger-ui/",
+    } == _DOCUMENTATION_OP_IDS
+    assert not _DOCUMENTATION_OP_IDS & _declared_op_ids()
 
 
 def test_declared_op_ids_are_served_by_the_pinned_vrslcm_spec() -> None:

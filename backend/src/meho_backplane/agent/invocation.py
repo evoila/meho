@@ -1036,7 +1036,7 @@ class AgentInvoker:
         # Request the audience we then verify, so the token carries it even on
         # realms without a default audience mapper.
         token = await get_client_credentials_token(
-            issuer_url=str(settings.keycloak_issuer_url),
+            issuer_url=settings.keycloak_discovery_base,
             client_id=agent_client_id,
             client_secret=agent_client_secret.get_secret_value(),
             audience=settings.keycloak_audience,

@@ -352,8 +352,14 @@
         "forwardedAllowIps"
       ],
       "properties": {
-        "keycloakIssuerUrl": { "type": "string", "minLength": 1 },
-        "keycloakAudience": { "type": "string", "minLength": 1 },
+        "keycloakIssuerUrl": {
+          "type": "string",
+          "description": "Keycloak issuer URL. Required (non-empty) unless `coreKeycloak.enabled` is true; then the chart derives it and this key must stay empty (allOf below)."
+        },
+        "keycloakAudience": {
+          "type": "string",
+          "description": "Token audience. Required (non-empty) unless `coreKeycloak.enabled` is true; then the chart uses `meho-backplane`, the audience of the built-in realm."
+        },
         "keycloakCliClientId": {
           "type": "string",
           "description": "Public OAuth client_id surfaced to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`. The CLI maps this field (NOT `keycloakAudience`) to the device-code `client_id`. Must be a Keycloak public client (no client secret) with the device-grant flow enabled and an audience mapper that injects `keycloakAudience` into the issued access token. Default `\"\"` keeps backwards compatibility with v0.3.1 — the backplane endpoint still returns the field but the CLI surfaces an actionable public-client error rather than silently misusing `keycloakAudience` (which is the confidential resource-server id and is rejected by Keycloak's device-grant endpoint with `401 unauthorized_client`). G0.9.1-T9, RDC dogfood Signal #16, 2026-05-21. See `deploy/values-examples/README.md` for the realm-side recipe."
@@ -589,9 +595,7 @@
       "properties": {
         "issuer": {
           "type": "string",
-          "minLength": 1,
-          "format": "uri",
-          "description": "Keycloak issuer URL — required."
+          "description": "Keycloak issuer URL. Required (a non-empty URI) unless `coreKeycloak.enabled` is true; then it must stay empty (allOf below)."
         },
         "audience": { "type": "string", "minLength": 1 },
         "clientSecretSyncFromVault": { "type": "string", "minLength": 1 }
@@ -870,7 +874,7 @@
     "coreKeycloak": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner, and the Keycloak subchart (`charts/keycloak/`) is deployed. Only the bootstrap Secret may have your own name (`existingSecrets.bootstrap`). While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`, `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and `checkRunner.clientSecret.secretName` must stay empty or name the `<release>-core-…` Secret; a custom name there makes the Keycloak pod wait forever for a Secret that is never created; the render-time check for this lands with #4591. See docs/codebase/core-secrets.md. Needs `corePostgres.enabled: true` (allOf below). This block names every key the subchart has; Helm checks their full shape against `charts/keycloak/values.schema.json` when `enabled` is true.",
+      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner, and the Keycloak subchart (`charts/keycloak/`) is deployed. Only the bootstrap Secret may have your own name (`existingSecrets.bootstrap`). While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`, `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and `checkRunner.clientSecret.secretName` must stay empty or name the `<release>-core-…` Secret, because Keycloak reads only that name; the render fails otherwise. The chart also sets the backplane's Keycloak settings from this block (issuer, in-cluster discovery URL, audience, client ids, `KEYCLOAK_ADMIN_*`). See docs/codebase/core-secrets.md. Needs `corePostgres.enabled: true` (allOf below). This block names every key the subchart has; Helm checks their full shape against `charts/keycloak/values.schema.json` when `enabled` is true.",
       "properties": {
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
@@ -1455,7 +1459,7 @@
         },
         "keycloakCIDR": {
           "type": "string",
-          "description": "Keycloak egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
+          "description": "Keycloak egress CIDR (IPv4). Same conditional shape rules as postgresCIDR, except that the built-in Keycloak (`coreKeycloak.enabled`) does not use it: the backplane then reaches the Keycloak pod by podSelector (root allOf)."
         },
         "ingestAllowedNamespaces": {
           "type": "array",
@@ -1511,7 +1515,7 @@
             "required": ["enabled"]
           },
           "then": {
-            "required": ["postgresCIDR", "vaultCIDR", "keycloakCIDR"],
+            "required": ["postgresCIDR", "vaultCIDR"],
             "properties": {
               "postgresCIDR": {
                 "type": "string",
@@ -1519,11 +1523,6 @@
                 "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
               },
               "vaultCIDR": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
-              },
-              "keycloakCIDR": {
                 "type": "string",
                 "minLength": 1,
                 "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
@@ -1710,6 +1709,49 @@
           }
         },
         "required": ["corePostgres"]
+      }
+    },
+    {
+      "description": "A bring-your-own Keycloak (`coreKeycloak.enabled` not true) needs its issuer and audience, and with the NetworkPolicy on its egress CIDR. With the built-in Keycloak the chart derives the issuer and audience (#4591), the render fails if an issuer is set by hand, and the NetworkPolicy reaches the Keycloak pod by podSelector.",
+      "if": {
+        "properties": {
+          "coreKeycloak": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["coreKeycloak"]
+      },
+      "else": {
+        "properties": {
+          "keycloak": {
+            "properties": {
+              "issuer": { "minLength": 1, "format": "uri" }
+            }
+          },
+          "config": {
+            "properties": {
+              "keycloakIssuerUrl": { "minLength": 1 },
+              "keycloakAudience": { "minLength": 1 }
+            }
+          },
+          "networkPolicy": {
+            "if": {
+              "properties": { "enabled": { "const": true } },
+              "required": ["enabled"]
+            },
+            "then": {
+              "required": ["keycloakCIDR"],
+              "properties": {
+                "keycloakCIDR": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                }
+              }
+            }
+          }
+        }
       }
     }
   ],

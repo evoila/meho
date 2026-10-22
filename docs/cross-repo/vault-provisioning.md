@@ -169,7 +169,7 @@ This is a *distinct* identity from the `meho-mcp` JWT-login role
 (surfaces 1–3): it is bound to its own narrow policy on the
 agent-credentials KV path
 (`scheduler_agent_vault_path_pattern`, default
-`secret/data/agents/*/credentials`).
+`secret/data/agents/+/credentials`).
 
 The capability scope must be **read + write**, not read-only:
 
@@ -217,10 +217,10 @@ write is never retried. See the two rows in *Failure modes* below.
 # KV v2 splits the secret value (/data/) from its metadata (/metadata/).
 # The write path mints + updates the value; the metadata read is needed
 # for create_or_update_secret's check-and-set bookkeeping.
-path "secret/data/agents/*/credentials" {
+path "secret/data/agents/+/credentials" {
   capabilities = ["create", "read", "update"]
 }
-path "secret/metadata/agents/*/credentials" {
+path "secret/metadata/agents/+/credentials" {
   capabilities = ["read"]
 }
 # The dead-token probe (evoila/meho#2652) reads lookup-self after a 403
@@ -352,7 +352,7 @@ vault write -field=token "auth/${VAULT_OIDC_MOUNT_PATH:-jwt}/login" \
 re-minted token authenticates as the runner principal, so the role it logs
 in with (`VAULT_CHECK_RUNNER_ROLE`, else `VAULT_OIDC_ROLE`) must itself
 grant the scheduler's capabilities — `create` / `read` / `update` on
-`secret/data/agents/*/credentials` — or the retry 403s just like the dead
+`secret/data/agents/+/credentials` — or the retry 403s just like the dead
 static token did. The scheduler adds **no** dedicated role knob (#2668
 reuses the landed identity); when you scope a dedicated
 `VAULT_CHECK_RUNNER_ROLE` (surface 7, Option A), attach the
@@ -593,12 +593,12 @@ the target** (`secret_ref` stays `NULL`).
 #    `secret/metadata/...` lines: `delete` removes every version and the
 #    metadata, `read` lets the op check the path before and after.
 vault policy write meho-teardown - <<'HCL'
-path "secret/data/ops/**"    { capabilities = ["read"] }
-path "secret/delete/ops/**"  { capabilities = ["update"] }
-path "secret/metadata/ops/**" { capabilities = ["read", "delete"] }
-path "secret/data/lab/**"    { capabilities = ["read"] }
-path "secret/delete/lab/**"  { capabilities = ["update"] }
-path "secret/metadata/lab/**" { capabilities = ["read", "delete"] }
+path "secret/data/ops/*"    { capabilities = ["read"] }
+path "secret/delete/ops/*"  { capabilities = ["update"] }
+path "secret/metadata/ops/*" { capabilities = ["read", "delete"] }
+path "secret/data/lab/*"    { capabilities = ["read"] }
+path "secret/delete/lab/*"  { capabilities = ["update"] }
+path "secret/metadata/lab/*" { capabilities = ["read", "delete"] }
 HCL
 
 # 2. Role on the SAME JWT auth mount as meho-mcp (dedicated mount per surface
@@ -688,7 +688,7 @@ everything it needs from Vault.
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: InvalidPath"` | **Missing surface 5** — federation-proof KV path doesn't exist. | Run the provisioning command from surface 5 above |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on `secret/meho/*`. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/*` and `secret/metadata/meho/*` |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: KeyError"` or `read_failed: TypeError` | Vault returned an unexpected payload shape — KV-v1 mount instead of v2, proxy mangling the response, etc. | Verify surface 4 (KV v2 mount); the mount must be type `kv` with `options.version="2"` |
-| Agent-principal registration fails — REST `502 scheduler_vault_write_error`, or MCP `meho_agent_principals_register` JSON-RPC `-32602` "scheduler Vault write failed" — while reads/listing still work | **Under-scoped surface 6** — `VAULT_SCHEDULER_TOKEN` policy grants read but not write on the agent-credentials path, so the secret-mint write is denied (Vault 403). The backplane probed `auth/token/lookup-self` after that 403 and did **not** get a 403 back, so the token is live (or Vault could not answer the probe — check for an outage first) and the policy is the remaining fault. Reads stay healthy because the read path is read-only-sufficient. | Verify surface 6 (`vault token capabilities "$VAULT_SCHEDULER_TOKEN" secret/data/agents/<name>/credentials`); widen the `meho-scheduler` policy to include `create`+`update` on `secret/data/agents/*/credentials` |
+| Agent-principal registration fails — REST `502 scheduler_vault_write_error`, or MCP `meho_agent_principals_register` JSON-RPC `-32602` "scheduler Vault write failed" — while reads/listing still work | **Under-scoped surface 6** — `VAULT_SCHEDULER_TOKEN` policy grants read but not write on the agent-credentials path, so the secret-mint write is denied (Vault 403). The backplane probed `auth/token/lookup-self` after that 403 and did **not** get a 403 back, so the token is live (or Vault could not answer the probe — check for an outage first) and the policy is the remaining fault. Reads stay healthy because the read path is read-only-sufficient. | Verify surface 6 (`vault token capabilities "$VAULT_SCHEDULER_TOKEN" secret/data/agents/<name>/credentials`); widen the `meho-scheduler` policy to include `create`+`update` on `secret/data/agents/+/credentials` |
 | Agent- or runner-principal registration fails with `scheduler_vault_token_invalid: the scheduler Vault token is invalid or expired …` (REST 502 detail, MCP `-32602` message, `/ui/agents/principals` register banner) | **Dead surface-6 token** — the `VAULT_SCHEDULER_TOKEN` value was revoked, hit its TTL, or is a periodic token whose lease lapsed (a `-period=768h` token expires that long after its *last* renewal, so a scheduler that was down for a month comes back with a dead token). Vault answers both this and the under-scoped-policy case with a 403; the backplane told them apart by getting a 403 from `auth/token/lookup-self` too. **Policy, path pattern, and mount are irrelevant here — do not widen the policy.** | Confirm with `VAULT_TOKEN="$VAULT_SCHEDULER_TOKEN" vault token lookup` (errors on a dead token). Re-mint against the same policy with the surface-6 command above (`vault token create -policy=meho-scheduler -period=768h -field=token`), then update the deployment secret the backplane reads (`VAULT_SCHEDULER_TOKEN`, or the file `VAULT_SCHEDULER_TOKEN_FILE` points at). The file sink is re-read on every use, so a Vault-Agent sidecar rewrite needs no pod restart; an env-var change does need a rollout. Watch the `scheduler_vault_token_verified` log event (`ttl_seconds` / `expire_time`) to confirm recovery |
 
 ## References

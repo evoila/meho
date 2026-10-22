@@ -134,8 +134,10 @@ sends the `GET` with its own `vRealizeOpsToken` login header.
   stored result stops with an error that names its size; the read never
   returns a cut file. A file in which the shared whole-file secret scan
   would replace a value (a password, token, key or Authorization field
-  with a value, in JSON, YAML, XML or HTML, or a PEM private key) is
-  refused; the read never returns a secret.
+  with a value, alone or inside an object or list, in JSON, YAML, XML or
+  HTML, or a PEM private key) is refused; the read never returns a
+  secret. A secret-named query value in `redirect_path` is replaced by
+  `[REDACTED:param_name]`.
 
 Details (the path rule, redirects, redaction, limits):
 [`connectors-vcf-operations.md`](connectors-vcf-operations.md).

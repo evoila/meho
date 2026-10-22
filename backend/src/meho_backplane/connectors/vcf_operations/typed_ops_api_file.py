@@ -23,7 +23,9 @@ The read is narrow on purpose:
   path is refused before a request goes out.
 * It sends one ``GET`` to the target's own address with the target's own
   login (the connector's token session), on the pooled client.
-* It does not follow a redirect. The answer names the redirect's path.
+* It does not follow a redirect. The answer names the redirect's path;
+  a secret-named query setting in it (``?licenseKey=...``) comes back
+  with its value replaced by the placeholder.
 * The file comes back as text parts of at most 64 KiB each, measured as
   JSON text, so a part always fits one ``result_query`` answer. Joining
   the parts in order gives the exact file; ``sha256`` is the hash of the
@@ -248,10 +250,9 @@ async def _fetch_file(
     """Send the one ``GET`` with the target's login and return status, headers and body.
 
     The request carries the connector's token header (``OpsToken`` on 9.x,
-    ``vRealizeOpsToken`` on 8.x) on the pooled client. The pooled client
-    class follows same-origin redirects by itself, so the request goes
-    through :meth:`httpx.AsyncClient.send` with ``follow_redirects=False``
-    to return a redirect unfollowed.
+    ``vRealizeOpsToken`` on 8.x). The pooled client class follows same-origin
+    redirects by itself, so the request goes through
+    :meth:`httpx.AsyncClient.send` with ``follow_redirects=False``.
     """
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
@@ -278,10 +279,9 @@ async def _read_version(
 ) -> dict[str, Any]:
     """Read ``version`` and ``build``; on failure return ``None`` and the reason.
 
-    The read uses the connector's normal login, so it can also fail
-    before any request goes out: no credentials for the target, access
-    denied, or a credential store that cannot be reached. Those are
-    expected failures of this best-effort read, not of the file read.
+    The read uses the connector's normal login, so it can also fail before
+    any request goes out (no credentials, access denied, a credential store
+    out of reach). Those are expected failures of this best-effort read.
     """
     try:
         payload = await connector._get_json(target, _VERSIONS_CURRENT_PATH, operator=operator)
@@ -332,9 +332,8 @@ def _file_fields(path: str, content_type: str | None, body: bytes) -> dict[str, 
 def _check_fits(answer: dict[str, Any], max_record_bytes: int, max_rows: int) -> None:
     """Refuse an answer too big to keep whole in one stored result.
 
-    The stored result keeps the text parts as rows, so both caps apply:
-    the row cap and the record byte cap. The reducer would cut the tail
-    silently; this read never returns a cut file.
+    The text parts are rows, so the row cap and the record byte cap both
+    apply. The reducer would cut the tail silently; this read never does.
     """
     if answer["parts"] > max_rows:
         raise VropsApiFileError(
@@ -354,9 +353,9 @@ def _check_fits(answer: dict[str, Any], max_record_bytes: int, max_rows: int) ->
 def _check_no_secret_value(answer: dict[str, Any]) -> None:
     """Refuse a file in which the shared secret scan would replace a value.
 
-    The scan reads the whole file text, whatever its format, so a secret
-    that a part cut splits in two is found too. This read returns the exact
-    file or nothing. The error names the count and the first field, never a value.
+    The scan reads the whole file text, so a secret that a part cut splits
+    in two is found too. The error names the count and the first field,
+    never a value.
     """
     file_text = "".join(part["text"] for part in answer["text_parts"])
     _, count = api_file_secrets.scrub_api_file_secrets(file_text)
@@ -366,6 +365,22 @@ def _check_no_secret_value(answer: dict[str, Any]) -> None:
             f"{answer['path']!r} holds {count} secret value{'s' if count != 1 else ''}; "
             f"the first is {first}. This read never returns a secret, so the file was not returned."
         )
+
+
+#: Answer fields that repeat a header the appliance sent.
+_HEADER_FIELDS = ("content_type", "redirect_path")
+
+
+def _scrub_header_fields(answer: dict[str, Any]) -> None:
+    """Replace a secret value in a field that repeats a header the appliance sent.
+
+    A redirect path can carry a secret-named query setting, which the
+    stored-result redaction does not see. There is no file to keep whole
+    here, so the value is replaced and the path stays usable.
+    """
+    for field in _HEADER_FIELDS:
+        if isinstance(answer[field], str):
+            answer[field], _ = api_file_secrets.scrub_api_file_secrets(answer[field])
 
 
 def _check_redaction_keeps_text(
@@ -419,7 +434,8 @@ async def api_file_get_impl(
     2. ``GET`` the file with the target's login, without following a redirect.
     3. Read the appliance version and build (best effort).
     4. Refuse a file that does not fit in one stored result, whose text the
-       stored-result redaction would change, or that holds a secret value.
+       stored-result redaction would change, or that holds a secret value;
+       replace a secret value in ``redirect_path`` or ``content_type``.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -446,6 +462,7 @@ async def api_file_get_impl(
         _check_fits(answer, max_record_bytes, settings.result_handle_max_spill_rows)
         _check_redaction_keeps_text(answer, connector, operator)
         _check_no_secret_value(answer)
+    _scrub_header_fields(answer)
 
     _log.info(
         "vrops_api_file_read",
@@ -492,22 +509,14 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "path": {"type": "string", "description": "The path that was read."},
         "status": {"type": "integer", "description": "HTTP status of the GET."},
-        "content_type": {
-            "type": ["string", "null"],
-            "description": "Content-Type header of the answer.",
-        },
+        "content_type": {"type": ["string", "null"], "description": "Content-Type of the answer."},
         "redirect_path": {
             "type": ["string", "null"],
-            "description": "For a 3xx answer: the path the redirect points to (not followed).",
+            "description": "For a 3xx answer: the path the redirect points to (not followed), "
+            "a secret-named query value in it replaced by [REDACTED:param_name].",
         },
-        "size": {
-            "type": ["integer", "null"],
-            "description": "File size in bytes; null when the status is not 2xx.",
-        },
-        "sha256": {
-            "type": ["string", "null"],
-            "description": "SHA-256 (hex) of the file bytes; null when the status is not 2xx.",
-        },
+        "size": {"type": ["integer", "null"], "description": "File size in bytes; null unless 2xx"},
+        "sha256": {"type": ["string", "null"], "description": "SHA-256 (hex) of the file bytes"},
         "parts": {"type": "integer", "description": "How many text parts the file has."},
         "text_parts": {
             "type": "array",
@@ -524,18 +533,9 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             },
             "description": "The file text, in order. Joining all parts gives the exact file.",
         },
-        "version": {
-            "type": ["string", "null"],
-            "description": "Appliance releaseName from GET /suite-api/api/versions/current.",
-        },
-        "build": {
-            "type": ["string", "null"],
-            "description": "Appliance buildNumber from GET /suite-api/api/versions/current.",
-        },
-        "version_error": {
-            "type": ["string", "null"],
-            "description": "Why version or build is empty; null when the read worked.",
-        },
+        "version": {"type": ["string", "null"], "description": "releaseName of the appliance."},
+        "build": {"type": ["string", "null"], "description": "buildNumber of the appliance."},
+        "version_error": {"type": ["string", "null"], "description": "Why the version is null."},
     },
     "required": ["path", "status", "parts", "text_parts"],
 }

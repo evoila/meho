@@ -259,8 +259,10 @@ registrar is queued via `register_typed_op_registrar` in the package
     8.x through the inherited `auth_headers`). The request goes through
     `httpx.AsyncClient.send(..., follow_redirects=False)`, so a redirect
     is not followed (the pooled client class would follow a same-origin
-    redirect by itself). A `3xx` returns `redirect_path`; a `401`, `403`,
-    `404` or `5xx` returns its `status` with no text. A login failure
+    redirect by itself). A `3xx` returns `redirect_path`, with the value
+    of a secret-named query setting in it (`?licenseKey=...`) replaced by
+    `[REDACTED:param_name]`; the same replacement runs on `content_type`.
+    A `401`, `403`, `404` or `5xx` returns its `status` with no text. A login failure
     (no credentials, a rejected login) stops the read before the request.
   - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
     `size` (bytes), `sha256` (of the file bytes), `parts`, `text_parts`,
@@ -300,7 +302,8 @@ registrar is queued via `register_typed_op_registrar` in the package
     setting; the content of a secret-named XML element
     (`<password>...</password>`, comments, CDATA and child elements
     included); the value attribute of an element named by its attributes
-    (`<property name="password" value="..."/>`); and a PEM private key.
+    (`<property name="password" value="..."/>`, the attribute values quoted
+    or bare); and a PEM private key.
     The value may sit on the same line or on the next line that is not
     empty and not a comment; a quoted value runs to its closing quote,
     also over a line break; a bare value runs to the end of its line and
@@ -309,8 +312,19 @@ registrar is queued via `register_typed_op_registrar` in the package
     is a value, and so is what its anchor marks anywhere in the file. A
     schema stub stays accepted: an empty value, a type word such as
     `string` or `null`, a placeholder such as `<password>`, `${TOKEN}` or
-    `{{ token }}`, a row of `*`, or an object or list (`"password":
-    {"type": "string"}`, `password:` then `type: string`). A bare
+    `{{ token }}`, or a row of `*`. When a secret-named key holds an
+    object or a list, every scalar inside it counts, at any depth, except
+    the values of the words a schema uses (`type`, `format`,
+    `description`, `$ref`, `example`, `enum`, `tags`, `scopes`, ...: the
+    fixed fields of OpenAPI 3.1, Swagger 2 and JSON Schema 2020-12), and a
+    bare number, `true`, `false` or `null`. So `"password": {"type":
+    "string"}` and a path item named `/reset-password` stay accepted,
+    while `"credentials": {"value": "..."}` and `"licenseKey": ["..."]`
+    are found. The scan lives in three modules next to each other:
+    `api_file_secrets.py` (the entry points, elements, attributes and PEM
+    blocks), `api_file_collections.py` (objects and lists under a
+    secret-named key) and `api_file_text.py` (keys, values, lines and
+    names). A bare
     secret-named word in running text (`Use password: ...`) counts only
     before a dense value of at least 8 characters without spaces, the
     stored-result redaction's own bound, so a sentence about passwords is
@@ -331,10 +345,12 @@ registrar is queued via `register_typed_op_registrar` in the package
   - **Tests.** `tests/test_connectors_vcf_operations_typed_api_file.py`
     (respx: accepted and refused paths with no request, the login header on
     both connectors, status and redirect cases, large files, version
-    failures, a login failure, a file that a redaction rule would change, a
-    file with a secret value in JSON, YAML, XML or HTML or a PEM private
-    key, schema text that stays accepted, a secret split across the part
-    cut in both forms, parts bounded by their JSON size,
+    failures, a login failure, a redirect with a secret-named query value,
+    a file that a redaction rule would change, a file with a secret value
+    in JSON, YAML, XML or HTML (attributes quoted or bare, a value inside
+    an object or a list under a secret-named key) or a PEM private key,
+    schema text that stays accepted, a secret split across the part cut
+    in both forms, parts bounded by their JSON size,
     the result-handle round trip for a one-line file and for a file of
     control characters, and the operation-contract rules),
     `tests/test_connectors_shared_api_file_secrets.py` (every secret

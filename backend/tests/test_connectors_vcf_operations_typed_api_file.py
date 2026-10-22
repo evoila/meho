@@ -338,6 +338,26 @@ async def test_relative_redirect_resolves_against_the_page_folder() -> None:
     assert answer["redirect_path"] == _PAGE_PATH
 
 
+async def test_secret_named_query_value_in_a_redirect_is_replaced() -> None:
+    raw = "/suite-api/doc/?licenseKey=MADEUP-MADEUP-MADEUP-MADEUP"
+    # The stored-result redaction does not see a secret in a path; the
+    # read must replace it itself, file body or not.
+    redaction = _redact_like_the_dispatcher({"redirect_path": raw})
+    assert redaction.manifest == () and redaction.redacted == redaction.raw
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_PAGE_PATH).respond(302, headers={"Location": raw})
+        answer = await _call(connector, _PAGE_PATH)
+    await connector.aclose()
+
+    assert answer["status"] == 302
+    assert answer["parts"] == 0
+    assert answer["redirect_path"] == "/suite-api/doc/?licenseKey=[REDACTED:param_name]"
+    assert "MADEUP" not in msgspec.json.encode(answer).decode()
+
+
 @pytest.mark.parametrize("version_status", [500, 403])
 async def test_failed_version_read_still_returns_the_file(version_status: int) -> None:
     connector = _connector()
@@ -718,6 +738,28 @@ _SECRET_SHAPED_FILES = {
         "openapi: 3.0.1\nx-login:\n  password: |\n    # made-up\n",
         "the field 'password'",
     ),
+    # The reviewer's third-round examples: bare attribute values, and an
+    # object or a list under a secret-named key.
+    "html-input-unquoted-name": (
+        '<html><body><input name=password value="made-up"></body></html>',
+        "the attribute 'value'",
+    ),
+    "html-input-unquoted-value": (
+        '<html><body><input name="password" value=made-up></body></html>',
+        "the attribute 'value'",
+    ),
+    "json-object-under-credentials": (
+        '{"openapi":"3.0.1","credentials":{"value":"made-up"}}',
+        "the field 'value'",
+    ),
+    "json-list-under-licence-key": (
+        '{"openapi":"3.0.1","licenseKey":["MADEUP-MADEUP"]}',
+        "the field 'licenseKey'",
+    ),
+    "yaml-mapping-under-credentials": (
+        "openapi: 3.0.1\ncredentials:\n  value: made-up\n",
+        "the field 'value'",
+    ),
 }
 
 
@@ -766,6 +808,9 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
         "password:\n  # the schema\n  type: string\ntoken: !!null\nsecret: !!str string\n",
         "- password: &pw\n    type: string\n",
         "s: &s {type: string}\ntoken: |\nnext: 1\n",
+        '{"paths":{"/auth/token":{"get":{"tags":["auth"],"operationId":"token",'
+        '"parameters":[{"name":"sort","in":"query","schema":{"type":"string",'
+        '"default":"asc"}}],"responses":{"200":{"description":"Done"}}}}}}',
         _PAGE,
     ],
     ids=[
@@ -784,6 +829,7 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
         "yaml-comment-tag-and-tagged-stub",
         "yaml-anchored-schema",
         "yaml-flow-anchor-and-empty-block",
+        "path-item-named-after-a-token",
         "swagger-page",
     ],
 )

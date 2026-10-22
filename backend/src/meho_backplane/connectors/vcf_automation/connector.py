@@ -425,7 +425,9 @@ class VcfAutomationConnector(HttpConnector):
     # Transport overrides -- thread path into auth_headers + 401 retry-once
     # ------------------------------------------------------------------
 
-    async def _request_json(
+    # tenacity >= 9.2 types the base method as a retry wrapper; this plain
+    # override drops that retry on purpose (see the docstring).
+    async def _request_json(  # type: ignore[override]
         self,
         target: VcfAutomationTargetLike,
         method: str,

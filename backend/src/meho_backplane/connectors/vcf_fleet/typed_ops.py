@@ -16,7 +16,7 @@ inventory read ('what's deployed')"*) to **typed** ops that dispatch as
 Basic session against the LCM-local user store — no catalog ingest, no
 spec dependency.
 
-Two ops ship here, one per audited bucket:
+Three ops ship here: one per audited bucket and one for the vendor files:
 
 * ``fleet.about`` — ``GET /lcm/lcops/api/v2/about`` — the appliance
   identity / health probe. **Known regression:** this endpoint returns
@@ -32,6 +32,13 @@ Two ops ship here, one per audited bucket:
   each environment carries a ``products[]`` summary inline, so a single
   no-argument call answers "what has Fleet provisioned" — the audited
   lab-bookkeeping surface.
+* ``fleet.api_file.get`` — ``GET {path}`` — reads one API description
+  page or file the appliance serves (the Lifecycle APIs under
+  ``/api/swagger-ui/``, the Content Management APIs under
+  ``/lcm/cms/api/swagger-ui/``, and the Swagger or OpenAPI files those
+  pages load). The body lives in
+  :mod:`meho_backplane.connectors.vcf_fleet.api_file`. It exists so the
+  vendor's ``/lcm`` files, which no vendor download ships, can be pinned.
 
 The remaining six curated ops (datacenter/vcenter list, environment
 detail, product list, request list/detail) are **declined** from typed
@@ -104,6 +111,23 @@ FLEET_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "One read: the Fleet environments and the products deployed in each (vRA, "
         "vROps, vRLI, vIDM and more). Answers 'what has Fleet deployed'. A read."
     ),
+    "fleet-api-docs": (
+        "One read: the API descriptions a running Aria Suite Lifecycle or VCF Fleet "
+        "appliance serves on its /lcm surface (fleet.api_file.get). It reads the "
+        "Lifecycle APIs page under /api/swagger-ui/, the Content Management APIs page "
+        "under /lcm/cms/api/swagger-ui/, or a Swagger or OpenAPI file they load, and "
+        "returns the file's size, SHA-256 and the appliance version, with the text in "
+        "parts behind a result handle, so a vendor API file can be pinned and compared. "
+        "It refuses every other path."
+    ),
+}
+
+_PART_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "index": {"type": "integer", "description": "Position of the part, from 0."},
+        "text": {"type": "string", "description": "The part's text, at most 64 KiB."},
+    },
 }
 
 
@@ -236,11 +260,137 @@ _ENVIRONMENT_LIST = FleetTypedOp(
 )
 
 
+_API_FILE_GET = FleetTypedOp(
+    op_id="fleet.api_file.get",
+    handler_attr="api_file_get",
+    summary="Read one API documentation page or API description file the /lcm appliance serves.",
+    description=(
+        "Reads one documentation page or Swagger/OpenAPI file from the /lcm appliance and "
+        "returns its path, HTTP status, content type, size, SHA-256 and the appliance "
+        "version. The text comes back in parts behind a result handle. Only the "
+        "documentation paths and the usual API file paths are allowed."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Path on the appliance, starting with '/'. Allowed: the pages "
+                    "/api/swagger-ui.html and /lcm/cms/api/swagger-ui.html, any path under "
+                    "the folders /api/swagger-ui/ and /lcm/cms/api/swagger-ui/, or a "
+                    "Swagger/OpenAPI file path (a part named api-docs, swagger-resources or "
+                    "swagger-config, or a name ending in swagger.json, swagger.yaml, "
+                    "openapi.json or openapi.yaml). A query string may hold only group and "
+                    "apiVersion. No '..', '//', ';', scheme or host."
+                ),
+            },
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+        "examples": [{"path": "<path>"}],
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "The path that was read."},
+            "status": {"type": "integer", "description": "HTTP status the appliance returned."},
+            "content_type": {
+                "type": ["string", "null"],
+                "description": "Content-Type header of the answer.",
+            },
+            "size": {"type": "integer", "description": "Size of the file in bytes."},
+            "sha256": {"type": "string", "description": "SHA-256 of the file, hex."},
+            "version": {
+                "type": ["string", "null"],
+                "description": "Product version from GET /lcm/lcops/api/v2/about.",
+            },
+            "build": {
+                "type": ["string", "null"],
+                "description": "Build number from GET /lcm/lcops/api/v2/about, when it has one.",
+            },
+            "version_error": {
+                "type": ["string", "null"],
+                "description": (
+                    "Why the version read failed (on VCF 9.0 builds it answers HTTP 500); "
+                    "null when it worked."
+                ),
+            },
+            "lcm_api_version": {
+                "type": ["string", "null"],
+                "description": "The Lcm-API-Version header the appliance sent with the file.",
+            },
+            "redirect_to": {
+                "type": ["string", "null"],
+                "description": (
+                    "Path of a redirect answer, resolved against the path that was read; "
+                    "read that path next. Not followed."
+                ),
+            },
+            "parts": {"type": "integer", "description": "How many text parts there are."},
+            "items": {
+                "type": "array",
+                "description": "The text parts, in order. Joined, they are the exact file.",
+                "items": _PART_ITEM_SCHEMA,
+            },
+        },
+    },
+    group_key="fleet-api-docs",
+    tags=("read-only", "fleet", "vcf", "api-docs", "documentation"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_call": (
+            "Call to read the API documentation an Aria Suite Lifecycle 8.x or VCF Fleet "
+            "appliance serves on its /lcm surface: the Lifecycle APIs page under "
+            "/api/swagger-ui/ (or /api/swagger-ui.html before 8.18 Patch 3), the Content "
+            "Management APIs page under /lcm/cms/api/swagger-ui/ (or "
+            "/lcm/cms/api/swagger-ui.html), or one of the Swagger/OpenAPI files those pages "
+            "load, for example to pin a vendor API file or to check which API calls an "
+            "appliance version serves."
+        ),
+        "output_shape": (
+            "{path, status, content_type, size, sha256, version, build, version_error, "
+            "lcm_api_version, redirect_to, parts, items: [{index, text}]}. items hold the "
+            "text in parts of at most 64 KiB, in order; a long file is behind a result "
+            "handle. Join the parts in order to rebuild the exact file; its SHA-256 equals "
+            "sha256. On VCF 9.0 builds version and build are null and version_error names "
+            "the HTTP 500 of the about call; lcm_api_version still names the API version."
+        ),
+        "next_step": (
+            "If redirect_to is set, call again with that path. If status is not 200, "
+            "read the text for the appliance's message. To rebuild the file, page the "
+            "result handle with result_query in index order and join the text fields. "
+            "A refused path means the path is outside the rule; fix the path. A read that "
+            "stops because the secret-redaction rules would change the file cannot return "
+            "that file exactly; report it instead of retrying."
+        ),
+        "result_scalars": {
+            "keys": [
+                "path",
+                "status",
+                "content_type",
+                "size",
+                "sha256",
+                "version",
+                "build",
+                "version_error",
+                "lcm_api_version",
+                "redirect_to",
+                "parts",
+            ]
+        },
+    },
+)
+
+
 #: The typed read ops :class:`VcfFleetConnector` registers at lifespan
 #: startup — the #2304 audited set (about/health probe + component
-#: inventory). Ordered probe → inventory to match the operator's typical
-#: "is it up, and what's on it" drill path.
+#: inventory), then the API description read that pins the vendor files.
+#: Ordered probe → inventory → documentation to match the operator's
+#: typical "is it up, what's on it, what does its API look like" path.
 FLEET_TYPED_OPS: tuple[FleetTypedOp, ...] = (
     _ABOUT,
     _ENVIRONMENT_LIST,
+    _API_FILE_GET,
 )

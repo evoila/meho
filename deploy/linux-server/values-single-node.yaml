@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Helm values for MEHO on one Linux server with RKE2 (install form 2). The
+# download ships this file as chart/values-single-node.yaml.
+#
+# This first version holds only what the form-2 design (section 4) decides:
+# RKE2 runs Traefik in kube-system, and the storage class stays empty, so the
+# volumes use the default class (local-path). The rest of the content comes
+# with the install of the core (#4735).
+ingress:
+  className: traefik
+networkPolicy:
+  ingressControllerNamespace: kube-system

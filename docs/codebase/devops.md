@@ -1998,11 +1998,14 @@ GitHub settings, which a PR cannot edit. Effective settings recorded
 ### Signing, deployment and cache separation
 
 Untrusted PR jobs carry no signing or deployment identity: cosign
-signing lives in `image.yml` (fork-guarded) and the `chart.yml` publish
-job (`push`-only), and `pr-smoke.yml` exports its buildx cache to an
-isolated `pr-smoke` scope so an unmerged PR-head build can never seed the
-default cache the cosign-signed `image.yml` release build restores from
-(#3475). The CI cluster is recorded as separate from the automation
+signing lives in `image.yml` (fork-guarded), the `chart.yml` publish
+job (`push`-only), `cli-release.yml` (tag-only) and the `publish` job of
+`linux-download.yml` (tag-only, called by `cli-release.yml`; it signs the
+form-2 download's `SHA256SUMS-linux`, see
+[linux-server-download.md](linux-server-download.md)), and `pr-smoke.yml`
+exports its buildx cache to an isolated `pr-smoke` scope so an unmerged
+PR-head build can never seed the default cache the cosign-signed
+`image.yml` release build restores from (#3475). The CI cluster is recorded as separate from the automation
 cluster; verifying the firewall/routing that a compromised CI runner
 could traverse is an infra check, tracked outside this repo.
 

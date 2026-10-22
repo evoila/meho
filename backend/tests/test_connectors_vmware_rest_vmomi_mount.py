@@ -42,6 +42,7 @@ from meho_backplane.connectors.vmware_rest._mount import (
     vmomi_release_from_version,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import object_collect_impl
+from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
 
 _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 _RETRIEVE_BODY: dict[str, Any] = {"specSet": [], "options": {}}
@@ -136,6 +137,7 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
 _BASE = "https://vc-8.test.invalid"
 _VIJSON_URL = "/sdk/vim25/8.0.3.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 _API_URL = "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+_VIJSON_90_URL = "/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 
 _MANAGED_OBJECT_NOT_FOUND_FAULT = """<?xml version="1.0"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
@@ -147,6 +149,21 @@ _MANAGED_OBJECT_NOT_FOUND_FAULT = """<?xml version="1.0"?>
     <detail><vim:ManagedObjectNotFound xsi:type="vim:ManagedObjectNotFound" /></detail>
   </soapenv:Fault></soapenv:Body>
 </soapenv:Envelope>"""
+
+
+def _vijson_fault(fault_type: str, obj: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A VI-JSON fault body (HTTP 500) in the shape of the pinned ``vi-json.yaml``.
+
+    ``ManagedObjectNotFound`` requires ``obj``, the missing object; the other
+    fault types used here carry none.
+    """
+    body: dict[str, Any] = {
+        "_typeName": fault_type,
+        "faultstring": "The object has already been deleted or has not been completely created",
+    }
+    if obj is not None:
+        body["obj"] = obj
+    return body
 
 
 @pytest.mark.asyncio
@@ -270,6 +287,113 @@ async def test_vijson_managed_object_fault_promotes_only_when_read_opted_in() ->
                 )
         assert vijson.called
         assert raised.value.resource_ids == ["vm-42"]
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_vijson_managed_object_json_fault_promotes_requested_moid() -> None:
+    """vCenter sends the fault as JSON (#4776): the requested missing VM becomes not_found."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    body = {"specSet": [{"objectSet": [{"obj": vim_moref("VirtualMachine", "vm-42")}]}]}
+    fault = _vijson_fault("ManagedObjectNotFound", vim_moref("VirtualMachine", "vm-42"))
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "9.0.0"})
+            vijson = mock.post(_VIJSON_90_URL).respond(500, json=fault)
+            with pytest.raises(ConnectorResourceNotFoundError) as raised:
+                await connector._post_vmomi_json(
+                    _StubTarget(),
+                    _RETRIEVE_PROPERTIES_PATH,
+                    operator=_make_operator(),
+                    json=body,
+                    promote_managed_object_not_found=True,
+                )
+        assert vijson.called
+        assert raised.value.resource_ids == ["vm-42"]
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_vijson_json_fault_for_another_object_stays_http_error() -> None:
+    """A missing property collector is not a missing VM: the fault stays a normal error."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    body = {"specSet": [{"objectSet": [{"obj": vim_moref("VirtualMachine", "vm-42")}]}]}
+    fault = _vijson_fault(
+        "ManagedObjectNotFound", vim_moref("PropertyCollector", "propertyCollector")
+    )
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "9.0.0"})
+            vijson = mock.post(_VIJSON_90_URL).respond(500, json=fault)
+            with pytest.raises(httpx.HTTPStatusError) as raised:
+                await connector._post_vmomi_json(
+                    _StubTarget(),
+                    _RETRIEVE_PROPERTIES_PATH,
+                    operator=_make_operator(),
+                    json=body,
+                    promote_managed_object_not_found=True,
+                )
+        assert vijson.called
+        assert raised.value.response.status_code == 500
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_vijson_json_fault_of_another_type_stays_http_error() -> None:
+    """Only ``ManagedObjectNotFound`` maps; an ``InvalidProperty`` fault stays a normal error."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    body = {"specSet": [{"objectSet": [{"obj": vim_moref("VirtualMachine", "vm-42")}]}]}
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "9.0.0"})
+            vijson = mock.post(_VIJSON_90_URL).respond(500, json=_vijson_fault("InvalidProperty"))
+            with pytest.raises(httpx.HTTPStatusError) as raised:
+                await connector._post_vmomi_json(
+                    _StubTarget(),
+                    _RETRIEVE_PROPERTIES_PATH,
+                    operator=_make_operator(),
+                    json=body,
+                    promote_managed_object_not_found=True,
+                )
+        assert vijson.called
+        assert raised.value.response.status_code == 500
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_object_collect_promotes_missing_moid_from_json_fault() -> None:
+    """``vmware.object.collect`` gets not_found from the JSON fault form too (#4776)."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    fault = _vijson_fault("ManagedObjectNotFound", vim_moref("Datastore", "datastore-42"))
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "9.0.0"})
+            vijson = mock.post(_VIJSON_90_URL).respond(500, json=fault)
+            with pytest.raises(ConnectorResourceNotFoundError) as raised:
+                await object_collect_impl(
+                    connector,
+                    _make_operator(),
+                    _StubTarget(),
+                    {
+                        "type": "Datastore",
+                        "moid": "datastore-42",
+                        "properties": ["summary.capacity"],
+                    },
+                )
+        assert vijson.called
+        assert raised.value.resource_ids == ["datastore-42"]
     finally:
         await connector.aclose()
 

@@ -97,11 +97,12 @@ spec:
           image: {{ include "meho.core.image" .Values.image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/bin/sh", "-c"]
-          # `key=@<file>` makes the program read the key from the file
-          # itself: the key is never on a command line or in a shell
-          # variable, and nothing keeps it between passes, so a deleted
-          # Secret takes effect on the next pass. The unseal call's output
-          # is thrown away; only fixed lines are logged.
+          # The key goes from the file through `tr` (it drops white space,
+          # such as the line break `echo` adds) into `key=-` (stdin): it is
+          # never on a command line or in a shell variable, and nothing
+          # keeps it between passes, so a deleted Secret takes effect on the
+          # next pass. The unseal call's output is thrown away; only fixed
+          # lines are logged.
           args:
             - |
               trap 'exit 0' TERM
@@ -115,10 +116,10 @@ spec:
                   msg="the server does not answer yet"
                 elif [ ! -f /unseal/key ]; then
                   msg="sealed, no unseal key in /unseal (keyholder mode, or not set up yet)"
-                elif {{ .Values.binary }} write sys/unseal key=@/unseal/key >/dev/null 2>&1; then
+                elif tr -d '[:space:]' </unseal/key | {{ .Values.binary }} write sys/unseal key=- >/dev/null 2>&1; then
                   msg="sealed, sent the unseal key"
                 else
-                  msg="sealed, the unseal call failed (output hidden: it could hold the key)"
+                  msg="sealed, the unseal call failed: a wrong key in the Secret, or the server is not set up (output hidden: it could hold the key)"
                 fi
                 if [ "$msg" != "$last" ]; then echo "unseal: $msg"; last="$msg"; fi
                 sleep 5 & wait $!

@@ -845,15 +845,19 @@ first install.
 **Unseal after a restart (#4046).** The `unseal` container (same image,
 same security settings, `coreVault.unseal.resources`) checks `bao status`
 every 5 seconds. When the server is sealed and `/unseal/key` exists, it runs
-`bao write sys/unseal key=@/unseal/key` against `127.0.0.1:8200`. The key
-file is the Secret `<release>-core-vault-unseal`, mounted only in this
-container, `optional: true` and without `subPath`.
+`tr -d '[:space:]' </unseal/key | bao write sys/unseal key=-` against
+`127.0.0.1:8200`. The key file is the Secret `<release>-core-vault-unseal`,
+mounted only in this container, `optional: true` and without `subPath`.
+The Secret's `key` value is the key alone. White space around it (such as
+the line break `echo` adds) is dropped, so the setup Job (#4044 part 2),
+the installers and an operator restoring by hand can write it either way;
+without the `tr`, a key with a line break never unseals.
 
 - The mode is whether the Secret exists; there is no mode value. Secret
   present: self-unseal. Secret absent: "keyholder at boot", the pod stays
   not ready and `/ready` says `vault: sealed`.
-- `bao` reads the file itself on every pass, and the call's output is
-  thrown away. The key is never on a command line, in a shell variable or
+- The key goes from the file through a pipe into `bao` on every pass, and
+  the call's output is thrown away. The key is never on a command line, in a shell variable or
   in a log, and nothing keeps it: a deleted Secret takes effect on the next
   pass once the kubelet removes the file (about one to two minutes on a
   running pod).

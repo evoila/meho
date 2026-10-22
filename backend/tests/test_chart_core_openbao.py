@@ -320,9 +320,10 @@ def test_unseal_helper_reads_the_key_file_on_every_pass() -> None:
     assert unseal["securityContext"] == server["securityContext"]
     assert {e["name"]: e["value"] for e in unseal["env"]} == {"BAO_ADDR": "http://127.0.0.1:8200"}
     script = unseal["args"][0]
-    # `bao` reads the key from the file itself, and the call's output is
-    # thrown away: the key is never on a command line, in the shell or in a log.
-    assert "bao write sys/unseal key=@/unseal/key >/dev/null 2>&1" in script
+    # The key goes from the file through a pipe (white space dropped, so a
+    # line break at the end does no harm), and the call's output is thrown
+    # away: the key is never on a command line, in the shell or in a log.
+    assert "tr -d '[:space:]' </unseal/key | bao write sys/unseal key=- >/dev/null 2>&1" in script
     assert "$(" not in script
     assert "sleep 5" in script
     assert unseal["volumeMounts"] == [{"name": "unseal", "mountPath": "/unseal", "readOnly": True}]
@@ -336,7 +337,7 @@ def test_unseal_helper_reads_the_key_file_on_every_pass() -> None:
 
 def test_unseal_helper_on_a_vault_image() -> None:
     unseal = _unseal_container(_openbao_docs("--set", "coreVault.binary=vault"))
-    assert "vault write sys/unseal key=@/unseal/key" in unseal["args"][0]
+    assert "</unseal/key | vault write sys/unseal key=-" in unseal["args"][0]
     assert {e["name"] for e in unseal["env"]} == {"VAULT_ADDR"}
 
 

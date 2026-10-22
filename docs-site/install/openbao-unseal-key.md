@@ -73,7 +73,8 @@ After the restart, OpenBao stays sealed until a keyholder unseals it.
 ### From keyholder at boot to self-unseal
 
 1. Create the Secret again from your key store. These commands keep the key
-   out of your shell history:
+   out of your shell history. Spaces or a line break around the key do no
+   harm: the helper removes them before it unseals.
 
     ```bash
     read -rs KEY    # paste the key, press Enter; it is not shown
@@ -118,8 +119,9 @@ OpenBao needs two. To go back, rotate to one key (`-key-shares=1
 Use this only when OpenBao's data is damaged or nobody can log in any more,
 and you still have the unseal key.
 
-- Start the OpenBao server with the `-recovery` flag. Unseal it with the
-  key, and make a recovery token from the key.
+- Start the OpenBao server with the `-recovery` flag. There is no normal
+  unseal in this mode: make a recovery token from the unseal key instead
+  (`bao operator generate-root -recovery-token`, in four steps).
 - With the recovery token you can read and repair OpenBao's raw storage
   (`sys/raw`). No root token and no admin login are needed.
 - The other ways to make a new root token without logging in stay switched

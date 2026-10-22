@@ -54,10 +54,16 @@ KEY=$(jq -r '.data.key | @base64d' <<<"$SAVED")
 # The server container is named after the program (`bao` or `vault`).
 BIN=$(k get pod "$POD" -o jsonpath='{.spec.containers[0].name}')
 
+# Retried for 2 minutes: this script may hold the only copy of the key.
 restore_secret() {
-  k get secret "$SECRET" >/dev/null 2>&1 && return 0
-  jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields)' \
-    <<<"$SAVED" | k create -f - >/dev/null
+  for _ in 1 2 3 4 5 6 7 8; do
+    k get secret "$SECRET" >/dev/null 2>&1 && return 0
+    jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields)' \
+      <<<"$SAVED" | k create -f - >/dev/null && return 0
+    sleep 15
+  done
+  echo "FAIL: could not put the Secret $SECRET back; create it again from your key store" >&2
+  return 1
 }
 trap restore_secret EXIT
 
@@ -129,7 +135,8 @@ OLD_UID=$(uid)
 k rollout restart statefulset "$STS" >/dev/null
 wait_until 180 new_and_answers || fail "the restarted server does not answer within 3 minutes"
 stays_sealed 30 "keyholder mode"
-k logs "$POD" -c unseal | grep -q "keyholder mode" || fail "the helper's log does not say keyholder mode"
+# No `grep -q`: it stops reading early, and `pipefail` would then fail on kubectl's broken pipe.
+k logs "$POD" -c unseal | grep "keyholder mode" >/dev/null || fail "the helper's log does not say keyholder mode"
 echo "ok: sealed for 30 s, the pod is not ready"
 
 echo "3. keyholder to self: put the Secret back, rollout restart, expect it ready"

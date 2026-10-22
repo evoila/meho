@@ -696,7 +696,8 @@ _SECRET_SHAPED_FILES = {
         '<html><script>var cfg = {"password":\n  "made-up"};</script></html>',
         "the field 'password'",
     ),
-    # The reviewer's second-round example: an id attribute before the name.
+    # The reviewer's second-round examples: an id attribute before the
+    # name, and block text that looks like a mapping, a list or a comment.
     "html-input-id-before-name": (
         '<html><body><input id="login-field" name="password" value="made-up"></body></html>',
         "the attribute 'value'",
@@ -704,6 +705,18 @@ _SECRET_SHAPED_FILES = {
     "html-input-name-before-id": (
         '<html><body><input name="password" id="login-field" value="made-up"></body></html>',
         "the attribute 'value'",
+    ),
+    "yaml-block-text-with-a-colon": (
+        "openapi: 3.0.1\nx-login:\n  password: |\n    made-up: phrase\n",
+        "the field 'password'",
+    ),
+    "yaml-block-text-with-a-dash": (
+        "openapi: 3.0.1\nx-login:\n  password: |\n    - made-up\n",
+        "the field 'password'",
+    ),
+    "yaml-block-text-with-a-hash": (
+        "openapi: 3.0.1\nx-login:\n  password: |\n    # made-up\n",
+        "the field 'password'",
     ),
 }
 

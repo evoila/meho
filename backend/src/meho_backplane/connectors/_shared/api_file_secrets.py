@@ -374,10 +374,28 @@ def _yaml_value(
         return _plain_value(text, pos, indent, mode)
     line_end = pos + len(rest)
     body_end = _deeper_lines_end(text, line_end, indent)
-    body_start = _next_value_line(text, pos) if body_end > line_end else None
+    body_start = _block_body_start(text, line_end, body_end)
     if body_start is None or _is_stub(text[body_start:body_end]):
         return None
     return (body_start, body_end)
+
+
+def _block_body_start(text: str, line_end: int, body_end: int) -> int | None:
+    """Return where the text of a block scalar starts, or ``None`` for an empty block.
+
+    The block is the lines after *line_end* up to *body_end*. Its first
+    line that is not blank starts the text. Every line is text: a
+    ``key: value``, a ``- item`` or a ``# comment`` inside a block scalar
+    is part of the password, not a mapping, a list or a comment.
+    """
+    pos = line_end + 1
+    while pos <= body_end:
+        end = _line_end(text, pos)
+        line = text[pos:end]
+        if line.strip(" \t\r"):
+            return pos + len(line) - len(line.lstrip(" \t"))
+        pos = end + 1
+    return None
 
 
 def _plain_value(text: str, pos: int, indent: int, mode: str) -> tuple[int, int] | None:

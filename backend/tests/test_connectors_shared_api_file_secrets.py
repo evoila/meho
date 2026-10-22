@@ -169,8 +169,8 @@ _REFUSED = {
         1,
         "EC PRIVATE KEY",
     ),
-    # The reviewer's example on the second round: a naming attribute
-    # behind another one.
+    # The reviewer's examples on the second round: a naming attribute
+    # behind another one, and block text that looks like structure.
     "html-input-id-before-name": (
         '<input id="login-field" name="password" value="madeup">',
         1,
@@ -180,6 +180,14 @@ _REFUSED = {
         '<input name="password" id="login-field" value="madeup">',
         1,
         "value",
+    ),
+    "yaml-block-text-with-a-colon": ("password: |\n  madeup: phrase\n", 1, "password"),
+    "yaml-block-text-with-a-dash": ("password: |\n  - madeup\n", 1, "password"),
+    "yaml-block-text-with-a-hash": ("password: |\n  # madeup\n", 1, "password"),
+    "yaml-block-text-after-a-blank-line": (
+        "login:\n  password: |\n\n    # madeup\n  user: a\n",
+        1,
+        "password",
     ),
 }
 
@@ -229,6 +237,7 @@ _ACCEPTED = {
     ),
     "yaml-anchored-schema": "- password: &pw\n    type: string\n",
     "yaml-flow-anchor-and-empty-block": "s: &s {type: string}\ntoken: |\nnext: 1\n",
+    "yaml-block-of-blank-lines": "token: |\n\n\nnext: 1\n",
     "yaml-list-under-the-key": "password:\n  - type: string\n",
     "yaml-masked-value": "password: ********\n",
     "already-replaced": f"password: {REDACTED}\n" + '{"password": "' + REDACTED + '"}',

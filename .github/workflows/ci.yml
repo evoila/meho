@@ -1099,7 +1099,7 @@ jobs:
           fi
 
   python-coverage:
-    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/5)
+    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/8)
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
@@ -1165,19 +1165,29 @@ jobs:
     # serial wall at ~57 min — past the 45-min step cap, the 55-min job cap,
     # and brushing the ~60-min external pod reap, so a monolithic sweep was
     # structurally out of road (proven by run 33149016521: healthy 14Gi pod,
-    # steady progress, killed at 93%). The sweep now runs as 5 stride shards
-    # of the sorted test-file list (~190 files each; #3172 started with 3),
-    # fanned into the python-coverage-combine job below which merges all
-    # shards' parallel data and uploads the single `python-coverage`
-    # artifact — the quality-gate.yml contract is unchanged. A shard's
-    # memory grows with the number of tests in its one pytest process, so
-    # more shards means less memory per shard: 5 shards keep each one well
-    # under a smaller heavy runner. The "Print peak memory" step at the end
-    # of each shard shows the real numbers. If a shard's wall approaches its
-    # 30-min step cap, or its memory nears the runner's limit, raise the
-    # shard count — bump the matrix, TOTAL in the pytest step AND the
-    # combine job's download steps, in lockstep. This job stays
+    # steady progress, killed at 93%). The sweep now runs as 8 stride shards
+    # of the sorted test-file list (~125 files each; #3172 started with 3,
+    # #4748 went to 5, #4758 to 8), fanned into the python-coverage-combine
+    # job below which merges all shards' parallel data and uploads the
+    # single `python-coverage` artifact — the quality-gate.yml contract is
+    # unchanged. A shard's memory grows with the number of tests in its one
+    # pytest process, so more shards means less memory per shard. The
+    # "Print peak memory" step at the end of each shard shows the real
+    # numbers. 8 shards (#4758): 3 shards hit the 30-min step cap and lost
+    # all their data; on the 7 GiB heavy runner, 5 shards of ~4,000-4,700
+    # tests still ran 19-29 min of pytest and peaked at the memory limit.
+    # ~2,700 tests per shard keeps each one near 15-20 min and ~4 GiB.
+    # If a shard's wall approaches its 30-min step cap, or its memory nears
+    # the runner's limit, raise the shard count — bump the matrix, TOTAL in
+    # the pytest step AND the combine job's download steps, in lockstep
+    # (tests/test_ci_coverage_shards.py pins the lockstep). This job stays
     # non-blocking; a shard OOM merely thins one shard's coverage.
+    # A SHARD'S WORKER DATA FILE (#4758): the worker writes its coverage
+    # data at interpreter exit, which the xdist controller can cut short
+    # (it kills a worker 10 s after the worker reports finished). The
+    # tests/conftest.py session-finish hook saves the worker's data before
+    # that report, so a slow worker clean-up no longer loses a whole
+    # shard's test coverage with every check green.
     # Runs on push to main, OR on a PR explicitly opted in via the
     # `ci-coverage-validate` label (the on-runner validation escape hatch
     # described above). The fork-PR guard still applies on the PR path so
@@ -1189,12 +1199,12 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 5 stride shards (#3172 started with 3) — see the SHARDED paragraph in
+      # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in
       # the header comment. fail-fast off: one shard's red tests must not
       # cancel the other shards' coverage data (partial coverage beats none).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
     # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
     # runner-loss on this pool — which silently killed coverage on every main
@@ -1354,9 +1364,12 @@ jobs:
         # when the runner is wedged, so the PRIMARY guard is the in-process
         # `--timeout` on the run below, not this cap.
         # 30 per shard (#3172): set when 3 shards ran ~19 min each (57-min
-        # serial total / 3 shards at 13,311 tests). With 5 shards each shard
-        # has less work, so 30 leaves more suite-growth headroom while
-        # keeping shard+combine far inside the 55-min job cap.
+        # serial total / 3 shards at 13,311 tests). With 8 shards (#4758)
+        # a shard runs ~15-20 min on the 7 GiB heavy runner, so 30 leaves
+        # suite-growth headroom while keeping shard+combine far inside the
+        # 55-min job cap. A shard that hits this cap loses ALL its coverage
+        # data (its processes are killed before they write), so raise the
+        # shard count before any shard gets near it.
         timeout-minutes: 30
         # Force bash so the run below gets pipefail + PIPESTATUS: the
         # self-hosted pool's default shell does NOT enable `pipefail`, which
@@ -1414,13 +1427,13 @@ jobs:
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
           # Deterministic stride shard (#3172): the sorted test-file list,
-          # every 5th file to this shard. File-level split keeps conftest
+          # every 8th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
           # blocks) spreads the heavyweight suites across shards. The
-          # five shards partition the full set exactly (NR mod 5 hits
+          # eight shards partition the full set exactly (NR mod 8 hits
           # each residue once); integration stays excluded by the find,
           # matching the old --ignore.
-          TOTAL=5
+          TOTAL=8
           SHARD="${{ matrix.shard }}"
           mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
@@ -1438,7 +1451,7 @@ jobs:
         # for THIS shard — the python-coverage-combine job below merges every
         # shard's set and writes the single coverage.xml quality-gate.yml
         # consumes (#3172). `.coveragerc.ci` sets relative_files=true, so
-        # data from five different runners combines cleanly.
+        # data from eight different runners combines cleanly.
         # include-hidden-files: upload-artifact v4+ excludes dotfiles by
         # default, and every coverage data file is a dotfile.
         # timeout-minutes (#3172): same job-cap-cancel hole as every
@@ -1523,7 +1536,7 @@ jobs:
           if [ -r "${cg}/cpu.max" ]; then
             echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
           fi
-          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/5)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/8)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
 
   python-coverage-combine:
@@ -1548,11 +1561,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
     runs-on: meho-runners-ci
-    # 20 > the 16 min of bounded step caps below + ~1-2 min of honest
+    # 26 > the 22 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
     # cancellation (the #2800/#3172 leak).
-    timeout-minutes: 20
+    timeout-minutes: 26
     continue-on-error: true
     defaults:
       run:
@@ -1574,7 +1587,7 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Download shard 1 coverage data
-        # Same pinned download-artifact as quality-gate.yml. Five explicit
+        # Same pinned download-artifact as quality-gate.yml. Eight explicit
         # name-addressed downloads (not a pattern match) keep the step free
         # of newer-action feature dependencies; continue-on-error tolerates
         # a shard that produced no artifact (see the job header).
@@ -1617,11 +1630,35 @@ jobs:
           name: python-coverage-data-shard-5
           path: backend
 
+      - name: Download shard 6 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-6
+          path: backend
+
+      - name: Download shard 7 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-7
+          path: backend
+
+      - name: Download shard 8 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-8
+          path: backend
+
       - name: Combine coverage + write XML (offline, all shards)
         # Runs in this fan-in job with every shard's pytest long gone, so
         # `coverage combine` merges the downloaded per-worker parallel data
         # files standalone (cheap). Uses .coveragerc.ci (relative_files=true)
-        # so paths are repo-relative across the five shard runners and for
+        # so paths are repo-relative across the eight shard runners and for
         # SonarCloud cross-job mapping (#1987 AC6).
         #
         # `if: always()` + the ls guard: combine whatever shards delivered —
@@ -1642,9 +1679,9 @@ jobs:
         # RELEASING.md tag gate. A step cap converts that hang into an
         # absorbed step FAILURE — run stays `success`, coverage degrades to
         # "none for this push", the documented lossy contract. This fan-in
-        # job's budget: downloads 2+2+2+2+2 + this step 4 + upload 2 = 16 min
+        # job's budget: downloads 8 x 2 + this step 4 + upload 2 = 22 min
         # of bounded steps + checkout/uv/sync (~1-2 min honest) under the
-        # 20-min job cap, so step caps always fire first.
+        # 26-min job cap, so step caps always fire first.
         if: always()
         timeout-minutes: 4
         run: |

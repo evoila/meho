@@ -77,3 +77,12 @@ dependencies:
     alias: coreKeycloak
     version: 0.1.0
     repository: ""
+  # Built-in OpenBao, the password safe of the MEHO core (`charts/openbao/`,
+  # ADR 0008), off by default. The `alias` maps the parent's `coreVault:`
+  # values block onto the subchart; its helpers pin the resource names to
+  # `<release>-vault`, because MEHO's names stay `vault`.
+  - name: openbao
+    condition: coreVault.enabled
+    alias: coreVault
+    version: 0.1.0
+    repository: ""

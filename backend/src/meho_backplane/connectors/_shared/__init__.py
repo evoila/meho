@@ -38,6 +38,12 @@ Exports:
   ``register_credential_backend`` call runs eagerly (as ``gsm_creds`` does
   for ``gsm``) and the ``wrapped`` kind is present before any credential
   resolution.
+* :mod:`meho_backplane.connectors._shared.api_file_secrets` — the one
+  whole-file secret scan for the reads that return an API description
+  file or a documentation page an appliance serves. It finds the value
+  of every secret-named key, element and attribute, whatever the file
+  format, and replaces it with the placeholder the governed Vault read
+  uses, or reports where it is so the read can refuse the file.
 
 New cross-connector shared modules land alongside these — keep each
 module focused on a single concern (auth, retries, pagination, etc.)
@@ -45,6 +51,7 @@ rather than growing this package into a god-module.
 """
 
 from meho_backplane.connectors._shared import (
+    api_file_secrets,
     cache_key,
     fingerprint,
     gsm_creds,
@@ -55,6 +62,7 @@ from meho_backplane.connectors._shared import (
 )
 
 __all__ = [
+    "api_file_secrets",
     "cache_key",
     "fingerprint",
     "gsm_creds",

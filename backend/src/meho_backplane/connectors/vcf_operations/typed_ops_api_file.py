@@ -30,12 +30,10 @@ The read is narrow on purpose:
   file bytes. A file that does not fit in one stored result is refused
   with its size, never cut.
 * The read never returns a secret. It runs the redaction rules the
-  dispatcher will apply, on the whole file text and on each part, and
-  refuses a file whose text they would change, naming the rule. It also
-  refuses a file with a password, token, licence key or Authorization
-  field with a value, or a PEM private key, shapes the redaction does not
-  see (:mod:`.typed_ops_api_file_secrets`). So the stored parts always
-  match ``sha256`` and no secret a part cut would hide gets through.
+  dispatcher will apply on the whole file text and on each part, refuses a
+  file whose text they would change, and also refuses a file in which the
+  shared secret scan (:mod:`meho_backplane.connectors._shared.api_file_secrets`)
+  would replace a value. So the stored parts always match ``sha256``.
 
 The appliance version and build come from
 ``GET /suite-api/api/versions/current`` (``releaseName``, ``buildNumber``),
@@ -57,11 +55,11 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared import api_file_secrets
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.vcf_operations.connector import _VERSIONS_CURRENT_PATH
 from meho_backplane.connectors.vcf_operations.session import VcfOperationsTargetLike
 from meho_backplane.connectors.vcf_operations.typed_ops import VropsTypedOp
-from meho_backplane.connectors.vcf_operations.typed_ops_api_file_secrets import find_secret_shape
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
@@ -353,17 +351,20 @@ def _check_fits(answer: dict[str, Any], max_record_bytes: int, max_rows: int) ->
         )
 
 
-def _check_no_secret_shape(answer: dict[str, Any]) -> None:
-    """Refuse a file that holds a secret the stored-result redaction would not see.
+def _check_no_secret_value(answer: dict[str, Any]) -> None:
+    """Refuse a file in which the shared secret scan would replace a value.
 
-    The whole file text is checked, so a secret that a part cut splits in
-    two is found as well. The error names the shape and field, never the value.
+    The scan reads the whole file text, whatever its format, so a secret
+    that a part cut splits in two is found too. This read returns the exact
+    file or nothing. The error names the count and the first field, never a value.
     """
-    found = find_secret_shape("".join(part["text"] for part in answer["text_parts"]))
-    if found is not None:
+    file_text = "".join(part["text"] for part in answer["text_parts"])
+    _, count = api_file_secrets.scrub_api_file_secrets(file_text)
+    if count:
+        first = api_file_secrets.find_api_file_secrets(file_text)[0].description
         raise VropsApiFileError(
-            f"{answer['path']!r} holds {found}. This read never returns a secret, "
-            "so the file was not returned."
+            f"{answer['path']!r} holds {count} secret value{'s' if count != 1 else ''}; "
+            f"the first is {first}. This read never returns a secret, so the file was not returned."
         )
 
 
@@ -418,7 +419,7 @@ async def api_file_get_impl(
     2. ``GET`` the file with the target's login, without following a redirect.
     3. Read the appliance version and build (best effort).
     4. Refuse a file that does not fit in one stored result, whose text the
-       stored-result redaction would change, or that holds a secret shape.
+       stored-result redaction would change, or that holds a secret value.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -444,7 +445,7 @@ async def api_file_get_impl(
     if answer["parts"]:
         _check_fits(answer, max_record_bytes, settings.result_handle_max_spill_rows)
         _check_redaction_keeps_text(answer, connector, operator)
-        _check_no_secret_shape(answer)
+        _check_no_secret_value(answer)
 
     _log.info(
         "vrops_api_file_read",

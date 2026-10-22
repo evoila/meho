@@ -289,28 +289,37 @@ registrar is queued via `register_typed_op_registrar` in the package
     `result_handle_max_record_bytes`, 16 MiB, measured as stored JSON)
     stops with an error that names its size; the read never returns a cut
     file.
-  - **No secret comes back.** The read refuses a file that holds a
-    password, token, licence key or Authorization field with a value, or a
-    PEM private key (`-----BEGIN ... PRIVATE KEY`). A field is a quoted key
-    anywhere in the text (`"password": "..."`, `'token': '...'`,
-    `"Authorization": "Basic ..."`, `"licenseKey": "..."`, also with a
-    prefix in the key such as `"x-auth-token"`) or a bare key at the start
-    of a line (`password: ...` in YAML). The complete value counts, so a
-    short password or one made of words is found too. These shapes are
-    checked in `typed_ops_api_file_secrets.py`, on the whole file text,
-    because the stored-result redaction below finds a labelled secret only
-    when a bare label sits directly before `=` or `:`, the value is at
-    least 8 characters with no spaces, and the label is one it knows.
-    A schema entry such as `"password": {"type": "string"}`, a stub such
-    as `"token": "string"` or `"password": ""`, and a placeholder such as
-    `"licenseKey": "<licence key>"` are not refused. In YAML the value may
-    sit after a tag (`!!str`) or an anchor (`&name`), in a block scalar
-    (`password: |`, the value on the lines below), on the next line, or
-    behind an alias (`*name`) of a value anchored elsewhere; the check
-    reads through each of these to the value and judges that. A bare label in
-    running text (`Use password: ...`) keeps the redaction's own bound, so
-    a sentence about passwords is not refused. The error names the shape
-    and the field and where it starts, never the value.
+  - **No secret comes back.** The read runs the shared whole-file secret
+    scan, `backend/src/meho_backplane/connectors/_shared/api_file_secrets.py`,
+    on the whole file text and refuses the file when the scan would
+    replace a value. The scan does not parse the file, so the format does
+    not matter: it finds the value of every secret-named key (the names
+    MEHO's broadcast scrub uses, `is_secret_param_name`, plus a licence
+    key, a product key and `Authorization`) written as a JSON key, a YAML
+    key, a key in a script object, an XML or HTML attribute or a query
+    setting; the content of a secret-named XML element
+    (`<password>...</password>`, comments, CDATA and child elements
+    included); the value attribute of an element named by its attributes
+    (`<property name="password" value="..."/>`); and a PEM private key.
+    The value may sit on the same line or on the next line that is not
+    empty and not a comment; a quoted value runs to its closing quote,
+    also over a line break; a bare value runs to the end of its line and
+    on over deeper-indented lines; a YAML block scalar (`|`, `>`), a tag
+    (`!!str`) or an anchor (`&name`) is read through; an alias (`*name`)
+    is a value, and so is what its anchor marks anywhere in the file. A
+    schema stub stays accepted: an empty value, a type word such as
+    `string` or `null`, a placeholder such as `<password>`, `${TOKEN}` or
+    `{{ token }}`, a row of `*`, or an object or list (`"password":
+    {"type": "string"}`, `password:` then `type: string`). A bare
+    secret-named word in running text (`Use password: ...`) counts only
+    before a dense value of at least 8 characters without spaces, the
+    stored-result redaction's own bound, so a sentence about passwords is
+    not refused. The error names how many values the scan would replace
+    and the first field, element or attribute and where it starts, never
+    a value. The same helper replaces the values with
+    `[REDACTED:param_name]` and counts them, for a read that returns the
+    cleaned text instead; it is built for every API file read, not only
+    this one.
   - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
     every stored result. A rule that fires on the file text would rewrite a
     part, and the joined parts would no longer match `sha256`. So the read
@@ -323,11 +332,13 @@ registrar is queued via `register_typed_op_registrar` in the package
     (respx: accepted and refused paths with no request, the login header on
     both connectors, status and redirect cases, large files, version
     failures, a login failure, a file that a redaction rule would change, a
-    file with a secret field (quoted, short, of words, a licence key) or a
-    PEM private key, schema text that stays accepted, a secret split
-    across the part cut in both forms, parts bounded by their JSON size,
+    file with a secret value in JSON, YAML, XML or HTML or a PEM private
+    key, schema text that stays accepted, a secret split across the part
+    cut in both forms, parts bounded by their JSON size,
     the result-handle round trip for a one-line file and for a file of
-    control characters, and the operation-contract rules) and the
+    control characters, and the operation-contract rules),
+    `tests/test_connectors_shared_api_file_secrets.py` (every secret
+    shape the scan finds and every schema text it leaves alone) and the
     reconcile lane below.
 
 All five are `safety_level="safe"`, `requires_approval=False`,

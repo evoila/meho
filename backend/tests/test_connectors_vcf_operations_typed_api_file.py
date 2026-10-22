@@ -26,6 +26,7 @@ import respx
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_secrets import find_api_file_secrets
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import AuthModel
@@ -41,9 +42,6 @@ from meho_backplane.connectors.vcf_operations.typed_ops_api_file import (
     VROPS_API_FILE_GET_OP,
     VropsApiFileError,
     split_text_parts,
-)
-from meho_backplane.connectors.vcf_operations.typed_ops_api_file_secrets import (
-    find_secret_shape,
 )
 from meho_backplane.connectors.vrops8 import Vrops8Connector
 from meho_backplane.operations._validate import validate_params
@@ -618,63 +616,85 @@ _PEM_HEADER = "-----BEGIN " + "RSA PRIVATE" + " KEY-----"
 _SECRET_SHAPED_FILES = {
     "quoted-json-password": (
         '{"openapi":"3.0.1","x-login":{"password": "made-up-pass-value-0123"}}',
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "quoted-json-token": (
         '{"openapi":"3.0.1","x-session":{"token":"made-up-token-value-0123"}}',
-        "a secret field named 'token'",
+        "the field 'token'",
     ),
     "quoted-json-prefixed-label": (
         '{"openapi":"3.0.1","x-login":{"x-auth-token": "made-up-token-value-0123"}}',
-        "a secret field named 'auth-token'",
+        "the field 'x-auth-token'",
     ),
     "single-quoted-yaml": (
         "openapi: 3.0.1\nx-login:\n  'password': 'made-up-pass-value-0123'\n",
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "quoted-authorization": (
         '{"openapi":"3.0.1","x-headers":{"Authorization": "Basic bWFkZS11cDpwYXNz"}}',
-        "a secret field named 'Authorization'",
+        "the field 'Authorization'",
     ),
     "quoted-json-licence-key": (
         '{"openapi":"3.0.1","x-licence":{"licenseKey": "MADEUP-MADEUP-MADEUP-MADEUP"}}',
-        "a secret field named 'licenseKey'",
+        "the field 'licenseKey'",
     ),
     "yaml-licence-key": (
         "openapi: 3.0.1\nx-licence:\n  licence_key: MADEUP-MADEUP-MADEUP-MADEUP\n",
-        "a secret field named 'licence_key'",
+        "the field 'licence_key'",
     ),
     "licence-key-in-running-text": (
         '{"openapi":"3.0.1","info":{"description":"Send licenseKey: MADEUP-MADEUP-MADEUP"}}',
-        "a secret field named 'licenseKey'",
+        "the field 'licenseKey'",
     ),
     "short-quoted-password": (
         '{"openapi":"3.0.1","x-login":{"password": "made-up"}}',
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "short-yaml-password": (
         "openapi: 3.0.1\nx-login:\n  password: made-up\n",
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "password-of-words": (
         '{"openapi":"3.0.1","x-login":{"password": "made up pass of words"}}',
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "yaml-password-of-words": (
         "openapi: 3.0.1\nx-login:\n  - password: made up pass of words\n",
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "yaml-block-password": (
         "openapi: 3.0.1\nx-login:\n  password: |\n    made-up-pass-value\n",
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "yaml-tagged-password": (
         "openapi: 3.0.1\nx-login:\n  password: !!str made-up-pass-value\n",
-        "a secret field named 'password'",
+        "the field 'password'",
     ),
     "pem-private-key": (
         "openapi: 3.0.1\nx-key: |\n  " + _PEM_HEADER + "\n  MADEUPMADEUPMADEUP\n",
         "a PEM private key",
+    ),
+    # The reviewer's last examples: valid YAML, XML and HTML that the
+    # per-format checks let through.
+    "yaml-two-comment-lines-before-the-value": (
+        "openapi: 3.0.1\nx-login:\n  password: # first\n  # second\n  # third\n    made-up\n",
+        "the field 'password'",
+    ),
+    "yaml-alias-with-a-trailing-comment": (
+        "openapi: 3.0.1\nd: &pw made-up\nx-login:\n  password: *pw # use default\n",
+        "the field '&pw'",
+    ),
+    "xml-password-element": (
+        "<settings><version>9</version><password>made-up</password></settings>",
+        "the element 'password'",
+    ),
+    "html-password-attribute": (
+        '<html><body><input type="text" password="made-up"></body></html>',
+        "the field 'password'",
+    ),
+    "json-value-on-the-next-line-in-a-script-block": (
+        '<html><script>var cfg = {"password":\n  "made-up"};</script></html>',
+        "the field 'password'",
     ),
 }
 
@@ -722,8 +742,8 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
         "        pwd: |\n          <password>\n",
         "password: string\ntoken: null\nlicenseKey: <licence key>\nsecret: # set later\n",
         "password:\n  # the schema\n  type: string\ntoken: !!null\nsecret: !!str string\n",
-        "- password: &pw\n    type: string\n- token: *pw\n- pwd: *missing\n",
-        "s: &s {type: string}\npassword: *s\ntoken: |\nnext: 1\n",
+        "- password: &pw\n    type: string\n",
+        "s: &s {type: string}\ntoken: |\nnext: 1\n",
         _PAGE,
     ],
     ids=[
@@ -740,13 +760,13 @@ async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> Non
         "yaml-schema",
         "yaml-stubs-and-placeholder",
         "yaml-comment-tag-and-tagged-stub",
-        "yaml-anchored-schema-and-aliases",
+        "yaml-anchored-schema",
         "yaml-flow-anchor-and-empty-block",
         "swagger-page",
     ],
 )
-def test_ordinary_api_description_text_is_not_a_secret_shape(text: str) -> None:
-    assert find_secret_shape(text) is None
+def test_ordinary_api_description_text_holds_no_secret_value(text: str) -> None:
+    assert find_api_file_secrets(text) == []
 
 
 @pytest.mark.parametrize(
@@ -778,21 +798,21 @@ def test_ordinary_api_description_text_is_not_a_secret_shape(text: str) -> None:
         "comment-then-next-line",
     ],
 )
-def test_yaml_block_tagged_and_anchored_secrets_are_a_secret_shape(text: str) -> None:
+def test_yaml_block_tagged_and_anchored_secrets_are_found(text: str) -> None:
     # The value sits after a YAML marker or on the lines below the key;
-    # the check must read through to it, not take the marker for a stub.
-    shape = find_secret_shape(text)
-    assert shape is not None and shape.startswith("a secret field named 'password'")
-    assert "made" not in shape
+    # the scan must read through to it, not take the marker for a stub.
+    hits = find_api_file_secrets(text)
+    assert any(hit.name == "password" for hit in hits)
+    assert all("made" not in hit.description for hit in hits)
 
 
 async def test_quoted_secret_split_across_the_part_cut_is_refused() -> None:
     body = _json_with_a_secret_across_the_part_cut('word": "made-up-pass-value-0123"}')
     parts = split_text_parts(body)
     assert parts[0].endswith('"pass') and parts[1].startswith('word": ')
-    # Neither part alone shows the shape; the whole text does.
-    assert all(find_secret_shape(part) is None for part in parts)
-    assert find_secret_shape(body.decode()) is not None
+    # Neither part alone shows the secret; the whole text does.
+    assert all(find_api_file_secrets(part) == [] for part in parts)
+    assert find_api_file_secrets(body.decode()) != []
     assert _redact_like_the_dispatcher({"text": body.decode()}).manifest == ()
 
     connector = _connector()
@@ -804,7 +824,7 @@ async def test_quoted_secret_split_across_the_part_cut_is_refused() -> None:
     await connector.aclose()
 
     message = str(excinfo.value)
-    assert "a secret field named 'password'" in message
+    assert "the field 'password'" in message
     assert "not returned" in message
     assert "made-up-pass-value" not in message
 

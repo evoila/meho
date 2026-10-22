@@ -132,9 +132,10 @@ sends the `GET` with its own `vRealizeOpsToken` login header.
   `limit`). Join the `text` of all parts in `index` order and encode as
   UTF-8; the SHA-256 of the result equals `sha256`. A file too big for one
   stored result stops with an error that names its size; the read never
-  returns a cut file. A file that holds a password, token, licence key or
-  Authorization field with a value, or a PEM private key, is refused; the
-  read never returns a secret.
+  returns a cut file. A file in which the shared whole-file secret scan
+  would replace a value (a password, token, key or Authorization field
+  with a value, in JSON, YAML, XML or HTML, or a PEM private key) is
+  refused; the read never returns a secret.
 
 Details (the path rule, redirects, redaction, limits):
 [`connectors-vcf-operations.md`](connectors-vcf-operations.md).

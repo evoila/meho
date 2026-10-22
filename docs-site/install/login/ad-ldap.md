@@ -135,6 +135,17 @@ groups out of Keycloak.
     names. Without it, a person in two of your groups gets one of the
     two roles, and you cannot tell which.
 
+    The chart has no named value for this setting yet. Set it with
+    `extraEnv` in your values file, comma-separated, no spaces:
+
+    ```yaml
+    extraEnv:
+      - name: JWT_ROLE_GROUPS
+        value: "MEHO-Readers,MEHO-Operators,MEHO-SA-Operators,MEHO-Admins,MEHO-Approvers,SG-MEHO-Read,SG-MEHO-Ops,SG-MEHO-SAOps,SG-MEHO-Admin,SG-MEHO-Approve"
+    ```
+
+    Way A needs nothing here: the default is the five MEHO names.
+
 ## 4. Never map role attributes
 
 The provider comes with a few attribute mappers (username, email, first

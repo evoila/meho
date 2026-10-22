@@ -72,6 +72,10 @@ from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._branches import resolve_ingested_request
+from meho_backplane.operations._catalog_guard import (
+    CatalogSelection,
+    choose_catalog_for_target,
+)
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
@@ -225,14 +229,22 @@ async def _resolve_previewable_descriptor(
     operator: Operator,
     connector_id: str,
     op_id: str,
+    target: Any,
     params: dict[str, Any],
-) -> EndpointDescriptor | dict[str, Any]:
+) -> tuple[EndpointDescriptor, str] | dict[str, Any]:
     """Run dispatch Steps 2-3 + the previewability gate; return descriptor or error.
 
-    Returns the validated :class:`EndpointDescriptor` when the op resolves,
-    is previewable (:func:`_is_previewable` — ``source_kind='ingested'``, or a
-    governed-tier non-ingested op), and its params pass the schema. Otherwise
-    returns the structured envelope the caller propagates verbatim:
+    Returns the validated :class:`EndpointDescriptor` and the connector id it
+    belongs to when the op resolves, is previewable (:func:`_is_previewable` —
+    ``source_kind='ingested'``, or a governed-tier non-ingested op), and its
+    params pass the schema. For an ingested op, the catalog choice is the
+    same one ``dispatch`` makes
+    (:func:`~meho_backplane.operations._catalog_guard.choose_catalog_for_target`):
+    when a sibling catalog serves the target (#3600), the sibling's
+    descriptor and connector id come back, so the ``preview_hash`` matches
+    the dispatch. When no catalog serves the target, the preview stays on
+    the named catalog; ``dispatch`` reports ``unqualified_target_version``.
+    Otherwise returns the structured envelope the caller propagates verbatim:
 
     * ``unknown_connector`` / ``unknown_op`` -- the natural key resolved no
       descriptor; :func:`~._op_miss.op_miss_result` picks the code and
@@ -271,6 +283,16 @@ async def _resolve_previewable_descriptor(
             "extras": dict(miss.extras),
         }
 
+    # --- Catalog choice (mirrors dispatch Step 3, no audit row) ------------
+    choice = await choose_catalog_for_target(
+        operator=operator,
+        descriptor=descriptor,
+        connector_id=connector_id,
+        target=target,
+    )
+    if isinstance(choice, CatalogSelection):
+        descriptor, connector_id = choice.descriptor, choice.connector_id
+
     # --- Previewability gate (see :func:`_is_previewable`) -----------------
     # A non-ingested op previews as "unavailable" unless it is in a governed
     # approval tier (destructive #3198 / non-credential requires_approval
@@ -298,7 +320,7 @@ async def _resolve_previewable_descriptor(
             validation_errors=validation_errors,
         )
 
-    return descriptor
+    return descriptor, connector_id
 
 
 def _invalid_params_envelope(
@@ -519,11 +541,13 @@ async def preview_dispatch(
         operator=operator,
         connector_id=connector_id,
         op_id=op_id,
+        target=target,
         params=params,
     )
     if isinstance(resolved, dict):
         return resolved  # structured unknown_op / unavailable / invalid_params
-    if resolved.source_kind != "ingested":
+    descriptor, connector_id = resolved
+    if descriptor.source_kind != "ingested":
         # A destructive/requires_approval typed/composite op cleared the
         # previewability gate (#3198/#3312) — bind the logical request tuple
         # + reuse the park-time proposed_effect, no handler runs. Imported
@@ -536,7 +560,7 @@ async def preview_dispatch(
             operator=operator,
             connector_id=connector_id,
             op_id=op_id,
-            descriptor=resolved,
+            descriptor=descriptor,
             target=target,
             params=params,
         )
@@ -544,7 +568,7 @@ async def preview_dispatch(
         operator=operator,
         connector_id=connector_id,
         op_id=op_id,
-        descriptor=resolved,
+        descriptor=descriptor,
         target=target,
         params=params,
     )

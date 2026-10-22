@@ -298,6 +298,7 @@ jobs:
             --set coreKeycloak.enabled=true \
             --set coreKeycloak.hostname=meho.test \
             --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c \
+            --set coreVault.enabled=true \
             > /tmp/rendered-core.yaml
           kubeconform \
             -strict \
@@ -310,6 +311,9 @@ jobs:
           # The built-in Keycloak subchart (#4040) renders in the same pass.
           grep -q 'name: test-keycloak$' /tmp/rendered-core.yaml \
             || { echo "::error::built-in Keycloak StatefulSet did not render with coreKeycloak on"; exit 1; }
+          # The built-in OpenBao subchart (#4044) renders in the same pass.
+          grep -q 'name: test-vault$' /tmp/rendered-core.yaml \
+            || { echo "::error::built-in OpenBao (test-vault) did not render with coreVault on"; exit 1; }
 
       - name: Assert agent-runtime credentials wire via secretKeyRef (#1363)
         # G0.18-T10 (#1363): when an operator opts into the G11.1 agent
@@ -620,10 +624,10 @@ jobs:
         # the object and its template file. The `helm-test` job proves the same
         # on a real cluster by installing as a namespace admin.
         #
+        # OpenBao (#4044) is off in all of those, so it gets two more renders.
         # The one allowed exception is the system:auth-delegator
-        # ClusterRoleBinding when `coreVault.authDelegator=true`. The value
-        # arrives with #4044; that PR adds a render here with
-        # `--set coreVault.authDelegator=true` and `--allow-auth-delegator`.
+        # ClusterRoleBinding with `coreVault.authDelegator=true`; that render
+        # passes only with `--allow-auth-delegator`.
         run: |
           set -euo pipefail
           # `--set` beats `-f`, so the placeholders in the example files are
@@ -650,6 +654,12 @@ jobs:
             helm template test deploy/charts/meho/ -f "$f" "${base[@]}" \
               | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope --label "$f"
           done
+          helm template test deploy/charts/meho/ "${base[@]}" --set coreVault.enabled=true \
+            | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope --label "coreVault on"
+          helm template test deploy/charts/meho/ "${base[@]}" \
+            --set coreVault.enabled=true --set coreVault.authDelegator=true \
+            | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope \
+                --label "coreVault.authDelegator on" --allow-auth-delegator
 
   helm-test:
     # Internal "run" job — the REQUIRED branch-protection context lives on the

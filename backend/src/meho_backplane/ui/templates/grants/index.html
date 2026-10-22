@@ -56,9 +56,9 @@
         </tr></thead>
         <tbody>
           {% for grant in service_rows %}
-            <tr data-grant-id="{{ grant.id }}" data-grant-kind="service">
+            <tr data-grant-id="{{ grant.id }}" data-grant-kind="service"{% if grant.delete_grant %} data-delete-grant="true"{% endif %}>
               <td class="max-w-xs break-all text-xs">{{ subject(grant.subject) }}</td>
-              <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}</td>
+              <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}{% if grant.delete_grant %} <span class="badge badge-sm badge-warning font-sans">delete grant</span>{% endif %}</td>
               <td class="max-w-xs break-all font-mono text-xs">{{ grant.connector }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.target }}</td>
               <td><span class="badge badge-sm {% if grant.effect in ('revoked', 'expired') %}badge-error{% elif grant.effect == 'orphaned' %}badge-warning{% else %}badge-success{% endif %}">{{ grant.effect }}</span>{% if grant.remediation %}<p class="mt-1 max-w-xs text-xs" data-grant-remediation>{{ grant.remediation }}</p>{% endif %}</td>
@@ -74,6 +74,11 @@
         </tbody>
       </table>
     </div>
+    {% if can_write and sandbox_mode_on %}
+      <div id="grants-renew-container" hx-on::before-swap="if (event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }">
+        {% include "grants/_renew.html" %}
+      </div>
+    {% endif %}
     {% if service_offset > 0 or service_has_next %}
       <nav class="flex justify-end gap-2" aria-label="Service grant pages">
         {% if service_offset > 0 %}<a class="btn btn-sm" href="{{ page_url([service_offset - limit, 0] | max, agent_offset) }}">Previous</a>{% endif %}

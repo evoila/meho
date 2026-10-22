@@ -398,7 +398,8 @@ async def _resume_approved_or_already_resumed(
     request waited must not receive the approved write. A saved target that
     no longer resolves fails closed with a ``denied`` envelope before the
     claim. A direct park (``resume_parent IS NULL``) keeps the re-dispatch of
-    the agent's original *call_arguments*.
+    the agent's original *call_arguments*, with ``connector_id`` taken from
+    the row (see :func:`_redispatch_approved`).
 
     Local imports mirror each other (and the wider module convention):
     ``meta_tools`` imports from ``operations.dispatcher`` which imports back
@@ -499,7 +500,12 @@ async def _redispatch_approved(
     composite re-entry as the operator surface. A composite sub-op park
     re-enters its parent composite with the approved sub-op cleared; a direct
     park (``resume_parent IS NULL``) re-dispatches the agent's original call
-    unchanged.
+    with one change: ``connector_id`` is the catalog the row stored. The park
+    may have run on a sibling catalog of the one the agent named (#3600), and
+    that stored catalog is the one policy checked and the approver saw. The
+    dispatcher never switches catalogs on an approved call, so the resume
+    either runs on that catalog or is refused when the target's detected
+    version no longer fits it.
     """
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
@@ -514,7 +520,9 @@ async def _redispatch_approved(
             requester=requester_of(request),
         ) as parent_call:
             if parent_call is None:
-                return await call_operation_with_approval(operator, call_arguments)
+                return await call_operation_with_approval(
+                    operator, {**call_arguments, "connector_id": request.connector_id}
+                )
             parent_op_id, parent_params = parent_call
             _log.info(
                 "approval_wait_resume_composite_parent",

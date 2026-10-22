@@ -674,6 +674,15 @@
         }
       ]
     },
+    "sandboxMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Sandbox mode (#4622, `docs/decisions/sandbox-mode.md`): only for an instance that holds disposable test systems. When `enabled`, a tenant admin may give a service principal a standing grant that also covers deletes (made in the web console, expiring within 30 days). Rendered into `MEHO_SANDBOX_MODE` and `MEHO_SANDBOX_MODE_CONFIRM` only when enabled; the default renders no sandbox setting. `confirmHost` must equal `ingress.host` (the render fails otherwise), and the backplane refuses to start unless that host has a dot-separated part that is exactly `sandbox`. The mode is fixed for the life of the database.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "confirmHost": { "type": "string", "description": "The instance's public host name, equal to `ingress.host`. Required when enabled." }
+      }
+    },
     "uiConsole": {
       "type": "object",
       "additionalProperties": false,
@@ -906,6 +915,27 @@
           "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
           "then": { "properties": { "tenantId": { "minLength": 1 } }, "required": ["tenantId"] }
         }
+      }
+    },
+    "coreVault": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Built-in OpenBao, the password safe (ADR 0008). When enabled, the OpenBao subchart (`charts/openbao/`) is deployed. The `vault:` block stays for a Vault you bring yourself. This block names every key the subchart has; Helm checks their full shape against `charts/openbao/values.schema.json` when `enabled` is true.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "authDelegator": { "type": "boolean", "description": "Render a ClusterRoleBinding of OpenBao's service account to `system:auth-delegator`, the chart's only cluster-wide object. Default false." },
+        "binary": { "type": "string", "description": "`bao` for OpenBao, `vault` for a HashiCorp Vault image (tests only)." },
+        "image": { "type": "object" },
+        "persistence": { "type": "object" },
+        "podSecurityContext": { "type": "object" },
+        "securityContext": { "type": "object" },
+        "resources": { "type": "object" },
+        "service": { "type": "object" },
+        "networkPolicy": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "global": { "type": "object" }
       }
     },
     "audit": {
@@ -1614,6 +1644,28 @@
           }
         },
         "required": ["gsm"]
+      }
+    },
+    {
+      "description": "Sandbox mode (#4622) needs its confirm host: `sandboxMode.enabled: true` requires a non-empty `sandboxMode.confirmHost`. The ConfigMap template then checks that it equals `ingress.host`.",
+      "if": {
+        "properties": {
+          "sandboxMode": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["sandboxMode"]
+      },
+      "then": {
+        "properties": {
+          "sandboxMode": {
+            "required": ["confirmHost"],
+            "properties": {
+              "confirmHost": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
       }
     },
     {

@@ -464,6 +464,7 @@ _CHANGE_BY_TYPE: dict[str, str] = {
     "timestamp with time zone": "COALESCE({col}, now()) + interval '1 second'",
     "jsonb": "'[\"changed\"]'::jsonb",
     "json": "'[\"changed\"]'::json",
+    "boolean": "NOT COALESCE({col}, false)",
 }
 #: Columns with a CHECK constraint get a value the constraint accepts, so
 #: only the guard can reject the change.

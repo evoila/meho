@@ -13,6 +13,7 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 __all__ = [
     "is_vmware_library_item_delete",
     "is_vmware_tagging_removal",
+    "is_vmware_vm_relocate",
     "vmware_rest_safety_floor",
 ]
 
@@ -42,6 +43,16 @@ _TAGGING_OBJECT_PATH_RE = re.compile(r"/cis/tagging/(category|tag)/\{[^/{}]+\}")
 # ``library_item_delete_preview.py``; it reuses the planner of the governed
 # ``vmware.composite.content_library.item.delete``.
 _LIBRARY_ITEM_PATH_RE = re.compile(r"/content/library/item/\{[^/{}]+\}")
+
+# A VM move that names a datastore copies the VM's disks (#4749). In a cold
+# move the VM is off for the whole copy, and the copy fills the target
+# datastore. The generic relocate (both forms) and the older-API method
+# ``RelocateVM_Task`` are ``dangerous`` with approval, with or without a
+# datastore in the call: the floor is on the operation, not on the request
+# body. The preview builder in ``vm_relocate_preview.py`` shows the copy size.
+_VM_PATH_RE = re.compile(r"/vcenter/vm/\{[^/{}]+\}")
+_VM_RELOCATE_QUERIES = frozenset({"action=relocate", "action=relocate&vmw-task=true"})
+_VIM_RELOCATE_PATH_RE = re.compile(r"/VirtualMachine/\{[^/{}]+\}/RelocateVM_Task")
 
 
 def _canonical(path: str) -> tuple[str, str]:
@@ -86,10 +97,27 @@ def is_vmware_library_item_delete(method: str, path: str) -> bool:
     )
 
 
+def is_vmware_vm_relocate(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is a VM move that can copy the VM's disks.
+
+    Matches ``POST /vcenter/vm/{vm}?action=relocate``, the same with
+    ``&vmw-task=true``, and ``POST /VirtualMachine/{moId}/RelocateVM_Task``,
+    with or without the ``/api`` mount in the path.
+    """
+    if method.upper() != "POST":
+        return False
+    canonical_path, query = _canonical(path)
+    if query in _VM_RELOCATE_QUERIES:
+        return _VM_PATH_RE.fullmatch(canonical_path) is not None
+    return not query and _VIM_RELOCATE_PATH_RE.fullmatch(canonical_path) is not None
+
+
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
     """Identify VMware VM write families that require approval."""
     if method not in _WRITE_METHODS:
         return False
+    if is_vmware_vm_relocate(method, path):
+        return True
     canonical_path, _query = _canonical(path)
     if canonical_path == "/vcenter/vm/{vm}/hardware":
         return True
@@ -107,7 +135,10 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
 def vmware_rest_safety_floor(
     version: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
-    """Promote VM, tagging-removal, and library-item-delete writes for the VMware catalogs."""
+    """Promote VM, tagging-removal, and library-item-delete writes for the VMware catalogs.
+
+    The VM writes include the moves that copy disks (:func:`is_vmware_vm_relocate`).
+    """
     if version not in _FLOORED_VERSIONS:
         return proto
     method = proto.method.upper()

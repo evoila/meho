@@ -253,6 +253,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -276,6 +277,7 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 # enum. The import is safe against a cycle: the ``checks`` package is
 # dependency-pure (stdlib + pydantic + itself) and never imports ``db``.
 from meho_backplane.checks.assertions import CheckState
+from meho_backplane.sandbox_mode import sandbox_mode_active
 
 __all__ = [
     "AUDIT_EVENT_CLASSES",
@@ -656,6 +658,22 @@ class AuditLog(Base):
         nullable=False,
         server_default=sa.text("'legacy_request'"),
     )
+    # Whether the instance ran in sandbox mode when it wrote the row
+    # (#4622, ``docs/decisions/sandbox-mode.md``). One default sets it for
+    # every writer: the ``before_insert`` hook below reads the process flag
+    # set at boot, so no writer names the mark. It is an ORM hook, not a
+    # Core column default, on purpose: a Core default would be added to
+    # every ``insert(AuditLog)`` statement, also against a database at an
+    # older revision (the migration tests do that). The database default
+    # ``false`` covers a row written by an older build that does not know
+    # the column, and every row from before migration ``0115``. The whole
+    # database has one mode, but rows leave it (exports, log stores), and
+    # the mark goes with them.
+    sandbox_mode: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=sa.false(),
+    )
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -720,6 +738,18 @@ class AuditLog(Base):
             postgresql_using="btree",
         ),
     )
+
+
+@sa.event.listens_for(AuditLog, "before_insert")
+def _stamp_audit_sandbox_mode(_mapper: object, _connection: object, row: AuditLog) -> None:
+    """The one default for ``audit_log.sandbox_mode`` (#4622).
+
+    Runs for every ``AuditLog`` row the ORM inserts. A writer that set the
+    mark itself keeps its value (none does today; the writer inventory
+    test checks that).
+    """
+    if row.sandbox_mode is None:
+        row.sandbox_mode = sandbox_mode_active()
 
 
 class Tenant(Base):
@@ -5546,7 +5576,135 @@ class AgentPermission(Base):
     )
 
 
-class ServicePrincipalGrant(Base):
+class _StandingGrantColumns:
+    """Columns shared by the two standing-grant tables (#4622).
+
+    :class:`ServicePrincipalGrant` holds ordinary grants.
+    :class:`SandboxDeleteGrant` holds delete grants, which only an instance
+    in sandbox mode creates or reads. The two tables have one shape so the
+    grant service runs the same lookup, list and revoke code over either.
+    """
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # JWT ``sub`` of the service principal the grant authorises. Soft
+    # reference (no FK) -- same discipline as AgentPermission.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
+    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
+    # (same shape as ApprovalRequest.connector_id).
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL keys a targetless / tenant-wide op; a UUID keys exactly one
+    # target. Matched exactly at dispatch (no any-target wildcard).
+    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    # Target *selector* (#3349), an alternative to a concrete ``target_id``:
+    # a grant with a selector matches any dispatch whose target fingerprint
+    # satisfies it, so an operator can authorise an op on targets that do
+    # not yet exist (a blueprint that registers its own appliances mid-run).
+    # ``target_product`` matches the target's ``product`` exactly;
+    # ``target_name_pattern`` is an ``fnmatch`` glob over the target ``name``.
+    # A selector grant keys ``target_id IS NULL`` with at least one of these
+    # non-NULL; a pure targetless grant keys all three NULL. The wildcard is
+    # requested explicitly here (never implied by a NULL ``target_id``), and
+    # matching is still exact on ``(tenant, principal_sub, op_id,
+    # connector_id)`` — deny-by-default is preserved.
+    target_product: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_name_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Operator's upfront justification (the review flow requires it).
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    # NULL = a standing (permanent) grant; a future UTC timestamp bounds it.
+    # The dispatch lookup ignores rows past their ``expires_at``.
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Soft-delete marker: NULL = live, non-NULL = revoked at that time.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional reason the operator gave when revoking (#3489). NULL when the
+    # revoke carried no reason, and on every live row.
+    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
+    """The four indexes every standing-grant table carries, named per table.
+
+    * ``<table>_lookup_idx`` -- b-tree on ``(tenant_id, principal_sub,
+      op_id)`` -- the dispatch-time query.
+    * ``uq_<table>_targeted`` / ``uq_<table>_targetless`` -- two **partial**
+      unique indexes enforcing "at most one active grant per fully-scoped
+      key". Split because the nullable ``target_id`` would otherwise defeat
+      a single unique index on the targetless case (``NULL != NULL``), and
+      scoped to ``revoked_at IS NULL`` so a revoked scope can be re-granted.
+      Since #3349 the ``…_targetless`` index is narrowed to *pure*
+      targetless grants (``target_product`` and ``target_name_pattern`` both
+      NULL); selector grants (#3349) also key ``target_id IS NULL`` but
+      carry their own CRUD-layer uniqueness check.
+    * ``<table>_expires_at_idx`` -- b-tree on ``expires_at``.
+    """
+    targetless_where = (
+        "target_id IS NULL AND target_product IS NULL "
+        "AND target_name_pattern IS NULL AND revoked_at IS NULL"
+    )
+    return (
+        Index(
+            f"{table}_lookup_idx",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            f"uq_{table}_targeted",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            "connector_id",
+            "target_id",
+            unique=True,
+            postgresql_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+            sqlite_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+        ),
+        Index(
+            f"uq_{table}_targetless",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            "connector_id",
+            unique=True,
+            postgresql_where=sa.text(targetless_where),
+            sqlite_where=sa.text(targetless_where),
+        ),
+        Index(
+            f"{table}_expires_at_idx",
+            "expires_at",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class ServicePrincipalGrant(_StandingGrantColumns, Base):
     """Standing scoped auto-approval grant for a service principal (#3151 / #3152).
 
     A paired consumer add-on drives long multi-step workflows through the
@@ -5610,115 +5768,51 @@ class ServicePrincipalGrant(Base):
     """
 
     __tablename__ = "service_principal_grant"
+    __table_args__ = _standing_grant_table_args("service_principal_grant")
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(),
-        primary_key=True,
-        default=uuid.uuid4,
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(),
-        ForeignKey("tenant.id"),
-        nullable=False,
-    )
-    # JWT ``sub`` of the service principal the grant authorises. Soft
-    # reference (no FK) -- same discipline as AgentPermission.principal_sub.
-    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
-    # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
-    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
-    op_id: Mapped[str] = mapped_column(Text, nullable=False)
-    # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
-    # (same shape as ApprovalRequest.connector_id).
-    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
-    # NULL keys a targetless / tenant-wide op; a UUID keys exactly one
-    # target. Matched exactly at dispatch (no any-target wildcard).
-    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
-    # Target *selector* (#3349), an alternative to a concrete ``target_id``:
-    # a grant with a selector matches any dispatch whose target fingerprint
-    # satisfies it, so an operator can authorise an op on targets that do
-    # not yet exist (a blueprint that registers its own appliances mid-run).
-    # ``target_product`` matches the target's ``product`` exactly;
-    # ``target_name_pattern`` is an ``fnmatch`` glob over the target ``name``.
-    # A selector grant keys ``target_id IS NULL`` with at least one of these
-    # non-NULL; a pure targetless grant keys all three NULL. The wildcard is
-    # requested explicitly here (never implied by a NULL ``target_id``), and
-    # matching is still exact on ``(tenant, principal_sub, op_id,
-    # connector_id)`` — deny-by-default is preserved.
-    target_product: Mapped[str | None] = mapped_column(Text, nullable=True)
-    target_name_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Operator's upfront justification (the review flow requires it).
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(UTC),
-    )
-    # NULL = a standing (permanent) grant; a future UTC timestamp bounds it.
-    # The dispatch lookup ignores rows past their ``expires_at``.
-    expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        default=None,
-    )
-    # Soft-delete marker: NULL = live, non-NULL = revoked at that time.
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        default=None,
-    )
-    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Optional reason the operator gave when revoking (#3489). NULL when the
-    # revoke carried no reason, and on every live row.
-    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    __table_args__ = (
-        Index(
-            "service_principal_grant_lookup_idx",
-            "tenant_id",
-            "principal_sub",
-            "op_id",
-            postgresql_using="btree",
-        ),
-        Index(
-            "uq_service_principal_grant_targeted",
-            "tenant_id",
-            "principal_sub",
-            "op_id",
-            "connector_id",
-            "target_id",
-            unique=True,
-            postgresql_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
-            sqlite_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
-        ),
-        Index(
-            "uq_service_principal_grant_targetless",
-            "tenant_id",
-            "principal_sub",
-            "op_id",
-            "connector_id",
-            unique=True,
-            # Narrowed (#3349) to *pure* targetless grants (no selector) so a
-            # selector grant — which also keys ``target_id IS NULL`` — is not
-            # forced into the single-targetless-grant slot. Selector-grant
-            # uniqueness is enforced in the CRUD layer (``create``), not by a
-            # partial index, to sidestep NULL-vs-NULL on the nullable selector
-            # columns portably across Postgres / SQLite.
-            postgresql_where=sa.text(
-                "target_id IS NULL AND target_product IS NULL "
-                "AND target_name_pattern IS NULL AND revoked_at IS NULL"
-            ),
-            sqlite_where=sa.text(
-                "target_id IS NULL AND target_product IS NULL "
-                "AND target_name_pattern IS NULL AND revoked_at IS NULL"
-            ),
-        ),
-        Index(
-            "service_principal_grant_expires_at_idx",
-            "expires_at",
-            postgresql_using="btree",
-        ),
-    )
+class SandboxDeleteGrant(_StandingGrantColumns, Base):
+    """A standing grant that covers a delete; sandbox mode only (#4622).
+
+    Same shape as :class:`ServicePrincipalGrant`, in its own table. A
+    delete grant is a grant for an operation with a delete sign (the
+    ``destructive`` safety level, the HTTP verb ``DELETE``, the
+    ``destructive`` tag, a delete name such as ``*.delete``, or a vendor
+    delete action name such as ``Destroy_Task``), or for a delete step of
+    a multi-step operation. Only a tenant admin creates one, only in the
+    web console, only on an instance in sandbox mode, and it expires within
+    30 days (``docs/decisions/sandbox-mode.md``).
+
+    **Why a separate table.** An older MEHO build never reads this table,
+    and MEHO with the mode off never reads or writes it either. So after a
+    rollback to an older build, and on every instance that is not a
+    sandbox, a delete grant has no effect: every delete waits for a person
+    again. The ordinary grant table stays the only grant table those builds
+    read.
+    """
+
+    __tablename__ = "sandbox_delete_grant"
+    __table_args__ = _standing_grant_table_args("sandbox_delete_grant")
+
+
+class SandboxModeState(Base):
+    """The stored sandbox mode: exactly one row, fixed for the database (#4622).
+
+    MEHO writes the row at its first start with one insert that only one
+    process can win, then reads it back at every start and refuses to run
+    when the stored mode differs from ``MEHO_SANDBOX_MODE``
+    (:mod:`meho_backplane.sandbox_mode`). Migration ``0115`` stores
+    ``false`` in every database that existed before it, so only a database
+    created from empty by this release or a later one can hold ``true``.
+    """
+
+    __tablename__ = "sandbox_mode_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    sandbox_mode: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    stored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
 
 
 class ScheduledTriggerKind(StrEnum):

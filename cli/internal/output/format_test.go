@@ -44,6 +44,42 @@ func TestRenderHumanHealth(t *testing.T) {
 	}
 }
 
+// TestRenderHumanHealth_SandboxMode: one extra line when the backplane
+// says the instance is in sandbox mode (#4622); nothing new when it is
+// off, and nothing new when an older backplane sends no field.
+func TestRenderHumanHealth_SandboxMode(t *testing.T) {
+	base := func(mode *string) *api.HealthResponse {
+		return &api.HealthResponse{
+			Operator:    api.OperatorIdentity{Sub: "alice-sub-id"},
+			Vault:       api.VaultStatus{Reachable: true, ReadOk: true},
+			Db:          api.DbStatus{Migrated: ptrBool(true)},
+			SandboxMode: mode,
+		}
+	}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+	on := render(base(ptrStr("on")))
+	if !strings.Contains(on, "Sandbox mode: on") {
+		t.Errorf("expected the sandbox line when the mode is on, got:\n%s", on)
+	}
+	off := render(base(ptrStr("off")))
+	missing := render(base(nil))
+	if off != missing {
+		t.Errorf("mode off and no field must print the same:\n%s\n---\n%s", off, missing)
+	}
+	if strings.Contains(off, "Sandbox mode") {
+		t.Errorf("no sandbox line when the mode is off, got:\n%s", off)
+	}
+	if strings.Count(on, "\n") != strings.Count(off, "\n")+1 {
+		t.Errorf("the mode on adds exactly one line:\n%s\n---\n%s", on, off)
+	}
+}
+
 // TestRenderHumanHealth_NoEmail confirms the fallback path (no
 // email → name → sub) renders the sub alone without the trailing
 // "(sub: ...)" tail.

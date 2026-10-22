@@ -70,6 +70,14 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.connectors.vcf_installer._response_schemas import (
+    BRINGUP_COMPOSITE_RESPONSE,
+)
+from meho_backplane.connectors.vcf_installer.typed_ops import (
+    INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP,
+    SDDC_SPEC_EXAMPLE,
+    SDDC_SPEC_HINT,
+)
 from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_BRINGUP_RETRY_OP_ID,
     INSTALLER_BRINGUP_START_OP_ID,
@@ -101,7 +109,8 @@ INSTALLER_BRINGUP_OP_ID = "installer.composite.sddc.bringup"
 _DEPLOY_SUBOP_OP_ID = "installer.sddc.deploy"
 
 #: Same operation group as the ``installer.sddc.bringup.status`` poll, so discovery
-#: co-locates "run a bring-up" with "track a bring-up".
+#: co-locates "run a bring-up" with "track a bring-up". The group text lives in
+#: :data:`~.typed_ops.INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP` only.
 _GROUP_BRINGUP = "installer-bringup"
 
 # --- Hand-coded wire paths — the spec-reconcile lane's introspection source. ---
@@ -455,28 +464,39 @@ _BRINGUP_PARAM_SCHEMA: dict[str, Any] = {
     },
     "required": ["spec"],
     "additionalProperties": False,
+    "examples": [{"spec": SDDC_SPEC_EXAMPLE}],
 }
 
-_BRINGUP_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "description": (
-        "Bring-up outcome envelope. status='deploying' with sddc_task.id when the "
-        "deploy is accepted (poll installer.sddc.bringup.status to terminal); "
-        "status='validation_failed'/'validation_timeout' with failed_checks when "
-        "validation blocked the deploy."
+_BRINGUP_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_call": (
+        "Call with a full SddcSpec to check it and, only if the check passes, "
+        "start a new VCF management-domain bring-up, in one approved step."
     ),
-    "additionalProperties": True,
+    "output_shape": (
+        "{status: 'deploying', sddc_task: {id, status, name, vcfInstanceName}, "
+        "poll_with, validation_id, validation_result_status, validation_warnings?} "
+        "or, when the check stops it, {status: 'validation_failed' | "
+        "'validation_timeout', validation_id, execution_status, result_status, "
+        "failed_checks: [{description, severity, resultStatus}]}."
+    ),
+    "next_step": (
+        "On deploying, call installer.sddc.bringup.status with sddc_task.id until "
+        "status is COMPLETED_WITH_SUCCESS, COMPLETED_WITH_FAILURE or "
+        "ROLLBACK_SUCCESS; the bring-up runs for hours. ROLLBACK_SUCCESS means the "
+        "bring-up failed and the Installer undid what it had built; stop polling. "
+        "On validation_failed, report failed_checks and fix the spec. On "
+        "validation_timeout, follow validation_id with "
+        "installer.sddc.validation.status."
+    ),
+    "preconditions": (
+        "The depot is set and the release bundles are downloaded "
+        "(installer.bundles.list shows them SUCCESSFUL). Check with "
+        "installer.sddc.list that no bring-up is running. A person must approve "
+        "the call before it runs; the approver sees the SDDC names and networks, "
+        "never passwords."
+    ),
+    "parameter_hints": {"spec": SDDC_SPEC_HINT},
 }
-
-_BRINGUP_WHEN_TO_USE = (
-    "Use to DEPLOY a new VCF management domain through the Installer: it validates "
-    "the SddcSpec (POST /v1/sddcs/validations, poll to terminal) and, only if "
-    "validation passes, starts the bring-up (POST /v1/sddcs) and returns the "
-    "SddcTask id. dangerous + requires_approval — the reviewer sees an SDDC "
-    "identity/network preview, never passwords. The deploy runs for hours; poll "
-    "installer.sddc.bringup.status with the returned id for terminal state. This is the "
-    "governed replacement for a Cloud Builder / Installer bring-up run by hand."
-)
 
 
 async def register_installer_composite_operations(
@@ -499,23 +519,21 @@ async def register_installer_composite_operations(
         impl_id=InstallerConnector.impl_id,
         op_id=INSTALLER_BRINGUP_OP_ID,
         handler=installer_sddc_bringup_composite,
-        summary="Govern a VCF management-domain bring-up (validate then deploy).",
+        summary="Check an SddcSpec, then start the VCF bring-up, in one approved step.",
         description=(
-            "Orchestrates the two-step VCF Installer bring-up as one approved unit: "
-            "POST /v1/sddcs/validations (non-mutating dry-run, polled to terminal) "
-            "gates POST /v1/sddcs (the deploy). Returns the SddcTask id the moment "
-            "the deploy is accepted — the bring-up runs for hours, so poll "
-            "installer.sddc.bringup.status for terminal state. dangerous + requires_approval; "
-            "the approval preview echoes SDDC identity + network blast-radius only, "
-            "never passwords. Direct-session dispatch (Goal #2247)."
+            "Sends the SddcSpec to POST /v1/sddcs/validations and waits for the "
+            "check. Only if it passes, starts the bring-up with POST /v1/sddcs and "
+            "returns the bring-up task. A person must approve first. The bring-up "
+            "runs for hours."
         ),
         parameter_schema=_BRINGUP_PARAM_SCHEMA,
-        response_schema=_BRINGUP_RESPONSE_SCHEMA,
+        response_schema=BRINGUP_COMPOSITE_RESPONSE,
         group_key=_GROUP_BRINGUP,
-        when_to_use=_BRINGUP_WHEN_TO_USE,
+        when_to_use=INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP[_GROUP_BRINGUP],
         tags=["vcf", "installer", "bringup", "deploy", "dangerous"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=_BRINGUP_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
     _log.info(

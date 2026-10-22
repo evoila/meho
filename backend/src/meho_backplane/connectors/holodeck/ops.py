@@ -25,6 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from meho_backplane.connectors.holodeck._response_schemas import HOLODECK_RESPONSE_SCHEMAS
+
 __all__ = ["HOLODECK_OPS", "SSH_TRANSPORT_NOTE", "HolodeckOp", "_holodeck_ops"]
 
 
@@ -78,57 +80,38 @@ class HolodeckOp:
 _HOLODECK_ABOUT_OP = HolodeckOp(
     op_id="holodeck.about",
     handler_attr="about",
-    summary="Return the Holodeck appliance's product, version, and Photon OS snapshot.",
+    summary="Show the Holodeck version, Photon OS version and pod id of the HoloRouter.",
     description=(
-        "Connects to the HoloRouter appliance over SSH and runs "
-        "``cat /etc/photon-release`` plus ``pwsh -EncodedCommand`` "
-        "of ``Get-HoloDeckConfig | ConvertTo-Json -Compress`` to "
-        "extract the Holodeck version, Photon OS version, and pod "
-        "ID. Returns a flat dict with the parsed Holodeck version, "
-        "the full Photon release line, the pod ID, and the vendor "
-        "(``vmware``). Holodeck exposes no REST API; this op (and "
-        "every other op in the connector) is the canonical surface "
-        "for identifying the appliance before issuing higher-level "
-        "pod/service/log ops. No params; safe to call on any healthy "
-        "HoloRouter target."
+        "Connects to the HoloRouter over SSH, reads /etc/photon-release and runs "
+        "Get-HoloDeckConfig. Returns vendor, product, Holodeck version, Photon "
+        "OS version and pod id. Read-only."
     ),
     parameter_schema={
         "type": "object",
         "properties": {},
         "additionalProperties": False,
+        "examples": [{}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "vendor": {"type": "string"},
-            "product": {"type": "string"},
-            "version": {"type": ["string", "null"]},
-            "build": {"type": ["string", "null"]},
-            "photon_version": {"type": ["string", "null"]},
-            "pod_id": {"type": ["string", "null"]},
-        },
-        "required": ["vendor", "product"],
-        "additionalProperties": True,
-    },
+    response_schema=HOLODECK_RESPONSE_SCHEMAS["holodeck.about"],
     group_key="identity",
     tags=("read-only", "identity", "holodeck"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call when the operator wants to identify the Holodeck "
-            "appliance behind a target before issuing higher-level "
-            "pod / service / log ops, or when the agent needs to "
-            "confirm the appliance is reachable via SSH + pwsh. " + SSH_TRANSPORT_NOTE
+        "when_to_call": (
+            "Call first, to learn which Holodeck version a HoloRouter runs and "
+            "to check that MEHO can reach it over SSH and PowerShell. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {},
         "output_shape": (
-            "Flat dict; ``version`` carries the parsed Holodeck "
-            "version string (e.g. ``9.0.0``) when the cmdlet output "
-            "was readable. ``photon_version`` carries the host "
-            "Photon OS release identifier (e.g. ``5.0``). ``pod_id`` "
-            "carries the Holodeck pod identifier when set on the "
-            "appliance, ``None`` otherwise."
+            "{vendor, product, version, build, photon_version, pod_id}. "
+            "'version' is the Holodeck version, for example 9.0.0, or null when "
+            "the cmdlet answer had none. 'build' is the first line of "
+            "/etc/photon-release. 'pod_id' is null when the appliance has none."
+        ),
+        "next_step": (
+            "For the full configuration, call holodeck.config.show. For the "
+            "services, call holodeck.service.list."
         ),
     },
 )

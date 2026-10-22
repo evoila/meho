@@ -74,7 +74,7 @@ def test_ready_open_by_default(client: TestClient) -> None:
     # No probes registered (no lifespan) -> 503, but crucially NOT 401.
     resp = client.get("/ready")
     assert resp.status_code != 401
-    assert set(resp.json()) == {"status", "checks", "features"}
+    assert set(resp.json()) == {"status", "checks", "sandbox_mode", "features"}
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ def test_correct_bearer_admits_ready(client: TestClient, monkeypatch: pytest.Mon
     _set_token(monkeypatch, _TOKEN)
     resp = client.get("/ready", headers={"Authorization": f"Bearer {_TOKEN}"})
     assert resp.status_code != 401
-    assert set(resp.json()) == {"status", "checks", "features"}
+    assert set(resp.json()) == {"status", "checks", "sandbox_mode", "features"}
 
 
 def test_healthz_never_guarded(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,8 +150,9 @@ def test_ready_without_valid_bearer_serves_verdict_only(
     _set_token(monkeypatch, _TOKEN)
     resp = client.get("/ready", headers=headers)
     # No probes registered (no lifespan) -> 503 not-ready; never 401.
+    # ``sandbox_mode`` (#4622) is readable by every caller, token or not.
     assert resp.status_code == 503
-    assert resp.json() == {"status": "not_ready", "checks": []}
+    assert resp.json() == {"status": "not_ready", "checks": [], "sandbox_mode": "off"}
 
 
 def test_ready_header_less_probe_gets_200_when_ready(

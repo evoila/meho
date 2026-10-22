@@ -131,7 +131,7 @@ def test_write_ops_are_dangerous_and_require_approval() -> None:
 def test_write_ops_carry_transport_note_and_instructions() -> None:
     for op in WRITE_OPS:
         instr = op.llm_instructions or {}
-        assert "Holodeck has no REST API" in instr.get("when_to_use", "")
+        assert "Holodeck has no REST API" in instr.get("when_to_call", "")
         assert instr.get("output_shape"), f"{op.op_id} missing output_shape"
 
 

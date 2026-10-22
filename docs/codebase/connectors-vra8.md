@@ -197,6 +197,11 @@ The read core follows the `vcd` / `fleet-lcm` layout:
 - **`_llm_instructions.py`** — the per-op `llm_instructions` blobs (`when_to_call` /
   `output_shape` / `next_step`), keyed by op id; framed around inventorying a
   migration-source estate, with explicit pagination guidance.
+- **`_response_schemas.py`** — the per-op `response_schema`s. Each names the
+  vendor fields, nested ones too, taken from the public `vra-sdk-go` v0.6.5
+  Swagger files (`vra-iaas.json`, `vra-catalog-deployment.json`,
+  `vra-blueprint.json`). They are information for the AI; the dispatcher does not
+  check an answer against them.
 - **`_paths.py`** — the request-path constants (`_CSP_LOGIN_PATH`,
   `_IAAS_LOGIN_PATH`, `_ABOUT_PATH`, `_PROJECTS_PATH`, `_DEPLOYMENTS_PATH`,
   `_DEPLOYMENT_DETAIL_PATH`, `_BLUEPRINTS_PATH`, `_CATALOG_ITEMS_PATH`) and the
@@ -220,6 +225,18 @@ self-describes the total. The agent pages the JSONFlux result handle with
 server-side sort/filter over a handle is not available, and `$orderby` is
 deliberately not forwarded to the vendor either (vRA 8's casing for it is not
 uniform across services: IaaS `$orderBy` vs `$orderby`).
+
+**Operation contracts.** The 6 ops meet the VMware operation-contract check
+(`backend/tests/test_vmware_operation_contracts.py`) and have no entry in its gap
+list:
+
+- Each description is at most about 300 characters; longer guidance lives in
+  `_llm_instructions.py`.
+- Each `parameter_schema` describes every field and has one example call under
+  `examples` (neutral placeholders such as `<deployment-id>`).
+  `backend/tests/test_vcfa_operation_examples.py` checks that every example is a
+  valid call and that every response field has a description.
+- No parameter has a fixed value list, so no `enum` was added.
 
 ## Spec reconcile lane
 

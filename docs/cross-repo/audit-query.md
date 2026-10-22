@@ -107,7 +107,7 @@ For the full parent/child **session-graph tree** (lineage between composite oper
 | `--principal` | string | Substring `ILIKE` match on `operator_sub`. Empty string is treated as no filter. |
 | `--op-id` | glob | `*` → SQL `%`. Literal `%` / `_` escaped. Matches both `payload->>'op_id'` (MCP / typed) and `http.{method}:{path}` (chassis). |
 | `--op-class` | enum | One of `read` / `write` / `credential_read` / `audit_query` / `other`. Exact match against `payload->>'op_class'`. |
-| `--result-status` | enum | One of `ok` / `error` / `denied`. Maps to status-code ranges. |
+| `--result-status` | enum | One of `ok` / `error` / `denied` / `pending`. Maps to status-code ranges. `pending` is history: the run stopped to wait for approval, and the row stays `pending` after the decision. To see what waits now, use `meho approvals list`. |
 | `--since` / `--until` | duration shorthand or ISO-8601 | Shorthand grammar: `<N><unit>` where unit ∈ `{s, m, h, d, w}` and N ≤ 9999. ISO-8601 accepted via `datetime.fromisoformat` (Python 3.11+, including the `Z` suffix). |
 | `--audit-id` | UUID | Exact-id lookup. Combined with the tenant boundary, produces 0 or 1 row. |
 | `--parent-audit-id` | UUID | Exact match on `parent_audit_id`. Returns the direct children of one row, for example the decision row and the run row of an approval request. |

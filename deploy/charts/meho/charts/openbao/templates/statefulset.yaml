@@ -1,0 +1,123 @@
+{{- $home := include "coreVault.home" . }}
+{{- $env := include "coreVault.envPrefix" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "coreVault.fullname" . }}
+  labels:
+    {{- include "coreVault.labels" . | nindent 4 }}
+spec:
+  # One server. Raft storage lets it grow to three later without a storage
+  # change.
+  replicas: 1
+  # A locked pod is never ready. With the default `OrderedReady`, Kubernetes
+  # would wait for it to be ready before it rolls out a change, and replace
+  # it right after someone unlocks it. The field cannot be changed after the
+  # first install.
+  podManagementPolicy: Parallel
+  serviceName: {{ include "coreVault.internalName" . }}
+  selector:
+    matchLabels:
+      {{- include "coreVault.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # The config is read at start. A changed ConfigMap restarts the pod
+        # on upgrade.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "coreVault.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.authDelegator }}
+      # The Kubernetes login method sends this pod's token to the cluster
+      # to check other tokens; the auth-delegator binding allows that.
+      serviceAccountName: {{ include "coreVault.fullname" . }}
+      automountServiceAccountToken: true
+      {{- else }}
+      automountServiceAccountToken: false
+      {{- end }}
+      # No `<SERVICE>_PORT` variables from other Services in the namespace:
+      # a Service named `vault` would otherwise set `VAULT_PORT` here.
+      enableServiceLinks: false
+      securityContext:
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
+      containers:
+        - name: {{ .Values.binary }}
+          image: {{ include "meho.core.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image's start script turns off core dumps and adds
+          # `-config=<home>/config`.
+          args: ["server"]
+          env:
+            # The pod is not root, so the start script must not try to
+            # change file owners.
+            - name: SKIP_CHOWN
+              value: "true"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: {{ $env }}_API_ADDR
+              value: "http://$(POD_NAME).{{ include "coreVault.internalName" . }}:8200"
+            - name: {{ $env }}_CLUSTER_ADDR
+              value: "https://$(POD_NAME).{{ include "coreVault.internalName" . }}:8201"
+            # For `status` in the readiness check and for `kubectl exec`.
+            - name: {{ $env }}_ADDR
+              value: "http://127.0.0.1:8200"
+          ports:
+            - name: http
+              containerPort: 8200
+              protocol: TCP
+            - name: cluster
+              containerPort: 8201
+              protocol: TCP
+          # `status` exits 2 while the server is locked ("sealed"), so a
+          # locked pod is not ready. No liveness check: restarting a locked
+          # server would not unlock it.
+          readinessProbe:
+            exec:
+              command: [{{ .Values.binary | quote }}, "status"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ $home }}/data
+            - name: config
+              mountPath: {{ $home }}/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "coreVault.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  # The disk outlives `helm uninstall` on purpose (the default Retain
+  # policy): it holds every secret, and it opens only with the unlock key.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "coreVault.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}

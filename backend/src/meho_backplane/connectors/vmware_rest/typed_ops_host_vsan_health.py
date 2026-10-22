@@ -200,6 +200,7 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7"}],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -304,21 +305,11 @@ HOST_VSAN_HEALTH_WHEN_TO_USE = (
 VMWARE_HOST_VSAN_HEALTH_OP = VmwareTypedOp(
     op_id="vmware.host.vsan_health",
     handler_attr="host_vsan_health",
-    summary="Per cluster, vSAN health-test groups + overall health status.",
+    summary="vSAN health of one cluster: the overall colour and each group of health tests.",
     description=(
-        "Returns the cluster-wide vSAN overall_health colour plus the "
-        "health-test groups list (each group with its own roll-up colour + "
-        "per-check tests: id / name / colour / short description) for one "
-        "cluster. Queries VsanQueryVcClusterHealthSummary on the "
-        "'vsan-cluster-health-system' singleton scoped to the target "
-        "cluster's ClusterComputeResource MoRef, directly on the connector "
-        "session, so it works with zero catalog ingest -- vSAN health is "
-        "the one read the plain vSphere Automation REST surface cannot "
-        "reproduce (it lives on the dedicated /vsanHealth vmomi endpoint), "
-        "making this the 'govc vsan.health.*' equivalent for cluster-health "
-        "triage. Best-effort: a cluster with vSAN disabled or a rejected "
-        "health call returns null groups / overall_health with a read_note "
-        "rather than failing. safety_level=safe, read-only."
+        "Returns the vSAN health summary of one cluster: the overall colour and each health "
+        "group with its tests (id, name, colour, short text). When vSAN is off or the health "
+        "service fails, groups and overall_health are null and read_note says why. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -327,21 +318,23 @@ VMWARE_HOST_VSAN_HEALTH_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call when the operator asks whether vSAN is healthy on a cluster, "
-            "which vSAN health group is red/yellow, or wants the vSAN "
-            "health-test roll-up -- data the plain vCenter REST surface cannot "
-            "supply. Requires the target cluster's MoRef."
+        "when_to_call": (
+            "Call to check whether vSAN is healthy on a cluster and which health group "
+            "or test is yellow or red. The vCenter REST API cannot give this."
         ),
         "parameter_hints": {
-            "cluster": "Managed-object ID of the vSAN cluster (e.g. 'domain-c123').",
+            "cluster": "Cluster moid, e.g. 'domain-c7'.",
         },
         "output_shape": (
-            "{cluster, overall_health, groups: [{group_id, group_name, "
-            "group_health, tests: [{test_id, test_name, test_health, "
-            "test_short_description}]}]}. When the best-effort health-service "
-            "read failed, overall_health/groups are null and the payload "
-            "carries a read_note."
+            "{cluster, overall_health, groups: [{group_id, group_name, group_health, "
+            "tests: [{test_id, test_name, test_health, test_short_description}]}], "
+            "read_note}. Colours are the vSAN health colours, such as green, yellow and "
+            "red. When the read failed, overall_health and groups are null and read_note "
+            "says why."
+        ),
+        "next_step": (
+            "For each group that is not green, report its tests that are not green. To "
+            "see the disks of a host, call vmware.host.storage_devices."
         ),
     },
 )

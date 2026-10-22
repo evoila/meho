@@ -386,9 +386,9 @@ async def _direct_seam_gate_return_verbatim(
     The faithful write-composite shape: the first governed child that parks
     short-circuits the composite and the handler returns the
     ``awaiting_approval`` :class:`OperationResult` verbatim (the dispatcher
-    passes a handler-returned result straight through, writing no composite
-    DISPATCH row). Records the ``parent_audit_id_var`` seen inside the body
-    so the test can assert the composite's audit id reached the seam.
+    then writes the composite's own ``awaiting_approval`` row, #4275).
+    Records the ``parent_audit_id_var`` seen inside the body so the test can
+    assert the composite's audit id reached the seam.
     """
     _direct_seam_parent_ids.append(parent_audit_id_var.get())
     gate = await enforce_subop_policy(
@@ -1074,10 +1074,10 @@ async def test_dispatch_composite_direct_seam_child_park_verbatim_not_orphaned(
     """The real write-composite shape (park returned verbatim) is not orphaned.
 
     A governed write composite returns the child's ``awaiting_approval``
-    verbatim on the first parked sub-op, so the dispatcher passes it straight
-    through and writes no composite DISPATCH row. The bind still fired for the
-    handler body, so the child's ``approval.request`` audit row carries the
-    composite's ``audit_id`` -- ``None`` before #3348.
+    verbatim on the first parked sub-op. The bind fired for the handler body,
+    so the child's ``approval.request`` audit row carries the composite's
+    ``audit_id`` -- ``None`` before #3348. Since #4275 that id also has a row:
+    the composite's own ``awaiting_approval`` execution row.
     """
     _direct_seam_parent_ids.clear()
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)

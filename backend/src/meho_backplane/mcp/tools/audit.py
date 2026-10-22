@@ -157,8 +157,15 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         "result_status": {
             "type": ["string", "null"],
             "description": (
-                'One of "ok" / "error" / "denied". Maps to status-code '
-                "ranges on the substrate side."
+                'One of "ok" / "error" / "denied" / "pending". Maps to '
+                'status-code ranges on the substrate side. "pending" is '
+                "history: the run stopped to wait for approval (the "
+                "`approval.request` row, and the stopped operation's own "
+                "`operation_execution` row). It stays "
+                '"pending" after the request is approved, rejected or '
+                "expired. To see what waits now, use the approval queue "
+                "(`meho approvals list`, or the console's approvals page). "
+                "Add `event_class` to pick one kind of row."
             ),
             "maxLength": 16,
         },

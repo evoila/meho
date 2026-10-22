@@ -115,6 +115,16 @@
 # the merge attempt and defeats the queue's purpose. cancel-in-progress
 # is scoped to pull_request / push refs only so PR force-pushes and rapid
 # main pushes still cancel their predecessors cleanly.
+#
+# Merge-queue watchdog (#4732): the queue drops a group as soon as one of
+# its required checks fails, or when it rebuilds the group behind a pull
+# request it took out, and then deletes the group's branch. GitHub does not
+# stop the group's CI run, so the run's jobs kept waiting for and using
+# runners for up to three hours after the drop. The `merge-queue-watchdog`
+# job (last in this file) runs only on `merge_group` events. It cancels its
+# own run when a job that carries or feeds a required check has not passed,
+# or when the queue branch is gone. It ends quietly once every other job of
+# the run has finished, so a run that passed and merged is never cancelled.
 
 name: CI
 
@@ -845,16 +855,15 @@ jobs:
         # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/4 the
         # tests so its base memory is well under the pod limit even without --cov,
         # and -n 3 stays inside the #1983 heartbeat-safe worker count on the
-        # 6-core cap. History: -n auto was inconsistent on the shared 4-core pool
-        # (cgroup detection drift), so #726 pinned -n 3.
+        # heavy runner's core cap. History: -n auto was inconsistent on the
+        # shared 4-core pool (cgroup detection drift), so #726 pinned -n 3.
         # RULE — pytest-xdist -n vs runner CPU (#1983): -n must stay BELOW
         # the runner container's usable cores, leaving at least one core for
         # the GHA agent + xdist coordinator. The fix for "runner lost
         # communication" / heartbeat starvation is burst headroom on the
-        # pod's CPU *limit* (rke2-ci heavy pool target: request 4000m /
-        # limit 7000m, pending evoila-bosnia/rdc-gitops#70 — currently
-        # 6000m requests=limits), not a smaller -n. Do not raise -n above
-        # the current value to chase wall-clock; raise the CPU *limit* instead.
+        # runner's CPU *limit* (the heavy pool's sizes live outside this
+        # repo), not a smaller -n. Do not raise -n above the current value
+        # to chase wall-clock; raise the CPU *limit* instead.
         # --dist loadscope: a module's tests stay on one worker so
         # module-/session-scoped fixtures (testcontainers PG, embedding
         # service) instantiate per worker, not per test. --maxfail=1
@@ -2328,3 +2337,138 @@ jobs:
             -ignore-missing-schemas \
             -summary \
             /tmp/rendered.yaml
+
+  # ---------------------------------------------------------------------------
+  # Merge-queue watchdog (#4732). Stops a merge-queue CI run as soon as its
+  # result no longer counts, so its runners go back to live runs.
+  #
+  # Why: the queue drops a group when a required check of the group fails,
+  # or when it takes out a pull request ahead of the group and builds the
+  # group again. It then deletes the group's branch. GitHub does not stop
+  # the group's CI run. On 2026-10-21 a broken Go vulnerability scan failed
+  # 31 queue runs in their first minute; the queue dropped every group
+  # within about a minute, but the runs went on for a median of 131 more
+  # minutes and held 73 percent of the heavy runner pool for most of the
+  # morning. Almost half of that day's merge-queue runner time was spent on
+  # runs whose result nobody could use.
+  #
+  # Why not `cancel-in-progress` for merge_group: each group has its own
+  # branch, so a new group never replaces the run of an old group, and a
+  # cancelled live check drops its group (see the `concurrency:` comment).
+  #
+  # What the job does, about once a minute, with 2 API calls per poll:
+  #   1. Lists this run's jobs. If every job other than this one has
+  #      finished, it ends with success — checked on two polls in a row,
+  #      because a job that still waits on `needs` (the `Python (ruff + mypy
+  #      + pytest)` fan-in) is not listed until its dependencies finish.
+  #      This check runs BEFORE the branch check, so a run that passed and
+  #      merged (which also deletes the queue branch) is never cancelled.
+  #   2. If a job other than `CLI API snapshot freshness` ended in failure,
+  #      cancelled or timed_out, it cancels the run (rule a). Every other
+  #      job of a merge-queue run either carries a required check or feeds
+  #      the required fan-in, so its failure drops the group anyway. The
+  #      snapshot job is not required: its failure alone keeps the group,
+  #      so it must not cancel the run.
+  #   3. Asks GitHub whether this run's queue branch (`github.ref_name`)
+  #      still exists. Only a `404` cancels the run (rule b). Any other
+  #      answer or error (timeout, 403, 429, 5xx) keeps the run alive.
+  #
+  # It never fails (no `set -e`; every call is checked and a failed call
+  # only means "look again next minute"), it is not a required check, and
+  # it runs on a GitHub-hosted runner so it never takes a slot from the
+  # jobs it watches. The queue builds at most 4 groups at once, so at most
+  # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
+  # hour that the job token may make per repository, worst case.
+  # ---------------------------------------------------------------------------
+  merge-queue-watchdog:
+    name: Merge queue watchdog
+    # Only merge-queue runs. A pull-request run must still show every failing
+    # job, and a push to `main` has no queue group that can be dropped.
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    # Backstop only: the loop below stops itself, with success, after 170
+    # minutes. A green merge-queue run took at most 78 minutes (#4732), and
+    # the queue itself gives up on a group long before this cap.
+    timeout-minutes: 180
+    # `actions: write` is what cancelling a run needs. Only this job gets it;
+    # the workflow-wide default stays `contents: read`. `contents: read` is
+    # listed again because a job-level block replaces the workflow-wide one.
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Cancel this run once the queue has dropped its group
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_BRANCH: ${{ github.ref_name }}
+          # Must match this job's `name:` above — the jobs API lists display
+          # names, and the loop has to leave itself out of "all other jobs".
+          SELF_NAME: Merge queue watchdog
+          # The one job whose failure does not drop the group (not required,
+          # feeds no required fan-in). Keep in sync with that job's `name:`.
+          HARMLESS_JOB: CLI API snapshot freshness
+        run: |
+          set -uo pipefail
+          api="repos/${GITHUB_REPOSITORY}"
+          interval=60
+          stop_after=$((170 * 60))
+          quiet_polls=0
+
+          cancel_run() {
+            echo "::notice title=Merge queue watchdog::${1} Cancelling run ${GITHUB_RUN_ID}."
+            if timeout 30 gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"; then
+              echo "cancel request accepted; GitHub stops the other jobs and then this one"
+              return 0
+            fi
+            echo "cancel request failed; the run keeps going and the next poll tries again"
+            return 1
+          }
+
+          echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
+          while [ "${SECONDS}" -lt "${stop_after}" ]; do
+            # 1 + 2: this run's own jobs. Done -> leave. A required job red -> cancel.
+            if jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
+              open="$(jq --arg me "${SELF_NAME}" \
+                '[.jobs[] | select(.name != $me and .status != "completed")] | length' <<<"${jobs}")"
+              red="$(jq -r --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
+                '[.jobs[] | select(.name != $me and .name != $ok
+                   and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
+                 | .name] | join(", ")' <<<"${jobs}")"
+              if [ -n "${red}" ]; then
+                cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
+              elif [ "${open}" -eq 0 ]; then
+                quiet_polls=$((quiet_polls + 1))
+                if [ "${quiet_polls}" -ge 2 ]; then
+                  echo "every other job of this run has finished; nothing left to watch"
+                  exit 0
+                fi
+                # Do not look at the branch on this poll: with no other job
+                # running there is nothing to free, and a run that just merged
+                # has lost its branch for a good reason.
+                echo "all listed jobs have finished; one more poll in case a job was still waiting on 'needs'"
+                sleep "${interval}"
+                continue
+              else
+                quiet_polls=0
+                echo "${open} job(s) still queued or running"
+              fi
+            else
+              quiet_polls=0
+              echo "jobs API did not answer (${jobs}); keeping the run alive"
+            fi
+
+            # 3: the queue branch. Only a clear 404 means the group is gone.
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/${api}/branches/${QUEUE_BRANCH}" 2>/dev/null)" || code="000"
+            case "${code}" in
+              200) echo "queue branch still exists" ;;
+              404) cancel_run "The queue branch '${QUEUE_BRANCH}' is gone: the queue has dropped this group and this run's result no longer counts." && exit 0 ;;
+              *)   echo "branch lookup answered '${code}', which is not conclusive; keeping the run alive" ;;
+            esac
+            sleep "${interval}"
+          done
+          echo "stopped watching after $((stop_after / 60)) minutes; the run goes on without a watchdog"
+          exit 0

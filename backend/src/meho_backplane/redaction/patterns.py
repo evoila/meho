@@ -145,6 +145,12 @@ _JWT = re.compile(
 # ``password: 'hunter2$plus#tail'`` is redacted whole instead of being
 # truncated at the first out-of-class byte -- the label requirement is
 # what keeps the false-positive posture, not the value alphabet.
+#
+# A value that already is a ``[REDACTED:<name>]`` placeholder is not a
+# secret: an earlier pass (the engine itself, or a read that checks a
+# file before it returns it) wrote it. Matching it again would take the
+# label away with it (``password: [REDACTED:param_name]`` would become
+# ``[REDACTED:api_key]``), so the look-ahead leaves it alone.
 _API_KEY = re.compile(
     r"\b(?:"
     r"api[_-]?key"
@@ -158,7 +164,7 @@ _API_KEY = re.compile(
     r"|client[_-]?secret"
     r"|token"
     r")"
-    r"\s*[=:]\s*['\"]?" + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
+    r"\s*[=:]\s*['\"]?(?!\[REDACTED:)" + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
     re.IGNORECASE,
 )
 

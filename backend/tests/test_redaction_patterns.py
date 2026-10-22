@@ -377,6 +377,23 @@ def test_get_pattern_unknown_raises() -> None:
             "the token machine is broken",
             False,
         ),
+        # api_key: a value that already is a placeholder is not redacted
+        # again (the label would go with it)
+        (
+            "api_key",
+            "password: [REDACTED:param_name]",
+            False,
+        ),
+        (
+            "api_key",
+            'password="[REDACTED:param_name]"',
+            False,
+        ),
+        (
+            "api_key",
+            "api_key=[REDACTED:api_key]",
+            False,
+        ),
         # kubeconfig: requires the apiVersion + kind preamble
         (
             "kubeconfig",

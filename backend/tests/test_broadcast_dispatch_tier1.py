@@ -77,6 +77,9 @@ def test_scrub_tier1_pass_redacts_labelled_string_shapes() -> None:
         ("kubeconfig", True),
         ("secret_id", True),
         ("continue_token", True),
+        ("license_key", True),
+        ("licenseKey", True),
+        ("licence-key", True),
         # attribute / reference names — not the secret itself
         ("token_policies", False),
         ("token_ttl", False),

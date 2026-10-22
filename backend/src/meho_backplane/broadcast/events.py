@@ -1123,13 +1123,16 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: Adjacent token pairs that mark a key as secret-bearing when the
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
-#: even though ``secret`` is non-final there).
+#: even though ``secret`` is non-final there; ``license_key`` -- a
+#: product licence is a credential a vendor file may show in clear).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("api", "key"),
         ("access", "key"),
         ("private", "key"),
         ("encryption", "key"),
+        ("license", "key"),
+        ("licence", "key"),
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),

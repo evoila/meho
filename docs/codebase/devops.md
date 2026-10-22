@@ -858,6 +858,62 @@ address decide, and a plain HTTP call from a non-private address would get
 (`sslRequired: all` still passes with the fixed address and fails without
 it). Browsers and the CLI come through the ingress, which ends TLS.
 
+**Trust inside the cluster.** With the built-in Keycloak, every call from a
+pod to Keycloak is plain HTTP. Nothing on this path is encrypted:
+
+- the signing keys the backplane uses to check every token;
+- the client secrets of `meho-admin`, the agents and the check runner, and
+  the tokens Keycloak sends back;
+- the web console's login code exchange and the user tokens it returns;
+- the realm setup Job's bootstrap client secret.
+
+This matters for two reasons:
+
+- `meho-admin` can manage the realm's clients and users. Anyone who reads
+  its secret can make any person a MEHO admin.
+- Anyone who can serve fake signing keys to the backplane can sign tokens
+  that the backplane accepts, for any tenant and any role.
+
+`sslRequired` does not protect this path (see above).
+
+What protects it today:
+
+- The backplane's own NetworkPolicy (`networkPolicy.enabled`, on by
+  default) lets the backplane connect only to this release's Keycloak pods,
+  on 8080. So a pod elsewhere in the cluster cannot pose as Keycloak. This
+  needs a network plugin that enforces NetworkPolicy. Someone who can
+  create pods in this namespace can still pose as Keycloak, but that person
+  can already read the namespace's Secrets.
+- Nothing else yet. The Keycloak subchart's own NetworkPolicy
+  (`coreKeycloak.networkPolicy.enabled`) is off by default. While it is
+  off, any pod in the cluster can reach Keycloak on 8080, including its
+  Admin REST API. The ingress hides the admin paths only from callers
+  outside the cluster.
+
+What an operator can do now:
+
+- Turn on the Keycloak NetworkPolicy, and allow the ingress controller in
+  `extraFrom`, or browser and CLI logins stop. For example, with Traefik in
+  `kube-system`:
+
+  ```yaml
+  coreKeycloak:
+    networkPolicy:
+      enabled: true
+      extraFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+  ```
+
+- Run a service mesh that encrypts traffic between pods (mutual TLS).
+
+A NetworkPolicy controls who can connect. It does not encrypt. Only
+encryption helps against someone who can read traffic on the cluster
+network, for example from a taken-over node. #4050 turns the Keycloak rule
+on by default, and it decides whether Keycloak's port 8080 gets TLS, along
+with OpenBao's port 8200.
+
 **Known limits.**
 
 - The admin console does not work through `kubectl port-forward`: its

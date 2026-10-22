@@ -829,6 +829,20 @@ async def test_secret_the_stored_result_redaction_misses_is_replaced(
             "ma<![CDATA[de]]>up",
             None,
         ),
+        (
+            _swagger_yaml_with("password: # note\n  madeup"),
+            "application/yaml",
+            "madeup",
+            None,
+        ),
+        (_swagger_with("pass\\u0077ord", "madeup"), "application/json", "madeup", None),
+        (_swagger_yaml_with("password: made\n  up"), "application/yaml", "made\n  up", None),
+        (
+            '<?xml version="1.0"?>\n<api>\n  <password>made<b>up</b></password>\n</api>\n',
+            "application/xml",
+            "made<b>up</b>",
+            None,
+        ),
     ],
     ids=[
         "yaml-double-quoted-value-over-two-lines",
@@ -838,12 +852,16 @@ async def test_secret_the_stored_result_redaction_misses_is_replaced(
         "yaml-value-with-a-space-inside-and-a-comment",
         "xml-element-text-split-by-a-comment",
         "xml-element-text-split-by-a-cdata-section",
+        "yaml-comment-after-the-colon-value-on-the-next-line",
+        "json-key-written-with-an-escape",
+        "yaml-bare-value-over-two-lines",
+        "xml-element-with-a-child-element",
     ],
 )
 async def test_value_over_lines_comments_or_spaces_is_replaced_whole(
     body: str, content_type: str, value: str, cleaned: str | None
 ) -> None:
-    """The second review's YAML and XML layouts: the whole value goes, nothing is left over."""
+    """The reviews' YAML, JSON and XML layouts: the whole value goes, nothing is left over."""
     # The stored-result redaction alone leaves these values in clear text.
     redaction = _redact_like_the_dispatcher({"text": body})
     assert redaction.manifest == () and redaction.redacted == redaction.raw
@@ -862,12 +880,20 @@ async def test_value_over_lines_comments_or_spaces_is_replaced_whole(
         ("xml", "<password>made<!-- note -->up</password>", "made<!-- note -->up", 28),
         ("yaml", 'password: "made\n  up"', "made\n  up", 16),
         ("yaml", "password: made up", "made up", 15),
+        ("yaml", "password: # note\n  madeup", "madeup", 17),
+        ("yaml", "password: made\n  up", "made\n  up", 15),
+        ("json", '"pass\\u0077ord": "madeup"', "madeup", 8),
+        ("xml", "<password>made<b>up</b></password>", "made<b>up</b>", 16),
     ],
     ids=[
         "xml-cut-inside-the-comment",
         "xml-cut-after-the-comment",
         "yaml-cut-at-the-line-break-inside-the-quotes",
         "yaml-cut-at-the-space-inside-the-value",
+        "yaml-cut-at-the-line-break-after-the-comment",
+        "yaml-cut-at-the-line-break-inside-the-bare-value",
+        "json-cut-inside-the-escape-of-the-key",
+        "xml-cut-inside-the-child-element",
     ],
 )
 async def test_value_over_lines_or_comments_split_across_the_part_cut_is_replaced(
@@ -877,6 +903,12 @@ async def test_value_over_lines_or_comments_split_across_the_part_cut_is_replace
     head, joint, tail, content_type = {
         "xml": ('<?xml version="1.0"?>\n<api>\n<!-- ', " -->\n", "\n</api>\n", "application/xml"),
         "yaml": ("swagger: '2.0'\n# ", "\n", "\npaths: {}\n", "application/yaml"),
+        "json": (
+            '{"swagger": "2.0", "info": {"title": "',
+            '"}, ',
+            ', "paths": {}}',
+            "application/json",
+        ),
     }[kind]
     pad = "/" * (PART_MAX_BYTES - before_cut - len(head) - len(joint))
     body = f"{head}{pad}{joint}{snippet}{tail}"

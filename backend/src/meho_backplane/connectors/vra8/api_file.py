@@ -36,7 +36,7 @@ The read is narrow on purpose:
 * The read cleans the file text before it returns it. First it scans
   the whole file as text, whatever its format (:mod:`.api_file_redaction`),
   and replaces every value of a secret-named key (the one rule MEHO uses
-  for secret-named fields), the text of a secret-named XML or HTML
+  for secret-named fields), the content of a secret-named XML or HTML
   element, an HTML attribute value and a PEM private key block with the
   placeholder ``[REDACTED:param_name]``. Then it runs the secret redaction
   MEHO applies to every stored result, with the labels the dispatcher

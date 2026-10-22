@@ -40,6 +40,10 @@ def test_placeholder_is_the_one_the_governed_vault_read_writes() -> None:
         ('{"licenseKey": "MADE-UP-0000"}', f'{{"licenseKey": "{REDACTED}"}}'),
         ('{"refreshToken": "made-up"}', f'{{"refreshToken": "{REDACTED}"}}'),
         ('{"x-api-key": "made-up"}', f'{{"x-api-key": "{REDACTED}"}}'),
+        # A key written with escapes spells the same name.
+        ('{"pass\\u0077ord": "made-up"}', f'{{"pass\\u0077ord": "{REDACTED}"}}'),
+        ('{"\\u0070wd": 1234}', f'{{"\\u0070wd": {REDACTED}}}'),
+        ("{'\\x70assword': 'made-up'}", f"{{'\\x70assword': '{REDACTED}'}}"),
         # The value on the next non-empty line, or the colon on its own line.
         ('{"password":\n    "made-up"}', f'{{"password":\n    "{REDACTED}"}}'),
         ('{"token"\n  :\n  "made-up"}', f'{{"token"\n  :\n  "{REDACTED}"}}'),
@@ -57,6 +61,30 @@ def test_placeholder_is_the_one_the_governed_vault_read_writes() -> None:
         # A bare value with a space inside goes whole; the comment after it stays.
         ("password: made up\n", f"password: {REDACTED}\n"),
         ("password: made up # note\n", f"password: {REDACTED} # note\n"),
+        # A YAML tag or anchor before the value stays; the value goes.
+        ("password: !!str made-up\n", f"password: !!str {REDACTED}\n"),
+        ("password: &a made-up\n", f"password: &a {REDACTED}\n"),
+        ("password: &a !!str 'made-up'\n", f"password: &a !!str '{REDACTED}'\n"),
+        # A comment after the colon is skipped; the value is on the next line.
+        ("password: # note\n  made-up\n", f"password: # note\n  {REDACTED}\n"),
+        ('"password": # note\n  "made-up"\n', f'"password": # note\n  "{REDACTED}"\n'),
+        # A bare value goes on below its line while the lines are indented more.
+        ("password: made\n  up\n", f"password: {REDACTED}\n"),
+        ("password: made\n  up\n\n  and more\nnext: 1\n", f"password: {REDACTED}\nnext: 1\n"),
+        ("a:\n  password: made\n    up\n  next: 1\n", f"a:\n  password: {REDACTED}\n  next: 1\n"),
+        ('"password":\n  made\n  up\nnext: 1\n', f'"password":\n  {REDACTED}\nnext: 1\n'),
+        ("- token: made\n    up\n- next: 1\n", f"- token: {REDACTED}\n- next: 1\n"),
+        ("example: {password: made\n  up}\n", f"example: {{password: {REDACTED}}}\n"),
+        ("example: {password: made\nup, x: 1}\n", f"example: {{password: {REDACTED}, x: 1}}\n"),
+        ("password: made\r\n  up\r\nnext: 1\r\n", f"password: {REDACTED}\r\nnext: 1\r\n"),
+        # The lines below stop at a comment line, a list item, a mapping key or
+        # a line indented like the key.
+        ("password: made\n  # c\n  x\n", f"password: {REDACTED}\n  # c\n  x\n"),
+        ("password: made\n  - x\n", f"password: {REDACTED}\n  - x\n"),
+        ("password: made\n  next: 1\n", f"password: {REDACTED}\n  next: 1\n"),
+        ("password: made\nup\n", f"password: {REDACTED}\nup\n"),
+        # A quote that never closes takes its line and the lines below it.
+        ('password: "made\n  up\nnext: 1\n', f"password: {REDACTED}\nnext: 1\n"),
         ("- token: made up, and more\n", f"- token: {REDACTED}, and more\n"),
         # A quoted value over two lines (a YAML quoted scalar) goes up to its closing quote.
         ('password: "made\n  up"\n', f'password: "{REDACTED}"\n'),
@@ -98,8 +126,28 @@ def test_placeholder_is_the_one_the_governed_vault_read_writes() -> None:
             f"<ns:token>{REDACTED}</ns:token>",
         ),
         (
-            "<credentials><user>bob</user><password>made-up</password></credentials>",
-            f"<credentials><user>bob</user><password>{REDACTED}</password></credentials>",
+            "<api><user>bob</user><password>made-up</password></api>",
+            f"<api><user>bob</user><password>{REDACTED}</password></api>",
+        ),
+        # A secret-named element loses its child elements too, and a
+        # nested element of the same name is part of the content.
+        ("<password>made<b>up</b></password>", f"<password>{REDACTED}</password>"),
+        ("<password><b>made-up</b></password>", f"<password>{REDACTED}</password>"),
+        (
+            "<credentials>\n  <user>bob</user>\n  <token>made-up</token>\n</credentials>\n",
+            f"<credentials>{REDACTED}</credentials>\n",
+        ),
+        (
+            "<password><password>made</password>up</password>",
+            f"<password>{REDACTED}</password>",
+        ),
+        ("<PASSWORD>made-up</PASSWORD>", f"<PASSWORD>{REDACTED}</PASSWORD>"),
+        ("<password>made-up</PASSWORD>", f"<password>{REDACTED}</PASSWORD>"),
+        # Without a closing tag the text up to the next tag goes.
+        ("<password>made-up", f"<password>{REDACTED}"),
+        (
+            "<api><password>made-up<user>bob</user></api>",
+            f"<api><password>{REDACTED}<user>bob</user></api>",
         ),
         # HTML and XML attributes.
         ('<input password="made-up" name="x">', f'<input password="{REDACTED}" name="x">'),
@@ -146,9 +194,15 @@ def test_one_secret_value_is_replaced_and_the_rest_stays(text: str, cleaned: str
         "password:\n  - a\n  - b\n",
         '"password":\n}',
         "password: # only a comment\n",
+        "password: # note\nnext: 1\n",
+        "password: # note\n  type: string\n",
+        "password: # note\n  - a\n",
+        "password: *alias\n",
+        "password: &a\n  type: string\n",
         # HTML and XML that name the field, or hold the word in running text.
         '<input type="password" name="password" placeholder="Password">',
         '<xs:element name="password" type="xs:string"/>',
+        "<password/><password />",
         "<password></password><password>  </password>",
         "<password><!-- set at install --></password><password><![CDATA[]]></password>",
         "<!DOCTYPE html>\n<html><body>\n<p>Docs: the token: see the header [not: yaml: {</p>\n"
@@ -174,11 +228,15 @@ def test_every_value_is_counted_and_a_placeholder_is_not_counted_again() -> None
     assert redact_secret_values(cleaned) == (cleaned, 0)
 
 
-def test_a_secret_named_element_with_children_is_checked_child_by_child() -> None:
-    text = "<credentials>\n  <user>bob</user>\n  <token>made-up</token>\n</credentials>\n"
+def test_an_element_that_is_not_secret_named_is_checked_child_by_child() -> None:
+    text = "<api>\n  <user>bob</user>\n  <token>made-up</token>\n</api>\n"
     cleaned, count = redact_secret_values(text)
     assert count == 1
-    assert (
-        cleaned
-        == f"<credentials>\n  <user>bob</user>\n  <token>{REDACTED}</token>\n</credentials>\n"
-    )
+    assert cleaned == f"<api>\n  <user>bob</user>\n  <token>{REDACTED}</token>\n</api>\n"
+
+
+def test_a_tag_inside_a_comment_or_a_cdata_section_is_not_a_tag() -> None:
+    text = "<!-- <password> --><password><![CDATA[</password>]]>made-up</password><!-- </p -->"
+    cleaned, count = redact_secret_values(text)
+    assert count == 1
+    assert cleaned == f"<!-- <password> --><password>{REDACTED}</password><!-- </p -->"

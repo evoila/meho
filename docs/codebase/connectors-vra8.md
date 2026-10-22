@@ -337,25 +337,33 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
      `is_secret_param_name` in `broadcast/events.py` (`password`, `pwd`,
      `clientSecret`, `refreshToken`, `x-api-key`, `private_key`,
      `licenseKey`, ...); there is no second list. The key may be in quotes
-     (JSON), bare at the start of a line or after a list dash (YAML, a
-     properties file), bare in a flow mapping (`{password: abc}`) or bare
-     before `=` (an attribute, a query string). The value follows `:` or
-     `=`, on the same line or on the next non-empty line, and goes whole:
-     a quoted string up to its closing quote, also over several lines (an
-     apostrophe or a doubled quote inside counts; a quote that never
-     closes takes the rest of its line), a bare value with the spaces
-     inside it (`made up`) up to the end of the line, a stop character or
-     a ` #` comment, or a YAML block scalar with its indented lines (a
-     comment after the `|` stays). An empty string, `null`, `true`,
-     `false`, a comment, an object or list (a schema property named
-     `password`), a key whose children follow on the next lines
-     (`password:` then `type: string`) and a secret-named word in running
-     text (`the token: in the header`) are not values, so a schema comes
-     back whole. The element rule follows the pfSense configuration read
-     (`connectors/pfsense/redaction.py`): a secret-named element loses its
-     text (with or without a namespace prefix or attributes; comments and
-     CDATA sections inside the text go with it), and an element with
-     child elements is checked child by child.
+     (JSON; a name written with escapes, `"pass\u0077ord"`, is read as
+     the name it spells), bare at the start of a line or after a list
+     dash (YAML, a properties file), bare in a flow mapping
+     (`{password: abc}`) or bare before `=` (an attribute, a query
+     string). The value follows `:` or `=`, on the same line or on the
+     next non-empty line (a comment after the colon, `password: # note`,
+     is skipped), and goes whole: a quoted string up to its closing
+     quote, also over several lines (an apostrophe or a doubled quote
+     inside counts; a quote that never closes takes the rest of its
+     line), a bare value with the spaces inside it (`made up`) up to the
+     end of the line, a stop character or a ` #` comment, plus the lines
+     below it that are indented more than the key (a YAML plain scalar
+     over several lines, `password: made` then `  up`; a comment line, a
+     list item or a mapping key ends it), or a YAML block scalar with its
+     indented lines (a comment after the `|` stays). An empty string,
+     `null`, `true`, `false`, a comment alone, an object or list (a
+     schema property named `password`), a key whose children follow on
+     the next lines (`password:` then `type: string`) and a secret-named
+     word in running text (`the token: in the header`) are not values, so
+     a schema comes back whole. The element rule follows the pfSense
+     configuration read (`connectors/pfsense/redaction.py`): a
+     secret-named element loses everything between its tags (with or
+     without a namespace prefix or attributes; comments, CDATA sections
+     and child elements inside go with it, so `<credentials>` with a
+     `<user>` and a `<password>` inside loses both); an element without a
+     closing tag loses its text up to the next tag. An element that is
+     not secret-named is checked child by child.
   2. The stored-result redaction itself, with the connector, tenant and
      operation labels the dispatcher will use, on the whole cleaned text.
      It replaces a labelled pair such as `api_key=...` (also one that a

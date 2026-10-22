@@ -45,9 +45,12 @@ returns a cut file. A file that the secret-redaction rules would change
 stops too, so the read never claims an exact file it cannot return. The
 read also refuses, on its own, the secret-bearing forms the shared rules
 do not see: a quoted field named like a secret (``"password": "..."``,
-the JSON form an API reference shows in its examples), a private-key
-block, and a licence key, labelled or bare. The check runs on the whole
-text, so a secret that crosses a part boundary is found too.
+the JSON form an API reference shows in its examples), the system's own
+login token (``sessionId``), a private-key block, and a licence key,
+labelled or bare. The check runs on the whole text, so a secret that
+crosses a part boundary is found too. The body of a ``401`` or ``440``
+answer goes through the same check before the read raises it for the
+login retry; a body that holds a secret form is withheld.
 
 Version and build come from the connector's own version detection
 (``GET /api/v2/version``, which needs no login). If that read fails, the
@@ -156,14 +159,17 @@ class VrliApiFileRedactedError(ValueError):
 _OP_ID = "vrli.api_file.get"
 
 #: Field names that carry a secret: the labels of the shared ``api_key``
-#: redaction rule plus the licence key. The shared rule sees ``password=``
-#: and ``password:`` but not a quoted key, so the read checks that form here.
+#: redaction rule plus the two this system uses that the rule lacks: the
+#: licence key and ``sessionId``, the login token the session API returns.
+#: The shared rule sees ``password=`` and ``password:`` but not a quoted
+#: key, so the read checks that form here.
 _SECRET_LABELS = (
     r"api[_-]?key"
     r"|access[_-]?token"
     r"|refresh[_-]?token"
     r"|auth[_-]?token"
     r"|session[_-]?token"
+    r"|session[_-]?id"
     r"|secret(?:[_-]?(?:key|id))?"
     r"|private[_-]?key"
     r"|password|passwd|pwd"
@@ -171,11 +177,16 @@ _SECRET_LABELS = (
     r"|token"
     r"|licen[cs]e[_-]?key"
 )
-#: A value of at least 8 characters, as the shared rule asks: quoted (the
-#: quote bounds it, so it may hold spaces) or bare (up to the next space or
-#: quote). An object or list after the label (``"password": {"type": ...}``,
-#: a schema, not a value) does not match: the first character is a brace.
-_SECRET_VALUE = r"(?:['\"][^'\"\n]{8,4096}['\"]|[^\s'\"{\[]{8,4096})"
+#: A value of at least 8 characters, as the shared rule asks: quoted or
+#: bare (up to the next space or quote). A quoted value ends at the same
+#: quote that opened it, so it may hold spaces, the other quote
+#: (``"it's-secret"``) and escaped characters (``"a\\"b"``). An object or
+#: list after the label (``"password": {"type": ...}``, a schema, not a
+#: value) does not match: the first character is a brace.
+_SECRET_VALUE = (
+    r"(?:(?P<quote>['\"])(?:\\.|(?!(?P=quote))[^\\\n]){8,4096}(?P=quote)"
+    r"|[^\s'\"{\[]{8,4096})"
+)
 
 #: The secret-bearing forms this read refuses on its own. Each name says what
 #: was found; the error never shows the matched text.
@@ -187,6 +198,10 @@ _SECRET_FORMS: dict[str, re.Pattern[str]] = {
     # ``licenseKey: ...`` -- the shared rule has no licence label.
     "licence-key-field": re.compile(
         r"(?<![\w-])licen[cs]e[_-]?key\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
+    ),
+    # ``sessionId: ...`` -- the login token, under a label the shared rule lacks.
+    "session-id-field": re.compile(
+        r"(?<![\w-])session[_-]?id\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
     ),
     # ``XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`` with letters and digits mixed -- the
     # shape of a VMware licence key under any field name (the Logs licence
@@ -542,6 +557,17 @@ def _assert_not_redacted(
         )
 
 
+def _secret_form_counts(text: str) -> dict[str, int]:
+    """Count the places in *text* that match each form in :data:`_SECRET_FORMS`.
+
+    Forms with no match are left out, so an empty dict means a clean text.
+    """
+    counts = {
+        name: sum(1 for _ in pattern.finditer(text)) for name, pattern in _SECRET_FORMS.items()
+    }
+    return {name: count for name, count in counts.items() if count}
+
+
 def _assert_no_secret_form(answer: dict[str, Any], text: str) -> None:
     """Stop when *text* holds one of the secret-bearing forms in :data:`_SECRET_FORMS`.
 
@@ -551,13 +577,38 @@ def _assert_no_secret_form(answer: dict[str, Any], text: str) -> None:
     and whose value starts the next is found. The error names the forms
     and counts the places, never the matched text.
     """
-    found = {name: len(pattern.findall(text)) for name, pattern in _SECRET_FORMS.items()}
-    forms = sorted(name for name, count in found.items() if count)
-    if not forms:
+    found = _secret_form_counts(text)
+    if not found:
         return
     raise VrliApiFileRedactedError(
-        f"GET {answer['path']}: the text holds a secret ({forms}) in {sum(found.values())} "
-        "place(s), so the file cannot be returned; the read stopped"
+        f"GET {answer['path']}: the text holds a secret ({sorted(found)}) in "
+        f"{sum(found.values())} place(s), so the file cannot be returned; the read stopped"
+    )
+
+
+def _session_expired_response(response: httpx.Response) -> httpx.Response:
+    """The ``401`` or ``440`` answer to raise: the same status, the body only when it is clean.
+
+    The dispatcher drops the cached session and asks once more. When that
+    fails too, it copies the body of the second answer into the error
+    result after the shared redaction rules only, which miss the forms in
+    :data:`_SECRET_FORMS`. So the body is checked here first and withheld
+    when a form matches or the body is not UTF-8 text. The status and the
+    headers stay, so the dispatcher still sees the session as expired and
+    the login retry still runs.
+    """
+    try:
+        text = response.content.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    if text is not None and not _secret_form_counts(text):
+        return response
+    return httpx.Response(
+        status_code=response.status_code,
+        headers=response.headers,
+        content=b"",
+        request=response.request,
+        extensions=response.extensions,
     )
 
 
@@ -609,8 +660,9 @@ async def vrli_api_file_get_impl(
 
     A ``401`` or a ``440`` (the system's own "session expired" status) is
     raised as :exc:`httpx.HTTPStatusError` so the dispatcher drops the
-    cached session and dispatches once more. Every other status is
-    reported in ``status``.
+    cached session and dispatches once more; its body is withheld when it
+    holds a secret form (:func:`_session_expired_response`). Every other
+    status is reported in ``status``.
     """
     path, query = check_path(params.get("path"))
     url = path if not query else f"{path}?{query}"
@@ -633,7 +685,7 @@ async def vrli_api_file_get_impl(
         span, method="GET", request_headers=headers, response=response
     )
     if response.status_code in _SESSION_EXPIRED_STATUSES:
-        response.raise_for_status()
+        _session_expired_response(response).raise_for_status()
 
     text = _decode_text(response, path)
     body = response.content

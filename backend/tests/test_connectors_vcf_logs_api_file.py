@@ -468,9 +468,58 @@ async def test_session_expiry_on_the_read_drops_the_session_and_asks_once_more(
 
     assert result.status == "error"
     assert str(status) in (result.error or "")
+    assert "session expired" in (result.extras.get("upstream_message") or "")
     assert docs.call_count == 2
     assert login.call_count == 2
     assert loader.calls == 1
+
+
+@pytest.mark.parametrize("status", [401, 440])
+@pytest.mark.parametrize(
+    ("body", "secret"),
+    [
+        (
+            '{"errorMessage": "session expired", "password": "example-secret-value-0123456789"}',
+            "example-secret-value-0123456789",
+        ),
+        (
+            '{"errorMessage": "session expired", "sessionId": "example-session-id-0123456789"}',
+            "example-session-id-0123456789",
+        ),
+        (
+            '{"errorMessage": "session expired", "password": "it\'s-a-secret-0123456789"}',
+            "it's-a-secret-0123456789",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_session_expiry_body_with_a_secret_is_withheld_and_the_retry_still_runs(
+    _stub_embedding: AsyncMock, session: AsyncSession, status: int, body: str, secret: str
+) -> None:
+    """The dispatcher copies the 401 or 440 body into the error result; no secret may go with it."""
+    _, loader = await _register_and_resolve(_stub_embedding)
+    shared = apply_connector_boundary_redaction(
+        {"text": body}, connector_id=VRLI_CONNECTOR_ID, tenant=None, op="vrli.api_file.get"
+    )
+    assert shared.redacted == shared.raw, "the shared rules must not see this form; the gap is real"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = _mock_login(mock)
+        mock.get(_VERSION).respond(200, json=_VERSION_PAYLOAD)
+        docs = mock.get(_REFERENCE).respond(
+            status, content=body.encode(), headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_REFERENCE)
+
+    assert result.status == "error"
+    assert str(status) in (result.error or "")
+    assert docs.call_count == 2
+    assert login.call_count == 2
+    assert loader.calls == 1
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert secret not in rendered
+    assert "session expired" not in rendered, "the whole body is withheld, not only the secret"
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1016,36 @@ _SECRET_FORM_PAGES: list[tuple[str, str, str]] = [
     ),
     (
         "quoted-secret-field",
+        '{"username": "admin", "password": "it\'s-a-secret-0123456789"}',
+        "it's-a-secret-0123456789",
+    ),
+    (
+        "quoted-secret-field",
+        '{"password": "ab\\"cd-secret-value-0123456789"}',
+        "cd-secret-value-0123456789",
+    ),
+    (
+        "quoted-secret-field",
+        "{'password': \"it's a secret with spaces\"}",
+        "it's a secret with spaces",
+    ),
+    (
+        "quoted-secret-field",
+        '{"userId": "u1", "sessionId": "example-session-id-0123456789", "ttl": 1800}',
+        "example-session-id-0123456789",
+    ),
+    (
+        "session-id-field",
+        "sessionId: example-session-id-0123456789\n",
+        "example-session-id-0123456789",
+    ),
+    (
+        "session-id-field",
+        "GET /api/v2/events?session_id=example-session-id-0123456789 HTTP/1.1",
+        "example-session-id-0123456789",
+    ),
+    (
+        "quoted-secret-field",
         "{'token': 'example token with spaces inside'}",
         "example token with spaces inside",
     ),
@@ -1064,6 +1143,8 @@ async def test_quoted_secret_field_that_crosses_a_part_boundary_stops_with_an_er
     [
         '{"password": {"type": "string", "format": "password", "description": "The password"}}',
         '{"username": "string", "password": "string"}',
+        '{"sessionId": {"type": "string", "description": "The session id"}, "ttl": 1800}',
+        '{"userId": "string", "sessionId": "string", "ttl": 0}',
         '{"info": {"license": {"name": "Apache 2.0"}}}',
         "licenseKey:\n  type: string\n  description: The licence key of the system\n",
         '{"key": "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"}',

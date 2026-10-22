@@ -335,8 +335,13 @@ was read, so `redirect_to` is always a full path. A `Location` on another
 host is reported as `scheme://host/path`, so the caller sees it cannot be
 read through this target. A `401`, or the system's own `440` ("the
 session has expired"), is raised so the dispatcher drops the cached
-session, logs in once more and asks once more; every other status (for
-example `404`) is reported in `status` with the body as text.
+session, logs in once more and asks once more. When the second try fails
+too, the dispatcher copies the body of that answer into the error result
+after the shared redaction rules. Those rules miss the forms listed
+below, so the read checks the body first and withholds it when a form
+matches or the body is not UTF-8 text; the status stays, so the retry
+still runs. Every other status (for example `404`) is reported in
+`status` with the body as text.
 
 The body is read in a stream. The read asks for `gzip` or `deflate` only
 and decodes the wire chunks itself with `zlib`, in steps that never
@@ -369,12 +374,16 @@ the form and the number of places but never the value, when the text
 holds:
 
 - a quoted field named like a secret with a value of 8 or more
-  characters, for example `"password": "..."`, `"sessionToken": "..."`
-  or `"licenseKey": "..."` (the JSON form an API reference shows in a
-  request example). A schema entry such as `"password": {"type":
-  "string"}` is not a value and passes; so does a short placeholder like
-  `"string"`;
+  characters, for example `"password": "..."`, `"sessionToken": "..."`,
+  `"sessionId": "..."` (the login token the session API returns) or
+  `"licenseKey": "..."` (the JSON form an API reference shows in a
+  request example). The value ends at the same quote that opened it, so
+  it may hold spaces, the other quote (`"it's-secret"`) and escaped
+  characters. A schema entry such as `"password": {"type": "string"}`
+  is not a value and passes; so does a short placeholder like `"string"`;
 - a licence-key field without quotes (`licenseKey: ...`);
+- a session-id field without quotes (`sessionId: ...` or
+  `session_id=...`);
 - a bare VMware licence key, five groups of five letters and digits
   mixed (`AB12C-3D4EF-...`), under any field name, because the Logs
   licence API names it `key`. A placeholder of only one kind of character

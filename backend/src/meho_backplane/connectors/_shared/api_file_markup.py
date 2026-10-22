@@ -22,8 +22,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Final
-from xml.etree.ElementTree import Element
+from typing import Any, Final
 
 import defusedxml.ElementTree as DefusedET
 from defusedxml import DefusedXmlException
@@ -138,7 +137,12 @@ class _XmlWriter:
         self._prefix_of_uri[uri] = prefix
         return prefix
 
-    def element(self, el: Element, out: list[str], default_uri: str, *, first: bool) -> None:
+    def element(self, el: Any, out: list[str], default_uri: str, *, first: bool) -> None:
+        """Write *el*, a node parsed by ``defusedxml``, and everything under it.
+
+        The node is typed ``Any`` on purpose: naming the stdlib ``Element``
+        type would import ``xml.etree``, which the security scan flags.
+        """
         uri, local = _split_tag(el.tag)
         prefix = self._prefix_of_uri.get(uri, "")
         if prefix:
@@ -172,7 +176,7 @@ class _XmlWriter:
         if el.tail:
             out.append(_xml_text(self.scrubber.text(el.tail)))
 
-    def _attributes(self, el: Element, element_is_secret: bool) -> list[tuple[str, str]]:
+    def _attributes(self, el: Any, element_is_secret: bool) -> list[tuple[str, str]]:
         written: list[tuple[str, str]] = []
         for key, value in el.attrib.items():
             uri, local = _split_tag(key)

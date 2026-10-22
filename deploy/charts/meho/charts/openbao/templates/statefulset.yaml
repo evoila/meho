@@ -10,6 +10,11 @@ spec:
   # One server. Raft storage lets it grow to three later without a storage
   # change.
   replicas: 1
+  # A locked pod is never ready. With the default `OrderedReady`, Kubernetes
+  # would wait for it to be ready before it rolls out a change, and replace
+  # it right after someone unlocks it. The field cannot be changed after the
+  # first install.
+  podManagementPolicy: Parallel
   serviceName: {{ include "coreVault.internalName" . }}
   selector:
     matchLabels:

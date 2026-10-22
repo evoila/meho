@@ -224,6 +224,8 @@ def test_config_change_restarts_the_pod() -> None:
 
     assert checksum() == checksum()
     assert checksum() != checksum("--set", "coreVault.binary=vault")
+    # Without it, a locked (never ready) pod would not get the change.
+    assert _one(_openbao_docs(), "StatefulSet")["spec"]["podManagementPolicy"] == "Parallel"
 
 
 def test_networkpolicy_off_by_default_and_admits_backplane_when_on() -> None:

@@ -833,7 +833,12 @@ Until they land, the server runs empty and locked.
 exits 2 while OpenBao is locked ("sealed") or not set up yet. There is no
 liveness check: a restart would not unlock it. Both Services still reach a
 pod that is not ready, so the setup Job can start OpenBao and the backplane
-reports `sealed` instead of "unreachable".
+reports `sealed` instead of "unreachable". The StatefulSet uses
+`podManagementPolicy: Parallel`: with the default `OrderedReady`, Kubernetes
+waits until the pod is ready before it rolls out a change, so a locked pod
+would keep the old version and be replaced, locked again, right after
+someone unlocks it. Keep the line: the field cannot be changed after the
+first install.
 
 **Audit.** OpenBao refuses audit devices made through the API, so the
 device is in the config file. The lines go to the container log, which the

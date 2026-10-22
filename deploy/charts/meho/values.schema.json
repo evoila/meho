@@ -917,6 +917,27 @@
         }
       }
     },
+    "coreVault": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Built-in OpenBao, the password safe (ADR 0008). When enabled, the OpenBao subchart (`charts/openbao/`) is deployed. The `vault:` block stays for a Vault you bring yourself. This block names every key the subchart has; Helm checks their full shape against `charts/openbao/values.schema.json` when `enabled` is true.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "authDelegator": { "type": "boolean", "description": "Render a ClusterRoleBinding of OpenBao's service account to `system:auth-delegator`, the chart's only cluster-wide object. Default false." },
+        "binary": { "type": "string", "description": "`bao` for OpenBao, `vault` for a HashiCorp Vault image (tests only)." },
+        "image": { "type": "object" },
+        "persistence": { "type": "object" },
+        "podSecurityContext": { "type": "object" },
+        "securityContext": { "type": "object" },
+        "resources": { "type": "object" },
+        "service": { "type": "object" },
+        "networkPolicy": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "global": { "type": "object" }
+      }
+    },
     "audit": {
       "type": "object",
       "additionalProperties": false,

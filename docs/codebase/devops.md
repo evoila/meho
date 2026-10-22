@@ -807,6 +807,68 @@ newer.
   routed unless `exposeAdmin` is true. The Admin REST API works through
   the Service and through `port-forward`.
 
+### Built-in OpenBao subchart (`charts/openbao/`, #4044)
+
+The install can bring its own password safe, OpenBao (ADR 0008: OpenBao,
+not HashiCorp Vault). It is **off by default** (`coreVault.enabled:
+false`). With it off, the chart renders exactly what it rendered before.
+The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
+`vault` (`coreVault`, `<release>-vault`, `VAULT_ADDR`): they name the job,
+not the product.
+
+**Not yet:** the setup Job `vault-init-<hash>` (the first start, the key
+and login setup, the policies) and the unlock after a restart (#4046).
+Until they land, the server runs empty and locked.
+
+**What it renders.**
+
+| Object | Shape |
+| --- | --- |
+| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data` |
+| ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
+| Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
+| Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
+| NetworkPolicy `<release>-vault` | off by default; admits port 8200 from the backplane pods and `networkPolicy.extraFrom` |
+| ServiceAccount `<release>-vault` and ClusterRoleBinding `<namespace>-<release>-vault-auth-delegator` | only with `coreVault.authDelegator: true` (default false); the chart's only cluster-wide object |
+
+**A locked pod is not ready.** The readiness check is `bao status`, which
+exits 2 while OpenBao is locked ("sealed") or not set up yet. There is no
+liveness check: a restart would not unlock it. Both Services still reach a
+pod that is not ready, so the setup Job can start OpenBao and the backplane
+reports `sealed` instead of "unreachable". The StatefulSet uses
+`podManagementPolicy: Parallel`: with the default `OrderedReady`, Kubernetes
+waits until the pod is ready before it rolls out a change, so a locked pod
+would keep the old version and be replaced, locked again, right after
+someone unlocks it. Keep the line: the field cannot be changed after the
+first install.
+
+**Audit.** OpenBao refuses audit devices made through the API, so the
+device is in the config file. The lines go to the container log, which the
+kubelet rotates; they count against the container's `ephemeral-storage`.
+
+**A Vault image (tests only).** `coreVault.binary: vault` with a matching
+`image` switches the program name, the variables (`VAULT_*`), the paths
+(`/vault/...`) and the config: `disable_mlock = true` is written, and the
+audit device is left out (the setup Job turns it on through the API).
+
+**`authDelegator`.** A Kubernetes login method checks tokens through the
+cluster's TokenReview API, which needs the cluster-wide binding to
+`system:auth-delegator`. MEHO does not need it: a test on RKE2 with the CIS
+profile proved a login for the setup Job that checks tokens with the
+cluster's public keys, with namespace rights only.
+The option gives OpenBao its own service account, so the namespace's
+`default` account does not get the right.
+
+**Security.** User 100 and group 1000 (the image's `openbao` user), with
+`fsGroup` 1000 for the disk; `global.openshift: true` removes all three
+through `meho.core.podSecurityContext`. Read-only root filesystem, no
+added capabilities, no service-account token (unless `authDelegator`),
+`enableServiceLinks: false`. Resources: request 100m / 256Mi, limit
+500m / 512Mi. Checked on RKE2 v1.37.1 with the CIS profile and namespace
+rights only: the pod starts under the strict pod rules, reaches ready after
+a setup and unlock by hand, keeps its data across a pod restart, and the
+network rule blocks other pods.
+
 ### Metrics scrape wiring (`templates/servicemonitor.yaml`, `templates/prometheusrule.yaml`)
 
 The backplane serves Prometheus exposition at an unauthenticated

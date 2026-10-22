@@ -1218,6 +1218,18 @@ coreKeycloak:
     # -- The second tenant's id (a UUID). Required when `ci.enabled` is true.
     tenantId: ""
 
+coreVault:
+  # -- Built-in OpenBao, the password safe (ADR 0008). When on, the install
+  # deploys the OpenBao subchart (`charts/openbao/`): one OpenBao server with
+  # its own disk at `http://<release>-vault:8200` inside the namespace. The
+  # `vault:` block above stays for a Vault you bring yourself. Every other
+  # key is described in `charts/openbao/values.yaml`; set it here.
+  enabled: false
+  # -- Bind OpenBao's service account to `system:auth-delegator` (a
+  # ClusterRoleBinding, the chart's only cluster-wide object). Default false:
+  # MEHO does not need it.
+  authDelegator: false
+
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store
   # mirror is explicitly v0.2 per Goal #11 spec.

@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "VRLI_API_FILE_GET_OP",
     "VRLI_EVENT_QUERY_OP",
     "VRLI_TYPED_OPS",
     "VRLI_TYPED_WHEN_TO_USE_BY_GROUP",
@@ -135,6 +136,15 @@ class VrliTypedOp:
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
     llm_instructions: dict[str, Any] | None
+
+
+# Imported after ``VrliTypedOp`` is defined: the metadata module builds one of
+# these, so an import at the top of the file would be circular.
+from meho_backplane.connectors.vcf_logs.typed_ops_api_file import (  # noqa: E402
+    API_FILE_GROUP_KEY,
+    API_FILE_WHEN_TO_USE,
+    VRLI_API_FILE_GET_OP,
+)
 
 
 def build_event_query_path(constraints: str) -> str:
@@ -253,6 +263,7 @@ VRLI_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "a fetch_more envelope); re-run with a narrower constraint / time range "
         "to act on more than the sample."
     ),
+    API_FILE_GROUP_KEY: API_FILE_WHEN_TO_USE,
 }
 
 #: Response schema of ``vrli.event.query``: the handler's ``{events, complete}``
@@ -380,10 +391,11 @@ VRLI_EVENT_QUERY_OP = VrliTypedOp(
     },
 )
 
-#: The typed ops :class:`VcfLogsConnector` registers at lifespan startup. Today
-#: just ``vrli.event.query`` (#2295); the tuple shape lets a future typed vRLI
-#: read join without touching the registrar.
-VRLI_TYPED_OPS: tuple[VrliTypedOp, ...] = (VRLI_EVENT_QUERY_OP,)
+#: The typed ops :class:`VcfLogsConnector` registers at lifespan startup:
+#: ``vrli.event.query`` (#2295) and ``vrli.api_file.get`` (the read of the API
+#: reference pages). The 8.x registrar reuses this tuple, so every op here is
+#: registered on both Logs implementations.
+VRLI_TYPED_OPS: tuple[VrliTypedOp, ...] = (VRLI_EVENT_QUERY_OP, VRLI_API_FILE_GET_OP)
 
 
 async def register_vrli_typed_operations(

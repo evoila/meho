@@ -535,6 +535,23 @@ class VcfLogsConnector(HttpConnector):
 
         return await event_query_impl(self, operator, target, params)
 
+    async def api_file_get(
+        self,
+        operator: Operator,
+        target: VcfLogsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrli.api_file.get`` -- read one API reference page or file the system serves.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vcf_logs.api_file.vrli_api_file_get_impl`
+        (imported lazily, like :meth:`event_query`). The 8.x subclass
+        inherits this handler, so the read exists on both implementations.
+        """
+        from meho_backplane.connectors.vcf_logs.api_file import vrli_api_file_get_impl
+
+        return await vrli_api_file_get_impl(self, operator, target, params)
+
     async def fingerprint(
         self,
         target: VcfLogsTargetLike,

@@ -24,8 +24,8 @@ unauthenticated `GET /api/v2/version` fingerprint, same
 `Vrli8Connector` **subclasses**
 `meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector` and inherits the
 session mint, the token cache, the `invalidate_session` / `invalidate_credentials`
-(#2067) recovery, the profile-derived fingerprint, and the `vrli.event.query` typed
-handler — overriding **only** the registration triple and the version band. Unlike
+(#2067) recovery, the profile-derived fingerprint, and the typed handlers
+(`vrli.event.query`, `vrli.api_file.get`) — overriding **only** the registration triple and the version band. Unlike
 vROps 8.x, the `Bearer` scheme is unchanged across the boundary, so there is **no
 auth override at all** (the subclass body is five class attributes).
 
@@ -49,23 +49,32 @@ a probed vRLI 8.x target fingerprints straight into `>=8.0,<9.0` and resolves he
 Matrix pinned in
 [`test_connectors_vrli8_dual_impl_resolution.py`](../../backend/tests/test_connectors_vrli8_dual_impl_resolution.py).
 
-## Scope: the modern typed read op, reused
+## Scope: the modern typed read ops, reused
 
-The 8.x impl reuses the modern sibling's one typed op verbatim
+The 8.x impl reuses the modern sibling's typed ops verbatim
 (`source_kind="typed"`, fresh-boot with zero catalog ingest) — the registrar
-(`register_vrli8_typed_operations`) upserts it under the `(vrli, 8.0, vrli-vrli8)`
-triple:
+(`register_vrli8_typed_operations`) upserts them under the `(vrli, 8.0, vrli-vrli8)`
+triple. **Versions** says where each call exists: the product versions of the
+connector implementations that register it.
 
-| Group | Op | Endpoint |
-|---|---|---|
-| `vrli-events` | `vrli.event.query` | `GET /api/v2/events/{constraints}` |
+| Group | Op | What it does | Endpoint | Versions |
+|---|---|---|---|---|
+| `vrli-events` | `vrli.event.query` | Query raw log events by a constraint chain. | `GET /api/v2/events/{constraints}` | 8.x, 9.0 |
+| `vrli-api-docs` | `vrli.api_file.get` | Read one API reference page or API description file the system serves (`/rest-api`, the pages under `/rest-api/`, the Swagger or OpenAPI files they load). Returns path, HTTP status, content type, size, SHA-256 and the system version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /api/v2/version` | 8.x, 9.0 |
 
 The op metadata (summary, response schema, example, guidance) is the modern
-connector's, taken from the 9.0 API file.
+connector's; the event-query fields are taken from the 9.0 API file. The
+API reference read is described in full, with the path rule, the answer
+fields and how to rebuild a file from the parts, in
+[`connectors-vcf-logs.md`](connectors-vcf-logs.md) ("The read:
+`vrli.api_file.get`"); the 8.x impl inherits the handler
+(`VcfLogsConnector.api_file_get`) unchanged, because 8.18 serves its
+reference at the same `/rest-api` address. Tests of the read on this impl:
+[`test_connectors_vcf_logs_api_file.py`](../../backend/tests/test_connectors_vcf_logs_api_file.py).
 
-The op_id and group key are shared with the modern impl on purpose (distinct
+The op_ids and group keys are shared with the modern impl on purpose (distinct
 `endpoint_descriptor` / `OperationGroup` rows, scoped by the full connector triple).
-The modern connector types only the event query; the rest of its browse surface
+The modern connector types only these two reads; the rest of its browse surface
 (hosts / content-packs / alerts / fields) is **generic-ingested** from an
 internally-authored `vcf-logs-9.0/openapi.yaml`, not a VMware download. 8.x has no
 committable spec to ingest, so a wider typed inventory surface is a documented
@@ -77,8 +86,10 @@ follow-up on #3068, not shipped speculatively.
 is an **op-set drift guard**, not a path pin: the subclass introduces no new paths
 (the vRLI `/api/v2/*` surface lives on the modern `vcf_logs` module and is already
 guarded by the modern lane). The lane pins that the 8.x impl reuses exactly the
-modern typed op-set (`{vrli.event.query}`) and adds no `_*_PATH` constants of its
-own. Evidenced exclusion (vRLI 8.x publishes no committable spec — a per-appliance
+modern typed op-set (`{vrli.event.query, vrli.api_file.get}`) and adds no `_*_PATH`
+constants of its own. The documentation paths of `vrli.api_file.get` (`/rest-api`,
+`/rest-api/`) are listed in the modern lane as `GET`, marked "documentation path,
+not in the API file", and kept out of the served check. Evidenced exclusion (vRLI 8.x publishes no committable spec — a per-appliance
 runtime Swagger UI at `/rest-api` only): the `vrli-vrli8` entry of
 [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
@@ -99,8 +110,8 @@ runtime Swagger UI at `/rest-api` only): the `vrli-vrli8` entry of
 - **Live dispatch not verified against a real appliance.** No vRLI 8.x lab was
   dialled; the inherited event query is unit-tested end-to-end (respx). Live
   verification is the deferred tail.
-- **Typed inventory breadth is a follow-up.** The event query is the 8.x typed
-  surface; typed hosts / content-packs / alerts / fields (the migration-discovery
+- **Typed inventory breadth is a follow-up.** The event query and the API
+  reference read are the 8.x typed surface; typed hosts / content-packs / alerts / fields (the migration-discovery
   inventory) would be a follow-up if a concrete need lands — the modern sibling
   serves these via ingested 9.0 catalog, which 8.x cannot use (no committable spec).
 - **Unfingerprinted targets resolve to modern** (wildcard owned by `vrli-rest`); a

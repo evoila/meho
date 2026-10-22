@@ -770,6 +770,27 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: TEMP (#4759) break the git-core PPA source before the php step
+        # Proof step for #4759 only. Removed before merge. Points the PPA
+        # source at a path that answers an error, so `apt-get update`
+        # sees one failed index, as in the 503 outage.
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ls -la /etc/apt/sources.list.d/
+          found=0
+          for f in /etc/apt/sources.list.d/*git-core*; do
+            found=1
+            sudo -n sed -i 's#git-core/ppa#git-core/ppa-not-there-4759#g' "$f"
+            echo "--- $f"; cat "$f"
+          done
+          if [ "$found" = "0" ]; then
+            echo "no git-core source file found; adding a broken source of our own"
+            echo "deb [trusted=yes] https://ppa.launchpadcontent.net/git-core/ppa-not-there-4759/ubuntu noble main" \
+              | sudo -n tee /etc/apt/sources.list.d/zz-broken-4759.list
+          fi
+
       - name: Install PHP CLI
         # The pfSense user-write tests
         # (tests/test_connectors_pfsense_user_write_ops.py) run the

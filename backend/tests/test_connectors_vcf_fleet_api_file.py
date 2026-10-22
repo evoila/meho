@@ -936,6 +936,54 @@ async def test_version_read_500_still_returns_the_file_with_the_header(
     assert body["lcm_api_version"] == "8.0"
 
 
+@pytest.mark.asyncio
+async def test_version_read_bad_gzip_still_returns_the_file(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A version body that fails to decode raises inside ``client.get``;
+    the file still comes back."""
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        about = mock.get(_ABOUT).respond(
+            200,
+            stream=_ChunkedStream(b"\x1f\x8b\x08\x00not-gzip-at-all", 4096),
+            headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+        )
+        mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML, headers=_LCM_HEADER)
+        result = await _dispatch(_LIFECYCLE_DOCS)
+
+    assert result.status == "ok", result.error
+    assert about.call_count == 1
+    body = result.result
+    assert body["sha256"] == hashlib.sha256(_HTML.encode()).hexdigest()
+    assert body["version"] is None
+    assert body["build"] is None
+    assert body["version_error"].startswith("DecodingError:")
+    assert body["lcm_api_version"] == "8.0"
+
+
+@pytest.mark.asyncio
+async def test_version_read_redirect_loop_still_returns_the_file(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A version endpoint that redirects to itself raises inside ``client.get``;
+    the file still comes back."""
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        about = mock.get(_ABOUT).respond(302, headers={"Location": _ABOUT})
+        mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML, headers=_LCM_HEADER)
+        result = await _dispatch(_LIFECYCLE_DOCS)
+
+    assert result.status == "ok", result.error
+    assert about.call_count > 1
+    body = result.result
+    assert body["sha256"] == hashlib.sha256(_HTML.encode()).hexdigest()
+    assert body["version"] is None
+    assert body["build"] is None
+    assert body["version_error"].startswith("TooManyRedirects:")
+    assert body["lcm_api_version"] == "8.0"
+
+
 @pytest.mark.parametrize(
     ("payload", "version", "build"),
     [

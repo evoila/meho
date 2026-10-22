@@ -307,6 +307,8 @@ Version and build come from `GET /lcm/lcops/api/v2/about`, the call of
 answers HTTP 500 (see "Known issues"): then `version` and `build` are
 `null`, `version_error` names the 500, and `lcm_api_version` still
 carries the `Lcm-API-Version` header the appliance sent with the file.
+A request that fails before a usable answer exists (a connection fault,
+a body that does not decode, a redirect loop) is named the same way.
 The file comes back either way.
 
 The answer:

@@ -461,7 +461,11 @@ class VcfFleetConnector(HttpConnector):
 
         One ``GET`` with no retry: on VCF 9.0 builds the call answers HTTP
         500 every time, so retrying only delays the caller. A failure is
-        named in ``error`` and the caller still gets its own answer.
+        named in ``error`` and the caller still gets its own answer. The
+        request guard catches every :exc:`httpx.RequestError`, not only
+        the transport kind: a body that fails to decode or a redirect loop
+        raises inside ``client.get`` too, and neither may cost the caller
+        its own answer.
         """
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
@@ -472,7 +476,7 @@ class VcfFleetConnector(HttpConnector):
                 headers={"Accept": "application/json", **headers},
                 extensions=self._request_extensions(target),
             )
-        except httpx.TransportError as exc:
+        except httpx.RequestError as exc:
             flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
             return FleetApplianceVersion(
                 version=None, build=None, error=f"{type(exc).__name__}: {exc}"

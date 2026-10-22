@@ -779,12 +779,26 @@ jobs:
         # main. Same `sudo -n apt-get` pattern as the Go lane's C-toolchain
         # step below. Every shard needs it: the file stride can put the
         # test file in any shard.
+        #
+        # `apt-get update` exits 100 when any one package index fails to
+        # download, even one that php-cli does not need. The runner image
+        # carries the git-core PPA (it installs a newer git from there), and
+        # that mirror answered 503 in a merge-queue run (#4759), which
+        # dropped the pull request from the queue. apt had already retried
+        # the file three times in that run, so more retries alone do not
+        # help. So a failed update is a warning, not the end of the step:
+        # apt keeps the indexes it did download, and the install below
+        # fails on its own when the Ubuntu indexes are missing.
+        shell: bash
         run: |
+          set -euo pipefail
           if command -v php >/dev/null 2>&1; then
             echo "php ready: $(php --version | head -1)"
             exit 0
           fi
-          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          if ! sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+            echo "::warning::apt-get update could not refresh every package index; installing php-cli from the indexes that did download"
+          fi
           sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
           php --version | head -1
 

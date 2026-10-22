@@ -198,7 +198,7 @@ _BACKUP_STATUS_PAYLOAD: dict[str, Any] = {
     "current_backup_operation_status": {"backup_id": "b-1", "success": True}
 }
 _TZ_PAYLOAD: dict[str, Any] = {
-    "results": [{"id": "tz-overlay", "display_name": "overlay", "tz_type": "OVERLAY"}]
+    "results": [{"id": "tz-overlay", "display_name": "overlay", "tz_type": "OVERLAY_BACKED"}]
 }
 _TIER1_PAYLOAD: dict[str, Any] = {
     "results": [{"id": "t1-a", "display_name": "tenant-a", "tier0_path": "/infra/tier-0s/t0"}]
@@ -788,10 +788,10 @@ def test_each_op_parameter_schema_disallows_additional_properties(op_id: str) ->
 
 
 @pytest.mark.parametrize("op_id", sorted(_EXPECTED_OP_IDS))
-def test_each_op_has_llm_instructions_with_when_to_use_and_output_shape(op_id: str) -> None:
+def test_each_op_has_llm_instructions_with_when_to_call_and_output_shape(op_id: str) -> None:
     op = next(o for o in NSX_TYPED_OPS if o.op_id == op_id)
     assert op.llm_instructions is not None
-    assert op.llm_instructions.get("when_to_use", "").strip() != ""
+    assert op.llm_instructions.get("when_to_call", "").strip() != ""
     assert "output_shape" in op.llm_instructions
 
 

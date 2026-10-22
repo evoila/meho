@@ -111,8 +111,9 @@ async def get_client_credentials_grant(
     to that principal as subject — there is no separate actor.
 
     Args:
-        issuer_url: The Keycloak realm issuer URL (the token endpoint is
-            derived from it).
+        issuer_url: The Keycloak realm base URL the token endpoint is
+            derived from: the issuer, or ``KEYCLOAK_DISCOVERY_URL`` when set
+            (``Settings.keycloak_discovery_base``).
         client_id: The OAuth client id (``agent:<name>`` for an agent
             principal, the configured check-runner client for background
             dispatch).

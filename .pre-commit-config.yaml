@@ -32,6 +32,10 @@ repos:
         # means we don't add one.
         exclude: ^backend/src/meho_backplane/ui/static/src/vendor/.+\.(?:js|css)$
       - id: check-yaml
+        # Kubernetes manifests hold several YAML documents in one file
+        # (for example deploy/linux-server/storage/local-path-storage.yaml),
+        # so the hook accepts multi-document files.
+        args: [--allow-multiple-documents]
         # Helm chart templates are Go-template-pre-YAML, not pure YAML;
         # they only become valid YAML after `helm template` renders
         # them. Validate them via `helm template` / `helm lint` (the

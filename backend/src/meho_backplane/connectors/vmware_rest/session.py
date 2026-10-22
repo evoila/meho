@@ -38,6 +38,7 @@ attributes satisfies this Protocol structurally — no edits here.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from meho_backplane.auth.operator import Operator
@@ -45,6 +46,7 @@ from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 
 __all__ = [
     "SessionCredentials",
+    "SessionTokenUsed",
     "VsphereSessionLoader",
     "VsphereTargetLike",
     "load_session_credentials_from_vault",
@@ -153,3 +155,24 @@ async def load_session_credentials_from_vault(
     (`shared_service_account`) use.
     """
     return await load_basic_credentials(target, operator)
+
+
+@dataclass
+class SessionTokenUsed:
+    """The session token one VI-JSON call was sent with (#3701).
+
+    A typed op that creates server-side state tied to the session (the
+    ``TaskHistoryCollector`` of ``vmware.tasks.history``) passes an
+    instance to :meth:`VmwareRestConnector._post_vmomi_json`. The call
+    pins the session it sends the request on and records that token here,
+    so the op's cleanup can later name the session that owns the state
+    (:meth:`VmwareRestConnector.close_session` with ``token``). Reading
+    the cached token before or after the call is not the same thing: the
+    connector may replace the session while the request is in flight.
+
+    ``token`` is the token of the last request the call sent (a
+    ``NotAuthenticated`` re-login retry updates it). ``None`` when the
+    call sent no request, or on an ESXi target (no session header).
+    """
+
+    token: str | None = None

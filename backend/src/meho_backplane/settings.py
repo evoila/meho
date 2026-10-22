@@ -192,6 +192,14 @@ class Settings(BaseModel):
         but the CLI surfaces an actionable error rather than silently
         misusing ``audience`` (which is the confidential resource-
         server identifier, not a public client).
+    keycloak_discovery_url:
+        Realm base URL the backplane uses for its own calls to Keycloak:
+        the discovery document and the token endpoint. For example the
+        in-cluster Service address
+        ``http://<release>-keycloak:8080/auth/realms/meho``. The issuer
+        check keeps ``keycloak_issuer_url``, because tokens carry the
+        public address. Empty (the default) means the issuer URL, as
+        before (#4591).
     keycloak_jwks_cache_ttl_seconds:
         Maximum age of a cached JWKS document before it must be
         refetched. The cache also refreshes on a kid-miss (key
@@ -1148,6 +1156,22 @@ class Settings(BaseModel):
         own call. Set ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` only on
         a lab-class deployment. Ordinary decisions are never affected.
         Read at boot only; no request field can change it.
+    sandbox_mode:
+        Sandbox mode (#4622, ``docs/decisions/sandbox-mode.md``). Only for
+        an instance that holds disposable test systems. When on, a tenant
+        admin may give a service principal a standing grant that also
+        covers deletes (a delete grant), made in the web console and
+        expiring within 30 days. Default ``False``: every other instance
+        keeps today's rules. Read at boot only, from ``MEHO_SANDBOX_MODE``.
+        The mode is stored in the database at the first start and checked
+        at every start; see :mod:`meho_backplane.sandbox_mode`.
+    sandbox_mode_confirm:
+        The host name that confirms sandbox mode, from
+        ``MEHO_SANDBOX_MODE_CONFIRM``. With the mode on, it must equal the
+        host of the MCP resource URI (the public address of the instance),
+        and one dot-separated part of that host must be exactly
+        ``sandbox``. Otherwise MEHO refuses to start. Ignored when the
+        mode is off.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1283,6 +1307,7 @@ class Settings(BaseModel):
     keycloak_issuer_url: HttpUrl
     keycloak_audience: str = Field(min_length=1)
     keycloak_cli_client_id: str = ""
+    keycloak_discovery_url: HttpUrl | None = None
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
@@ -1612,6 +1637,10 @@ class Settings(BaseModel):
     # the reason, #3692) are allowed only on lab-class deployments. Default
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
+    # #4622 -- sandbox mode: a standing grant may also cover deletes, only
+    # on an instance for disposable test systems. Both read at boot only.
+    sandbox_mode: bool = False
+    sandbox_mode_confirm: str = ""
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -2140,6 +2169,14 @@ class Settings(BaseModel):
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 
+    @property
+    def keycloak_discovery_base(self) -> str:
+        """Realm base URL for discovery and token calls, without a trailing slash.
+
+        ``KEYCLOAK_DISCOVERY_URL`` when set, else the issuer URL.
+        """
+        return str(self.keycloak_discovery_url or self.keycloak_issuer_url).rstrip("/")
+
     @field_validator("vault_kv_tenant_scope_prefix")
     @classmethod
     def _vault_tenant_prefix_must_template_tenant_id(cls, value: str) -> str:
@@ -2476,6 +2513,7 @@ def get_settings() -> Settings:
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
         keycloak_cli_client_id=os.environ.get("KEYCLOAK_CLI_CLIENT_ID", ""),
+        keycloak_discovery_url=os.environ.get("KEYCLOAK_DISCOVERY_URL") or None,  # type: ignore[arg-type]
         keycloak_jwks_cache_ttl_seconds=int(
             os.environ.get("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300"),
         ),
@@ -2752,6 +2790,12 @@ def get_settings() -> Settings:
         approval_allow_delegated_decision=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
+        # #4622 -- sandbox mode is off unless both settings are set; the
+        # boot guards in ``meho_backplane.sandbox_mode`` check them.
+        sandbox_mode=parse_bool_env(
+            os.environ.get("MEHO_SANDBOX_MODE", "false"),
+        ),
+        sandbox_mode_confirm=os.environ.get("MEHO_SANDBOX_MODE_CONFIRM", "").strip(),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(
             os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),

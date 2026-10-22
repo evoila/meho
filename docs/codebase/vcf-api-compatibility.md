@@ -218,6 +218,35 @@ the ingested-catalog boundary.
   descriptor against an 8.0.3 target is therefore **not** rejected with
   `unqualified_target_version` — the mirror image of the 9.0 guard's rejection
   of the same target. The 9.0 guard is unchanged.
+- **Sibling-catalog fallback (#3600).** When the named catalog's guard
+  rejects the target, the dispatcher checks the catalog the resolver picks
+  for that target. If it is a sibling of the same implementation
+  (`vmware-rest`, another version), its own guard accepts the target, and it
+  has the same `op_id` as an **enabled ingested** descriptor, the call runs
+  there instead. So a caller that pins `vmware-rest-9.0` keeps working for an
+  8.0.x target once the 8.0 catalog has the op, and the reverse. The sibling
+  descriptor is used for parameter checks, policy, approval and audit: the
+  audit row and any approval request name the catalog that really ran
+  (`vmware-rest-8.0`), not the one the caller named. If no sibling qualifies,
+  or the op is missing or disabled there, the result is still
+  `unqualified_target_version` with the same fields. Typed and composite
+  descriptors are not affected. The params are checked once, after this
+  choice, against the schema of the catalog that runs. So for a guarded
+  op, `unqualified_target_version` is reported before `invalid_params`.
+  `preview_operation` makes the same choice (without an audit row), so its
+  envelope names the sibling's `connector_id` and its `preview_hash` matches
+  the call. A destructive op can then use the fallback too. The fallback
+  is for a fresh call only. When an approved request resumes, the call
+  stays on the catalog the approval request stored. If the target's
+  detected version moved while the request waited and that catalog no
+  longer fits, the resume is refused with `unqualified_target_version`
+  and the caller must make a new request. The resume skips the policy
+  gate, so switching catalogs there would run an operation the approver
+  never saw. Both resume paths use the stored catalog: the operator surface
+  reads it from the request row, and the agent waiter replaces the
+  `connector_id` in the agent's original call with it
+  (`backend/src/meho_backplane/agent/approval_wait.py`). Code:
+  `backend/src/meho_backplane/operations/_catalog_guard.py`.
 - **Safety floors.** The VMware hardware/lifecycle/power write floor
   (`dangerous` + approval) is keyed on `(product, impl_id)` and applies to the
   8.0 catalog's ingested rows exactly as it does for 9.0.
@@ -232,7 +261,9 @@ target guard (#3565), a target below 9.x served by the 9.0 catalog fails with
 an 8.x catalog is ingested. Ingest the `vmware-rest-8.0` catalog
 (`meho connector ingest --catalog vmware/8.0`) to restore governed generic
 operations on fingerprinted 8.0.x targets; typed and composite ops are
-unaffected either way.
+unaffected either way. Callers that pin `vmware-rest-9.0` do not need to
+change their `connector_id`: an op that is enabled in the 8.0 catalog runs
+there through the sibling-catalog fallback (#3600).
 
 **Acquisition (Package 1, 8.0 U3).** The 8.0 U3 `vcenter.yaml` is pinned on
 the private shelf as `docs/vcenter-8.0/vcenter.yaml`. It was made from a live
@@ -251,14 +282,19 @@ shelf) and prints the methods a file lacks. CI requires the three files, so
 this check runs on every CI run. Without the shelf it skips.
 
 A method that a file lacks needs a version gate in the operation, or an entry
-in the lane's exclusion list (`_NOT_IN_8_0_VI_JSON`) with the reason. Today
-one method is in the list:
+in the lane's exclusion list (`_NOT_IN_8_0_VI_JSON`) with the reason. The list
+is empty today: every VI-JSON method MEHO calls on 8.0 is in all three files.
 
-| Method | Missing in | Why it is safe |
-|---|---|---|
-| `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` | 8.0 U1, U2, U3 | It is a vSAN health service method, not a vim25 method; no 8.0 VI/JSON file has the vSAN health service (`VsanVcClusterHealthSystem`) paths. `vmware.host.vsan_health` calls it best-effort and returns `overall_health: null` with a `read_note` when the call fails. |
-
-All other 49 methods are in all three files.
+**vSAN methods on 8.0 (#4441).** No 8.0 VI/JSON file has vSAN paths. So on
+vCenter 8.0 the connector sends vSAN methods as SOAP to `/vsanHealth`, not as
+VI-JSON; on vCenter 9.x it sends them as VI-JSON under `/vsan/...` (see "vSAN
+calls" in [connectors-vmware-rest.md](connectors-vmware-rest.md)). The same
+lane checks every vSAN method MEHO calls against the method lists of the
+vendor's vSAN Management SDK for Python 8.0 U1 and U2
+(`docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt`, `.../8.0u2/...` on the
+shelf). Today that is one method,
+`VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary`, and both lists
+have it.
 
 ## References
 

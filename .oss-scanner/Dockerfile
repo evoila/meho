@@ -21,7 +21,7 @@
 #   - helm, so the chart tests can render deploy/charts/meho offline.
 #
 # Versions follow CI and the production image: Python 3.14 (same base
-# image digest as backend/Dockerfile), uv 0.11.12, Go 1.26.9 (the floor in
+# image digest as backend/Dockerfile), uv 0.11.12, Go 1.26.10 (the floor in
 # cli/go.mod), helm v3.16.4 (chart.yml). Bump them together.
 #
 # Try it locally from a clean checkout:
@@ -31,7 +31,7 @@
 FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /usr/local/bin/
-COPY --from=golang:1.26.9-trixie@sha256:f89535b7caea67fa9ff0ba009894bff8f3be915e49cb635477c8ce04e045db5d /usr/local/go /usr/local/go
+COPY --from=golang:1.26.10-trixie@sha256:7202554ed358a37f41c44e4910ae29bbc5ef0715f289ac637218adbb0ca132dd /usr/local/go /usr/local/go
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/src/backend/.venv/bin:/usr/local/go/bin:/root/go/bin:$PATH \

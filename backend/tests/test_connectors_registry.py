@@ -320,6 +320,9 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
+            # #4622: the sandbox-mode boot step reads the stored mode from
+            # the database; patched out like the other env/DB boot steps.
+            patch("meho_backplane.main.assert_sandbox_mode_consistent", new=AsyncMock()),
             patch("meho_backplane.main.get_embedding_service"),
             # G5.2-T1 (#623) added a memory-expiry sweeper start to the
             # lifespan body; G9.3-T6 (#858) added a topology-history
@@ -528,6 +531,9 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
+            # #4622: the sandbox-mode boot step reads the stored mode from
+            # the database; patched out like the other env/DB boot steps.
+            patch("meho_backplane.main.assert_sandbox_mode_consistent", new=AsyncMock()),
             patch("meho_backplane.main.get_embedding_service"),
             # G5.2-T1 (#623) + G9.3-T6 (#858) + G11.2-T6 (#819) +
             # G11.3-T4 (#825) — same lifespan-task patches as the

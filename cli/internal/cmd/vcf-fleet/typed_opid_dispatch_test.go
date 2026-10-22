@@ -57,6 +57,7 @@ var ingestedDispatchCases = []struct {
 var typedOpCLICoverage = map[string]string{
 	"fleet.about":            "about",
 	"fleet.environment.list": "environment list",
+	"fleet.api_file.get":     "", // agent surface only: the lab pins the vendor API files through MCP, no CLI verb
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed Fleet

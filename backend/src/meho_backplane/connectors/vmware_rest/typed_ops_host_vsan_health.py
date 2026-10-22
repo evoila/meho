@@ -13,27 +13,32 @@ it works on a fresh boot with **zero catalog ingest**.
 
 vSAN health is the one read the plain vSphere Automation REST surface
 cannot reproduce: the health-test-group / overall-status roll-up lives
-on the dedicated ``/vsanHealth`` vmomi service, whose
-``VsanVcClusterHealthSystem`` managed object (singleton moId
+on the vSAN health service of vCenter, whose
+``VsanVcClusterHealthSystem`` managed object (fixed moId
 ``vsan-cluster-health-system``) answers
 ``VsanQueryVcClusterHealthSummary`` at cluster grain -- the ``govc
 vsan.health.*`` equivalent. It drives cluster-health triage ('is vSAN
 healthy?' / 'which health group is red?').
 
-The request-building + parse logic is carried over verbatim from the
-composite; only the dispatch mechanism changed (composite
-``_read_sub_op`` -> the same ``mount_op_path`` + ``_post_json`` call
-``host.usage`` issues).
+How the call is sent (#4441): through
+:meth:`VmwareRestConnector._post_vsan`, the one vSAN transport. On vCenter
+9.x that is VI-JSON ``POST /sdk/vim25/{release}/vsan/VsanVcClusterHealthSystem/
+vsan-cluster-health-system/VsanQueryVcClusterHealthSummary``; on vCenter 8.0,
+whose VI-JSON API has no vSAN methods, it is SOAP to ``/vsanHealth``. Before
+#4441 the path had no ``/vsan`` part, vCenter 9.1 answered HTTP 500
+``ManagedObjectNotFound``, and the read hid that behind empty health fields.
+Now a failed call raises, so the caller gets an error with vCenter's fault
+and never an empty answer that looks healthy.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vmware_rest._mount import VsanMethod
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
@@ -44,22 +49,38 @@ if TYPE_CHECKING:
 __all__ = [
     "HOST_VSAN_HEALTH_WHEN_TO_USE",
     "VMWARE_HOST_VSAN_HEALTH_OP",
+    "VSAN_QUERY_HEALTH_SUMMARY",
     "build_vsan_query_health_params",
     "host_vsan_health_impl",
 ]
 
 _log = structlog.get_logger(__name__)
 
-# VsanQueryVcClusterHealthSummary against the singleton
-# ``vsan-cluster-health-system`` moId (carried in the path, so the body
-# is only the method's ``cluster`` argument). Spec-relative; mounted
-# onto /api or /rest per-target by mount_op_path.
-_VSAN_QUERY_HEALTH_PATH = (
-    "/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
+#: ``VsanQueryVcClusterHealthSummary`` on the vSAN health service object of
+#: vCenter. The object id is fixed (vendor sample ``vsanapiutils.py``), so
+#: the body holds only the method's ``cluster`` argument.
+VSAN_QUERY_HEALTH_SUMMARY = VsanMethod(
+    mo_type="VsanVcClusterHealthSystem",
+    moid="vsan-cluster-health-system",
+    method="VsanQueryVcClusterHealthSummary",
 )
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
 
 HOST_VSAN_HEALTH_GROUP_KEY = "vmware-host-vsan-health"
+
+
+def _dict_items(value: Any) -> list[dict[str, Any]]:
+    """The dict entries of a vSAN list field, as a list.
+
+    VI-JSON always sends a list. SOAP (vCenter 8.0) has no list marker, so a
+    list with one entry comes back as a single dict. A missing or other
+    value gives an empty list.
+    """
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
 
 
 def _parse_vsan_health_test(test: dict[str, Any]) -> dict[str, Any]:
@@ -84,16 +105,11 @@ def _parse_vsan_health_group(group: dict[str, Any]) -> dict[str, Any]:
     A group buckets related health checks (network, physical disk,
     cluster, data, …). ``groupHealth`` is the group-level roll-up
     colour; ``groupTests`` is the per-check list flattened via
-    :func:`_parse_vsan_health_test`. A missing / non-list ``groupTests``
-    degrades to an empty list rather than raising -- the group-level
-    colour is still meaningful on its own.
+    :func:`_parse_vsan_health_test`. A missing ``groupTests`` degrades to
+    an empty list rather than raising -- the group-level colour is still
+    meaningful on its own.
     """
-    raw_tests = group.get("groupTests")
-    tests = (
-        [_parse_vsan_health_test(t) for t in raw_tests if isinstance(t, dict)]
-        if isinstance(raw_tests, list)
-        else []
-    )
+    tests = [_parse_vsan_health_test(t) for t in _dict_items(group.get("groupTests"))]
     return {
         "group_id": group.get("groupId"),
         "group_name": group.get("groupName"),
@@ -105,8 +121,8 @@ def _parse_vsan_health_group(group: dict[str, Any]) -> dict[str, Any]:
 def build_vsan_query_health_params(cluster_moid: str) -> dict[str, Any]:
     """Build the ``VsanQueryVcClusterHealthSummary`` request body for one cluster.
 
-    The ``vsan-cluster-health-system`` singleton moId rides the request
-    path (:data:`_VSAN_QUERY_HEALTH_PATH`); the body carries the method's
+    The ``vsan-cluster-health-system`` object rides the request path
+    (:data:`VSAN_QUERY_HEALTH_SUMMARY`); the body carries the method's
     ``cluster`` argument -- the target cluster's MoRef (a
     ``ClusterComputeResource``), ``_typeName``-annotated per the vim wire
     format (#3103). Every other parameter of the method
@@ -126,59 +142,40 @@ async def host_vsan_health_impl(
 ) -> dict[str, Any]:
     """Implementation of ``vmware.host.vsan_health`` -- per-cluster vSAN health.
 
-    Reads, directly on the connector session (no ``dispatch_child``, no
-    ingested descriptor):
+    Sends ``VsanQueryVcClusterHealthSummary`` to the
+    ``vsan-cluster-health-system`` object, scoped to the target cluster's
+    MoRef, directly on the connector session (no ``dispatch_child``, no
+    ingested descriptor). :meth:`VmwareRestConnector._post_vsan` picks the
+    transport: VI-JSON on vCenter 9.x, SOAP to ``/vsanHealth`` on vCenter
+    8.0.
 
-    1. ``POST .../VsanVcClusterHealthSystem/vsan-cluster-health-system/
-       VsanQueryVcClusterHealthSummary`` (mounted) against the
-       ``vsan-cluster-health-system`` singleton, scoped to the target
-       cluster's MoRef. Best-effort: the cluster is already identified by
-       the ``cluster`` param, so when the health-service read errors (a
-       cluster with vSAN disabled, a ``/vsanHealth`` endpoint that rejects
-       the vi-json call, a transient auth expiry) the summary is returned
-       with ``groups`` / ``overall_health`` set to ``null`` and a
-       ``read_note`` recording why, rather than propagating the transport
-       error.
-
-    The call routes through
-    :meth:`VmwareRestConnector._post_vmomi_json`, which mounts the vmomi
-    method on the documented VI-JSON base ``/sdk/vim25/{release}`` (with a
-    single ``/api`` fallback) so ``VsanQueryVcClusterHealthSummary``
-    resolves on vCenter 8.0.x instead of 404ing (#2466); on legacy /
-    vcsim targets it stays on the ``/rest`` mount.
+    A failed call is not caught here (#4441). The dispatcher turns it into
+    an error with vCenter's fault type and text; a ``ManagedObjectNotFound``
+    for the cluster becomes MEHO's ``not_found``. An answer without a health
+    summary raises too, so a failed read never looks like a healthy, empty
+    one.
 
     Returns ``{"cluster": <moid>, "overall_health": <colour|null>,
     "groups": [...]}``.
     """
     cluster_moid = params["cluster"]
-
-    out: dict[str, Any] = {"cluster": cluster_moid}
-    try:
-        health_result = await connector._post_vmomi_json(
-            target,
-            _VSAN_QUERY_HEALTH_PATH,
-            operator=operator,
-            json=build_vsan_query_health_params(cluster_moid),
-        )
-    except (httpx.HTTPError, RuntimeError) as exc:
-        out["overall_health"] = None
-        out["groups"] = None
-        out["read_note"] = (
-            f"vsan health-service read skipped: VsanQueryVcClusterHealthSummary for "
-            f"cluster {cluster_moid!r} failed with {type(exc).__name__}: {exc}"
-        )
-        return out
-    summary = _unwrap_value(health_result)
-    raw_groups = summary.get("groups") if isinstance(summary, dict) else None
-    overall = summary.get("overallHealth") if isinstance(summary, dict) else None
-    out["overall_health"] = overall
-    out["groups"] = (
-        [_parse_vsan_health_group(g) for g in raw_groups if isinstance(g, dict)]
-        if isinstance(raw_groups, list)
-        else []
+    health_result = await connector._post_vsan(
+        target,
+        VSAN_QUERY_HEALTH_SUMMARY,
+        operator=operator,
+        json=build_vsan_query_health_params(cluster_moid),
     )
+    summary = _unwrap_value(health_result)
+    if not isinstance(summary, dict):
+        raise RuntimeError(
+            f"vSAN health read for cluster {cluster_moid!r}: vCenter sent no health summary"
+        )
     _log.info("vmware_host_vsan_health_read", target=target.name, cluster=cluster_moid)
-    return out
+    return {
+        "cluster": cluster_moid,
+        "overall_health": summary.get("overallHealth"),
+        "groups": [_parse_vsan_health_group(g) for g in _dict_items(summary.get("groups"))],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +197,7 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7"}],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -214,12 +212,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Cluster-wide vSAN health roll-up colour from "
                 "``VsanClusterHealthSummary.overallHealth``; ``null`` when "
-                "the best-effort health-service read was skipped (see "
-                "``read_note``)."
+                "vCenter's summary has no overall colour."
             ),
         },
         "groups": {
-            "type": ["array", "null"],
+            "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
@@ -269,22 +266,10 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 },
                 "required": ["tests"],
             },
-            "description": (
-                "Health-test groups from ``VsanClusterHealthSummary.groups``; "
-                "``null`` when the best-effort health-service read was skipped "
-                "(see ``read_note``)."
-            ),
-        },
-        "read_note": {
-            "type": "string",
-            "description": (
-                "Present only when the health-service read was skipped; "
-                "records the failing method, its status, and the underlying "
-                "error."
-            ),
+            "description": "Health-test groups from ``VsanClusterHealthSummary.groups``.",
         },
     },
-    "required": ["cluster"],
+    "required": ["cluster", "overall_health", "groups"],
 }
 
 #: Curated ``when_to_use`` blurb for the host-vsan-health group.
@@ -294,7 +279,7 @@ HOST_VSAN_HEALTH_WHEN_TO_USE = (
     "groups (each with its own colour and per-check tests: id / name / "
     "colour / short description). The govc vsan.health.* equivalent and "
     "the one read the plain vSphere Automation REST surface cannot "
-    "reproduce -- it lives on the dedicated /vsanHealth vmomi endpoint. "
+    "reproduce -- it lives on the vSAN health service of vCenter. "
     "The right op for cluster-health triage: 'is vSAN healthy?' / 'which "
     "health group is red?'. Reads VsanQueryVcClusterHealthSummary "
     "directly on the connector session, so it works with zero catalog "
@@ -304,21 +289,11 @@ HOST_VSAN_HEALTH_WHEN_TO_USE = (
 VMWARE_HOST_VSAN_HEALTH_OP = VmwareTypedOp(
     op_id="vmware.host.vsan_health",
     handler_attr="host_vsan_health",
-    summary="Per cluster, vSAN health-test groups + overall health status.",
+    summary="vSAN health of one cluster: the overall colour and each group of health tests.",
     description=(
-        "Returns the cluster-wide vSAN overall_health colour plus the "
-        "health-test groups list (each group with its own roll-up colour + "
-        "per-check tests: id / name / colour / short description) for one "
-        "cluster. Queries VsanQueryVcClusterHealthSummary on the "
-        "'vsan-cluster-health-system' singleton scoped to the target "
-        "cluster's ClusterComputeResource MoRef, directly on the connector "
-        "session, so it works with zero catalog ingest -- vSAN health is "
-        "the one read the plain vSphere Automation REST surface cannot "
-        "reproduce (it lives on the dedicated /vsanHealth vmomi endpoint), "
-        "making this the 'govc vsan.health.*' equivalent for cluster-health "
-        "triage. Best-effort: a cluster with vSAN disabled or a rejected "
-        "health call returns null groups / overall_health with a read_note "
-        "rather than failing. safety_level=safe, read-only."
+        "Returns the vSAN health summary of one cluster: the overall colour and each health "
+        "group with its tests (id, name, colour, short text). When the vSAN call fails, the "
+        "call returns an error with vCenter's fault, not an empty answer. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -327,21 +302,23 @@ VMWARE_HOST_VSAN_HEALTH_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call when the operator asks whether vSAN is healthy on a cluster, "
-            "which vSAN health group is red/yellow, or wants the vSAN "
-            "health-test roll-up -- data the plain vCenter REST surface cannot "
-            "supply. Requires the target cluster's MoRef."
+        "when_to_call": (
+            "Call to check whether vSAN is healthy on a cluster and which health group "
+            "or test is yellow or red. The vCenter REST API cannot give this."
         ),
         "parameter_hints": {
-            "cluster": "Managed-object ID of the vSAN cluster (e.g. 'domain-c123').",
+            "cluster": "Cluster moid, e.g. 'domain-c7'.",
         },
         "output_shape": (
-            "{cluster, overall_health, groups: [{group_id, group_name, "
-            "group_health, tests: [{test_id, test_name, test_health, "
-            "test_short_description}]}]}. When the best-effort health-service "
-            "read failed, overall_health/groups are null and the payload "
-            "carries a read_note."
+            "{cluster, overall_health, groups: [{group_id, group_name, group_health, "
+            "tests: [{test_id, test_name, test_health, test_short_description}]}]}. "
+            "Colours are the vSAN health colours, such as green, yellow and red. When the "
+            "vSAN call fails, the call returns an error with vCenter's fault instead; a "
+            "cluster id that does not exist gives not_found."
+        ),
+        "next_step": (
+            "For each group that is not green, report its tests that are not green. To "
+            "see the disks of a host, call vmware.host.storage_devices."
         ),
     },
 )

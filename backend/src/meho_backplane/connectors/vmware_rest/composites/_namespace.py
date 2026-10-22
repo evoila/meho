@@ -255,7 +255,8 @@ async def namespace_delete_composite(
 
     Op-id: ``vmware.composite.namespace.delete``. ``safety_level="destructive"``
     + ``requires_approval=True`` -- mandatory human approval, no standing grant
-    (the ``DELETE`` child is never grant-clearable, so this always parks).
+    except on an instance in sandbox mode (the ``DELETE`` child is never
+    grant-clearable elsewhere, so this always parks there).
     Issues ``DELETE /vcenter/namespaces/instances/{namespace}`` through the
     governed REST write seam; a parked / denied gate returns the
     :class:`OperationResult` verbatim and no teardown fires.

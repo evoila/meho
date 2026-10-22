@@ -290,6 +290,7 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"filter_hosts": ["host-21"]}],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -429,21 +430,11 @@ HOST_NETWORK_UPLINKS_WHEN_TO_USE = (
 VMWARE_HOST_NETWORK_UPLINKS_OP = VmwareTypedOp(
     op_id="vmware.host.network_uplinks",
     handler_attr="host_network_uplinks",
-    summary="Per host, physical NIC link state + speed and their proxy-switch uplinks.",
+    summary="Link state and speed of each ESXi host's physical NICs, and the NICs behind each DVS.",
     description=(
-        "Returns one row per ESXi host in the vCenter with its physical "
-        "NICs (device / MAC / driver / link_up / speed_mb / duplex) and "
-        "proxy switches (key / dvs_name / dvs_uuid / uplink_pnics -- the "
-        "physical-NIC device names backing each DVS uplink). Reads "
-        "config.network.pnic + config.network.proxySwitch off a per-host "
-        "Web-Services-API RetrievePropertiesEx directly on the connector "
-        "session, so it works with zero catalog ingest -- the pnic "
-        "link-state / uplink mapping is the one read the plain vSphere "
-        "Automation REST surface cannot reproduce (it drives physical "
-        "switch-port-occupancy reasoning). Optional filter_hosts narrows "
-        "to specific host MoRef ids. The per-host read is best-effort: a "
-        "failed read nulls pnics / proxy_switches with a read_note rather "
-        "than sinking the op. safety_level=safe, read-only."
+        "Returns one row per ESXi host with its physical NICs (device, MAC, driver, link up, "
+        "speed, duplex) and its proxy switches: each distributed switch on the host with the "
+        "physical NICs it uses as uplinks. A failed host read gives a read_note. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -452,20 +443,25 @@ VMWARE_HOST_NETWORK_UPLINKS_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call when the operator asks about physical NIC inventory, link "
-            "state / speed, or which pnics back a DVS uplink on ESXi hosts -- "
-            "physical switch-port occupancy the plain vCenter REST host "
-            "listing cannot answer."
+        "when_to_call": (
+            "Call to see the physical NICs of ESXi hosts: which links are up, at what "
+            "speed, and which NICs carry the uplinks of a distributed switch. Use it for "
+            "questions like 'is an uplink down?' or 'how many switch ports do we use?'."
         ),
         "parameter_hints": {
-            "filter_hosts": "List of host MoRef ids to narrow to; omit for all hosts.",
+            "filter_hosts": "Host moids, e.g. ['host-21']; omit for all hosts.",
         },
         "output_shape": (
-            "{hosts: [{id, name, pnics: [{device, mac, driver, link_up, "
-            "speed_mb, duplex}], proxy_switches: [{key, dvs_name, dvs_uuid, "
-            "uplink_pnics}]}, ...]}. When a host's property read failed, "
-            "pnics/proxy_switches are null and the row carries a read_note."
+            "{hosts: [{id, name, pnics: [{device, mac, driver, link_up, speed_mb, "
+            "duplex}], proxy_switches: [{key, dvs_name, dvs_uuid, uplink_pnics: "
+            "[device]}], read_note}]}. speed_mb and duplex are null when the link is "
+            "down. When a host's read failed, pnics and proxy_switches are null and "
+            "read_note says why."
+        ),
+        "next_step": (
+            "Match uplink_pnics against pnics by device to find a down uplink "
+            "(link_up false). A NIC in no uplink_pnics list is not used by any "
+            "distributed switch."
         ),
     },
 )

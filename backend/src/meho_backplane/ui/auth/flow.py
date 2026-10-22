@@ -247,8 +247,7 @@ async def _fetch_discovery_doc(settings: Settings) -> OIDCEndpoints:
     :mod:`meho_backplane.auth.jwt` raises on its own discovery hit, so
     the operator-facing 502 mapping in the routes module is one shape.
     """
-    issuer = str(settings.keycloak_issuer_url).rstrip("/")
-    discovery_url = f"{issuer}/.well-known/openid-configuration"
+    discovery_url = f"{settings.keycloak_discovery_base}/.well-known/openid-configuration"
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         response = await client.get(discovery_url)
         response.raise_for_status()
@@ -266,7 +265,7 @@ async def _fetch_discovery_doc(settings: Settings) -> OIDCEndpoints:
     raw_end_session = doc.get("end_session_endpoint")
     end_session = raw_end_session if isinstance(raw_end_session, str) and raw_end_session else None
     return OIDCEndpoints(
-        issuer=issuer,
+        issuer=str(settings.keycloak_issuer_url).rstrip("/"),
         authorization_endpoint=authz,
         token_endpoint=token,
         end_session_endpoint=end_session,

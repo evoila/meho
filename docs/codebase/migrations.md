@@ -375,7 +375,8 @@ Job (`deploy/charts/meho/templates/migration-job.yaml`), so the schema moves
 release). After any rollback across a migration the database is therefore
 *ahead* of the running image, by design.
 
-Two enforced invariants make that state safe instead of an outage:
+Two enforced invariants make that state safe instead of an outage (and
+one more rule for data an older build must not act on, below):
 
 1. **Additive-only `upgrade()`** (above, CI-gated by
    `scripts/ci/check_migration_compat.py` via `migration-compat.yml`) — the
@@ -388,6 +389,21 @@ Two enforced invariants make that state safe instead of an outage:
    newer release's migration Job can have stamped it). A revision the image
    *does* know that differs from head means the DB is **behind** — that
    still fails readiness, as does a fresh unmigrated DB.
+
+**Data an older build must not use (#4622).** A rollback replaces the
+program, not the database, so a table a newer build writes stays in place
+and an older build reads whatever tables it knows. Where that would change
+a safety decision, the newer build keeps the data in a table of its own
+that older builds never read. The first case: delete grants in sandbox
+mode live in `sandbox_delete_grant` (migration `0115`), not in
+`service_principal_grant`. So after a rollback to a build from before
+sandbox mode, **an older build sees no delete grant**, and every delete
+and every delete step waits for a person again. The same holds while old
+and new builds run side by side during an update, and on a newer build
+with the mode off. The stored mode in `sandbox_mode_state` and the audit
+column `audit_log.sandbox_mode` (database default `false`) are additive,
+so an older build still starts and writes audit rows against the newer
+schema; its rows carry the mark `false`.
 
 Before #1607 the probe demanded strict `current == head` equality, which
 poisoned the deploy lifecycle twice over (live 2026-06-08, v0.12.0): the

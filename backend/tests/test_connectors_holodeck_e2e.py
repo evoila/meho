@@ -523,13 +523,13 @@ def test_holodeck_ops_all_have_llm_instructions() -> None:
     for op in HOLODECK_OPS:
         assert op.llm_instructions, f"{op.op_id}: llm_instructions must not be empty"
         instr = op.llm_instructions
-        assert "when_to_use" in instr, f"{op.op_id}: llm_instructions missing when_to_use"
+        assert "when_to_call" in instr, f"{op.op_id}: llm_instructions missing when_to_call"
         assert "output_shape" in instr, f"{op.op_id}: llm_instructions missing output_shape"
-        assert instr["when_to_use"], f"{op.op_id}: when_to_use must not be empty"
+        assert instr["when_to_call"], f"{op.op_id}: when_to_call must not be empty"
 
 
 def test_holodeck_ops_all_carry_ssh_only_transport_note() -> None:
-    """MCP review acceptance criterion (#855): every op's `when_to_use`
+    """MCP review acceptance criterion (#855): every op's `when_to_call`
     surfaces the canonical "Holodeck has no REST API; transport is
     PowerShell-over-SSH" note so agents don't compose against a
     non-existent REST surface.
@@ -541,15 +541,15 @@ def test_holodeck_ops_all_carry_ssh_only_transport_note() -> None:
     canonical_phrase = "Holodeck has no REST API"
     pwsh_phrase = "PowerShell-over-SSH"
     for op in HOLODECK_OPS:
-        when_to_use = (op.llm_instructions or {}).get("when_to_use", "")
+        when_to_use = (op.llm_instructions or {}).get("when_to_call", "")
         assert canonical_phrase in when_to_use, (
-            f"{op.op_id}: llm_instructions.when_to_use missing canonical SSH-only "
+            f"{op.op_id}: llm_instructions.when_to_call missing canonical SSH-only "
             f"transport note; expected substring {canonical_phrase!r} so an LLM "
             f"reading the op metadata understands Holodeck has no REST surface. "
             f"Got: {when_to_use!r}"
         )
         assert pwsh_phrase in when_to_use, (
-            f"{op.op_id}: llm_instructions.when_to_use missing PowerShell-over-SSH "
+            f"{op.op_id}: llm_instructions.when_to_call missing PowerShell-over-SSH "
             f"phrase; the agent needs to know which transport carries cmdlet ops."
         )
 

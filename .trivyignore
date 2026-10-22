@@ -1,0 +1,39 @@
+# Dated exceptions for the image security scan (trivy).
+# The image workflow (.github/workflows/image.yml) reads this file.
+# Each line is one finding id and the day its exception ends:
+#   <finding id> exp:<YYYY-MM-DD>
+# On that day trivy stops ignoring the finding by itself. If the finding
+# is still in the image, the scan fails again.
+
+# pillow 12.3.0: 19 findings (3 critical, 16 high). Pillow 13 fixes them.
+# - Why we accept them for now: MEHO never opens image files. Pillow is in
+#   the image only because the embedding library fastembed needs it, and
+#   fastembed allows only Pillow below 13 (0.9.0 is its newest release).
+# - Who decided: the program owner, on 2026-10-22.
+# - When it ends: on 2026-11-30, by itself.
+# - The real fix: Task #4729 (move to Pillow 13). Remove these lines then.
+# - Only these pillow findings are listed. Every other finding still
+#   fails the scan.
+
+# critical
+CVE-2026-112393 exp:2026-11-30
+CVE-2026-112403 exp:2026-11-30
+CVE-2026-112900 exp:2026-11-30
+
+# high
+CVE-2026-112390 exp:2026-11-30
+CVE-2026-112392 exp:2026-11-30
+CVE-2026-112397 exp:2026-11-30
+CVE-2026-112399 exp:2026-11-30
+CVE-2026-112400 exp:2026-11-30
+CVE-2026-112402 exp:2026-11-30
+CVE-2026-112404 exp:2026-11-30
+CVE-2026-112405 exp:2026-11-30
+CVE-2026-112406 exp:2026-11-30
+CVE-2026-112892 exp:2026-11-30
+CVE-2026-112893 exp:2026-11-30
+CVE-2026-112894 exp:2026-11-30
+CVE-2026-112895 exp:2026-11-30
+CVE-2026-112896 exp:2026-11-30
+CVE-2026-112897 exp:2026-11-30
+CVE-2026-112902 exp:2026-11-30

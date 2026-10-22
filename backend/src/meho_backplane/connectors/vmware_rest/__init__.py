@@ -113,6 +113,13 @@ from meho_backplane.connectors.vmware_rest import composites  # noqa: E402
 from meho_backplane.connectors.vmware_rest import (  # noqa: E402, F401
     library_item_delete_preview as _library_item_delete_preview,
 )
+
+# The VM moves that copy disks wait for approval (#4749); their copy-size
+# preview reads VM and datastore properties with a composite read helper, so
+# it is imported after the composites too.
+from meho_backplane.connectors.vmware_rest import (  # noqa: E402, F401
+    vm_relocate_preview as _vm_relocate_preview,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import (  # noqa: E402
     VMWARE_TYPED_OPS,
     register_vmware_typed_operations,

@@ -2373,8 +2373,10 @@ jobs:
   #      still exists. Only a `404` cancels the run (rule b). Any other
   #      answer or error (timeout, 403, 429, 5xx) keeps the run alive.
   #
-  # It never fails (no `set -e`; every call is checked and a failed call
-  # only means "look again next minute"), it is not a required check, and
+  # It never fails (the runner starts the step with `bash -e`, so every
+  # call is checked; a failed or unreadable call only means "look again
+  # next minute", and no branch check runs while the jobs' state is
+  # unknown), it is not a required check, and
   # it runs on a GitHub-hosted runner so it never takes a slot from the
   # jobs it watches. The queue builds at most 4 groups at once, so at most
   # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
@@ -2427,34 +2429,45 @@ jobs:
           echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
           while [ "${SECONDS}" -lt "${stop_after}" ]; do
             # 1 + 2: this run's own jobs. Done -> leave. A required job red -> cancel.
-            if jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
-              open="$(jq --arg me "${SELF_NAME}" \
-                '[.jobs[] | select(.name != $me and .status != "completed")] | length' <<<"${jobs}")"
-              red="$(jq -r --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
-                '[.jobs[] | select(.name != $me and .name != $ok
-                   and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
-                 | .name] | join(", ")' <<<"${jobs}")"
-              if [ -n "${red}" ]; then
-                cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
-              elif [ "${open}" -eq 0 ]; then
-                quiet_polls=$((quiet_polls + 1))
-                if [ "${quiet_polls}" -ge 2 ]; then
-                  echo "every other job of this run has finished; nothing left to watch"
-                  exit 0
-                fi
-                # Do not look at the branch on this poll: with no other job
-                # running there is nothing to free, and a run that just merged
-                # has lost its branch for a good reason.
-                echo "all listed jobs have finished; one more poll in case a job was still waiting on 'needs'"
-                sleep "${interval}"
-                continue
-              else
-                quiet_polls=0
-                echo "${open} job(s) still queued or running"
+            # When the jobs cannot be listed or read, this poll ends here: the
+            # branch check below must not run while the jobs' state is unknown,
+            # because a run that passed and merged has lost its branch too.
+            if ! jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
+              quiet_polls=0
+              echo "jobs API did not answer (${jobs}); keeping the run alive and looking again next minute"
+              sleep "${interval}"
+              continue
+            fi
+            # The runner starts this step with `bash -e`, so every jq call is
+            # guarded: an unreadable answer must not end the watchdog.
+            if ! open="$(jq --arg me "${SELF_NAME}" \
+                  '[.jobs[] | select(.name != $me and .status != "completed")] | length' <<<"${jobs}")" \
+               || ! red="$(jq -r --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
+                  '[.jobs[] | select(.name != $me and .name != $ok
+                     and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
+                   | .name] | join(", ")' <<<"${jobs}")"; then
+              quiet_polls=0
+              echo "jobs API answer could not be read; keeping the run alive and looking again next minute"
+              sleep "${interval}"
+              continue
+            fi
+            if [ -n "${red}" ]; then
+              cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
+            elif [ "${open}" -eq 0 ]; then
+              quiet_polls=$((quiet_polls + 1))
+              if [ "${quiet_polls}" -ge 2 ]; then
+                echo "every other job of this run has finished; nothing left to watch"
+                exit 0
               fi
+              # Do not look at the branch on this poll: with no other job
+              # running there is nothing to free, and a run that just merged
+              # has lost its branch for a good reason.
+              echo "all listed jobs have finished; one more poll in case a job was still waiting on 'needs'"
+              sleep "${interval}"
+              continue
             else
               quiet_polls=0
-              echo "jobs API did not answer (${jobs}); keeping the run alive"
+              echo "${open} job(s) still queued or running"
             fi
 
             # 3: the queue branch. Only a clear 404 means the group is gone.

@@ -2964,6 +2964,37 @@ op_ids (`POST .../instances/v2`, `DELETE .../instances/{namespace}`, `GET
 lane `tests/test_connectors_vmware_rest_namespace_reconcile.py` (always-on shape
 test + spec-backed path-existence).
 
+### AI guidance of the Supervisor, namespace, content library and guest customization operations
+
+Fourteen multi-step operations keep their AI guidance (`llm_instructions`:
+`when_to_call`, `preconditions`, `output_shape`, `next_step`) in
+`composites/_supervisor_library_llm_instructions.py`, one entry per op id:
+`supervisor.enable` / `.disable` / `.status`, `namespace.create` / `.delete` /
+`.status`, `content_library.delete`, `content_library.item.delete`, the four
+`content_library.subscribed.*` operations, `guest.customization_spec.create` and
+`vm.customize`. Their descriptions in `_register.py` stay short. Each parameter
+schema has one example call under `examples`, and
+`test_connectors_vmware_rest_supervisor_library_composite_contracts.py` checks
+that every example validates.
+
+Enums come from the vCenter REST spec (`vcenter.yaml` 9.1.1.0 in
+`vmware/vcf-api-specs`): `control_plane.size` of `supervisor.enable`
+(`Supervisors.ControlPlane.size`, TINY / SMALL / MEDIUM / LARGE) and
+`access_list[].subject_type` / `.role` of `namespace.create`
+(`Namespaces.Access.SubjectType`, `Namespaces.Access.Role`), and
+`workloads.edge.provider` of `supervisor.enable` (`Networks.Edges.EdgeProvider`,
+VSPHERE_FOUNDATION / NSX / NSX_VPC / NSX_ADVANCED / HAPROXY, the same set as the
+handler's `_ALLOWED_EDGE_PROVIDERS`). The `content_library.subscribed.sync`,
+`.status` and `.items.list` schemas have the same `anyOf` as
+`content_library.delete`: give `library_id` or `library_name`. A call with
+neither is refused before it runs (the handler would answer
+`invalid_reference` without calling vCenter); a call with both still passes,
+and `library_id` wins. `workloads.network.network_type` stays a free string;
+the handler answers an unknown value with status `unknown_network_provider`.
+The `windows_*` fields of
+`guest.customization_spec.create` are ignored for a Linux spec; a schema rule
+there would refuse calls that work today, so the field texts say it instead.
+
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 
 Read composites distinguish **load-bearing** sub-ops from **optional

@@ -22,11 +22,11 @@ func main() {
 	}
 	// Honor structured exit codes (auth_expired → 2, unreachable →
 	// 3, unexpected → 4) when the subcommand returned an
-	// ExitCoder. cobra has already rendered the error message to
-	// stderr via SilenceErrors=false (or status.go's --json envelope
-	// went out via its own RenderError); our only remaining job is
-	// to propagate the right process exit code so consumers
-	// (install.sh smoke tests, CI gates) can branch on it.
+	// ExitCoder. The error message is already on stderr: cobra's
+	// printer, the command's own RenderError, or the usage_error
+	// path for an unknown flag or a wrong argument count. Our only
+	// remaining job is to propagate the right process exit code so
+	// consumers (install.sh smoke tests, CI gates) can branch on it.
 	var coder output.ExitCoder
 	if errors.As(err, &coder) {
 		os.Exit(coder.ExitCode())

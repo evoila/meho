@@ -13,9 +13,8 @@
         Column 1: Properties card + Fingerprint card + Recent ops card.
         Column 2: Available operations matrix.
     * The fingerprint card hosts the re-probe button (tenant_admin
-      gated). The recent-ops card hosts the SSE-live wiring via the
-      HTMX 2 ``sse`` extension; the broadcast bridge (G10.1) carries
-      the ``target=<name>`` filter.
+      gated). The recent-ops card is server-rendered and refreshed
+      every 5 seconds while the page is visible (#3758).
 -#}
 {% extends "base.html" %}
 
@@ -163,14 +162,9 @@
 </section>
 {% endblock %}
 
-{# Surface JS -- the ``connectorsRecentOps`` Alpine controller.
-   Injected into the head-level ``component_scripts`` block so it
-   executes BEFORE ``vendor/alpine.min.js`` (deferred scripts run in
-   document order): the controller registers on ``alpine:init``, and
-   Alpine's CDN bundle fires that event from a microtask at the end of
-   its own script task -- a body-end script registers the listener too
-   late and the ``x-data="connectorsRecentOps(...)"`` wrapper stays
-   dead (#1692). #}
-{% block component_scripts %}
-  <script src="/ui/static/src/app/connectors-feed.js" defer></script>
+{# Surface JS -- refreshes the recent-ops card every 5 seconds while the
+   page is visible (#3758). Plain JS, no Alpine component, so it can load
+   at the end of the body. #}
+{% block scripts %}
+  <script src="/ui/static/src/app/recent-ops-refresh.js" defer></script>
 {% endblock %}

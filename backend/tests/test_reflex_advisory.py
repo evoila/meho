@@ -47,7 +47,6 @@ from uuid import UUID
 import pytest
 import structlog
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
     BroadcastEvent,
@@ -548,17 +547,6 @@ def _reset_dispatch_state() -> Iterator[None]:
 
 
 @pytest.fixture
-def _quiet_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
-@pytest.fixture
 def stub_embedding_service() -> AsyncMock:
     service = AsyncMock()
     service.encode_one.return_value = [0.1] * 384
@@ -588,7 +576,6 @@ async def _register_op(
 
 async def test_dispatch_carries_reflex_fragment_then_dedupes(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """A read-class MCP-session dispatch carries the read nudge, then dedupes."""
     await _seed_tenant()
@@ -617,7 +604,6 @@ async def test_dispatch_carries_reflex_fragment_then_dedupes(
 
 async def test_dispatch_without_session_carries_no_reflex_fragment(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """An operator CLI-shaped dispatch (no session) carries no reflex nudge."""
     await _seed_tenant()
@@ -638,7 +624,6 @@ async def test_dispatch_without_session_carries_no_reflex_fragment(
 
 async def test_three_advisory_fragments_coexist_on_one_response(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """#2550 + #2718 + #3133 fragments ride one ``extras`` -- distinct keys.
 

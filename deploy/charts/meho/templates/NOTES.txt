@@ -35,6 +35,16 @@ Built-in PostgreSQL (corePostgres):
     Delete the PVC and these Secrets together, or neither.
 {{- end }}
 
+{{- if .Values.sandboxMode.enabled }}
+
+WARNING: sandbox mode is ON (sandboxMode.enabled=true, confirmed for host {{ .Values.sandboxMode.confirmHost }}).
+  On this instance a tenant admin may give a service principal a standing grant that
+  also covers deletes, made in the web console and expiring within 30 days. Agents
+  may then delete systems here without a person's approval. Keep only disposable
+  test systems on this instance, with no network route to any other system.
+  The mode is fixed for the life of the database.
+{{- end }}
+
 Next steps:
   1. Watch the rollout:
        kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "meho.fullname" . }}
@@ -51,6 +61,18 @@ Next steps:
 {{- if not .Values.coreKeycloak.ingress.exposeAdmin }}
      The admin console is not on the ingress (coreKeycloak.ingress.exposeAdmin=false).
 {{- end }}
+{{- end }}
+{{- if .Values.coreKeycloak.enabled }}
+
+First login (built-in Keycloak):
+  The install made two people with temporary passwords:
+    - {{ .Values.coreKeycloak.firstLogin.adminUsername }}: the first admin (group MEHO-Admins, with platform_admin)
+    - {{ .Values.coreKeycloak.firstLogin.approverUsername }}: a second person who can approve (group MEHO-SA-Operators)
+  Their passwords are in the Secret {{ printf "%s-core-first-login" .Release.Name }}. Read one with:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d
+  (keys: admin_username, admin_password, approver_username, approver_password)
+  Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
+  Keycloak asks for a new password, a name and an email at the first login.
 {{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 

@@ -160,8 +160,9 @@ One namespaced Role, nothing cluster-wide:
 - `create` on Secrets. Kubernetes cannot limit `create` to names; creating a
   name that exists fails with 409 and changes nothing, so an operator's
   Secret is never overwritten.
-- `get` and `patch` only on the fifteen `<release>-core-*` names (the ten
-  above plus `-core-first-login` and the four `-core-vault-*` Secrets).
+- `get` and `patch` only on the sixteen `<release>-core-*` names (the ten
+  above, `-core-first-login` and `-core-ci-login` of the realm stage, and the
+  four `-core-vault-*` Secrets).
 - `get` only on the Secrets the operator named in values, to check their
   keys.
 - `delete` only on `<release>-core-vault-init` (the `vault-init` Job of #4044

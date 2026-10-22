@@ -667,6 +667,30 @@ def test_destructive_family_excluded_via_settings_single_source(op_id: str) -> N
     assert result.family == "destructive"
 
 
+@pytest.mark.parametrize(
+    "op_id",
+    [
+        "POST:/VirtualMachine/{moId}/Destroy_Task",
+        "POST:/HostNetworkSystem/{moId}/RemovePortGroup",
+        "POST:/FileManager/{moId}/DeleteDatastoreFile_Task",
+        "POST:/VirtualMachine/{moId}/UnregisterVM",
+    ],
+)
+def test_vendor_delete_action_name_excludes_body(op_id: str) -> None:
+    """A VI-JSON delete is a POST; its action name puts it in the destructive family (#4632)."""
+    result = classify_body_exclusion(op_id, method="POST")
+    assert result.excluded is True
+    assert result.family == "destructive"
+    assert "vendor action name" in (result.reason or "")
+
+
+def test_vendor_delete_lookalike_records_body() -> None:
+    assert (
+        classify_body_exclusion("POST:/VirtualMachine/{moId}/Reset_Task", method="POST").excluded
+        is False
+    )
+
+
 def test_delete_method_excludes_body() -> None:
     result = classify_body_exclusion("acme.thing.remove_it", method="delete")
     assert result.excluded is True

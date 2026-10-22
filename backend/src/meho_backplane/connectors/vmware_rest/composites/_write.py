@@ -88,7 +88,6 @@ status enums are listed on each composite's ``response_schema`` in
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import re
 import secrets
 import time
@@ -108,6 +107,8 @@ from meho_backplane.connectors.vmware_rest.ovf_import import (
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
+    fault_message,
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
     vim_moref,
@@ -1183,6 +1184,12 @@ _SUB_OPS_VM_RESIZE: tuple[str, ...] = (
     _OP_UPDATE_VM_CPU,
     _OP_UPDATE_VM_MEMORY,
 )
+#: vm.destroy's 9.0+ REST arm (#3198): the fail-closed power-state read plus
+#: the synchronous delete. The pre-9.0 vim arm is ``_VIM_SUB_OPS_VM_DESTROY``.
+_SUB_OPS_VM_DESTROY: tuple[str, ...] = (
+    _OP_GET_VM,
+    _OP_DELETE_VM,
+)
 _SUB_OPS_VM_NIC_REPOINT: tuple[str, ...] = (
     _OP_GET_VM_NIC,
     _OP_LIST_NETWORK,
@@ -1415,13 +1422,21 @@ def _rolled_back(
     steps: list[str],
     failed_step: str,
     reason: str,
+    rollback_note: str | None = None,
 ) -> dict[str, Any]:
     """Build the canonical rolled_back response envelope for :func:`vm_create_composite`.
 
-    A rollback means no VM was created, so the envelope carries an
+    A rollback means the create did not finish, so the envelope carries an
     ``error``-severity issue and the dispatcher records a failure (#3813).
+    *rollback_note* says what happened to a VM the run had created (#4057).
+    It comes before the cause, so a shortened error line still shows it.
     """
-    message = f"vm.create failed at step {failed_step!r}" + (f": {reason}" if reason else "")
+    if rollback_note is None:
+        message = f"vm.create failed at step {failed_step!r}" + (f": {reason}" if reason else "")
+    else:
+        message = f"vm.create failed at step {failed_step!r}; {rollback_note}" + (
+            f" Cause: {reason}" if reason else ""
+        )
     return {
         "status": "rolled_back",
         "vm_id": None,
@@ -1707,18 +1722,20 @@ async def _roll_back_created_vm(
 ) -> dict[str, Any]:
     """Remove a half-created VM with ``DELETE:/vcenter/vm/{vm}``; the ``rolled_back`` envelope.
 
-    Best-effort: rollback faults are swallowed -- the operator already knows
-    the create flow failed, and a denied/queued rollback sub-op or a
-    transport error must not mask the original failure. A gate result from
-    the seam is ignored here for the same reason (the rollback DELETE is a
-    cleanup, not an operator-requested action). The VM exists by now, so a
-    DELETE that waits for approval saves the rollback as its resume state
-    (#4217): approving it re-runs ``vm.create``, which then only runs this
-    rollback (:func:`_resumed_vm_create_rollback`) and creates no VM.
+    A failed, denied or waiting rollback DELETE does not replace the
+    original failure: the envelope is still ``rolled_back`` with the failed
+    step and its cause. The ``rollback`` field and the error message say
+    what happened to the VM (#4057): ``removed``, ``awaiting_approval``
+    (the VM still exists until someone approves the DELETE) or
+    ``not_removed`` (the operator must delete it by hand). The VM exists by
+    now, so a DELETE that waits for approval saves the rollback as its
+    resume state (#4217): approving it re-runs ``vm.create``, which then
+    only runs this rollback (:func:`_resumed_vm_create_rollback`) and
+    creates no VM.
     """
     rollback = {"vm_id": vm_id, "steps": steps, "failed_step": failed_step, "reason": reason}
-    with contextlib.suppress(httpx.HTTPError):
-        await _write_sub_op(
+    try:
+        gate, _ = await _write_sub_op(
             connector,
             target,
             operator,
@@ -1727,7 +1744,31 @@ async def _roll_back_created_vm(
             resume_state={"rollback": rollback},
             after_main_effect=True,
         )
-    return _rolled_back(steps=steps, failed_step=failed_step, reason=reason)
+    except httpx.HTTPError as exc:
+        outcome = "not_removed"
+        note = (
+            f"the rollback could not remove the VM it created ({vm_id}): "
+            f"{_vsphere_fault_detail(exc).rstrip('.')}. Delete the VM by hand."
+        )
+    else:
+        if gate is None:
+            outcome = "removed"
+            note = f"the rollback removed the VM it created ({vm_id})."
+        elif gate.status == "awaiting_approval":
+            outcome = "awaiting_approval"
+            note = (
+                f"removing the VM it created ({vm_id}) waits for approval. "
+                "The VM exists until then."
+            )
+        else:
+            outcome = "not_removed"
+            note = (
+                f"the rollback was not allowed to remove the VM it created ({vm_id}). "
+                "Delete the VM by hand."
+            )
+    envelope = _rolled_back(steps=steps, failed_step=failed_step, reason=reason, rollback_note=note)
+    envelope["rollback"] = {"vm_id": vm_id, "outcome": outcome}
+    return envelope
 
 
 def _resumed_vm_create_rollback() -> dict[str, Any] | None:
@@ -1789,7 +1830,7 @@ async def _enable_nested_hv(
             timeout_seconds=_VM_CREATE_VHV_TASK_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
-        return None, f"nested_hv reconfigure failed: {exc}"
+        return None, f"nested_hv reconfigure failed: {_vsphere_fault_detail(exc)}"
     if outcome.state == TASK_STATE_ERROR:
         return None, (
             f"nested_hv ReconfigVM_Task on vm {vm_id!r} faulted: "
@@ -2231,7 +2272,7 @@ async def _issue_vim_create(
             timeout_seconds=_VM_CREATE_TASK_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
-        return None, None, f"create via CreateVM_Task failed: {exc}"
+        return None, None, f"create via CreateVM_Task failed: {_vsphere_fault_detail(exc)}"
     if outcome.state == TASK_STATE_ERROR:
         return (
             None,
@@ -2277,7 +2318,7 @@ async def _power_on_created_vm(
             connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
         )
     except httpx.HTTPError as exc:
-        return None, f"power_on failed: {exc}"
+        return None, f"power_on failed: {_vsphere_fault_detail(exc)}"
     return gate, None
 
 
@@ -2623,7 +2664,9 @@ async def vm_create_composite(
         )
     except httpx.HTTPError as exc:
         # Create failed; nothing to roll back.
-        return _rolled_back(steps=steps, failed_step="create", reason=f"create failed: {exc}")
+        return _rolled_back(
+            steps=steps, failed_step="create", reason=f"create failed: {_vsphere_fault_detail(exc)}"
+        )
     if gate is not None:
         return gate
     vm_id = _unwrap_value(create_payload)
@@ -2661,7 +2704,10 @@ async def vm_create_composite(
                 vm_id=vm_id,
                 steps=steps,
                 failed_step="nic_attach",
-                reason=f"nic attach for network={nic.get('network')!r} failed: {exc}",
+                reason=(
+                    f"nic attach for network={nic.get('network')!r} failed: "
+                    f"{_vsphere_fault_detail(exc)}"
+                ),
             )
         if gate is not None:
             return gate
@@ -4697,10 +4743,10 @@ async def vm_destroy_composite(
     Op-id: ``vmware.composite.vm.destroy``. The FIRST governed destructive
     delete (#3198) — ``safety_level="destructive"``, so it rides the hardest
     gate MEHO has (decision ``docs/decisions/governed-delete-operations.md``):
-    mandatory human approval (no agent path, no standing grant, no
-    self-approval even under break-glass), a mandatory preview-hash binding,
-    and a mandatory blast-radius statement (built by
-    :func:`._write_preview._vm_destroy_preview`).
+    mandatory human approval (no agent path, no standing grant except on an
+    instance in sandbox mode, no self-approval even under break-glass), a
+    mandatory preview-hash binding, and a mandatory blast-radius statement
+    (built by :func:`._write_preview._vm_destroy_preview`).
 
     **Fail-closed on a running VM.** vSphere faults a destroy on a VM that is
     not powered off, so the composite live-re-reads the power state and
@@ -5027,9 +5073,12 @@ def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
     otherwise left the surfaced detail an empty ``transport fault:`` tail
     (#3076); a non-empty ``str(exc)`` is appended after it. The helper owns
     the whole rendered detail for both fault classes, so callers interpolate
-    it directly without a redundant ``: {exc}`` suffix. Body parsing is
-    defensive — a non-JSON or unexpectedly-shaped body drops the missing parts,
-    never raises.
+    it directly without a redundant ``: {exc}`` suffix. A VI-JSON method
+    fault (HTTP 500 whose body is the fault DataObject itself: ``_typeName``
+    plus ``faultstring`` / ``faultMessage`` / ``localizedMessage``) renders
+    the same way, with the vim fault class in place of ``error_type`` (#4057).
+    Body parsing is defensive — a non-JSON or unexpectedly-shaped body drops
+    the missing parts, never raises.
     """
     if not isinstance(exc, httpx.HTTPStatusError):
         base = f"transport fault ({type(exc).__name__})"
@@ -5040,17 +5089,37 @@ def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
         body = exc.response.json()
     except (ValueError, httpx.HTTPError):
         body = None
-    if isinstance(body, dict):
-        error_type = body.get("error_type")
-        if isinstance(error_type, str) and error_type:
-            detail += f" ({error_type})"
-        for message in body.get("messages") or []:
-            if isinstance(message, dict):
-                default = message.get("default_message")
-                if isinstance(default, str) and default:
-                    detail += f": {default}"
-                    break
+    if not isinstance(body, dict):
+        return detail
+    if VIM_TYPE_NAME_KEY in body:
+        return detail + _vim_fault_suffix(body)
+    error_type = body.get("error_type")
+    if isinstance(error_type, str) and error_type:
+        detail += f" ({error_type})"
+    for message in body.get("messages") or []:
+        if isinstance(message, dict):
+            default = message.get("default_message")
+            if isinstance(default, str) and default:
+                detail += f": {default}"
+                break
     return detail
+
+
+def _vim_fault_suffix(body: dict[str, Any]) -> str:
+    """`` (<fault class>): <text>`` of a VI-JSON method-fault body.
+
+    :func:`fault_message` prefixes a flattened fault's text with its class
+    (``InvalidArgument: ...``); the class already sits in the parentheses
+    here, so that prefix is dropped to keep the REST-error shape.
+    """
+    type_name = fault_type_name(body)
+    text = fault_message(body)
+    suffix = f" ({type_name})" if type_name else ""
+    if text and type_name and text.startswith(f"{type_name}: "):
+        text = text[len(type_name) + 2 :]
+    if text and text != type_name:
+        suffix += f": {text}"
+    return suffix
 
 
 def _guest_tools_unavailable(status: int | None, error_type: str | None) -> bool:
@@ -6498,7 +6567,8 @@ async def vm_disk_grow_composite(
        returns ``status="timeout"`` with the task id for the operator.
     """
     vm_moid = params["vm"]
-    disk_id = params["disk"]
+    # The REST disk id is a string, the vim device key an int (#3789).
+    disk_id = str(params["disk"])
     requested = int(params["capacity_bytes"])
 
     devices_result = await connector._post_vmomi_json(

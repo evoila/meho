@@ -106,9 +106,10 @@ machinery exist here.
 | `installer.system.trusted-certificates.list` | `GET /v1/sddc-manager/trusted-certificates` | `safe` |
 | `installer.system.trusted-certificates.add` | `POST /v1/sddc-manager/trusted-certificates` | `caution` + `requires_approval` |
 | `installer.bundles.list` | `GET /v1/bundles` → `PageOfBundle` | `safe` |
+| `installer.bundles.download-status` | `GET /v1/bundles/download-status` → `PageOfBundleDownloadStatusInfo` | `safe` |
 | `installer.bundles.download` | `PATCH /v1/bundles/{id}` per id (one approved batch) | `caution` + `requires_approval` |
 
-The bottom seven rows are the **air-gapped depot lifecycle** (#3121, group
+The bottom eight rows are the **air-gapped depot lifecycle** (#3121, group
 `installer-depot`) — the steps that used to force a governed bring-up
 out-of-band: configure the depot (`depot.set` maps the vendor rejection to a
 structured `depot_error`, with inline remediation for the common
@@ -123,6 +124,18 @@ scrubs every `password` key at every depth before the settings echo crosses
 the governed surface; `depot.set`'s park-time preview echoes
 hostname/port/mode + account username only, `trusted-certificates.add`'s a
 SHA-256 fingerprint, `bundles.download`'s the id batch (truncated past 20).
+`bundles.download-status` ([#3410](https://github.com/evoila/meho/issues/3410))
+explains a `FAILED` row on `bundles.list`, which only carries `downloadStatus`.
+Per bundle it returns the vendor failure `message`, `downloadedSize` (bytes so
+far; compare with `sizeMB` from `bundles.list` for progress), `isDownloadable`
+(can the bundle be downloaded right now), and `downloadId` (the download task
+id). Optional `bundle_id` / `release_version` / `image_type` params map to the
+vendor `bundleId` / `releaseVersion` / `imageType` query filters. A
+release-wide read reduces to a result handle; its `result_digest` hint adds
+per-`downloadStatus` counts and the `IN_PROGRESS` bundle ids inline. `FAILED`
+rows are not copied inline, because a depot outage fails every row; read them
+with `bundle_id` or `result_query`. The vendor schema has no credential
+fields, so nothing is scrubbed.
 
 **Waiting for the catalog ingest (#3406).** `depot.set` returns as soon as the
 depot connection check passes (about a second). The appliance then ingests the
@@ -157,8 +170,11 @@ appliance retries the stored spec as-is — the common transient-failure case;
 provided, it is the vendor's edit-and-retry flow), and its own park-time
 preview leads with the failed task id, appending the blast-radius identity only
 when a spec rides along. `bringup.status` polls the `SddcTask` (`IN_PROGRESS` /
-`COMPLETED_WITH_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus `sddcSubTasks[]` /
-`milestones[]`). `installer.sddc.list`
+`COMPLETED_WITH_SUCCESS` / `ROLLBACK_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus
+`sddcSubTasks[]` / `milestones[]`). `ROLLBACK_SUCCESS` is a finished task too:
+the bring-up failed and the appliance undid what it had built, so the AI
+guidance of `bringup.start`, `bringup.retry`, `bringup.status` and the
+composite names it as a stop condition. `installer.sddc.list`
 ([#3418](https://github.com/evoila/meho/issues/3418)) lists every bring-up task
 and needs no id. Use it when the id of a running bring-up is lost — for example
 when the result of an approved `bringup.start` was not picked up in time — then
@@ -242,6 +258,33 @@ request, so re-issuing the non-idempotent POST once after a re-login cannot
 double-apply.
 
 Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
+
+### Operation contracts
+
+The 14 typed ops and the bring-up composite meet the VMware operation-contract
+check (`backend/tests/test_vmware_operation_contracts.py`), with one gap left
+(see below):
+
+- **Response schemas** live in `_response_schemas.py` (split out for the
+  file-size budget). Vendor field names come from the pinned `vcf-installer-9.1`
+  OpenAPI file (`Validation`, `SddcTask`, `DepotSettings`, `DepotSyncInfo`,
+  `PageOfTrustedCertificate`, `PageOfBundle`,
+  `PageOfBundleDownloadStatusInfo`). The envelope keys of the writes and of the
+  composite (`status`, `settings`, `results`, `sddc_task`, ...) are the keys the
+  handlers build. The schemas are informational; the reducer does not read them.
+- **Examples.** Each parameter schema has one example call under `examples`:
+  `{}` for the no-argument reads, a placeholder such as `<validation-id>` for
+  the reads by id, and the short placeholder `SDDC_SPEC_EXAMPLE` for the spec
+  submits.
+- **AI guidance.** Each `llm_instructions` blob has `when_to_call`,
+  `output_shape` and `next_step`; the changes also have `preconditions`. The
+  JSONFlux hints (`result_scalars`, `result_digest`) are unchanged.
+- **One group text.** The `installer-bringup` group text is defined only in
+  `typed_ops.INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP`. `bringup.py` reads it from
+  there, so the group row gets the same text whichever registrar runs first.
+- **Open gap.** `installer.sddc.spec.validate` is `caution` without
+  `requires_approval`. It only checks a spec and deploys nothing; making it wait
+  for approval would change what it does, so it stays on the gap list.
 
 ## Spec-reconcile lane
 

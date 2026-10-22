@@ -109,6 +109,7 @@ from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
+from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
 
 __all__ = ["build_health_response", "router"]
@@ -353,6 +354,11 @@ class HealthResponse(BaseModel):
     server registers with the ones this session lists
     (:class:`SurfaceSummary`). Both have empty defaults so older response
     decoders keep working; the handler always fills them.
+
+    ``sandbox_mode`` (#4622) is ``"on"`` or ``"off"``: whether this
+    instance lets a standing grant made in the web console cover a delete
+    by a service principal. ``meho status`` prints one line when it is on.
+    The default ``"off"`` keeps older response decoders working.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -366,6 +372,7 @@ class HealthResponse(BaseModel):
     pairings: list[PairingHealth] = []
     granted_scopes: list[str] = []
     surface_summary: SurfaceSummary = SurfaceSummary()
+    sandbox_mode: str = "off"
 
 
 class LivenessResponse(BaseModel):
@@ -722,6 +729,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         pairings=await _pairing_health(operator.tenant_id),
         granted_scopes=sorted(operator.scopes),
         surface_summary=await _surface_summary(operator),
+        sandbox_mode=sandbox_mode_label(),
     )
 
 

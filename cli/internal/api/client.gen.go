@@ -664,6 +664,7 @@ const (
 	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
 	TargetCreateProductGh         TargetCreateProduct = "gh"
 	TargetCreateProductHarbor     TargetCreateProduct = "harbor"
+	TargetCreateProductHcx        TargetCreateProduct = "hcx"
 	TargetCreateProductHetzner    TargetCreateProduct = "hetzner"
 	TargetCreateProductHolodeck   TargetCreateProduct = "holodeck"
 	TargetCreateProductHyperv     TargetCreateProduct = "hyperv"
@@ -2151,6 +2152,13 @@ type BodyEditUiEventSourcesSlugEditPost struct {
 	Kind         string  `json:"kind"`
 	Secret       *string `json:"secret,omitempty"`
 	Status       string  `json:"status"`
+}
+
+// BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost defines model for Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post.
+type BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost struct {
+	ExpiresAt    *string `json:"expires_at"`
+	PrincipalSub *string `json:"principal_sub,omitempty"`
+	Reason       *string `json:"reason"`
 }
 
 // BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
@@ -5693,6 +5701,11 @@ type HTTPValidationError struct {
 // server registers with the ones this session lists
 // (:class:`SurfaceSummary`). Both have empty defaults so older response
 // decoders keep working; the handler always fills them.
+//
+// “sandbox_mode“ (#4622) is “"on"“ or “"off"“: whether this
+// instance lets a standing grant made in the web console cover a delete
+// by a service principal. “meho status“ prints one line when it is on.
+// The default “"off"“ keeps older response decoders working.
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -5727,8 +5740,9 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
-	Operator OperatorIdentity `json:"operator"`
-	Pairings *[]PairingHealth `json:"pairings,omitempty"`
+	Operator    OperatorIdentity `json:"operator"`
+	Pairings    *[]PairingHealth `json:"pairings,omitempty"`
+	SandboxMode *string          `json:"sandbox_mode,omitempty"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
 	//
@@ -8776,6 +8790,7 @@ type ServiceGrantRead struct {
 	ConnectorId       string              `json:"connector_id"`
 	CreatedAt         time.Time           `json:"created_at"`
 	CreatedBySub      string              `json:"created_by_sub"`
+	DeleteGrant       *bool               `json:"delete_grant,omitempty"`
 	ExpiresAt         *time.Time          `json:"expires_at"`
 	Id                openapi_types.UUID  `json:"id"`
 	OpId              string              `json:"op_id"`
@@ -12050,9 +12065,6 @@ type UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONReque
 // UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody defines body for UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet for application/json ContentType.
 type UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody = UISessionContext
 
-// UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
-type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
-
 // UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody defines body for UiConnectorsEditSubmitUiConnectorsNamePatch for application/x-www-form-urlencoded ContentType.
 type UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody = BodyUiConnectorsEditSubmitUiConnectorsNamePatch
 
@@ -12136,6 +12148,9 @@ type EditUiEventSourcesSlugEditPostFormdataRequestBody = BodyEditUiEventSourcesS
 
 // CreateUiGrantsCreatePostFormdataRequestBody defines body for CreateUiGrantsCreatePost for application/x-www-form-urlencoded ContentType.
 type CreateUiGrantsCreatePostFormdataRequestBody = BodyCreateUiGrantsCreatePost
+
+// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody defines body for RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost for application/x-www-form-urlencoded ContentType.
+type RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody = BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost
 
 // KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
 type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
@@ -14515,10 +14530,8 @@ type ClientInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiConnectorsDetailUiConnectorsNameGet request
+	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBody request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14544,6 +14557,9 @@ type ClientInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet request
+	UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConventionsListUiConventionsGetWithBody request with any body
 	UiConventionsListUiConventionsGetWithBody(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14651,6 +14667,9 @@ type ClientInterface interface {
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiDashboardRecentOperationsUiDashboardRecentOperationsGet request
+	UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListUiEventSourcesGet request
 	ListUiEventSourcesGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14683,6 +14702,11 @@ type ClientInterface interface {
 	CreateUiGrantsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody request with any body
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RevokeUiGrantsKindGrantIdRevokePost request
 	RevokeUiGrantsKindGrantIdRevokePost(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19459,20 +19483,8 @@ func (c *Client) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdR
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(c.Server, name, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name, body)
+func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -19593,6 +19605,18 @@ func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx contex
 
 func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -20107,6 +20131,18 @@ func (c *Client) CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Cont
 	return c.Client.Do(req)
 }
 
+func (c *Client) UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListUiEventSourcesGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListUiEventSourcesGetRequest(c.Server)
 	if err != nil {
@@ -20241,6 +20277,30 @@ func (c *Client) CreateUiGrantsCreatePostWithBody(ctx context.Context, contentTy
 
 func (c *Client) CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateUiGrantsCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -37925,19 +37985,8 @@ func NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGrou
 	return req, nil
 }
 
-// NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
-func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server, name, "application/json", bodyReader)
-}
-
-// NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody generates requests for UiConnectorsDetailUiConnectorsNameGet with any type of body
-func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+// NewUiConnectorsDetailUiConnectorsNameGetRequest generates requests for UiConnectorsDetailUiConnectorsNameGet
+func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -37962,12 +38011,10 @@ func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name
 		return nil, err
 	}
 
-	req, err := http.NewRequest("GET", queryURL.String(), body)
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -38225,6 +38272,40 @@ func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server strin
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest generates requests for UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet
+func NewUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetRequest(server string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/recent-operations", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -39232,6 +39313,33 @@ func NewCorpusSearchUiCorpusSearchPostRequestWithBody(server string, contentType
 	return req, nil
 }
 
+// NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest generates requests for UiDashboardRecentOperationsUiDashboardRecentOperationsGet
+func NewUiDashboardRecentOperationsUiDashboardRecentOperationsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/dashboard/recent-operations")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListUiEventSourcesGetRequest generates requests for ListUiEventSourcesGet
 func NewListUiEventSourcesGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -39618,6 +39726,46 @@ func NewCreateUiGrantsCreatePostRequestWithBody(server string, contentType strin
 	}
 
 	operationPath := fmt.Sprintf("/ui/grants/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody calls the generic RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost builder with application/x-www-form-urlencoded body
+func NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithFormdataBody(server string, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody generates requests for RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost with any type of body
+func NewRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/grants/service/renew-delete-grants")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -45492,10 +45640,8 @@ type ClientWithResponsesInterface interface {
 
 	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithResponse(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error)
 
-	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
-	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
-
-	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+	// UiConnectorsDetailUiConnectorsNameGetWithResponse request
+	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
 
 	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse request with any body
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
@@ -45521,6 +45667,9 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse request
+	UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error)
 
 	// UiConventionsListUiConventionsGetWithBodyWithResponse request with any body
 	UiConventionsListUiConventionsGetWithBodyWithResponse(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConventionsListUiConventionsGetResponse, error)
@@ -45628,6 +45777,9 @@ type ClientWithResponsesInterface interface {
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBodyWithResponse(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
 
+	// UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse request
+	UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error)
+
 	// ListUiEventSourcesGetWithResponse request
 	ListUiEventSourcesGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUiEventSourcesGetResponse, error)
 
@@ -45660,6 +45812,11 @@ type ClientWithResponsesInterface interface {
 	CreateUiGrantsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
 
 	CreateUiGrantsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
+
+	// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse request with any body
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error)
+
+	RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBodyWithResponse(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error)
 
 	// RevokeUiGrantsKindGrantIdRevokePostWithResponse request
 	RevokeUiGrantsKindGrantIdRevokePostWithResponse(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeUiGrantsKindGrantIdRevokePostResponse, error)
@@ -52025,6 +52182,28 @@ func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
 	return 0
 }
 
+type UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConventionsListUiConventionsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -52509,6 +52688,27 @@ func (r CorpusSearchUiCorpusSearchPostResponse) StatusCode() int {
 	return 0
 }
 
+type UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListUiEventSourcesGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -52701,6 +52901,28 @@ func (r CreateUiGrantsCreatePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateUiGrantsCreatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -58023,17 +58245,9 @@ func (c *ClientWithResponses) UiConnectorsRegistryReviewGroupUiConnectorsRegistr
 	return ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse(rsp)
 }
 
-// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
-}
-
-func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
-	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, body, reqEditors...)
+// UiConnectorsDetailUiConnectorsNameGetWithResponse request returning *UiConnectorsDetailUiConnectorsNameGetResponse
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -58123,6 +58337,15 @@ func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithRe
 		return nil, err
 	}
 	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+// UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse request returning *UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse
+func (c *ClientWithResponses) UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error) {
+	rsp, err := c.UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGet(ctx, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse(rsp)
 }
 
 // UiConventionsListUiConventionsGetWithBodyWithResponse request with arbitrary body returning *UiConventionsListUiConventionsGetResponse
@@ -58483,6 +58706,15 @@ func (c *ClientWithResponses) CorpusSearchUiCorpusSearchPostWithFormdataBodyWith
 	return ParseCorpusSearchUiCorpusSearchPostResponse(rsp)
 }
 
+// UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse request returning *UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse
+func (c *ClientWithResponses) UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error) {
+	rsp, err := c.UiDashboardRecentOperationsUiDashboardRecentOperationsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse(rsp)
+}
+
 // ListUiEventSourcesGetWithResponse request returning *ListUiEventSourcesGetResponse
 func (c *ClientWithResponses) ListUiEventSourcesGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUiEventSourcesGetResponse, error) {
 	rsp, err := c.ListUiEventSourcesGet(ctx, reqEditors...)
@@ -58586,6 +58818,23 @@ func (c *ClientWithResponses) CreateUiGrantsCreatePostWithFormdataBodyWithRespon
 		return nil, err
 	}
 	return ParseCreateUiGrantsCreatePostResponse(rsp)
+}
+
+// RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse request with arbitrary body returning *RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse
+func (c *ClientWithResponses) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	rsp, err := c.RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBodyWithResponse(ctx context.Context, body RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	rsp, err := c.RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp)
 }
 
 // RevokeUiGrantsKindGrantIdRevokePostWithResponse request returning *RevokeUiGrantsKindGrantIdRevokePostResponse
@@ -67734,6 +67983,32 @@ func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Respons
 	return response, nil
 }
 
+// ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse parses an HTTP response from a UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetWithResponse call
+func ParseUiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse(rsp *http.Response) (*UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRecentOperationsUiConnectorsNameRecentOperationsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiConventionsListUiConventionsGetResponse parses an HTTP response from a UiConventionsListUiConventionsGetWithResponse call
 func ParseUiConventionsListUiConventionsGetResponse(rsp *http.Response) (*UiConventionsListUiConventionsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -68306,6 +68581,22 @@ func ParseCorpusSearchUiCorpusSearchPostResponse(rsp *http.Response) (*CorpusSea
 	return response, nil
 }
 
+// ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse parses an HTTP response from a UiDashboardRecentOperationsUiDashboardRecentOperationsGetWithResponse call
+func ParseUiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse(rsp *http.Response) (*UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiDashboardRecentOperationsUiDashboardRecentOperationsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
 // ParseListUiEventSourcesGetResponse parses an HTTP response from a ListUiEventSourcesGetWithResponse call
 func ParseListUiEventSourcesGetResponse(rsp *http.Response) (*ListUiEventSourcesGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -68514,6 +68805,32 @@ func ParseCreateUiGrantsCreatePostResponse(rsp *http.Response) (*CreateUiGrantsC
 	}
 
 	response := &CreateUiGrantsCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse parses an HTTP response from a RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostWithResponse call
+func ParseRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse(rsp *http.Response) (*RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

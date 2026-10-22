@@ -39,12 +39,38 @@ Delete-shaped guardrail
 
 A grant is the *floor* of what runs unattended, never a bypass of a
 modeled destructive gate, so :meth:`ServicePrincipalGrantService.create`
-refuses delete-shaped ops: op ids matching a configured pattern set
-(``Settings.service_grant_delete_shaped_patterns`` — at minimum
-``DELETE:*`` raw ops plus ``*.delete`` / ``*.destroy`` / ``*.remove`` /
-``*.purge`` typed ops) and, best-effort when a descriptor resolves,
-anything whose descriptor carries ``method='DELETE'`` or a ``destructive``
-tag.
+refuses delete-shaped ops. Three signs on the op id or its stored row:
+
+* a configured pattern (``Settings.service_grant_delete_shaped_patterns``
+  — at minimum ``DELETE:*`` raw ops plus ``*.delete`` / ``*.destroy`` /
+  ``*.remove`` / ``*.purge`` typed ops);
+* a vendor action name that means delete (``Destroy``, ``Delete``,
+  ``Remove``, ``Unregister`` — the word list the ingest parser uses, in
+  :mod:`meho_backplane.delete_names`). VI-JSON exposes a VM destroy as
+  ``POST:/VirtualMachine/{moId}/Destroy_Task``, so neither the HTTP method
+  nor a pattern sees it. This sign does not depend on the pattern setting
+  (#4632);
+* best-effort when a descriptor resolves, the ``destructive`` safety tier,
+  ``method='DELETE'`` or a ``destructive`` tag.
+
+The action-name sign and the descriptor signs are checked again when a
+grant is consulted at dispatch (:func:`consult_and_record_grant`), so a
+grant row that already exists for such an op never lets it run.
+
+Sandbox mode (#4622)
+--------------------
+
+On an instance in sandbox mode (:mod:`meho_backplane.sandbox_mode`,
+``docs/decisions/sandbox-mode.md``) a tenant admin may create a **delete
+grant**: a standing grant for an operation with a delete sign, or for a
+delete step of a multi-step operation. Such a grant is stored in its own
+table (:class:`~meho_backplane.db.models.SandboxDeleteGrant`), which an
+older build and an instance with the mode off never read. It is made only
+in the web console (``from_console``), and it expires within
+:data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS` days.
+At dispatch, a ``destructive`` call under a delete grant still needs its
+preview hash and a valid blast radius; both are checked before the
+grant-use row is written, and the row stores them.
 """
 
 from __future__ import annotations
@@ -52,11 +78,11 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fnmatch import fnmatchcase
 from glob import escape as glob_escape
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from sqlalchemy import func, or_, select, update
@@ -69,21 +95,32 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
     EndpointDescriptor,
+    SandboxDeleteGrant,
     ServicePrincipalGrant,
     Target,
 )
+from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
+from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
 __all__ = [
+    "DeleteGrantConsoleOnlyError",
+    "GrantModel",
     "GrantValidationError",
     "ServicePrincipalGrantService",
     "classify_orphaned_grants",
     "consult_and_record_grant",
     "count_live_grants_for_principal",
+    "delete_grant_reason",
     "delete_shaped_refusal_reason",
     "find_live_grant",
     "null_target_only_park_hint",
 ]
+
+#: Either standing-grant table. The lookup, list and revoke code takes one.
+GrantModel = type[ServicePrincipalGrant] | type[SandboxDeleteGrant]
+#: A row of either table.
+GrantRow = ServicePrincipalGrant | SandboxDeleteGrant
 
 _log = structlog.get_logger(__name__)
 
@@ -105,6 +142,21 @@ class GrantValidationError(Exception):
     a delete-shaped op (never grantable); a past / naive ``expires_at``; or
     a duplicate active grant for the same fully-scoped key. The REST route
     maps this to HTTP 422.
+    """
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
+
+
+class DeleteGrantConsoleOnlyError(Exception):
+    """A delete grant was requested from outside the web console (#4622).
+
+    Raised by :meth:`ServicePrincipalGrantService.create` in sandbox mode
+    when the op has a delete sign and the call did not come from the
+    console route. The REST route maps this to HTTP 403
+    ``delete_grant_console_only``. The CLI refuses such an op before it
+    calls the server.
     """
 
     def __init__(self, message: str) -> None:
@@ -193,17 +245,77 @@ def _validate_expires_at(expires_at: datetime | None) -> None:
         )
 
 
-def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
-    """Public alias for the pattern-based delete-shaped classifier (#3349).
+def _validate_delete_grant_expires_at(expires_at: datetime | None) -> None:
+    """A delete grant must expire, within the sandbox limit (#4622)."""
+    if expires_at is None:
+        raise GrantValidationError(
+            "a delete grant needs an expiry: set expires_at to a time within "
+            f"{SANDBOX_DELETE_GRANT_MAX_DAYS} days. MEHO never renews a delete "
+            "grant by itself; a person reviews and renews it."
+        )
+    latest = datetime.now(UTC) + timedelta(days=SANDBOX_DELETE_GRANT_MAX_DAYS)
+    if expires_at > latest:
+        raise GrantValidationError(
+            f"a delete grant must expire within {SANDBOX_DELETE_GRANT_MAX_DAYS} days "
+            f"(expires_at {expires_at.isoformat()} is later than "
+            f"{latest.isoformat()})"
+        )
 
-    The governed-subop discovery surface
+
+def delete_grant_reason(
+    op_id: str,
+    patterns: tuple[str, ...],
+    descriptor: EndpointDescriptor | None = None,
+) -> str | None:
+    """Return why *op_id* (and its row, when known) carries a delete sign.
+
+    One rule for every reader: a configured name pattern, a vendor delete
+    action name (#4632), and, when a descriptor is given, the ``destructive``
+    safety level, the HTTP verb ``DELETE`` or the ``destructive`` tag.
+    ``None`` when the op has no delete sign. In sandbox mode (#4622) an op
+    with a delete sign needs a delete grant; elsewhere it can never be
+    granted.
+    """
+    reason = delete_shaped_refusal_reason(op_id, patterns)
+    if reason is None and descriptor is not None:
+        reason = _delete_shaped_reason_by_descriptor(descriptor)
+    return reason
+
+
+def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
+    """Return why *op_id* is delete-shaped by its id alone, or ``None`` (#3349).
+
+    Two signs need no stored row: a configured pattern and a vendor action
+    name that means delete (#4632). The governed-subop discovery surface
     (:func:`meho_backplane.operations.governed_subops.classify_subop_grantability`)
     flags a child op un-grantable through this single-sourced rule — the same
     one :meth:`ServicePrincipalGrantService.create` refuses on — so a rollback
     / delete leg is flagged on discovery exactly as it would be refused at
     grant-create time.
     """
-    return _delete_shaped_reason_by_pattern(op_id, patterns)
+    pattern_reason = _delete_shaped_reason_by_pattern(op_id, patterns)
+    if pattern_reason is not None:
+        return pattern_reason
+    return _delete_shaped_reason_by_action_name(op_id)
+
+
+def _delete_shaped_reason_by_action_name(op_id: str) -> str | None:
+    """Return a refusal reason if the op id ends in a vendor delete action name.
+
+    ``POST:/VirtualMachine/{moId}/Destroy_Task`` is a delete even though its
+    method is ``POST`` and no pattern names it. The rule and the word list
+    are the ingest parser's (:mod:`meho_backplane.delete_names`), so the
+    grant checks and the parser cannot drift. Independent of
+    ``Settings.service_grant_delete_shaped_patterns``.
+    """
+    action_name = destructive_action_name_in_op_id(op_id)
+    if action_name is None:
+        return None
+    return (
+        f"op {op_id!r} is a delete (vendor action name {action_name!r}); "
+        "delete operations are never grantable — a standing grant is the floor "
+        "of what runs unattended, not a bypass of a destructive gate"
+    )
 
 
 def _delete_shaped_reason_by_pattern(op_id: str, patterns: tuple[str, ...]) -> str | None:
@@ -378,6 +490,25 @@ async def classify_orphaned_grants(
     return classified
 
 
+def _grant_models() -> tuple[GrantModel, ...]:
+    """The grant tables this instance reads: the delete-grant table only in sandbox mode.
+
+    With the mode off the delete-grant table is never queried, so this
+    build behaves like an older build that does not know it (#4622).
+    """
+    if sandbox_mode_active():
+        return (ServicePrincipalGrant, SandboxDeleteGrant)
+    return (ServicePrincipalGrant,)
+
+
+def _read_entry(row: ServicePrincipalGrant | SandboxDeleteGrant) -> ServiceGrantRead:
+    """Build the read shape and mark which table the row came from."""
+    entry = ServiceGrantRead.model_validate(row)
+    if isinstance(row, SandboxDeleteGrant):
+        entry = entry.model_copy(update={"delete_grant": True})
+    return entry
+
+
 # ---------------------------------------------------------------------------
 # CRUD service (operator-only REST surface)
 # ---------------------------------------------------------------------------
@@ -400,6 +531,8 @@ class ServicePrincipalGrantService:
         tenant_id: uuid.UUID,
         created_by_sub: str,
         payload: ServiceGrantCreate,
+        *,
+        from_console: bool = False,
     ) -> ServiceGrantRead:
         """Create one standing grant row after the full create-time review.
 
@@ -407,61 +540,20 @@ class ServicePrincipalGrantService:
         raises :exc:`GrantValidationError` (→ 422) on any of those or on a
         duplicate active grant for the same fully-scoped key (a duplicate
         target selector included, #3349).
+
+        In sandbox mode (#4622) an op with a delete sign becomes a **delete
+        grant** instead of a refusal: it is stored in
+        :class:`~meho_backplane.db.models.SandboxDeleteGrant`, it must come
+        from the web console (``from_console`` is set only by the console
+        route, in server code; no request field, header or token claim can
+        set it; otherwise :exc:`DeleteGrantConsoleOnlyError`), and it must
+        expire within :data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS`
+        days. Ordinary grants keep today's rules in every mode.
         """
-        from meho_backplane.settings import get_settings
-
-        _reject_wildcards(payload)
-        _validate_expires_at(payload.expires_at)
-
-        pattern_reason = _delete_shaped_reason_by_pattern(
-            payload.op_id, get_settings().service_grant_delete_shaped_patterns
-        )
-        if pattern_reason is not None:
-            raise GrantValidationError(pattern_reason)
-        descriptor = await _resolve_descriptor_for_classification(
-            tenant_id, payload.connector_id, payload.op_id
-        )
-        if descriptor is not None:
-            descriptor_reason = _delete_shaped_reason_by_descriptor(descriptor)
-            if descriptor_reason is not None:
-                raise GrantValidationError(descriptor_reason)
-
-        is_selector = payload.target_product is not None or payload.target_name_pattern is not None
-
-        row = ServicePrincipalGrant(
-            tenant_id=tenant_id,
-            principal_sub=payload.principal_sub,
-            op_id=payload.op_id,
-            connector_id=payload.connector_id,
-            target_id=payload.target_id,
-            target_product=payload.target_product,
-            target_name_pattern=payload.target_name_pattern,
-            reason=payload.reason,
-            created_by_sub=created_by_sub,
-            expires_at=payload.expires_at,
-        )
+        model = await self._review(tenant_id, payload, from_console=from_console)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            # Selector grants are not covered by a DB partial unique index
-            # (the nullable selector columns make a portable NULL-safe unique
-            # index awkward), so enforce "at most one active selector per
-            # (key, product, pattern)" in the CRUD layer to preserve the
-            # same duplicate-refusal contract the targeted / targetless
-            # indexes give.
-            if is_selector:
-                await self._reject_duplicate_selector(session, tenant_id, payload)
-            session.add(row)
-            try:
-                await session.flush()
-            except IntegrityError as exc:
-                await session.rollback()
-                raise GrantValidationError(
-                    f"an active grant for principal {payload.principal_sub!r} on "
-                    f"op {payload.op_id!r} / connector {payload.connector_id!r} / "
-                    f"target {payload.target_id} already exists; revoke it first"
-                ) from exc
-            await session.refresh(row)
-            entry = ServiceGrantRead.model_validate(row)
+            entry = await self._insert(session, tenant_id, created_by_sub, payload, model)
             await session.commit()
             (entry,) = await classify_orphaned_grants(session, tenant_id, [entry])
 
@@ -469,6 +561,7 @@ class ServicePrincipalGrantService:
             "service_grant_created",
             tenant_id=str(tenant_id),
             grant_id=str(entry.id),
+            delete_grant=entry.delete_grant,
             principal_sub=payload.principal_sub,
             op_id=payload.op_id,
             connector_id=payload.connector_id,
@@ -481,35 +574,235 @@ class ServicePrincipalGrantService:
         return entry
 
     @staticmethod
+    async def _review(
+        tenant_id: uuid.UUID,
+        payload: ServiceGrantCreate,
+        *,
+        from_console: bool,
+    ) -> GrantModel:
+        """Run the full create-time review; return the table the grant goes in.
+
+        Every grant, new or renewed, passes here (#4622: a renewal is
+        checked like a new grant). Opens no session of its own except the
+        descriptor lookup, so a caller may run it before it writes.
+        """
+        from meho_backplane.settings import get_settings
+
+        _reject_wildcards(payload)
+        _validate_expires_at(payload.expires_at)
+
+        descriptor = await _resolve_descriptor_for_classification(
+            tenant_id, payload.connector_id, payload.op_id
+        )
+        delete_reason = delete_grant_reason(
+            payload.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
+        )
+        if delete_reason is None:
+            return ServicePrincipalGrant
+        if not sandbox_mode_active():
+            raise GrantValidationError(delete_reason)
+        if not from_console:
+            raise DeleteGrantConsoleOnlyError(
+                f"op {payload.op_id!r} has a delete sign, so this is a delete grant. "
+                "A delete grant is made only in the web console, by a tenant admin, "
+                "and only on an instance in sandbox mode. REST and the CLI refuse it."
+            )
+        _validate_delete_grant_expires_at(payload.expires_at)
+        return SandboxDeleteGrant
+
+    async def _insert(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        created_by_sub: str,
+        payload: ServiceGrantCreate,
+        model: GrantModel,
+    ) -> ServiceGrantRead:
+        """Add one reviewed grant row to *session* and flush it; the caller commits.
+
+        A duplicate active grant raises :exc:`GrantValidationError` after
+        the session is rolled back, so a multi-row caller writes nothing.
+        """
+        is_selector = payload.target_product is not None or payload.target_name_pattern is not None
+        row = model(
+            tenant_id=tenant_id,
+            principal_sub=payload.principal_sub,
+            op_id=payload.op_id,
+            connector_id=payload.connector_id,
+            target_id=payload.target_id,
+            target_product=payload.target_product,
+            target_name_pattern=payload.target_name_pattern,
+            reason=payload.reason,
+            created_by_sub=created_by_sub,
+            expires_at=payload.expires_at,
+        )
+        # Selector grants are not covered by a DB partial unique index
+        # (the nullable selector columns make a portable NULL-safe unique
+        # index awkward), so enforce "at most one active selector per
+        # (key, product, pattern)" in the CRUD layer to preserve the
+        # same duplicate-refusal contract the targeted / targetless
+        # indexes give.
+        if is_selector:
+            await self._reject_duplicate_selector(session, tenant_id, payload, model)
+        session.add(row)
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise GrantValidationError(
+                f"an active grant for principal {payload.principal_sub!r} on "
+                f"op {payload.op_id!r} / connector {payload.connector_id!r} / "
+                f"target {payload.target_id} already exists; revoke it first"
+            ) from exc
+        await session.refresh(row)
+        return _read_entry(row)
+
+    async def renew_delete_grants(
+        self,
+        tenant_id: uuid.UUID,
+        principal_sub: str,
+        renewed_by_sub: str,
+        *,
+        expires_at: datetime | None,
+        reason: str | None = None,
+        from_console: bool = False,
+    ) -> list[ServiceGrantRead]:
+        """Renew the delete grants of one service principal as one set (#4622).
+
+        The set is every live delete grant of *principal_sub*: not revoked
+        and not expired. Each one is checked like a new grant with the new
+        expiry (:meth:`_review`): the mode is on, the call comes from the
+        console, the op still has a delete sign, and the expiry is within
+        :data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS`
+        days. One failed check renews nothing. Then, in one transaction,
+        each old row is revoked with the reason ``renewed`` and a new row
+        with the new expiry takes its place. ``reason`` replaces the
+        recorded reason of every grant; ``None`` keeps each one. Returns
+        the new entries. MEHO never calls this by itself.
+        """
+        if not sandbox_mode_active():
+            raise GrantValidationError(
+                "this instance is not in sandbox mode, so it has no delete grants to renew"
+            )
+        if not from_console:
+            raise DeleteGrantConsoleOnlyError(
+                "delete grants are renewed only in the web console, by a tenant admin"
+            )
+        now = datetime.now(UTC)
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(SandboxDeleteGrant)
+                .where(
+                    SandboxDeleteGrant.tenant_id == tenant_id,
+                    SandboxDeleteGrant.principal_sub == principal_sub,
+                    SandboxDeleteGrant.revoked_at.is_(None),
+                    or_(
+                        SandboxDeleteGrant.expires_at.is_(None),
+                        SandboxDeleteGrant.expires_at > now,
+                    ),
+                )
+                .order_by(SandboxDeleteGrant.created_at)
+            )
+            old_rows = list(result.scalars().all())
+        if not old_rows:
+            raise GrantValidationError(
+                f"service principal {principal_sub!r} has no live delete grant to renew"
+            )
+
+        # Every check first, every write after: one refusal renews nothing.
+        reviewed: list[tuple[uuid.UUID, ServiceGrantCreate]] = []
+        for old in old_rows:
+            payload = ServiceGrantCreate(
+                principal_sub=old.principal_sub,
+                op_id=old.op_id,
+                connector_id=old.connector_id,
+                target_id=old.target_id,
+                target_product=old.target_product,
+                target_name_pattern=old.target_name_pattern,
+                reason=reason or old.reason,
+                expires_at=expires_at,
+            )
+            model = await self._review(tenant_id, payload, from_console=True)
+            if model is not SandboxDeleteGrant:
+                raise GrantValidationError(
+                    f"op {old.op_id!r} on connector {old.connector_id!r} no longer has a "
+                    "delete sign, so its grant is not a delete grant any more. Revoke it "
+                    "and make an ordinary grant instead."
+                )
+            reviewed.append((old.id, payload))
+
+        async with sessionmaker() as session:
+            renewed: list[ServiceGrantRead] = []
+            for old_id, payload in reviewed:
+                gone = await session.execute(
+                    update(SandboxDeleteGrant)
+                    .where(
+                        SandboxDeleteGrant.tenant_id == tenant_id,
+                        SandboxDeleteGrant.id == old_id,
+                        SandboxDeleteGrant.revoked_at.is_(None),
+                    )
+                    .values(
+                        revoked_at=now,
+                        revoked_by_sub=renewed_by_sub,
+                        revoked_reason="renewed",
+                    )
+                    .returning(SandboxDeleteGrant.id)
+                )
+                if gone.scalar_one_or_none() is None:
+                    await session.rollback()
+                    raise GrantValidationError(
+                        f"delete grant {old_id} was revoked while the set was reviewed; "
+                        "review the set again"
+                    )
+                renewed.append(
+                    await self._insert(
+                        session, tenant_id, renewed_by_sub, payload, SandboxDeleteGrant
+                    )
+                )
+            await session.commit()
+            renewed = await classify_orphaned_grants(session, tenant_id, renewed)
+
+        self._log.info(
+            "service_delete_grants_renewed",
+            tenant_id=str(tenant_id),
+            principal_sub=principal_sub,
+            renewed_by_sub=renewed_by_sub,
+            count=len(renewed),
+            grant_ids=[str(entry.id) for entry in renewed],
+            expires_at=expires_at.isoformat() if expires_at else None,
+        )
+        return renewed
+
+    @staticmethod
     async def _reject_duplicate_selector(
         session: AsyncSession,
         tenant_id: uuid.UUID,
         payload: ServiceGrantCreate,
+        model: GrantModel = ServicePrincipalGrant,
     ) -> None:
         """Raise if a live selector grant with the identical scope exists (#3349).
 
-        The CRUD-layer twin of the ``uq_service_principal_grant_*`` partial
-        indexes for selector grants (which those indexes deliberately do not
-        cover). Matches an active (``revoked_at IS NULL``) selector row on the
-        full key plus the exact ``(target_product, target_name_pattern)`` pair.
+        The CRUD-layer twin of the ``uq_<table>_*`` partial indexes for
+        selector grants (which those indexes deliberately do not cover).
+        Matches an active (``revoked_at IS NULL``) selector row on the full
+        key plus the exact ``(target_product, target_name_pattern)`` pair.
         """
         existing = await session.execute(
-            select(ServicePrincipalGrant.id)
+            select(model.id)
             .where(
-                ServicePrincipalGrant.tenant_id == tenant_id,
-                ServicePrincipalGrant.principal_sub == payload.principal_sub,
-                ServicePrincipalGrant.op_id == payload.op_id,
-                ServicePrincipalGrant.connector_id == payload.connector_id,
-                ServicePrincipalGrant.target_id.is_(None),
+                model.tenant_id == tenant_id,
+                model.principal_sub == payload.principal_sub,
+                model.op_id == payload.op_id,
+                model.connector_id == payload.connector_id,
+                model.target_id.is_(None),
                 # NULL-safe equality (``IS NOT DISTINCT FROM`` on Postgres,
                 # ``IS`` on SQLite) so a NULL selector column compares equal
                 # to NULL — a selector with only a product set collides with
                 # another product-only selector for the same product.
-                ServicePrincipalGrant.target_product.is_not_distinct_from(payload.target_product),
-                ServicePrincipalGrant.target_name_pattern.is_not_distinct_from(
-                    payload.target_name_pattern
-                ),
-                ServicePrincipalGrant.revoked_at.is_(None),
+                model.target_product.is_not_distinct_from(payload.target_product),
+                model.target_name_pattern.is_not_distinct_from(payload.target_name_pattern),
+                model.revoked_at.is_(None),
             )
             .limit(1)
         )
@@ -542,21 +835,25 @@ class ServicePrincipalGrantService:
         now = datetime.now(UTC)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            result = await session.execute(
-                update(ServicePrincipalGrant)
-                .where(
-                    ServicePrincipalGrant.tenant_id == tenant_id,
-                    ServicePrincipalGrant.id == grant_id,
-                    ServicePrincipalGrant.revoked_at.is_(None),
+            revoked = False
+            for model in _grant_models():
+                result = await session.execute(
+                    update(model)
+                    .where(
+                        model.tenant_id == tenant_id,
+                        model.id == grant_id,
+                        model.revoked_at.is_(None),
+                    )
+                    .values(
+                        revoked_at=now,
+                        revoked_by_sub=revoked_by_sub,
+                        revoked_reason=reason,
+                    )
+                    .returning(model.id)
                 )
-                .values(
-                    revoked_at=now,
-                    revoked_by_sub=revoked_by_sub,
-                    revoked_reason=reason,
-                )
-                .returning(ServicePrincipalGrant.id)
-            )
-            revoked = result.scalar_one_or_none() is not None
+                if result.scalar_one_or_none() is not None:
+                    revoked = True
+                    break
             await session.commit()
 
         self._log.info(
@@ -576,18 +873,17 @@ class ServicePrincipalGrantService:
         """Fetch one grant by ``(tenant_id, grant_id)``; ``None`` if absent."""
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            result = await session.execute(
-                select(ServicePrincipalGrant).where(
-                    ServicePrincipalGrant.tenant_id == tenant_id,
-                    ServicePrincipalGrant.id == grant_id,
+            row: GrantRow | None = None
+            for model in _grant_models():
+                result = await session.execute(
+                    select(model).where(model.tenant_id == tenant_id, model.id == grant_id)
                 )
-            )
-            row = result.scalar_one_or_none()
+                row = cast("GrantRow | None", result.scalar_one_or_none())
+                if row is not None:
+                    break
             if row is None:
                 return None
-            (entry,) = await classify_orphaned_grants(
-                session, tenant_id, [ServiceGrantRead.model_validate(row)]
-            )
+            (entry,) = await classify_orphaned_grants(session, tenant_id, [_read_entry(row)])
         return entry
 
     async def list_(
@@ -607,7 +903,10 @@ class ServicePrincipalGrantService:
         ``include_expired=True`` preserves the historic list behavior;
         ``False`` returns only rows that have not reached their expiry.
         Each entry carries the read-time ``orphaned`` flag (#3430, see
-        :func:`classify_orphaned_grants`).
+        :func:`classify_orphaned_grants`). In sandbox mode the list also
+        holds the delete grants (``delete_grant=True``), merged newest-first
+        with the ordinary grants; with the mode off the delete-grant table
+        is never read.
         """
         if limit < 0:
             raise ValueError(f"limit must be >= 0; got {limit}")
@@ -618,30 +917,26 @@ class ServicePrincipalGrantService:
 
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            stmt = (
-                select(ServicePrincipalGrant)
-                .where(ServicePrincipalGrant.tenant_id == tenant_id)
-                .order_by(ServicePrincipalGrant.created_at.desc())
-                .limit(limit)
-                .offset(offset)
-            )
-            if principal_sub is not None:
-                stmt = stmt.where(ServicePrincipalGrant.principal_sub == principal_sub)
-            if not include_revoked:
-                stmt = stmt.where(ServicePrincipalGrant.revoked_at.is_(None))
-            if not include_expired:
-                now = datetime.now(UTC)
-                stmt = stmt.where(
-                    or_(
-                        ServicePrincipalGrant.expires_at.is_(None),
-                        ServicePrincipalGrant.expires_at > now,
-                    )
+            entries: list[ServiceGrantRead] = []
+            for model in _grant_models():
+                stmt = (
+                    select(model)
+                    .where(model.tenant_id == tenant_id)
+                    .order_by(model.created_at.desc())
+                    .limit(limit + offset)
                 )
-            result = await session.execute(stmt)
-            rows = result.scalars().all()
-            return await classify_orphaned_grants(
-                session, tenant_id, [ServiceGrantRead.model_validate(row) for row in rows]
-            )
+                if principal_sub is not None:
+                    stmt = stmt.where(model.principal_sub == principal_sub)
+                if not include_revoked:
+                    stmt = stmt.where(model.revoked_at.is_(None))
+                if not include_expired:
+                    now = datetime.now(UTC)
+                    stmt = stmt.where(or_(model.expires_at.is_(None), model.expires_at > now))
+                result = await session.execute(stmt)
+                entries.extend(_read_entry(cast("GrantRow", row)) for row in result.scalars().all())
+            entries.sort(key=lambda entry: entry.created_at, reverse=True)
+            page = entries[offset : offset + limit]
+            return await classify_orphaned_grants(session, tenant_id, page)
 
 
 # ---------------------------------------------------------------------------
@@ -662,6 +957,7 @@ def _live_grant_scope_predicates(
     op_id: str,
     connector_id: str,
     cutoff: datetime,
+    model: GrantModel = ServicePrincipalGrant,
 ) -> tuple[Any, ...]:
     """The scope + liveness predicates shared by every grant lookup.
 
@@ -671,20 +967,20 @@ def _live_grant_scope_predicates(
     dimension (exact id / selector / targetless) is applied by the caller.
     """
     return (
-        ServicePrincipalGrant.tenant_id == tenant_id,
-        ServicePrincipalGrant.principal_sub == principal_sub,
-        ServicePrincipalGrant.op_id == op_id,
-        ServicePrincipalGrant.connector_id == connector_id,
-        ServicePrincipalGrant.revoked_at.is_(None),
+        model.tenant_id == tenant_id,
+        model.principal_sub == principal_sub,
+        model.op_id == op_id,
+        model.connector_id == connector_id,
+        model.revoked_at.is_(None),
         or_(
-            ServicePrincipalGrant.expires_at.is_(None),
-            ServicePrincipalGrant.expires_at > cutoff,
+            model.expires_at.is_(None),
+            model.expires_at > cutoff,
         ),
     )
 
 
 def _selector_matches(
-    grant: ServicePrincipalGrant,
+    grant: ServicePrincipalGrant | SandboxDeleteGrant,
     *,
     target_product: str | None,
     target_name: str | None,
@@ -715,7 +1011,8 @@ async def find_live_grant(
     target_product: str | None = None,
     target_name: str | None = None,
     now: datetime | None = None,
-) -> ServicePrincipalGrant | None:
+    model: GrantModel = ServicePrincipalGrant,
+) -> GrantRow | None:
     """Return the live grant covering this dispatch, or ``None``.
 
     Exact match on ``(tenant, principal_sub, op_id, connector_id)`` with
@@ -733,6 +1030,9 @@ async def find_live_grant(
       satisfy its predicate (``product`` exact + ``name`` ``fnmatch`` glob).
       The concrete match is preferred so a specific grant always wins over a
       broad selector.
+
+    ``model`` picks the table: the ordinary grants by default, the delete
+    grants (sandbox mode, #4622) when the caller asks for them.
     """
     cutoff = now or datetime.now(UTC)
     scope = _live_grant_scope_predicates(
@@ -741,41 +1041,39 @@ async def find_live_grant(
         op_id=op_id,
         connector_id=connector_id,
         cutoff=cutoff,
+        model=model,
     )
 
     if target_id is None:
         stmt = (
-            select(ServicePrincipalGrant)
+            select(model)
             .where(
                 *scope,
-                ServicePrincipalGrant.target_id.is_(None),
-                ServicePrincipalGrant.target_product.is_(None),
-                ServicePrincipalGrant.target_name_pattern.is_(None),
+                model.target_id.is_(None),
+                model.target_product.is_(None),
+                model.target_name_pattern.is_(None),
             )
             .limit(1)
         )
-        return (await session.execute(stmt)).scalar_one_or_none()
+        return cast("GrantRow | None", (await session.execute(stmt)).scalar_one_or_none())
 
     # Target-scoped dispatch: prefer a concrete-target grant, then selectors.
-    exact_stmt = (
-        select(ServicePrincipalGrant)
-        .where(*scope, ServicePrincipalGrant.target_id == target_id)
-        .limit(1)
-    )
-    exact = (await session.execute(exact_stmt)).scalar_one_or_none()
+    exact_stmt = select(model).where(*scope, model.target_id == target_id).limit(1)
+    exact = cast("GrantRow | None", (await session.execute(exact_stmt)).scalar_one_or_none())
     if exact is not None:
         return exact
 
-    selector_stmt = select(ServicePrincipalGrant).where(
+    selector_stmt = select(model).where(
         *scope,
-        ServicePrincipalGrant.target_id.is_(None),
+        model.target_id.is_(None),
         or_(
-            ServicePrincipalGrant.target_product.isnot(None),
-            ServicePrincipalGrant.target_name_pattern.isnot(None),
+            model.target_product.isnot(None),
+            model.target_name_pattern.isnot(None),
         ),
     )
     candidates = (await session.execute(selector_stmt)).scalars().all()
-    for grant in candidates:
+    for candidate in candidates:
+        grant = cast("GrantRow", candidate)
         if _selector_matches(grant, target_product=target_product, target_name=target_name):
             return grant
     return None
@@ -877,6 +1175,8 @@ async def consult_and_record_grant(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str,
+    preview_hash: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> uuid.UUID | None:
     """Look up a live standing grant and, on a hit, record its use.
 
@@ -884,8 +1184,8 @@ async def consult_and_record_grant(
     caller then clears the gate to ``AUTO_EXECUTE``), or ``None`` when no
     grant matches (the caller parks the op). On a hit it writes the
     grant-use audit row (``approval.decision`` shape) in its own committed
-    transaction and publishes a fail-open broadcast — same visibility as a
-    human approval decision — before returning.
+    transaction before returning. The audit row is the record; no
+    Broadcast event is published (#3758).
 
     A ``destructive``-tier op (#3183) is refused here **before** any grant
     lookup: the tier is non-grantable, so even a stale grant row that
@@ -894,8 +1194,41 @@ async def consult_and_record_grant(
     :func:`_delete_shaped_reason_by_descriptor`; together they make
     "a standing grant can never satisfy a destructive op" hold whether the
     grant is being created or consulted.
+
+    An op id whose vendor action name means delete (#4632) is refused the
+    same way. A composite's inner step arrives as an in-memory record with
+    its declared level only — no method, no tags — so for it the op id is
+    the only sign.
+
+    **Sandbox mode (#4622).** When the instance runs in sandbox mode and
+    the op has any delete sign, a live **delete grant** from
+    :class:`~meho_backplane.db.models.SandboxDeleteGrant` is consulted
+    first. For a ``destructive`` op the caller's ``preview_hash`` and
+    ``params`` are needed: the preview hash is re-computed and compared and
+    the blast radius is built and checked (the same checks the park path
+    runs) **before** the grant-use row is written, so a refused call leaves
+    no row. A step gate or a child call presents no preview hash, so a
+    ``destructive`` step or child stays refused. A delete below
+    ``destructive`` needs no hash; its grant-use row stores the proposed
+    effect. With no delete grant the call falls through to today's rules,
+    so an ordinary grant never changes its verdict. With the mode off the
+    delete-grant table is never read.
     """
-    destructive_reason = _delete_shaped_reason_by_descriptor(descriptor)
+    if sandbox_mode_active():
+        grant_id = await _consult_delete_grant(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+            preview_hash=preview_hash,
+            params=params,
+        )
+        if grant_id is not None:
+            return grant_id
+
+    destructive_reason = _delete_shaped_reason_by_action_name(
+        descriptor.op_id
+    ) or _delete_shaped_reason_by_descriptor(descriptor)
     if destructive_reason is not None:
         _log.info(
             "service_grant_refused_delete_shaped",
@@ -908,9 +1241,7 @@ async def consult_and_record_grant(
         )
         return None
 
-    target_id = _target_uuid(target)
-    target_product = getattr(target, "product", None) if target is not None else None
-    target_name = getattr(target, "name", None) if target is not None else None
+    target_id, target_product, target_name = _target_fields(target)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         grant = await find_live_grant(
@@ -920,8 +1251,8 @@ async def consult_and_record_grant(
             op_id=descriptor.op_id,
             connector_id=connector_id,
             target_id=target_id,
-            target_product=target_product if isinstance(target_product, str) else None,
-            target_name=target_name if isinstance(target_name, str) else None,
+            target_product=target_product,
+            target_name=target_name,
         )
     if grant is None:
         return None
@@ -929,14 +1260,13 @@ async def consult_and_record_grant(
     matched_by_selector = grant.target_id is None and (
         grant.target_product is not None or grant.target_name_pattern is not None
     )
-    audit_id = await _record_grant_use(
+    await _record_grant_use(
         operator=operator,
         grant=grant,
         connector_id=connector_id,
         target_id=target_id,
         matched_by_selector=matched_by_selector,
     )
-    await _publish_grant_use_event(operator=operator, grant=grant, audit_id=audit_id)
     _log.info(
         "service_grant_auto_approved",
         grant_id=str(grant.id),
@@ -949,13 +1279,152 @@ async def consult_and_record_grant(
     return grant.id
 
 
+def _target_fields(target: Any) -> tuple[uuid.UUID | None, str | None, str | None]:
+    """``(target_id, target_product, target_name)`` of a dispatch target."""
+    target_product = getattr(target, "product", None) if target is not None else None
+    target_name = getattr(target, "name", None) if target is not None else None
+    return (
+        _target_uuid(target),
+        target_product if isinstance(target_product, str) else None,
+        target_name if isinstance(target_name, str) else None,
+    )
+
+
+async def _consult_delete_grant(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+    preview_hash: str | None,
+    params: dict[str, Any] | None,
+) -> uuid.UUID | None:
+    """Sandbox mode only: clear a delete under a live delete grant (#4622).
+
+    Returns the grant id when a delete grant covers the dispatch and its
+    evidence checks pass, else ``None`` (the caller falls through to
+    today's rules, which park or refuse the delete).
+    """
+    from meho_backplane.settings import get_settings
+
+    delete_reason = delete_grant_reason(
+        descriptor.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
+    )
+    if delete_reason is None:
+        return None
+    target_id, target_product, target_name = _target_fields(target)
+    async with get_sessionmaker()() as session:
+        grant = await find_live_grant(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            target_id=target_id,
+            target_product=target_product,
+            target_name=target_name,
+            model=SandboxDeleteGrant,
+        )
+    if grant is None:
+        return None
+    evidence = await _delete_grant_evidence(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
+    )
+    if evidence is None:
+        _log.info(
+            "sandbox_delete_grant_evidence_refused",
+            grant_id=str(grant.id),
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            safety_level=descriptor.safety_level,
+            principal_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        return None
+    matched_by_selector = grant.target_id is None and (
+        grant.target_product is not None or grant.target_name_pattern is not None
+    )
+    await _record_grant_use(
+        operator=operator,
+        grant=grant,
+        connector_id=connector_id,
+        target_id=target_id,
+        matched_by_selector=matched_by_selector,
+        evidence=evidence,
+    )
+    _log.info(
+        "sandbox_delete_grant_auto_approved",
+        grant_id=str(grant.id),
+        op_id=descriptor.op_id,
+        connector_id=connector_id,
+        safety_level=descriptor.safety_level,
+        principal_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+        matched_by_selector=matched_by_selector,
+    )
+    return grant.id
+
+
+async def _delete_grant_evidence(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+    preview_hash: str | None,
+    params: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The evidence a delete-grant use stores, or ``None`` when the call is refused.
+
+    A ``destructive`` op needs the caller's preview hash and a valid blast
+    radius, checked by the dispatcher's own binding check
+    (:func:`~meho_backplane.operations.dispatcher.destructive_binding_evidence`).
+    No hash (a step gate, a child call) or a failed check refuses the
+    grant; the park path then returns the exact refusal. A delete below
+    ``destructive`` stores the proposed effect an approval request would
+    show a person.
+    """
+    from meho_backplane.operations.dispatcher import (
+        _build_proposed_effect,
+        destructive_binding_evidence,
+    )
+
+    if descriptor.safety_level == "destructive":
+        if preview_hash is None or params is None:
+            return None
+        return await destructive_binding_evidence(
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            preview_hash=preview_hash,
+        )
+    proposed_effect = await _build_proposed_effect(
+        op_id=descriptor.op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params or {},
+    )
+    return {"proposed_effect": proposed_effect}
+
+
 async def _record_grant_use(
     *,
     operator: Operator,
-    grant: ServicePrincipalGrant,
+    grant: ServicePrincipalGrant | SandboxDeleteGrant,
     connector_id: str,
     target_id: uuid.UUID | None,
     matched_by_selector: bool = False,
+    evidence: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     """Write one ``approval.decision`` audit row for a standing-grant use.
 
@@ -980,6 +1449,11 @@ async def _record_grant_use(
     for a plain REST call), and ``parent_audit_id`` is the composite parent's
     audit id when a composite child is the call being cleared (NULL for a
     top-level call).
+
+    A delete-grant use (sandbox mode, #4622) carries ``delete_grant=True``
+    and its ``evidence``: ``preview_hash`` and ``blast_radius`` for a
+    ``destructive`` call, ``proposed_effect`` for a delete below it. The
+    evidence sits in ``payload``, which MEHO keeps, not in ``raw_payload``.
     """
     from meho_backplane.operations._audit import (
         parent_audit_id_var,
@@ -1006,6 +1480,9 @@ async def _record_grant_use(
             "target_product": grant.target_product,
             "target_name_pattern": grant.target_name_pattern,
         }
+    if isinstance(grant, SandboxDeleteGrant):
+        payload["delete_grant"] = True
+        payload.update(evidence or {})
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = AuditLog(
@@ -1028,52 +1505,3 @@ async def _record_grant_use(
         session.add(row)
         await session.commit()
     return audit_id
-
-
-async def _publish_grant_use_event(
-    *,
-    operator: Operator,
-    grant: ServicePrincipalGrant,
-    audit_id: uuid.UUID,
-) -> None:
-    """Publish a fail-open ``approval.auto_approved`` broadcast for the grant use.
-
-    Parity with a human decision (which broadcasts ``approval.approved``).
-    Fail-open: a broadcast outage never blocks the durable grant use — the
-    audit row is the source of truth.
-    """
-    try:
-        from meho_backplane.broadcast.events import BroadcastEvent, classify_op
-        from meho_backplane.broadcast.publisher import publish_event
-        from meho_backplane.operations._audit import resolve_broadcast_lineage
-
-        op_id = "approval.auto_approved"
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=operator.tenant_id,
-            principal_sub=operator.sub,
-            op_id=op_id,
-            op_class=classify_op(op_id),
-            result_status="ok",
-            audit_id=audit_id,
-            payload={
-                "op_class": classify_op(op_id),
-                "result_status": "ok",
-                "decision": "auto-approved",
-                "grant_id": str(grant.id),
-                "connector_id": grant.connector_id,
-                "approval_op_id": grant.op_id,
-            },
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
-        )
-        await publish_event(event)
-    except Exception:
-        _log.exception(
-            "service_grant_broadcast_failed",
-            grant_id=str(grant.id),
-            op_id=grant.op_id,
-        )

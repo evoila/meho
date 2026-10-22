@@ -253,17 +253,36 @@ delete-shaped ops:
 
 - **by configured pattern** (`Settings.service_grant_delete_shaped_patterns`,
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
-  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`), and
+  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`),
+- **by vendor action name** (#4632): an ingested op id whose last path part
+  starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
+  `POST:/VirtualMachine/{moId}/Destroy_Task`. VI-JSON (the JSON form of
+  vCenter's older object API) sends every method as a `POST`, so neither
+  the HTTP method nor a pattern sees these deletes. The word list and the
+  rule are the ingest parser's, in `meho_backplane/delete_names.py`; the
+  parser, the grant service, the flight recorder and the stored-delete
+  review all import that one module. This sign does **not** depend on the
+  pattern setting: a changed `SERVICE_GRANT_DELETE_SHAPED_PATTERNS` keeps
+  it. Lookalikes such as `Destroyer_Task` or `Reset_Task` stay grantable,
+  and
 - **by descriptor** (best-effort when a descriptor resolves via
   `lookup_descriptor`): the `destructive` safety tier (#3183), the HTTP
   `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
 
-`_delete_shaped_reason_by_descriptor` single-sources that descriptor-level
-classification and is consulted at **both** ends: create-time (above) and
-dispatch-time (`consult_and_record_grant`, so a stale grant predating an
-op's promotion into the `destructive` tier can never satisfy it). That is
-what makes "a standing grant can never satisfy a destructive op" hold
-whether the grant is being created or consulted.
+The first two signs need only the op id (`delete_shaped_refusal_reason`),
+so they also work for an op with no stored row. The action-name sign and
+`_delete_shaped_reason_by_descriptor` are consulted at **both** ends:
+create-time (above) and dispatch-time (`consult_and_record_grant`, so a
+stale grant predating an op's promotion into the `destructive` tier, or a
+grant row written for a VI-JSON delete, can never satisfy it). An inner
+step of a multi-step operation reaches the gate as an in-memory record with
+only its declared level — no method, no tags — so for it the op id is the
+only sign, and the action name is what catches `Destroy_Task`. That is what
+makes "a standing grant can never satisfy a destructive op" hold whether
+the grant is being created or consulted. A grant row that already exists
+for such an op stays in the list but never lets the op run; revoke it with
+`meho service-principals grants revoke <id>`. The one exception is an
+instance in sandbox mode; see [Sandbox mode](#sandbox-mode-4622) below.
 
 Ops the workflow models as its human gate (e.g. a bring-up start) are
 expected to stay ungranted — the grant list is the floor, not a bypass.
@@ -291,6 +310,100 @@ session; NULL for a plain REST call) and `parent_audit_id` (the multi-step
 parent's audit id when a child step was cleared). Details:
 [`approvals.md`](approvals.md#service-principal-standing-grants--safety_level-gate-3151--3152).
 
+## Sandbox mode (#4622)
+
+Decision record: [`docs/decisions/sandbox-mode.md`](../decisions/sandbox-mode.md).
+Sandbox mode is one setting for the whole instance. It says that the
+instance holds only disposable test systems: systems built for one test
+and deleted after it. On such an instance a tenant admin may give a
+service principal a **delete grant**: a standing grant for an operation
+with a delete sign (the `destructive` level, the HTTP verb `DELETE`, the
+`destructive` tag, a delete name, or a vendor delete action name), or for
+a delete step of a multi-step operation. So an automated test run can
+build, change and delete its own systems with no wait for a person. Every
+other instance keeps the rules above.
+
+What the code does:
+
+- **The switch.** `MEHO_SANDBOX_MODE` and `MEHO_SANDBOX_MODE_CONFIRM` are
+  `Settings` fields read at boot only. `meho_backplane/sandbox_mode.py`
+  checks them (`check_sandbox_settings`): the mode on needs the confirm
+  value, it must equal the host of the MCP resource URI, and that host
+  needs a dot-separated part that is exactly `sandbox`. Then the mode is
+  stored in the one-row table `sandbox_mode_state` with one insert that
+  only one process can win, and read back (`store_or_check_sandbox_mode`);
+  a stored mode that differs from the setting refuses the start. The mode
+  is fixed for the life of the database. Every runtime reader uses the
+  process flag `sandbox_mode_active()`, set once at boot. Migration `0115`
+  stores `false` in every database that existed before it.
+- **Where delete grants live.** In their own table, `sandbox_delete_grant`
+  (`SandboxDeleteGrant`, same shape and indexes as the ordinary table). An
+  older build never reads it, and MEHO with the mode off never reads or
+  writes it (`_grant_models()` returns the ordinary table alone). So after
+  a rollback, and on every other instance, every delete and every delete
+  step waits for a person again.
+- **Creating one.** `ServicePrincipalGrantService.create(...,
+  from_console=True)`. With the mode on, an op with a delete sign
+  (`delete_grant_reason`) becomes a delete grant instead of a refusal. It
+  needs the console mark, which only the console route sets in server code
+  (no request field, header or token claim can set it; otherwise
+  `DeleteGrantConsoleOnlyError`, HTTP 403 `delete_grant_console_only` on
+  REST), and an expiry within 30 days (`SANDBOX_DELETE_GRANT_MAX_DAYS`).
+  The CLI refuses a delete op before it calls the server. The console
+  route itself runs only for a tenant admin who is a person
+  (`is_human_principal`): a console session that holds an agent, service
+  or runner token gets 403 `human_principal_required`, as on REST.
+  Ordinary grants keep today's rules in every mode. List, get, revoke, the
+  orphan check and the console page cover both tables; a read entry
+  carries `delete_grant=True` for a delete grant.
+- **Renewing a set.** `ServicePrincipalGrantService.renew_delete_grants(...,
+  from_console=True)` renews the live delete grants (not revoked, not
+  expired) of one service principal together, with one new expiry. Each
+  grant passes the same review as a new grant (`_review`): the mode is
+  on, the call comes from the console, the op still has a delete sign,
+  and the expiry is within 30 days. One failed check renews nothing. Then,
+  in one transaction, each old row is revoked with the reason `renewed`
+  and a new row takes its place. The console grant page shows the form
+  (`grants/_renew.html`, `POST /ui/grants/service/renew-delete-grants`)
+  only with the mode on; there is no REST or CLI path. MEHO never renews
+  a grant by itself.
+- **Using one.** `consult_and_record_grant` gets the call's `preview_hash`
+  and `params` from the gate (`policy_gate(..., preview_hash, params)`,
+  passed by the dispatcher; the step gate passes the params only). With
+  the mode on and a delete sign on the op, `_consult_delete_grant` looks
+  up a live delete grant first. A `destructive` call then runs the same
+  two checks the park path runs (`dispatcher.destructive_binding_evidence`:
+  the preview hash must match a fresh server-side preview, and the blast
+  radius must be valid) **before** the grant-use row is written; a failed
+  check writes no row and the park path returns the exact refusal
+  (`preview_binding_required`, `preview_hash_mismatch`,
+  `blast_radius_required`). A step gate or a child call presents no hash,
+  so a `destructive` step or child stays refused. A delete below
+  `destructive` needs no hash. With no delete grant the call falls through
+  to the rules above, so an ordinary grant never changes its verdict.
+- **The grant-use row.** `payload.delete_grant = true`, plus
+  `preview_hash` and `blast_radius` for a `destructive` call, or
+  `proposed_effect` for a delete below it. A step's row names its
+  multi-step operation through `parent_audit_id`.
+- **The step list.** `GET /api/v1/operations/governed-subops` marks delete
+  steps grantable with the mode on.
+- **Display.** `/ready` has a top-level `sandbox_mode` (`"on"` / `"off"`)
+  for every caller and `features.approval_queue.sandbox_mode`;
+  `GET /api/v1/health` has `sandbox_mode`; `meho status` prints one line
+  when it is on; every console page shows a banner, with the number of
+  delete grants that expire within 7 days.
+- **The audit mark.** `audit_log.sandbox_mode` (boolean, not null,
+  database default `false`). One model default reads the process flag, so
+  every writer stamps it.
+- **Chart.** `sandboxMode.enabled` and `sandboxMode.confirmHost`; the
+  render fails when the host is not `ingress.host`; the notes warn.
+
+Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
+`test_sandbox_mode_calls.py`, `test_sandbox_mode_verdict_table.py` (with
+the checked-in mode-off table `tests/data/sandbox_mode_verdict_table_off.json`),
+`test_sandbox_mode_audit_mark.py`, `test_sandbox_mode_display.py`,
+`test_chart_sandbox_mode.py`, `migrations/test_migration_0115_add_sandbox_mode.py`.
+
 ## Governed-subop discovery (#3349)
 
 A composite fans out to child ops, and child gating consults the grant plane
@@ -315,7 +428,9 @@ id, the manifest tuples it fans out to via
 `connectors/vmware_rest/composites/_governed_subops.py`, referencing the
 `_SUB_OPS_*` constants, never re-typing them) — not hand-maintained. A
 **delete-shaped** rollback / delete leg (e.g. `vm.create`'s
-`DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`) is flagged
+`DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`, or
+`vm.destroy`'s VI-JSON step `POST:/VirtualMachine/{moId}/Destroy_Task`,
+which only its action name marks as a delete, #4632) is flagged
 `grantable=false` with the same refusal reason `create` would raise, so the
 operator knows up front that a **partial failure of that composite still
 requires a human** (the delete rollback can never run unattended). Grantable

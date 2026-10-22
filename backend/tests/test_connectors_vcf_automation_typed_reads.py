@@ -49,7 +49,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -237,18 +236,6 @@ def _stub_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -338,7 +325,7 @@ class _Bundle:
 
 
 @pytest.fixture
-async def typed_bundle(captured_events: list[Any]) -> AsyncIterator[_Bundle]:
+async def typed_bundle() -> AsyncIterator[_Bundle]:
     """Register the seven typed ops (zero ingested state) + respx-mock the appliance."""
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -446,7 +433,7 @@ async def test_typed_ops_dispatch_ok(op_id: str, typed_bundle: _Bundle) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]) -> None:
+async def test_provider_typed_op_rides_provider_plane() -> None:
     """Provider typed op establishes the provider session + Accept; tenant cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -497,7 +484,7 @@ async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]
     }
 
 
-async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) -> None:
+async def test_tenant_typed_op_rides_tenant_plane() -> None:
     """Tenant typed op establishes the tenant session + Accept; provider cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
     seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -536,9 +523,7 @@ async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) ->
     assert accept_by_path.get("/iaas/api/about") == TENANT_ACCEPT, accept_by_path
 
 
-async def test_tenant_op_on_91_appliance_falls_back_and_re_mints_through_dispatch(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_op_on_91_appliance_falls_back_and_re_mints_through_dispatch() -> None:
     """#3865 end to end: legacy 400 → CSP mint → refreshToken exchange, then a 401 re-mint.
 
     Drives ``call_operation`` (the real dispatcher path) against an appliance
@@ -592,9 +577,7 @@ async def test_tenant_op_on_91_appliance_falls_back_and_re_mints_through_dispatc
     assert tenant_cached == "bearer-fresh"
 
 
-async def test_provider_health_reports_about_failure_without_failing(
-    captured_events: list[Any],
-) -> None:
+async def test_provider_health_reports_about_failure_without_failing() -> None:
     """An unreachable /iaas/api/about lands in ``api``; the provider leg still reports ok."""
     await VcfAutomationConnector.register_typed_operations()
     await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -628,7 +611,7 @@ async def test_provider_health_reports_about_failure_without_failing(
     assert result["result"]["api"] == {"reachable": False, "error": "HTTPStatusError"}
 
 
-async def test_provider_op_query_params_forward_pagination(captured_events: list[Any]) -> None:
+async def test_provider_op_query_params_forward_pagination() -> None:
     """``vcfa.provider.org.list`` forwards ``page`` / ``pageSize`` as query params."""
     await VcfAutomationConnector.register_typed_operations()
     await _seed_target(host=_HOST, fqdn=_FQDN)
@@ -664,9 +647,7 @@ async def test_provider_op_query_params_forward_pagination(captured_events: list
     assert "page=2" in captured["query"] and "pageSize=50" in captured["query"], captured
 
 
-async def test_tenant_deployment_list_forwards_odata_and_returns_content(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_deployment_list_forwards_odata_and_returns_content() -> None:
     """``vcfa.tenant.deployment.list`` forwards OData params, returns the content envelope.
 
     Pins the PassThrough reducer so the assertion targets the inline
@@ -717,9 +698,7 @@ async def test_tenant_deployment_list_forwards_odata_and_returns_content(
     assert {"id", "name", "status", "projectId", "resources"} <= content[0].keys(), content[0]
 
 
-async def test_tenant_deployment_get_requests_detail_path_and_returns_object(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_deployment_get_requests_detail_path_and_returns_object() -> None:
     """``vcfa.tenant.deployment.get`` hits ``/iaas/api/deployments/<id>``, returns the object.
 
     Pins the PassThrough reducer for the same reason as the list test —
@@ -769,9 +748,7 @@ async def test_tenant_deployment_get_requests_detail_path_and_returns_object(
     )
 
 
-async def test_tenant_deployment_get_percent_encodes_the_id(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_deployment_get_percent_encodes_the_id() -> None:
     """A reserved char in the id is percent-encoded — it cannot extend the path.
 
     OpenAPI ``style: simple`` semantics (the same contract the ingested
@@ -811,9 +788,7 @@ async def test_tenant_deployment_get_percent_encodes_the_id(
     assert detail_route.called, "the encoded detail route was never hit"
 
 
-async def test_tenant_deployment_get_missing_id_is_invalid_params(
-    captured_events: list[Any],
-) -> None:
+async def test_tenant_deployment_get_missing_id_is_invalid_params() -> None:
     """Omitting the required ``id`` fails schema validation before any request."""
     await VcfAutomationConnector.register_typed_operations()
     await _seed_target(host="10.20.30.5", fqdn=_FQDN)

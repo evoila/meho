@@ -106,6 +106,11 @@ keys are reused too — `OperationGroup` rows are scoped by
 read payloads pass through the JSONFlux reducer largely unparsed, so 8.x
 response-shape drift is absorbed rather than parsed.
 
+The op metadata (summaries, response schemas, examples, guidance, and the
+`resourceState` / `resourceStatus` / `resourceHealth` enums) is the modern
+connector's, taken from the 9.0 Suite API file; no 8.x Suite API file is on the
+spec shelf to check it against.
+
 The broader ingested browse catalog the modern connector also exposes (via the 9.x
 OA3) is **not** available on 8.x (no committable 8.x spec to ingest) — a documented
 follow-up, not shipped speculatively.

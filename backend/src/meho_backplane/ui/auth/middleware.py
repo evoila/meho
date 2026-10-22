@@ -102,8 +102,12 @@ from sqlalchemy import select
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import SandboxDeleteGrant, Tenant
 from meho_backplane.health import ui_readiness_verdict
+from meho_backplane.sandbox_mode import (
+    SANDBOX_BANNER_EXPIRY_WINDOW_DAYS,
+    sandbox_mode_active,
+)
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.revalidation import revalidate_read_session
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
@@ -287,6 +291,40 @@ def _redirect_to_login(
         (b"cache-control", b"no-store"),
         (b"content-length", b"0"),
     ]
+
+
+async def _stash_sandbox_banner(scope_state: dict[str, object], *, tenant_id: uuid.UUID) -> None:
+    """Count the tenant's delete grants that expire soon, for the banner (#4622).
+
+    Only with sandbox mode on; with it off the delete-grant table is never
+    read. One count query per page render. A failure leaves the count
+    unknown (``None``) rather than failing the page.
+    """
+    if not sandbox_mode_active():
+        return
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import func
+
+    now = datetime.now(UTC)
+    window_end = now + timedelta(days=SANDBOX_BANNER_EXPIRY_WINDOW_DAYS)
+    try:
+        async with get_sessionmaker()() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(SandboxDeleteGrant)
+                .where(
+                    SandboxDeleteGrant.tenant_id == tenant_id,
+                    SandboxDeleteGrant.revoked_at.is_(None),
+                    SandboxDeleteGrant.expires_at.is_not(None),
+                    SandboxDeleteGrant.expires_at > now,
+                    SandboxDeleteGrant.expires_at <= window_end,
+                )
+            )
+        scope_state["sandbox_expiring_delete_grants"] = int(count or 0)
+    except Exception:  # pragma: no cover -- defensive
+        structlog.get_logger(__name__).warning("sandbox_banner_count_failed", exc_info=True)
+        scope_state["sandbox_expiring_delete_grants"] = None
 
 
 async def _stash_ui_readiness(scope_state: dict[str, object], *, path: str) -> None:
@@ -475,6 +513,7 @@ class UISessionMiddleware:
         if isinstance(scope_state, dict):
             scope_state["ui_session"] = session_context
             await _stash_ui_readiness(scope_state, path=path)
+            await _stash_sandbox_banner(scope_state, tenant_id=session_context.tenant_id)
 
         # G0.15-T7 (#1216): bind audit contextvars per-request happens
         # later, inside :func:`require_ui_session` (the FastAPI

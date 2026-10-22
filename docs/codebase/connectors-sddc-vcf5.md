@@ -144,14 +144,30 @@ issues a plain `self._get_json` on the token session (dispatcher-hook 401 recove
 Follows the modern `sddc_manager` layout:
 
 - **`typed_ops.py`** — the `SddcVcf5TypedOp` dataclass table, the per-group
-  `when_to_use` map, inline per-op `llm_instructions` (`when_to_use` / `output_shape`
-  / `parameter_hints`, the SDDC-family key shape), and the
+  `when_to_use` map, inline per-op `llm_instructions` (`when_to_call` / `output_shape`
+  / `next_step` / `parameter_hints`), and the
   `register_sddc_vcf5_typed_operations` registrar.
+- **`_response_schemas.py`** — the per-op response schemas
+  (`SDDC_VCF5_RESPONSE_SCHEMAS`), split out for the file-size budget.
 - **`typed_reads.py`** — the op bodies (`async def sddc5_*_impl(...)`), each issuing
   `connector._get_json(...)`; the filtered reads forward `domainId` / `clusterId` /
   `status` via `_optional_query`. Holds the `_*_PATH` constants (incl. `_TOKENS_PATH`
   for the mint) the reconcile lane introspects.
 - **`connector.py`** — the connector class + auth helpers + 7 bound-method shims.
+
+**Operation contracts.** The 7 typed ops meet the VMware operation-contract
+check (`backend/tests/test_vmware_operation_contracts.py`):
+
+- Each `response_schema` names the main fields of the vendor answer
+  (`PageOf<X>` → `elements[]` + `pageMetadata`). Broadcom publishes no API file
+  for 5.x, so the field names come from the GET pages of the vendor's "VMware
+  Cloud Foundation API" reference for 5.0.0 and 5.2.4. A field only the 5.2 page
+  lists says so. The schemas are informational; the reducer does not read them.
+- Each `parameter_schema` describes every field and carries one example call
+  under `examples` with neutral placeholders (`<domain-id>`).
+- The `sddc.vcf5.host.list` `status` filter is an `enum` of the three values the
+  vendor reference lists (`ASSIGNED`, `UNASSIGNED_USEABLE`, `UNASSIGNED_UNUSEABLE`).
+- `llm_instructions` carries `when_to_call`, `output_shape` and `next_step`.
 
 ## Spec reconcile lane
 
@@ -188,6 +204,13 @@ trigger are in the `sddc-vcf5` entry of
 - **List-focused inventory core.** Deep by-id reads, the credential-read surface, and
   any write surface are out of scope — a source-inventory core, not an operations
   surface.
+- **Two filters may not match the vendor reference.** The 5.0.0 reference lists
+  no `domainId` filter on `GET /v1/clusters` (the 5.2 reference does), and it names
+  the task filter `taskStatus` while `sddc.vcf5.task.list` sends `status`. The op
+  texts give the AI a fallback: match cluster ids against the `clusters` entries of
+  `sddc.vcf5.domain.list` (a cluster row's `domain` field is only documented from
+  5.2), and check each task row's status itself. Changing what the handlers send is
+  a separate task.
 - **Unfingerprinted targets resolve to modern.** Because the modern impl owns the
   wildcard, a `sddc` target with no fingerprint/version resolves to `sddc-rest`. In
   practice a probed VCF 5.x target fingerprints its real version and resolves here.

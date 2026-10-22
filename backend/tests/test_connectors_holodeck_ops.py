@@ -37,7 +37,7 @@ Coverage matrix (per Task #854 acceptance criteria):
   metacharacters; lines clamped to [1, 5000].
 * ``HOLODECK_OPS`` registration shape -- 8 ops total, all carry
   ``safety_level='safe'``, ``additionalProperties=False`` on the
-  parameter schema, non-empty ``llm_instructions.when_to_use``, the
+  parameter schema, non-empty ``llm_instructions.when_to_call``, the
   SSH-only transport note, and ``holodeck.`` namespace op_ids.
 * Secret/SSH-key leak canaries -- the connector's ``target.secret_ref``
   password and the operator-supplied k8s command never appear in
@@ -1725,23 +1725,55 @@ def test_holodeck_ops_all_parameter_schemas_have_additional_properties_false() -
 def test_holodeck_ops_all_have_llm_instructions() -> None:
     for op in HOLODECK_OPS:
         assert op.llm_instructions, f"{op.op_id!r} missing llm_instructions"
-        when_to_use = op.llm_instructions.get("when_to_use")
-        assert when_to_use, f"{op.op_id!r} missing llm_instructions.when_to_use"
+        when_to_use = op.llm_instructions.get("when_to_call")
+        assert when_to_use, f"{op.op_id!r} missing llm_instructions.when_to_call"
         assert isinstance(when_to_use, str) and when_to_use.strip()
 
 
 def test_holodeck_ops_llm_instructions_mention_ssh_transport() -> None:
-    """Every op's ``when_to_use`` must include the SSH-only transport note.
+    """Every op's ``when_to_call`` must include the SSH-only transport note.
 
     CLAUDE.md postulate 5 + Initiative #371 require agent-facing
     descriptions to call out the PowerShell-over-SSH transport so an
     LLM doesn't compose against a non-existent REST surface.
     """
     for op in HOLODECK_OPS:
-        when_to_use = op.llm_instructions.get("when_to_use", "")
+        when_to_use = op.llm_instructions.get("when_to_call", "")
         assert "SSH" in when_to_use or "ssh" in when_to_use, (
-            f"{op.op_id!r} when_to_use lacks SSH transport mention"
+            f"{op.op_id!r} when_to_call lacks SSH transport mention"
         )
+
+
+@pytest.mark.parametrize("op", HOLODECK_OPS, ids=lambda op: op.op_id)
+def test_each_op_example_validates_against_its_parameter_schema(op: Any) -> None:
+    """Every op ships one example call, and it is a valid call (Draft 2020-12)."""
+    examples = op.parameter_schema.get("examples")
+    assert isinstance(examples, list) and examples, op.op_id
+    jsonschema.Draft202012Validator.check_schema(op.parameter_schema)
+    validator = jsonschema.Draft202012Validator(op.parameter_schema)
+    for example in examples:
+        assert list(validator.iter_errors(example)) == [], (op.op_id, example)
+
+
+@pytest.mark.parametrize("op", HOLODECK_OPS, ids=lambda op: op.op_id)
+def test_each_op_response_schema_names_its_fields(op: Any) -> None:
+    """No response schema is a bare "any object"; every field has a description."""
+    schema = op.response_schema
+    assert schema is not None, op.op_id
+    assert schema.get("properties"), op.op_id
+    for name, field in schema["properties"].items():
+        assert field.get("description"), (op.op_id, name)
+
+
+@pytest.mark.parametrize("op", HOLODECK_OPS, ids=lambda op: op.op_id)
+def test_each_op_guidance_has_next_step_and_change_preconditions(op: Any) -> None:
+    """Every op says what to do next; every change says what must be true first."""
+    instr = op.llm_instructions or {}
+    for key in ("when_to_call", "output_shape", "next_step"):
+        assert isinstance(instr.get(key), str) and instr[key].strip(), (op.op_id, key)
+    if op.safety_level != "safe":
+        assert isinstance(instr.get("preconditions"), str), op.op_id
+        assert instr["preconditions"].strip(), op.op_id
 
 
 def test_holodeck_ops_group_keys_include_new_groups() -> None:

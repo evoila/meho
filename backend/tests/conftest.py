@@ -739,6 +739,23 @@ def _force_import_connector_modules() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_sandbox_mode_flag() -> Iterator[None]:
+    """Start and end every test with sandbox mode off (#4622).
+
+    The flag is process state set once at boot
+    (:func:`meho_backplane.sandbox_mode.set_sandbox_mode_active`). A test
+    that turns it on must not leak it into the next test on the same
+    xdist worker; a test that runs the app lifespan sets it from the
+    stored mode of its own database, which is also reset here.
+    """
+    from meho_backplane.sandbox_mode import set_sandbox_mode_active
+
+    set_sandbox_mode_active(False)
+    yield
+    set_sandbox_mode_active(False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_global_registries() -> Iterator[None]:
     """Snapshot/restore every process-global registry around each test.
 
@@ -1110,10 +1127,44 @@ def pytest_fixture_setup(fixturedef, request):
     )
 
 
-def pytest_sessionfinish(session, exitstatus):
-    """Flush accumulated fixture-setup timings once per worker."""
+def _save_worker_coverage_data() -> None:
+    """Write this xdist worker's coverage data file before the worker reports done.
+
+    CI's coverage job measures each worker through coverage's process-startup
+    hook (``COVERAGE_PROCESS_START``), which writes the worker's data file
+    only at interpreter exit. That exit is a race the worker can lose: as
+    soon as the worker reports "finished", the controller asks it to stop
+    and kills it 10 seconds later (execnet 2.1 interrupts it after 5).
+    Freeing a whole session's objects under coverage can take longer than
+    that, and a killed worker writes nothing, so a shard's entire test
+    coverage disappears while every check stays green (#4758). Saving here,
+    after session teardown and before the "finished" message, puts the data
+    on disk while the worker is still allowed to live. Stopping the tracer
+    first makes the cleanup that follows faster and turns coverage's own
+    exit-time save into a no-op (the file is already finished).
+    """
+    if not (os.environ.get("PYTEST_XDIST_WORKER") and os.environ.get("COVERAGE_PROCESS_START")):
+        return
+    import coverage
+
+    cov = coverage.Coverage.current()
+    if cov is None:
+        return
+    cov.stop()
+    cov.save()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Save worker coverage, then flush fixture-setup timings, once per worker.
+
+    ``trylast`` places this after pytest's own session-fixture teardown, so
+    the saved coverage includes it, and still inside pytest-xdist's
+    hook wrapper, so it runs before the worker sends "finished".
+    """
     import json
 
+    _save_worker_coverage_data()
     path = os.environ.get("MEHO_FIXTURE_TIMING_FILE")
     if not path or not _PERF_FIXTURE_TIMINGS:
         return

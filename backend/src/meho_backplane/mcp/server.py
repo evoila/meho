@@ -322,8 +322,8 @@ class McpRateLimitedError(Exception):
     into this sentinel, passing ``data={limit, window_seconds,
     retry_after_seconds}`` so the calling agent can back off precisely.
     Keeping the broadcast layer's domain error separate from this MCP
-    sentinel mirrors the ``InvalidSinceError`` seam -- the broadcast
-    package never imports the MCP error vocabulary.
+    sentinel keeps the broadcast package free of the MCP error
+    vocabulary.
     """
 
     def __init__(

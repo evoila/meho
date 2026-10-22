@@ -1212,8 +1212,8 @@ def test_reject_rejected_without_csrf_token() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_app_shell_renders_bell_and_sse_filter() -> None:
-    """Every console page carries the approvals bell + the op_class=approval SSE sink."""
+def test_app_shell_renders_bell_with_polled_badges() -> None:
+    """Every console page carries the bell; both badges refresh on one body event (#3758)."""
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
 
@@ -1230,8 +1230,22 @@ def test_app_shell_renders_bell_and_sse_filter() -> None:
     assert 'data-icon="bell"' in body
     # The badge target seeds itself from the live count endpoint.
     assert 'hx-get="/ui/approvals/badge"' in body
-    # The notifications bell subscribes to the SSE bridge filtered to approvals.
-    assert 'sse-connect="/ui/broadcast/stream?op_class=approval"' in body
+    # No Broadcast SSE subscription: the bell polls the badge endpoint.
+    assert "/ui/broadcast/stream" not in body
+    assert "sse-before-message" not in body
+    # Both badges (mobile + sidebar) re-fetch on the one body event the
+    # shell timer dispatches, with no inline htmx filter expression.
+    for prefix in ("mobile", "sidebar"):
+        assert f'id="{prefix}-approvals-badge"' in body
+    assert (
+        body.count(
+            'hx-trigger="load, meho:approval-badge-poll from:body, meho:approval-bump from:body"'
+        )
+        == 2
+    )
+    assert "[document" not in body
+    # Exactly one bell controller root, so exactly one timer per page.
+    assert body.count('x-data="approvalsBell()"') == 1
     # The app-shell controller script is loaded on every page.
     assert "/ui/static/src/app/approvals-bell.js" in body
 

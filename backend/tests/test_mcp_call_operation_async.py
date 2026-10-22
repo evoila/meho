@@ -18,7 +18,6 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import jsonschema
 import pytest
@@ -39,7 +38,6 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 -- pytest-discovered autouse fixture
 )
 
-_PUBLISH_NODES = "meho_backplane.topology.nodes.publish_event"
 _CONNECTOR = "topology-graph-1.x"
 _OP = "topology.create_node"
 
@@ -124,25 +122,24 @@ async def test_async_call_returns_pending_then_the_stored_result(
     """Start a real governed write in async mode, then read its result by run_id."""
     client, _op = client_with_operator
     base = {"connector_id": _CONNECTOR, "op_id": _OP}
-    with patch(_PUBLISH_NODES, new=AsyncMock()):
-        started = _structured(
-            _call(
-                client,
-                {**base, "params": {"kind": "vault-role", "name": "async-node"}, "async": True},
-            )
+    started = _structured(
+        _call(
+            client,
+            {**base, "params": {"kind": "vault-role", "name": "async-node"}, "async": True},
         )
-        assert started["status"] == "pending"
-        assert started["audit_id"] is None
-        run_id = started["extras"]["run_id"]
-        assert uuid.UUID(run_id)
-        assert started["extras"]["async"] is True
+    )
+    assert started["status"] == "pending"
+    assert started["audit_id"] is None
+    run_id = started["extras"]["run_id"]
+    assert uuid.UUID(run_id)
+    assert started["extras"]["async"] is True
 
-        final: dict[str, Any] = {}
-        for attempt in range(100):
-            final = _structured(_call(client, {**base, "run_id": run_id}, req_id=attempt + 2))
-            if final["status"] not in ("pending", "running"):
-                break
-            await asyncio.sleep(0.05)
+    final: dict[str, Any] = {}
+    for attempt in range(100):
+        final = _structured(_call(client, {**base, "run_id": run_id}, req_id=attempt + 2))
+        if final["status"] not in ("pending", "running"):
+            break
+        await asyncio.sleep(0.05)
 
     assert final["status"] == "ok", final
     assert uuid.UUID(final["audit_id"])

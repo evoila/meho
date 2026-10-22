@@ -642,7 +642,7 @@ meho audit query [flags]
 - `--op-id` — narrow to one op-id (glob with * wildcards)
 - `--parent-audit-id` — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request
 - `--principal` — narrow to one operator (JWT subject; partial-match supported)
-- `--result-status` — narrow to one result-status (ok|error|denied)
+- `--result-status` — narrow to one result-status (ok|error|denied|pending); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
@@ -4406,7 +4406,7 @@ meho service-principals grants create [flags]
 - `--connector-id` — exact connector id; globs are refused (required)
 - `--expires` — optional ISO 8601 UTC expiry
 - `--json` — emit raw ServiceGrantRead JSON
-- `--op-id` — exact operation id; globs and delete-shaped ops are refused (required)
+- `--op-id` — exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)
 - `--principal` — JWT sub of the service principal (required)
 - `--reason` — operator justification for this standing grant (required)
 - `--target` — target UUID (optional; targetless is not a wildcard)

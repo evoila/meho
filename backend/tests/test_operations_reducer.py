@@ -43,9 +43,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.prometheus.ops import _TARGETS_OP
@@ -103,26 +101,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub.
-
-    Mirrors the dispatcher-test fixture: the audit helper invokes
-    ``publish_event`` via the imported reference inside
-    :mod:`meho_backplane.operations._audit`; patching the module's
-    attribute is sufficient -- no need to swap the broadcast package's
-    bind. Tests need this to be present so the dispatcher's broadcast
-    leg doesn't fail open against a missing Valkey broker.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +422,6 @@ def test_operation_result_with_handle_round_trips_through_json() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_default_reducer_leaves_handle_none(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """v0.2 default path: dispatch returns ``handle=None``."""
     register_connector_v2(
@@ -481,7 +458,6 @@ async def test_dispatch_default_reducer_leaves_handle_none(
 @pytest.mark.asyncio
 async def test_dispatch_propagates_reducer_handle_onto_operation_result(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Mock 'would-reduce' reducer: the produced handle lands on the result.
 
@@ -551,7 +527,6 @@ async def test_dispatch_propagates_reducer_handle_onto_operation_result(
 @pytest.mark.asyncio
 async def test_dispatch_passes_context_to_reducer(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The reducer sees ``op_id`` / ``operator_sub`` / ``target_id`` in context.
 
@@ -619,7 +594,6 @@ async def test_dispatch_passes_context_to_reducer(
 @pytest.mark.asyncio
 async def test_dispatch_returns_unavailable_delivery_when_reducer_raises(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A completed handler stays successful when only reduction fails."""
 
@@ -678,8 +652,6 @@ async def test_dispatch_returns_unavailable_delivery_when_reducer_raises(
         exception_class="RuntimeError",
     )
     assert "simulated reducer explosion" not in str(mock_log.warning.call_args)
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "ok"
 
 
 # ---------------------------------------------------------------------------

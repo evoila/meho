@@ -30,7 +30,6 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -44,16 +43,6 @@ from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _BASE = "/api/v1/service-principals/grants"
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence the broadcast publisher so responses don't stall on Valkey."""
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)
@@ -222,11 +211,12 @@ def test_operator_crud_round_trip(client: TestClient) -> None:
     "op_id, expect_fragment",
     [
         ("DELETE:/vcenter/vm/{vm}", "delete-shaped"),
+        ("POST:/VirtualMachine/{moId}/Destroy_Task", "vendor action name 'Destroy_Task'"),
         ("vmware.composite.vm.*", "wildcard"),
     ],
 )
 def test_create_review_rejects_bad_op(client: TestClient, op_id: str, expect_fragment: str) -> None:
-    """A delete-shaped op / a wildcard op_id is refused with HTTP 422."""
+    """A delete-shaped op, a vendor delete action name, or a wildcard op_id is refused with 422."""
     key = make_rsa_keypair("kid-op2")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))

@@ -678,6 +678,15 @@
         }
       ]
     },
+    "sandboxMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Sandbox mode (#4622, `docs/decisions/sandbox-mode.md`): only for an instance that holds disposable test systems. When `enabled`, a tenant admin may give a service principal a standing grant that also covers deletes (made in the web console, expiring within 30 days). Rendered into `MEHO_SANDBOX_MODE` and `MEHO_SANDBOX_MODE_CONFIRM` only when enabled; the default renders no sandbox setting. `confirmHost` must equal `ingress.host` (the render fails otherwise), and the backplane refuses to start unless that host has a dot-separated part that is exactly `sandbox`. The mode is fixed for the life of the database.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "confirmHost": { "type": "string", "description": "The instance's public host name, equal to `ingress.host`. Required when enabled." }
+      }
+    },
     "uiConsole": {
       "type": "object",
       "additionalProperties": false,
@@ -889,6 +898,26 @@
           "properties": {
             "bootstrap": { "type": "string", "description": "Your own Secret with Keycloak's first-start service account (keys `client_id` and `client_secret`). Empty = the install makes <release>-core-keycloak-bootstrap." }
           }
+        },
+        "firstLogin": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The two people the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md). Their temporary passwords are in <release>-core-first-login.",
+          "properties": {
+            "adminUsername": { "type": "string", "minLength": 1, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
+            "approverUsername": { "type": "string", "minLength": 1, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." }
+          }
+        },
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "A login for automated install proofs. Off by default. When on, the bootstrap Job makes the service client meho-ci (secret in <release>-core-ci-login) and the group MEHO-CI-Admins for a second tenant.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "tenantId": { "type": "string", "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$", "description": "The second tenant's id (a UUID). Required when `enabled` is true." }
+          },
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": { "properties": { "tenantId": { "minLength": 1 } }, "required": ["tenantId"] }
         }
       }
     },
@@ -1593,6 +1622,28 @@
           }
         },
         "required": ["gsm"]
+      }
+    },
+    {
+      "description": "Sandbox mode (#4622) needs its confirm host: `sandboxMode.enabled: true` requires a non-empty `sandboxMode.confirmHost`. The ConfigMap template then checks that it equals `ingress.host`.",
+      "if": {
+        "properties": {
+          "sandboxMode": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["sandboxMode"]
+      },
+      "then": {
+        "properties": {
+          "sandboxMode": {
+            "required": ["confirmHost"],
+            "properties": {
+              "confirmHost": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
       }
     },
     {

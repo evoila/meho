@@ -33,6 +33,10 @@ import (
 // StructuredError is present. The named codes start at 2 so the
 // generic 1 stays distinguishable from a known failure mode.
 const (
+	// ExitUsage indicates a wrong command line: an unknown flag or
+	// the wrong number of arguments. It is the generic 1, so the
+	// exit code did not change when these errors started to print.
+	ExitUsage = 1
 	// ExitAuthExpired indicates the operator's stored token is
 	// missing, malformed, or rejected by the backplane (HTTP 401).
 	// The remedy is always `meho login`.
@@ -81,6 +85,10 @@ const (
 // jq-style consumers and dashboards filter on. Keep them stable
 // across CLI releases.
 const (
+	// ErrCodeUsage pairs with ExitUsage. The command line was wrong
+	// (unknown flag, wrong number of arguments); the detail names
+	// the problem and the --help command to run.
+	ErrCodeUsage = "usage_error"
 	// ErrCodeAuthExpired pairs with ExitAuthExpired. The operator
 	// has no usable token; rerunning `meho login` is the remedy.
 	ErrCodeAuthExpired = "auth_expired"
@@ -172,6 +180,16 @@ func AuthExpired(detail string) *StructuredError {
 		Code:   ErrCodeAuthExpired,
 		Detail: detail,
 		Exit:   ExitAuthExpired,
+	}
+}
+
+// Usage builds the canonical usage_error StructuredError for a
+// wrong command line.
+func Usage(detail string) *StructuredError {
+	return &StructuredError{
+		Code:   ErrCodeUsage,
+		Detail: detail,
+		Exit:   ExitUsage,
 	}
 }
 
@@ -318,6 +336,13 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 
 	// DB subsystem. migrated is a tri-state (true, false, nil/unknown).
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+
+	// Sandbox mode (#4622): one line when it is on, nothing when it is
+	// off. Older backplanes send no field; the generated decoder leaves
+	// it nil or empty, which reads as off.
+	if resp.SandboxMode != nil && *resp.SandboxMode == "on" {
+		fmt.Fprintln(stdoutW, "  Sandbox mode: on (a standing grant made in the web console may cover deletes by service principals)")
+	}
 	return nil
 }
 

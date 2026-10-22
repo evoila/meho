@@ -134,16 +134,44 @@ def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:
     return parts or _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
 
 
+#: The five MEHO login groups (``docs/decisions/login-role-groups.md``).
+#: A person must be in exactly one of them. Override with
+#: ``JWT_ROLE_GROUPS`` (comma-separated).
+_DEFAULT_JWT_ROLE_GROUPS: tuple[str, ...] = (
+    "MEHO-Readers",
+    "MEHO-Operators",
+    "MEHO-SA-Operators",
+    "MEHO-Admins",
+    "MEHO-Approvers",
+)
+
+
+def _parse_jwt_role_groups(raw: str) -> tuple[str, ...]:
+    """Parse the comma-separated override, falling back to the five default groups.
+
+    An empty / whitespace-only value keeps the built-in default groups so
+    the one-group check never silently disappears on a blank env var.
+    """
+    parts = tuple(chunk.strip() for chunk in raw.split(",") if chunk.strip())
+    return parts or _DEFAULT_JWT_ROLE_GROUPS
+
+
 class Settings(BaseModel):
     """Process-wide configuration knobs.
 
     Attributes
     ----------
     keycloak_issuer_url:
-        The Keycloak realm's issuer URL — typically
-        ``https://<host>/realms/<realm>``. Must match the ``iss`` claim
-        of every accepted JWT exactly. Required (no default); the
-        backplane refuses to start without it.
+        The OIDC issuer URL — for Keycloak typically
+        ``https://<host>/realms/<realm>``, for authentik
+        ``https://<host>/application/o/<slug>/``. The ``iss`` claim of
+        every accepted JWT must equal this value, with or without a
+        trailing slash; any other issuer is rejected. Use the form the
+        login server publishes in its discovery document: the metadata
+        routes (``/.well-known/oauth-protected-resource`` and
+        ``/api/v1/auth-config``) return the value unchanged, and strict
+        clients compare it byte-for-byte (RFC 8414 §3.3). Required (no
+        default); the backplane refuses to start without it.
     keycloak_audience:
         The OIDC ``aud`` claim every accepted JWT must carry. The
         backplane is registered as a Keycloak client (e.g.
@@ -297,6 +325,21 @@ class Settings(BaseModel):
         ``tenant_role`` matches the same protocol-mapper recipe.
         Override only when the realm exposes the role under a
         different attribute.
+    jwt_role_groups:
+        Names of the login groups that give a person their tenant and
+        role (``docs/decisions/login-role-groups.md``). Default: the
+        five groups ``MEHO-Readers``, ``MEHO-Operators``,
+        ``MEHO-SA-Operators``, ``MEHO-Admins`` and ``MEHO-Approvers``.
+        A person must be in exactly one of them: in two, Keycloak copies
+        ``tenant_role`` from whichever group it finds first, so the role
+        is unpredictable. ``verify_jwt`` reads the token's ``groups``
+        claim and refuses a token that names two or more of these
+        groups with ``401 multiple_role_groups`` (#4594). A token with
+        no ``groups`` claim (service accounts, agents, check runners) is
+        not checked. A name with and without a leading ``/`` is the
+        same group, because the group-membership mapper can send full
+        group paths. Override with ``JWT_ROLE_GROUPS`` (comma-separated)
+        when a site renames the groups; a blank value keeps the default.
     jwt_principal_kind_claim_name:
         Name of the JWT claim that carries the principal-kind
         discriminator (``user`` / ``service`` / ``agent``) added by
@@ -1113,6 +1156,22 @@ class Settings(BaseModel):
         own call. Set ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` only on
         a lab-class deployment. Ordinary decisions are never affected.
         Read at boot only; no request field can change it.
+    sandbox_mode:
+        Sandbox mode (#4622, ``docs/decisions/sandbox-mode.md``). Only for
+        an instance that holds disposable test systems. When on, a tenant
+        admin may give a service principal a standing grant that also
+        covers deletes (a delete grant), made in the web console and
+        expiring within 30 days. Default ``False``: every other instance
+        keeps today's rules. Read at boot only, from ``MEHO_SANDBOX_MODE``.
+        The mode is stored in the database at the first start and checked
+        at every start; see :mod:`meho_backplane.sandbox_mode`.
+    sandbox_mode_confirm:
+        The host name that confirms sandbox mode, from
+        ``MEHO_SANDBOX_MODE_CONFIRM``. With the mode on, it must equal the
+        host of the MCP resource URI (the public address of the instance),
+        and one dot-separated part of that host must be exactly
+        ``sandbox``. Otherwise MEHO refuses to start. Ignored when the
+        mode is off.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1253,6 +1312,7 @@ class Settings(BaseModel):
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
+    jwt_role_groups: tuple[str, ...] = _DEFAULT_JWT_ROLE_GROUPS
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
     jwt_service_account_username_claim: str = Field(default="preferred_username", min_length=1)
     jwt_service_account_username_prefix: str = Field(default="service-account-")
@@ -1577,6 +1637,10 @@ class Settings(BaseModel):
     # the reason, #3692) are allowed only on lab-class deployments. Default
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
+    # #4622 -- sandbox mode: a standing grant may also cover deletes, only
+    # on an instance for disposable test systems. Both read at boot only.
+    sandbox_mode: bool = False
+    sandbox_mode_confirm: str = ""
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -2461,6 +2525,7 @@ def get_settings() -> Settings:
             "JWT_TENANT_ROLE_CLAIM_NAME",
             "tenant_role",
         ),
+        jwt_role_groups=_parse_jwt_role_groups(os.environ.get("JWT_ROLE_GROUPS", "")),
         jwt_principal_kind_claim_name=os.environ.get(
             "JWT_PRINCIPAL_KIND_CLAIM_NAME",
             "principal_kind",
@@ -2725,6 +2790,12 @@ def get_settings() -> Settings:
         approval_allow_delegated_decision=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
+        # #4622 -- sandbox mode is off unless both settings are set; the
+        # boot guards in ``meho_backplane.sandbox_mode`` check them.
+        sandbox_mode=parse_bool_env(
+            os.environ.get("MEHO_SANDBOX_MODE", "false"),
+        ),
+        sandbox_mode_confirm=os.environ.get("MEHO_SANDBOX_MODE_CONFIRM", "").strip(),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(
             os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),

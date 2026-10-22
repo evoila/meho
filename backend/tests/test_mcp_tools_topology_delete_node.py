@@ -27,7 +27,6 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -44,8 +43,6 @@ from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
-
-_PUBLISH_DELETE_PATCH = "meho_backplane.topology.node_delete.publish_event"
 
 
 @pytest_asyncio.fixture
@@ -154,8 +151,7 @@ async def test_delete_node_removes_curated_row(
     client, _op = client_with_operator
     node_id = await _seed_node(kind="vault-role", name="rdc-vault", source="curated")
 
-    with patch(_PUBLISH_DELETE_PATCH, new=AsyncMock()) as publish_mock:
-        response = _delete_node_call(client, 10, {"node_id": str(node_id)})
+    response = _delete_node_call(client, 10, {"node_id": str(node_id)})
 
     body = response.json()
     assert body["result"]["isError"] is False, body
@@ -163,7 +159,6 @@ async def test_delete_node_removes_curated_row(
     assert payload["node_id"] == str(node_id)
     assert payload["kind"] == "vault-role"
     assert payload["name"] == "rdc-vault"
-    assert publish_mock.await_count == 1
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -179,9 +174,8 @@ async def test_delete_node_second_call_returns_not_found(
     client, _op = client_with_operator
     node_id = await _seed_node(kind="vault-role", name="once", source="curated")
 
-    with patch(_PUBLISH_DELETE_PATCH, new=AsyncMock()):
-        first = _delete_node_call(client, 20, {"node_id": str(node_id)})
-        second = _delete_node_call(client, 21, {"node_id": str(node_id)})
+    first = _delete_node_call(client, 20, {"node_id": str(node_id)})
+    second = _delete_node_call(client, 21, {"node_id": str(node_id)})
 
     assert first.json()["result"]["isError"] is False
     body = second.json()
@@ -198,8 +192,7 @@ async def test_delete_node_refuses_probe_owned(
     client, _op = client_with_operator
     node_id = await _seed_node(kind="vm", name="probe-vm", source="auto")
 
-    with patch(_PUBLISH_DELETE_PATCH, new=AsyncMock()):
-        response = _delete_node_call(client, 30, {"node_id": str(node_id)})
+    response = _delete_node_call(client, 30, {"node_id": str(node_id)})
 
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS

@@ -132,7 +132,7 @@ def _bind_request_audit_context(
     still produces an audit row with partial payload (incident-
     postmortem hook). The two override keys (``audit_op_id`` /
     ``audit_op_class``) are honoured by the chassis broadcast
-    publisher per :func:`meho_backplane.audit._publish_broadcast_event`.
+    publisher per :func:`meho_backplane.audit._resolve_op_id_and_class_override`.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="meho.retrieval.eval",

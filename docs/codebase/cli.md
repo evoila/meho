@@ -148,7 +148,7 @@ names.
 
 ```text
 cli/
-├── go.mod                  # github.com/evoila/meho/cli; Go 1.26.9.
+├── go.mod                  # github.com/evoila/meho/cli; Go 1.26.10.
 ├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
 ├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
@@ -780,7 +780,7 @@ that branch on them:
 | Code | Meaning                                                         |
 | ---- | --------------------------------------------------------------- |
 | 0    | Success                                                         |
-| 1    | Generic failure (cobra usage error, panic recovery, etc.)       |
+| 1    | Generic failure; also `usage_error` (unknown flag, wrong number of arguments) |
 | 2    | `auth_expired`                                                  |
 | 3    | `unreachable`                                                   |
 | 4    | `unexpected_response`                                           |
@@ -790,6 +790,26 @@ The propagation path is `output.RenderError` → `silentError` →
 default error printer is bypassed via `SilenceErrors=true` on the
 status subcommand so the JSON envelope doesn't double-render
 alongside the text rendering of `.Error()`.
+
+Most subcommands set `SilenceErrors=true`. cobra checks flags and the
+argument count before `RunE` runs, so without help those errors would
+print nothing. `internal/cmd/usage_errors.go` covers this for the whole
+tree in one place: the root's flag error function (every child inherits
+it) and a wrapper around every command's `Args` check both print a
+`usage_error` through `output.RenderError`, exit code 1:
+
+```text
+meho: usage_error: unknown flag: --bogus (run 'meho targets list --help' for usage)
+```
+
+With `--json` on a command that has that flag, the same error uses the
+JSON envelope. cobra stops parsing at an unknown flag, so the usage
+error reads the raw command line up to `--` and the last `--json`
+setting wins, as it does for a parsed flag. A word that is the value of
+another flag of the command (`--query --json`) is skipped, so it does
+not count as a setting. `usage_errors_test.go` walks every command and
+checks that an unknown flag prints a message that names the flag. Missing
+required flags (`MarkFlagRequired`) are not covered by this path yet.
 
 ### Sensitive-data discipline
 
@@ -1144,9 +1164,10 @@ end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
 [oapi-codegen v2.5](https://github.com/oapi-codegen/oapi-codegen)
 from `cli/api/openapi.json` — a committed snapshot of the
 backplane's OpenAPI document. v2.5 is the last v2.x release that
-supports Go 1.22. The CLI module itself requires Go 1.26.9: Go 1.25
-gets no more security fixes, and 1.26.9 is the first 1.26 release
-that fixes nine standard-library CVEs. The generator itself runs
+supports Go 1.22. The CLI module itself requires Go 1.26.10: Go 1.25
+gets no more security fixes, 1.26.9 is the first 1.26 release
+that fixes nine standard-library CVEs, and 1.26.10 also fixes
+GO-2026-6809 in `crypto/x509`. The generator itself runs
 on a newer Go toolchain (downloaded automatically by `go install`
 when the host has Go 1.21+) so this is a build-time vs.
 runtime split.
@@ -2227,12 +2248,12 @@ Direct:
   `Config.DeviceAccessToken` for the RFC 8628 device-code flow,
   plus `Config.TokenSource` for the T3 refresh path. Pinned at
   `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
-  upgrades is lifted now that the module requires Go 1.26.9.
+  upgrades is lifted now that the module requires Go 1.26.10.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated
   client uses (JSON merging for `oneOf` unions, parameter styling
   per RFC 6570). Pinned at `v1.1.1`; the Go 1.22 compatibility
   constraint that blocked upgrades is lifted now that the module
-  requires Go 1.26.9 — upgrade tracked as a follow-up.
+  requires Go 1.26.10 — upgrade tracked as a follow-up.
 
 Build-time tool (not in `go.mod`; installed under `bin/` via
 `make tools`):
@@ -2240,7 +2261,7 @@ Build-time tool (not in `go.mod`; installed under `bin/` via
 * `github.com/oapi-codegen/oapi-codegen/v2` — the OpenAPI → Go
   client generator itself. Pinned at `v2.5.0`, the last v2.x
   release whose module go directive was compatible with Go 1.22;
-  now that the module requires Go 1.26.9, a newer v2.x may be
+  now that the module requires Go 1.26.10, a newer v2.x may be
   used — upgrade tracked as a follow-up. `make tools` runs
   `go install …@v2.5.0` with
   `GOBIN=$PWD/bin`; the generator itself executes on a Go 1.24+

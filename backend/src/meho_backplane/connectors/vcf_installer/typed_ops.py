@@ -29,8 +29,9 @@ ingest that runs after a connect, #3406),
 ``installer.system.trusted-certificates.list`` / ``.add``
 (outbound trust store — the depot TLS-trust fix), and
 ``installer.bundles.list`` / ``.download`` (bundle inventory + the mandatory
-explicit GA pre-download). Reads are ``safe``; the three writes are
-``caution`` + ``requires_approval``.
+explicit GA pre-download), plus ``installer.bundles.download-status`` (the
+per-bundle failure message and progress, #3410). Reads are ``safe``; the
+three writes are ``caution`` + ``requires_approval``.
 
 The vendor bring-up API is natively asynchronous — every submit returns its
 tracking object in seconds and progress rides the status polls — so each
@@ -54,6 +55,19 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from meho_backplane.connectors.vcf_installer._response_schemas import (
+    BUNDLES_DOWNLOAD_RESPONSE,
+    BUNDLES_DOWNLOAD_STATUS_RESPONSE,
+    BUNDLES_LIST_RESPONSE,
+    DEPOT_GET_RESPONSE,
+    DEPOT_SET_RESPONSE,
+    DEPOT_SYNC_STATUS_RESPONSE,
+    SDDC_LIST_RESPONSE,
+    SDDC_TASK_RESPONSE,
+    TRUSTED_CERTIFICATE_ADD_RESPONSE,
+    TRUSTED_CERTIFICATES_LIST_RESPONSE,
+    VALIDATION_RESPONSE,
+)
 from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_BRINGUP_RETRY_OP_ID,
     INSTALLER_BRINGUP_START_OP_ID,
@@ -69,6 +83,8 @@ if TYPE_CHECKING:
 __all__ = [
     "INSTALLER_TYPED_OPS",
     "INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP",
+    "SDDC_SPEC_EXAMPLE",
+    "SDDC_SPEC_HINT",
     "InstallerTypedOp",
     "register_installer_typed_operations",
 ]
@@ -113,7 +129,8 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its verdict; installer.sddc.bringup.start (dangerous, approval-gated) "
         "starts the bring-up and installer.sddc.bringup.status polls the task's "
         "lifecycle state (IN_PROGRESS / COMPLETED_WITH_SUCCESS / "
-        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; installer.sddc.list "
+        "ROLLBACK_SUCCESS / COMPLETED_WITH_FAILURE) and per-stage sub-tasks; "
+        "installer.sddc.list "
         "lists every bring-up task with its id and status and needs no id, so "
         "use it to find a running bring-up whose id you do not have; on "
         "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
@@ -144,24 +161,32 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "and hard-fails Versions-and-Bundles when those binaries are absent "
         "from the depot, so the explicit GA download is a required step, not "
         "an optimization. Poll installer.bundles.list downloadStatus until "
-        "the set is SUCCESSFUL."
+        "the set is SUCCESSFUL; installer.bundles.download-status reads the "
+        "per-bundle failure message, isDownloadable flag and downloaded bytes, "
+        "so a FAILED bundle can be told apart as retry-worthy or not "
+        "downloadable from this depot."
     ),
 }
 
 
 def _instructions(
     *,
-    when_to_use: str,
+    when_to_call: str,
     output_shape: str,
+    next_step: str,
     parameter_hints: dict[str, str],
+    preconditions: str | None = None,
     result_scalars: tuple[str, ...] | None = None,
     result_digest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     instructions: dict[str, Any] = {
-        "when_to_use": when_to_use,
+        "when_to_call": when_to_call,
         "output_shape": output_shape,
+        "next_step": next_step,
         "parameter_hints": parameter_hints,
     }
+    if preconditions is not None:
+        instructions["preconditions"] = preconditions
     if result_scalars is not None:
         # #3084: the JSONFlux reduction hint — when the vendor object's
         # set-shaped field (validationChecks[] / sddcSubTasks[]) rides the
@@ -227,6 +252,20 @@ _SDDC_TASK_RESULT_DIGEST: dict[str, Any] = {
     "failed_states": ["FAILED", "COMPLETED_WITH_FAILURE"],
 }
 
+#: ``PageOfBundleDownloadStatusInfo`` digest (#3410). A release-wide read runs
+#: to ~180 rows and reduces to a handle; this hint adds per-``downloadStatus``
+#: counts and the ``bundleId`` of every IN_PROGRESS row inline. FAILED rows are
+#: deliberately NOT kept whole inline (a depot outage fails every row, which
+#: would put the whole set back inline); callers read them with a ``bundle_id``
+#: call or a ``result_query`` on the handle. Field names match the vendored
+#: ``vcf-installer-9.1`` OpenAPI (``components.schemas.BundleDownloadStatusInfo``).
+_BUNDLE_DOWNLOAD_STATUS_DIGEST: dict[str, Any] = {
+    "collection": "elements",
+    "status_field": "downloadStatus",
+    "name_field": "bundleId",
+    "active_states": ["IN_PROGRESS"],
+}
+
 
 #: The shared ``spec`` parameter hint for the submit primitives — carrying the
 #: 9.1 SddcSpec shape rules that are undocumented upstream and were each paid
@@ -234,7 +273,7 @@ _SDDC_TASK_RESULT_DIGEST: dict[str, Any] = {
 #: 2026-08-25). Field names pinned by the vendored ``vcf-installer-9.1``
 #: OpenAPI; the FLEET_LCM consequence observed live in the SDDC Manager
 #: inventory translation.
-_SDDC_SPEC_HINT = (
+SDDC_SPEC_HINT = (
     "The full SddcSpec object, POSTed verbatim. 9.1 shape rules proven live: "
     "(1) vspClusterSpec needs THREE unique FQDNs — platformFqdn, "
     "instanceFqdn AND fleetFqdn — each resolving (A+PTR) to its OWN address "
@@ -251,6 +290,24 @@ _SDDC_SPEC_HINT = (
     "datastoreSpec.vsanSpec.esaConfig.enabled=false. (5) The ipv4Pool "
     "ipRange needs >=12 free addresses for a small deployment."
 )
+
+
+#: A short placeholder SddcSpec for the examples. A real spec has many more
+#: fields; the parameter schema keeps ``spec`` open, so this is a valid call
+#: shape. Field names from the pinned ``vcf-installer-9.1`` OpenAPI
+#: (``components.schemas.SddcSpec``; ``sddcId``, ``vcenterSpec``,
+#: ``networkSpecs`` and ``dnsSpec`` are its required fields).
+SDDC_SPEC_EXAMPLE: dict[str, Any] = {
+    "sddcId": "<sddc-id>",
+    "vcfInstanceName": "<vcf-instance-name>",
+    "workflowType": "VCF",
+    "vcenterSpec": {"vcenterHostname": "<vcenter-fqdn>"},
+    "networkSpecs": [
+        {"networkType": "MANAGEMENT", "vlanId": "<vlan-id>", "subnet": "<subnet-cidr>"}
+    ],
+    "dnsSpec": {"subdomain": "<dns-subdomain>", "nameservers": ["<dns-server-ip>"]},
+    "hostSpecs": [{"hostname": "<esx-host-fqdn>"}],
+}
 
 
 def _sddc_spec_parameter_schema(posted_to: str) -> dict[str, Any]:
@@ -270,41 +327,56 @@ def _sddc_spec_parameter_schema(posted_to: str) -> dict[str, Any]:
         },
         "required": ["spec"],
         "additionalProperties": False,
+        "examples": [{"spec": SDDC_SPEC_EXAMPLE}],
+    }
+
+
+def _id_parameter_schema(description: str, example: str) -> dict[str, Any]:
+    """A ``{"id": <string>}`` parameter schema with one example call."""
+    return {
+        "type": "object",
+        "properties": {"id": {"type": "string", "minLength": 1, "description": description}},
+        "required": ["id"],
+        "additionalProperties": False,
+        "examples": [{"id": example}],
     }
 
 
 _SPEC_VALIDATE = InstallerTypedOp(
     op_id=INSTALLER_SPEC_VALIDATE_OP_ID,
     handler_attr="sddc_spec_validate",
-    summary="Submit an SddcSpec for a non-mutating validation dry-run.",
+    summary="Check an SddcSpec on the Installer before a bring-up (deploys nothing).",
     description=(
-        "Submits the SddcSpec to POST /v1/sddcs/validations — the Installer's "
-        "non-mutating dry-run — and returns the vendor Validation object the "
-        "moment the submit is accepted (typically executionStatus=IN_PROGRESS "
-        "with the id to poll). Poll installer.sddc.validation.status to the "
-        "terminal executionStatus and read the resultStatus verdict "
-        "(SUCCEEDED / WARNING / FAILED) plus per-check detail. Writes to the "
-        "installer appliance but mutates no estate. safety_level=caution."
+        "Sends the SddcSpec to POST /v1/sddcs/validations. The Installer checks the "
+        "spec and deploys nothing. Returns the validation run at once, usually "
+        "with executionStatus IN_PROGRESS; follow it with "
+        "installer.sddc.validation.status."
     ),
     parameter_schema=_sddc_spec_parameter_schema("/v1/sddcs/validations"),
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=VALIDATION_RESPONSE,
     group_key=_GROUP_BRINGUP,
     tags=("vcf", "installer", "bringup", "validation", "write"),
     safety_level="caution",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call with a full SddcSpec to dry-run-validate it on the Installer "
-            "before any bring-up is started. Nothing is deployed."
+        when_to_call=(
+            "Call with a full SddcSpec to check it before any bring-up starts. Nothing is deployed."
         ),
         output_shape=(
-            "{id, executionStatus, resultStatus, validationChecks: [...]}. "
-            "Keep the id and poll installer.sddc.validation.status until "
-            "executionStatus is terminal. When validationChecks reduces to "
-            "a JSONFlux handle, id / executionStatus / resultStatus stay "
-            "top-level on the result."
+            "{id, description, executionStatus, resultStatus, validationChecks: "
+            "[...]}. When validationChecks comes back as a result handle, id, "
+            "executionStatus and resultStatus stay top-level."
         ),
-        parameter_hints={"spec": _SDDC_SPEC_HINT},
+        next_step=(
+            "Keep the id. Call installer.sddc.validation.status with it until "
+            "executionStatus is no longer IN_PROGRESS."
+        ),
+        preconditions=(
+            "The depot is set and the release bundles are downloaded "
+            "(installer.bundles.list shows them SUCCESSFUL). The call runs at once, "
+            "without approval; it changes no system outside the Installer."
+        ),
+        parameter_hints={"spec": SDDC_SPEC_HINT},
         result_scalars=_VALIDATION_RESULT_SCALARS,
     ),
 )
@@ -312,43 +384,35 @@ _SPEC_VALIDATE = InstallerTypedOp(
 _VALIDATION_STATUS = InstallerTypedOp(
     op_id="installer.sddc.validation.status",
     handler_attr="sddc_validation_status",
-    summary="Status of one SddcSpec validation dry-run.",
+    summary="Read one SddcSpec validation run and its verdict.",
     description=(
-        "Reads one spec validation via GET /v1/sddcs/validations/{id} — the "
-        "Validation object whose executionStatus carries the IN_PROGRESS / "
-        "COMPLETED lifecycle, resultStatus the SUCCEEDED / WARNING / FAILED "
-        "verdict, and validationChecks[] the per-check detail. Requires the "
-        "validation id returned by installer.sddc.spec.validate. Works with "
-        "zero catalog ingest. safety_level=safe, read-only."
+        "Reads GET /v1/sddcs/validations/{id}: the validation run with "
+        "executionStatus (where the run is), resultStatus (SUCCEEDED, WARNING or "
+        "FAILED) and validationChecks[] (each check). Needs the id from "
+        "installer.sddc.spec.validate. Read-only."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "id": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The validation id returned by installer.sddc.spec.validate.",
-            },
-        },
-        "required": ["id"],
-        "additionalProperties": False,
-    },
-    response_schema={"type": "object", "additionalProperties": True},
+    parameter_schema=_id_parameter_schema(
+        "The validation id returned by installer.sddc.spec.validate.", "<validation-id>"
+    ),
+    response_schema=VALIDATION_RESPONSE,
     group_key=_GROUP_BRINGUP,
     tags=("read-only", "vcf", "installer", "bringup", "validation", "status"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call with a validation id to check whether an SddcSpec dry-run "
-            "has finished and whether it passed."
+        when_to_call=(
+            "Call with a validation id to see whether an SddcSpec check has "
+            "finished and whether it passed."
         ),
         output_shape=(
-            "{id, executionStatus, resultStatus, validationChecks: [...]}. "
-            "Terminal when executionStatus leaves IN_PROGRESS; surface any "
-            "FAILED check. When validationChecks reduces to a JSONFlux "
-            "handle, id / executionStatus / resultStatus stay top-level on "
-            "the result."
+            "{id, description, executionStatus, resultStatus, validationChecks: "
+            "[...]}. When validationChecks comes back as a result handle, id, "
+            "executionStatus and resultStatus stay top-level."
+        ),
+        next_step=(
+            "If executionStatus is IN_PROGRESS, call again later. If resultStatus is "
+            "SUCCEEDED or WARNING, go on with installer.sddc.bringup.start. If it is "
+            "FAILED, report the failed checks and fix the spec."
         ),
         parameter_hints={"id": "The validation id from installer.sddc.spec.validate."},
         result_scalars=_VALIDATION_RESULT_SCALARS,
@@ -360,35 +424,38 @@ _BRINGUP_START = InstallerTypedOp(
     handler_attr="sddc_bringup_start",
     summary="Start a VCF management-domain bring-up from an SddcSpec.",
     description=(
-        "Submits the SddcSpec to POST /v1/sddcs — the estate mutation — and "
-        "returns the vendor SddcTask the moment the deploy is accepted "
-        "(typically within seconds). The bring-up itself runs for hours on "
-        "the appliance; poll installer.sddc.bringup.status with the returned "
-        "id to a terminal state. dangerous + requires_approval — the dispatch "
-        "parks for approval first and the approver sees an SDDC "
-        "identity/network preview, never passwords. Run "
-        "installer.sddc.spec.validate to a SUCCEEDED/WARNING verdict first — "
-        "this primitive submits the spec as-is."
+        "Sends the SddcSpec to POST /v1/sddcs and starts the bring-up. A person "
+        "must approve first; the approver sees the SDDC names and networks, never "
+        "passwords. Returns the bring-up task at once. The bring-up runs for "
+        "hours."
     ),
     parameter_schema=_sddc_spec_parameter_schema("/v1/sddcs"),
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=SDDC_TASK_RESPONSE,
     group_key=_GROUP_BRINGUP,
     tags=("vcf", "installer", "bringup", "deploy", "dangerous"),
     safety_level="dangerous",
     requires_approval=True,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call with a validated SddcSpec to start the management-domain "
-            "bring-up. Parks for human approval before anything runs."
-        ),
+        when_to_call=("Call with a checked SddcSpec to start the management-domain bring-up."),
         output_shape=(
-            "{id, name, status, vcfInstanceName, ...} (SddcTask). Keep the id "
-            "and poll installer.sddc.bringup.status to terminal. When the "
-            "sub-task list reduces to a JSONFlux handle, id / status stay "
-            "top-level and a status_counts / in_progress / failed digest of "
-            "the sub-tasks rides inline (see installer.sddc.bringup.status)."
+            "{id, name, status, vcfInstanceName, ...} (SddcTask). When the "
+            "sub-task list comes back as a result handle, id and status stay "
+            "top-level, with a status_counts / in_progress / failed digest of the "
+            "sub-tasks (see installer.sddc.bringup.status)."
         ),
-        parameter_hints={"spec": _SDDC_SPEC_HINT},
+        next_step=(
+            "Keep the id. Call installer.sddc.bringup.status with it until status is "
+            "COMPLETED_WITH_SUCCESS, COMPLETED_WITH_FAILURE or ROLLBACK_SUCCESS. "
+            "ROLLBACK_SUCCESS means the bring-up failed and the Installer undid "
+            "what it had built; the task is finished, so stop polling."
+        ),
+        preconditions=(
+            "Run installer.sddc.spec.validate with the same spec first, and go on "
+            "only when its resultStatus is SUCCEEDED or WARNING; this call sends the "
+            "spec as it is. Check with installer.sddc.list that no bring-up is "
+            "running. A person must approve the call before it runs."
+        ),
+        parameter_hints={"spec": SDDC_SPEC_HINT},
         result_scalars=_SDDC_TASK_RESULT_SCALARS,
         result_digest=_SDDC_TASK_RESULT_DIGEST,
     ),
@@ -399,18 +466,10 @@ _BRINGUP_RETRY = InstallerTypedOp(
     handler_attr="sddc_bringup_retry",
     summary="Retry a failed VCF management-domain bring-up from its failed sub-task.",
     description=(
-        "Resumes a COMPLETED_WITH_FAILURE bring-up via PATCH /v1/sddcs/{id} — "
-        "the vendor retrySddc operation — and returns the same SddcTask the "
-        "moment the retry is accepted. The task re-runs from its failed "
-        "sub-task, not from scratch; poll installer.sddc.bringup.status with "
-        "the same id to a terminal state. The spec body is optional: omit it "
-        "to retry the stored SddcSpec as-is (the common transient-failure "
-        "case), or pass a corrected spec for the vendor's edit-and-retry "
-        "flow. dangerous + requires_approval — the dispatch parks first and "
-        "the approver sees the task id (plus, for edit-and-retry, the SDDC "
-        "identity/network preview), never passwords. Triage the failure via "
-        "installer.sddc.bringup.status (failed sub-tasks carry errors[]) "
-        "before retrying."
+        "Sends PATCH /v1/sddcs/{id} (the vendor retrySddc). The bring-up runs again "
+        "from its failed sub-task, not from the start. Leave out spec to retry the "
+        "stored spec, or pass a fixed spec. A person must approve first. Returns "
+        "the same bring-up task."
     ),
     parameter_schema={
         "type": "object",
@@ -434,25 +493,33 @@ _BRINGUP_RETRY = InstallerTypedOp(
         },
         "required": ["id"],
         "additionalProperties": False,
+        "examples": [{"id": "<bringup-task-id>"}],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=SDDC_TASK_RESPONSE,
     group_key=_GROUP_BRINGUP,
     tags=("vcf", "installer", "bringup", "retry", "dangerous"),
     safety_level="dangerous",
     requires_approval=True,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call with a failed bring-up task id to resume the deployment "
-            "from its failed sub-task. Parks for human approval before "
-            "anything runs. Read installer.sddc.bringup.status first to see "
-            "which sub-task failed and why."
+        when_to_call=(
+            "Call with the id of a failed bring-up to run it again from the failed sub-task."
         ),
         output_shape=(
-            "{id, name, status, vcfInstanceName, ...} (SddcTask). The id is "
-            "unchanged — keep polling installer.sddc.bringup.status with it "
-            "to terminal. When the sub-task list reduces to a JSONFlux handle, "
-            "id / status stay top-level and a status_counts / in_progress / "
-            "failed digest of the sub-tasks rides inline."
+            "{id, name, status, vcfInstanceName, ...} (SddcTask). The id does not "
+            "change. When the sub-task list comes back as a result handle, id and "
+            "status stay top-level, with a status_counts / in_progress / failed "
+            "digest of the sub-tasks."
+        ),
+        next_step=(
+            "Call installer.sddc.bringup.status with the same id until status is "
+            "COMPLETED_WITH_SUCCESS, COMPLETED_WITH_FAILURE or ROLLBACK_SUCCESS. "
+            "ROLLBACK_SUCCESS means the bring-up failed and the Installer undid "
+            "what it had built; the task is finished, so stop polling."
+        ),
+        preconditions=(
+            "installer.sddc.bringup.status shows status COMPLETED_WITH_FAILURE. Read "
+            "the errors[] of the failed sub-task first and fix the cause. A person "
+            "must approve the call before it runs."
         ),
         parameter_hints={
             "id": "The failed bring-up (SDDC) task id from the deploy.",
@@ -469,49 +536,41 @@ _BRINGUP_RETRY = InstallerTypedOp(
 _BRINGUP_STATUS = InstallerTypedOp(
     op_id="installer.sddc.bringup.status",
     handler_attr="sddc_bringup_status",
-    summary="Lifecycle status of one VCF bring-up task.",
+    summary="Read one VCF bring-up task: its status and its steps.",
     description=(
-        "Reads one VCF management-domain bring-up task via GET /v1/sddcs/{id} — "
-        "the SddcTask object whose top-level status carries the "
-        "IN_PROGRESS / COMPLETED_WITH_SUCCESS / COMPLETED_WITH_FAILURE lifecycle "
-        "state, plus sddcSubTasks[] and milestones[] for per-stage progress. "
-        "Requires the bring-up id returned by installer.sddc.bringup.start (or "
-        "the governed composite). The poll an operator (or the automation "
-        "add-on) runs while a bring-up is in flight or to triage a failed one. "
-        "Works with zero catalog ingest. safety_level=safe, read-only."
+        "Reads GET /v1/sddcs/{id}: the bring-up task with its status "
+        "(IN_PROGRESS, COMPLETED_WITH_SUCCESS, ROLLBACK_SUCCESS or "
+        "COMPLETED_WITH_FAILURE), sddcSubTasks[] (each step) and milestones[] "
+        "(the main stages). Needs the id from the start call or from "
+        "installer.sddc.list. Read-only."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "id": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The bring-up (SDDC) task id returned by the deploy.",
-            },
-        },
-        "required": ["id"],
-        "additionalProperties": False,
-    },
-    response_schema={"type": "object", "additionalProperties": True},
+    parameter_schema=_id_parameter_schema(
+        "The bring-up (SDDC) task id returned by the deploy.", "<bringup-task-id>"
+    ),
+    response_schema=SDDC_TASK_RESPONSE,
     group_key=_GROUP_BRINGUP,
     tags=("read-only", "vcf", "installer", "bringup", "status"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call with a bring-up id to check whether a VCF management-domain "
-            "deployment has completed, is still running, or failed."
+        when_to_call=(
+            "Call with a bring-up id to see whether a VCF management-domain "
+            "deployment has finished, is still running, or failed."
         ),
         output_shape=(
-            "{id, name, status, vcfInstanceName, sddcSubTasks: [...], "
-            "milestones: [...]}. Surface the top-level status and any failed "
-            "sub-task. On a live bring-up the ~260-row sddcSubTasks reduces to "
-            "a JSONFlux handle; the inline summary then keeps id / status and "
-            "carries a sub-task digest — status_counts (per-state counts), "
-            "in_progress (names of IN_PROGRESS sub-tasks), and failed "
-            "(FAILED / COMPLETED_WITH_FAILURE sub-tasks WITH their errors[], so "
-            "no drill-in is needed to triage or retry). Drill into the full "
-            "sddcSubTasks via result_query on the handle."
+            "{id, name, status, vcfInstanceName, sddcSubTasks: [...], milestones: "
+            "[...]}. On a live bring-up the ~260 sddcSubTasks come back as a result "
+            "handle. The inline summary then keeps id and status and adds a "
+            "digest: status_counts (steps per state), in_progress (names of running "
+            "steps) and failed (failed steps WITH their errors[])."
+        ),
+        next_step=(
+            "If status is IN_PROGRESS, call again later. If it is "
+            "COMPLETED_WITH_FAILURE, report the failed steps and their errors, fix "
+            "the cause, then use installer.sddc.bringup.retry. If it is "
+            "ROLLBACK_SUCCESS, the bring-up failed and the Installer undid what it "
+            "had built; report the failed steps and stop polling. Read all steps "
+            "with result_query on the handle."
         ),
         parameter_hints={"id": "The bring-up (SDDC) task id from the deploy."},
         result_scalars=_SDDC_TASK_RESULT_SCALARS,
@@ -524,6 +583,7 @@ _EMPTY_PARAMS: dict[str, Any] = {
     "type": "object",
     "properties": {},
     "additionalProperties": False,
+    "examples": [{}],
 }
 
 _SDDC_LIST = InstallerTypedOp(
@@ -531,54 +591,31 @@ _SDDC_LIST = InstallerTypedOp(
     handler_attr="sddc_list",
     summary="List every VCF bring-up task on the Installer with its id and status.",
     description=(
-        "Reads GET /v1/sddcs — every VCF bring-up (SDDC) task the Installer "
-        "knows, running or finished. Needs no id: use it to find the id of a "
-        "bring-up that was started (for example by an approved "
-        "installer.sddc.bringup.start) when that id was lost. Each task is cut "
-        "down to id / name / status / deploymentType / vcfInstanceName / "
-        "creationTimestamp; the large sddcSubTasks[] and milestones[] arrays are "
-        "dropped — read them with installer.sddc.bringup.status and the id. "
-        "Works with zero catalog ingest. safety_level=safe, read-only."
+        "Reads GET /v1/sddcs: every bring-up task the Installer knows, running or "
+        "done. Needs no id, so use it to find a lost bring-up id. Each row keeps "
+        "only id, name, status, deploymentType, vcfInstanceName and "
+        "creationTimestamp. Read-only."
     ),
     parameter_schema=_EMPTY_PARAMS,
-    response_schema={
-        "type": "object",
-        "properties": {
-            "elements": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string"},
-                        "name": {"type": "string"},
-                        "status": {"type": "string"},
-                        "deploymentType": {"type": "string"},
-                        "vcfInstanceName": {"type": "string"},
-                        "creationTimestamp": {"type": "string"},
-                    },
-                },
-            },
-            "pageMetadata": {"type": "object"},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=SDDC_LIST_RESPONSE,
     group_key=_GROUP_BRINGUP,
     tags=("read-only", "vcf", "installer", "bringup", "status", "list"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
+        when_to_call=(
             "Call to see which VCF bring-ups exist on the Installer and their "
-            "state, or to recover the id of a running bring-up you no longer "
-            "have, then poll installer.sddc.bringup.status with that id."
+            "state, or to find the id of a running bring-up you no longer have."
         ),
         output_shape=(
             "{elements: [{id, name, status, deploymentType, vcfInstanceName, "
             "creationTimestamp}], pageMetadata?}. status is IN_PROGRESS / "
             "COMPLETED_WITH_SUCCESS / ROLLBACK_SUCCESS / COMPLETED_WITH_FAILURE. "
-            "No sub-task detail here — call installer.sddc.bringup.status with "
-            "the id for it. A long list reduces to a JSONFlux handle; read the "
-            "rest with result_query."
+            "No step detail here. A long list comes back as a result handle."
+        ),
+        next_step=(
+            "Call installer.sddc.bringup.status with the id of the task you want "
+            "to follow. Read more rows with result_query on the handle."
         ),
         parameter_hints={},
     ),
@@ -589,30 +626,31 @@ _DEPOT_GET = InstallerTypedOp(
     handler_attr="system_depot_get",
     summary="Read the Installer's release-depot settings and connection status.",
     description=(
-        "Reads GET /v1/system/settings/depot — the DepotSettings object "
-        "(vmwareAccount / offlineAccount / depotConfiguration with "
-        "isOfflineDepot, hostname, port). Every password key is scrubbed at "
-        "every depth before the result crosses the governed surface; the "
-        "account status/message fields (e.g. DEPOT_CONNECTION_SUCCESSFUL) "
-        "survive, so this is the read that tells you whether a depot is "
-        "connected. safety_level=safe, read-only."
+        "Reads GET /v1/system/settings/depot: the depot settings (vmwareAccount, "
+        "offlineAccount, depotConfiguration). Every password field is removed. "
+        "The account status (for example DEPOT_CONNECTION_SUCCESSFUL) tells you "
+        "whether a depot is connected. Read-only."
     ),
     parameter_schema=_EMPTY_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=DEPOT_GET_RESPONSE,
     group_key=_GROUP_DEPOT,
     tags=("read-only", "vcf", "installer", "depot", "system"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to check whether (and which) release depot the Installer "
-            "is connected to before configuring one or triggering downloads."
+        when_to_call=(
+            "Call to check whether (and which) release depot the Installer is "
+            "connected to, before you set one or start downloads."
         ),
         output_shape=(
-            "{vmwareAccount?, offlineAccount?, depotConfiguration: "
-            "{isOfflineDepot, hostname, port, url}}. Account status carries "
-            "the connection verdict (e.g. DEPOT_CONNECTION_SUCCESSFUL); "
-            "password keys are scrubbed and never present."
+            "{vmwareAccount?, offlineAccount?, depotConfiguration: {isOfflineDepot, "
+            "hostname, port, url}}. The account status is the connection verdict; "
+            "password fields are never present."
+        ),
+        next_step=(
+            "If no account shows DEPOT_CONNECTION_SUCCESSFUL, set the depot with "
+            "installer.system.depot.set. If one does, go on with "
+            "installer.system.depot.sync-status."
         ),
         parameter_hints={},
     ),
@@ -621,19 +659,12 @@ _DEPOT_GET = InstallerTypedOp(
 _DEPOT_SET = InstallerTypedOp(
     op_id=INSTALLER_DEPOT_SET_OP_ID,
     handler_attr="system_depot_set",
-    summary="Configure the Installer's release depot (vendor connection check inline).",
+    summary="Set the Installer's release depot; the appliance tests the connection.",
     description=(
-        "Submits the DepotSettings object to PUT /v1/system/settings/depot. "
-        "The appliance runs its depot connection check synchronously, so the "
-        "result is the verdict: status='ok' with the scrubbed settings echo "
-        "on success, or the structured status='depot_error' (http_status + "
-        "vendor error_code + message) on rejection — the common "
-        "VMWARE_DEPOT_CONNECT_FAILURE TLS-trust case carries its remediation "
-        "inline (import the depot certificate via "
-        "installer.system.trusted-certificates.add first). caution + "
-        "requires_approval — appliance-scoped configuration that gates what "
-        "any later bring-up may install; the approval preview echoes "
-        "hostname/port/mode and username only, never a password."
+        "Sends the depot settings to PUT /v1/system/settings/depot. The appliance "
+        "tests the connection at once, so the answer is the verdict: status ok, "
+        "or status depot_error with the vendor error. A person must approve "
+        "first; the approver never sees a password."
     ),
     parameter_schema={
         "type": "object",
@@ -651,21 +682,46 @@ _DEPOT_SET = InstallerTypedOp(
         },
         "required": ["settings"],
         "additionalProperties": False,
+        "examples": [
+            {
+                "settings": {
+                    "offlineAccount": {
+                        "username": "<depot-user>",
+                        "password": "<depot-password>",
+                    },
+                    "depotConfiguration": {
+                        "isOfflineDepot": True,
+                        "hostname": "depot.example.com",
+                        "port": 443,
+                    },
+                }
+            }
+        ],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=DEPOT_SET_RESPONSE,
     group_key=_GROUP_DEPOT,
     tags=("vcf", "installer", "depot", "system", "write"),
     safety_level="caution",
     requires_approval=True,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to point the Installer at a release depot (offline/air-gapped "
-            "or the online Broadcom depot). Parks for approval. On depot_error "
-            "with VMWARE_DEPOT_CONNECT_FAILURE, follow the inline remediation."
+        when_to_call=(
+            "Call to point the Installer at a release depot: an offline "
+            "(air-gapped) depot or the online Broadcom depot."
         ),
         output_shape=(
-            "{status: 'ok', settings: {...scrubbed echo...}} or {status: "
+            "{status: 'ok', settings: {...password fields removed...}} or {status: "
             "'depot_error', http_status, error_code, message, remediation?}."
+        ),
+        next_step=(
+            "On ok, call installer.system.depot.sync-status until the catalog sync "
+            "has finished. On depot_error with VMWARE_DEPOT_CONNECT_FAILURE for an "
+            "HTTPS depot, import its certificate with "
+            "installer.system.trusted-certificates.add and call this again."
+        ),
+        preconditions=(
+            "Read the current settings with installer.system.depot.get first. The "
+            "depot must be reachable from the Installer. A person must approve the "
+            "call before it runs."
         ),
         parameter_hints={
             "settings": (
@@ -680,48 +736,35 @@ _DEPOT_SET = InstallerTypedOp(
 _DEPOT_SYNC_STATUS = InstallerTypedOp(
     op_id="installer.system.depot.sync-status",
     handler_attr="system_depot_sync_status",
-    summary="Read the Installer's depot catalog sync (ingest) state.",
+    summary="Read whether the Installer has finished loading the depot catalog.",
     description=(
-        "Reads GET /v1/system/settings/depot/depot-sync-info — the "
-        "DepotSyncInfo object (syncStatus / errorMessage / "
-        "lastSyncCompletionTimestamp). After installer.system.depot.set "
-        "connects a depot, the appliance ingests the release catalog in the "
-        "background; installer.bundles.list stays empty until that ingest "
-        "finishes. This read tells 'ingest still running' apart from "
-        "'ingest failed' and 'ingest done', so callers can wait for it "
-        "before listing or downloading bundles. Password keys are scrubbed. "
-        "safety_level=safe, read-only."
+        "Reads GET /v1/system/settings/depot/depot-sync-info: syncStatus, "
+        "errorMessage and lastSyncCompletionTimestamp. After a depot is set, the "
+        "appliance loads the release catalog in the background; "
+        "installer.bundles.list stays empty until that is done. Read-only."
     ),
     parameter_schema=_EMPTY_PARAMS,
-    response_schema={
-        "type": "object",
-        "properties": {
-            "syncStatus": {"type": "string"},
-            "errorMessage": {"type": "string"},
-            "lastSyncCompletionTimestamp": {"type": "string"},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=DEPOT_SYNC_STATUS_RESPONSE,
     group_key=_GROUP_DEPOT,
     tags=("read-only", "vcf", "installer", "depot", "system", "sync"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call after installer.system.depot.set succeeds, and poll it, to "
-            "know when the depot catalog has finished ingesting — before "
-            "installer.bundles.list / installer.bundles.download. Also call "
-            "when installer.bundles.list is empty, to tell 'still ingesting' "
-            "from 'ingest failed'."
+        when_to_call=(
+            "Call after installer.system.depot.set succeeds, and again until the "
+            "catalog sync is done, before installer.bundles.list or "
+            "installer.bundles.download. Also call it when installer.bundles.list "
+            "is empty, to tell 'still loading' from 'failed'."
         ),
         output_shape=(
-            "{syncStatus, errorMessage?, lastSyncCompletionTimestamp?}. "
-            "syncStatus is the vendor's state string, passed through as sent "
-            "(the 9.1 API does not list its values). The catalog is ready when "
-            "errorMessage is empty and lastSyncCompletionTimestamp is later "
-            "than the depot.set call; a non-empty errorMessage means the sync "
-            "failed — fix the depot instead of waiting. Confirm with a "
-            "non-empty installer.bundles.list."
+            "{syncStatus, errorMessage?, lastSyncCompletionTimestamp?}. syncStatus "
+            "is passed through as the vendor sends it (the 9.1 API does not list "
+            "its values)."
+        ),
+        next_step=(
+            "When errorMessage is empty and lastSyncCompletionTimestamp is later "
+            "than the depot.set call, call installer.bundles.list. A non-empty "
+            "errorMessage means the sync failed: fix the depot instead of waiting."
         ),
         parameter_hints={},
     ),
@@ -732,22 +775,26 @@ _TRUSTED_CERTIFICATES_LIST = InstallerTypedOp(
     handler_attr="system_trusted_certificates_list",
     summary="List the Installer's outbound trusted certificates.",
     description=(
-        "Reads GET /v1/sddc-manager/trusted-certificates — the appliance "
-        "outbound trust store (public certificate material). The read half "
-        "of the depot TLS-trust flow. safety_level=safe, read-only."
+        "Reads GET /v1/sddc-manager/trusted-certificates: the certificates the "
+        "appliance trusts when it connects out, for example to a depot. "
+        "Certificates are public. Read-only."
     ),
     parameter_schema=_EMPTY_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=TRUSTED_CERTIFICATES_LIST_RESPONSE,
     group_key=_GROUP_DEPOT,
     tags=("read-only", "vcf", "installer", "certificates", "system"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call to see which outbound TLS certificates the Installer "
-            "already trusts (e.g. before/after adding a depot certificate)."
+        when_to_call=(
+            "Call to see which outbound TLS certificates the Installer already "
+            "trusts, for example before or after you add a depot certificate."
         ),
-        output_shape="Vendor page of trusted certificates (public material).",
+        output_shape="{elements: [{alias, certificate}], pageMetadata}.",
+        next_step=(
+            "If the depot certificate is missing, add it with "
+            "installer.system.trusted-certificates.add."
+        ),
         parameter_hints={},
     ),
 )
@@ -757,14 +804,11 @@ _TRUSTED_CERTIFICATE_ADD = InstallerTypedOp(
     handler_attr="system_trusted_certificate_add",
     summary="Trust an outbound TLS certificate on the Installer (depot TLS trust).",
     description=(
-        "POSTs {certificate, certificateUsageType} to "
-        "/v1/sddc-manager/trusted-certificates. The fix for "
-        "VMWARE_DEPOT_CONNECT_FAILURE against an HTTPS depot with a "
-        "self-signed/private-CA certificate: import the depot's certificate "
-        "(usage TRUSTED_FOR_OUTBOUND, the default), then re-run "
-        "installer.system.depot.set. Certificates are public material — the "
-        "PEM rides the params verbatim and the preview echoes a fingerprint. "
-        "caution + requires_approval."
+        "Sends {certificate, certificateUsageType} to POST "
+        "/v1/sddc-manager/trusted-certificates. This fixes "
+        "VMWARE_DEPOT_CONNECT_FAILURE for an HTTPS depot with a self-signed or "
+        "private-CA certificate. A person must approve first; the approver sees "
+        "a fingerprint of the certificate."
     ),
     parameter_schema={
         "type": "object",
@@ -784,19 +828,26 @@ _TRUSTED_CERTIFICATE_ADD = InstallerTypedOp(
         },
         "required": ["certificate"],
         "additionalProperties": False,
+        "examples": [{"certificate": "<pem-certificate>"}],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=TRUSTED_CERTIFICATE_ADD_RESPONSE,
     group_key=_GROUP_DEPOT,
     tags=("vcf", "installer", "certificates", "system", "write"),
     safety_level="caution",
     requires_approval=True,
     llm_instructions=_instructions(
-        when_to_use=(
+        when_to_call=(
             "Call when installer.system.depot.set returns depot_error with "
-            "VMWARE_DEPOT_CONNECT_FAILURE for an HTTPS depot: trust the "
-            "depot's certificate, then retry depot.set."
+            "VMWARE_DEPOT_CONNECT_FAILURE for an HTTPS depot: trust the depot's "
+            "certificate."
         ),
-        output_shape="{status: 'ok', result: <vendor echo>}.",
+        output_shape="{status: 'ok', result: {elements: [{alias, certificate}], ...}}.",
+        next_step="Call installer.system.depot.set again with the same settings.",
+        preconditions=(
+            "Get the PEM certificate of the depot or of its CA from a source you "
+            "trust. Check with installer.system.trusted-certificates.list that it "
+            "is not there yet. A person must approve the call before it runs."
+        ),
         parameter_hints={
             "certificate": "PEM string of the depot/CA certificate.",
             "certificate_usage_type": "Omit for TRUSTED_FOR_OUTBOUND.",
@@ -807,51 +858,115 @@ _TRUSTED_CERTIFICATE_ADD = InstallerTypedOp(
 _BUNDLES_LIST = InstallerTypedOp(
     op_id="installer.bundles.list",
     handler_attr="bundles_list",
-    summary="List the Installer's bundle inventory (download states).",
+    summary="List the Installer's bundles and their download status.",
     description=(
-        "Reads GET /v1/bundles — the PageOfBundle inventory the catalog "
-        "ingest populates after a successful depot connect (typically within "
-        "about a minute; empty before any connect). Each element carries "
-        "id / version / downloadStatus / components — the poll target after "
-        "installer.bundles.download. safety_level=safe, read-only."
+        "Reads GET /v1/bundles: the bundles the catalog sync loaded after a depot "
+        "was set (empty before that). Each row has id, version, downloadStatus and "
+        "components. Use it to follow downloads after installer.bundles.download. "
+        "Read-only."
     ),
     parameter_schema=_EMPTY_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=BUNDLES_LIST_RESPONSE,
     group_key=_GROUP_DEPOT,
     tags=("read-only", "vcf", "installer", "bundles", "depot"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call after a depot connect to enumerate available bundles and "
-            "their download states, and to poll downloads to SUCCESSFUL "
-            "after installer.bundles.download."
+        when_to_call=(
+            "Call after the depot catalog sync to see the bundles and their "
+            "download status, and to follow downloads after "
+            "installer.bundles.download."
         ),
         output_shape=(
             "{elements: [{id, version, downloadStatus, components, ...}], "
-            "pageMetadata}. A 9.1 release depot advertises ~180 bundles — "
-            "filter by downloadStatus/version instead of dumping elements."
+            "pageMetadata}. A 9.1 release depot has about 180 bundles, so the list "
+            "comes back as a result handle; filter by downloadStatus or version."
+        ),
+        next_step=(
+            "Download the bundles of the target release with "
+            "installer.bundles.download. When a bundle is FAILED, read why with "
+            "installer.bundles.download-status."
         ),
         parameter_hints={},
+    ),
+)
+
+_BUNDLES_DOWNLOAD_STATUS = InstallerTypedOp(
+    op_id="installer.bundles.download-status",
+    handler_attr="bundles_download_status",
+    summary="Per-bundle download detail: status, failure message, progress.",
+    description=(
+        "Reads GET /v1/bundles/download-status. Each row has bundleId, version, "
+        "downloadStatus and the detail installer.bundles.list lacks: message (why "
+        "a download failed), downloadedSize, isDownloadable and the times. Filter "
+        "by bundle_id, release_version or image_type. Read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "bundle_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Only this bundle (an id from installer.bundles.list).",
+            },
+            "release_version": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Only bundles of this VCF release, e.g. 9.1.0.0.",
+            },
+            "image_type": {
+                "type": "string",
+                "enum": ["INSTALL", "PATCH"],
+                "description": "Only INSTALL or only PATCH bundles.",
+            },
+        },
+        "additionalProperties": False,
+        "examples": [{"release_version": "<vcf-release-version>", "image_type": "INSTALL"}],
+    },
+    response_schema=BUNDLES_DOWNLOAD_STATUS_RESPONSE,
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "bundles", "depot"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_call=(
+            "Call when installer.bundles.list shows a bundle as FAILED, or a "
+            "download seems stuck, to learn why and how far it got."
+        ),
+        output_shape=(
+            "{elements: [{bundleId, componentType, version, downloadStatus, "
+            "message?, downloadedSize?, isDownloadable?, downloadId?, "
+            "downloadScheduledTime, downloadStartTime?, downloadEndTime?, "
+            "isDownloadCancellable}], pageMetadata}. downloadedSize is bytes; "
+            "compare it with sizeMB from installer.bundles.list. A release-wide "
+            "read comes back as a handle with status_counts and the in_progress "
+            "bundle ids inline."
+        ),
+        next_step=(
+            "A FAILED row with isDownloadable=false cannot be downloaded from this "
+            "depot now: stop and fix the depot. A FAILED row with "
+            "isDownloadable=true and a transfer error in message is worth one more "
+            "installer.bundles.download. Read FAILED rows with bundle_id or "
+            "result_query."
+        ),
+        parameter_hints={
+            "bundle_id": "Pass one id to read a single bundle's detail.",
+            "release_version": "Pass the target release to check its whole set.",
+            "image_type": "INSTALL for bring-up bundles; omit for both.",
+        },
+        result_digest=_BUNDLE_DOWNLOAD_STATUS_DIGEST,
     ),
 )
 
 _BUNDLES_DOWNLOAD = InstallerTypedOp(
     op_id=INSTALLER_BUNDLES_DOWNLOAD_OP_ID,
     handler_attr="bundles_download",
-    summary="Trigger release-bundle downloads on the Installer (one approved batch).",
+    summary="Start release-bundle downloads on the Installer (one approved batch).",
     description=(
-        "PATCHes {bundleDownloadSpec: {downloadNow: true}} to "
-        "/v1/bundles/{id} for every id in bundle_ids — the mandatory "
-        "pre-download step of an air-gapped bring-up: a freshly connected "
-        "installer pins components to the newest catalog versions and "
-        "hard-fails the Versions-and-Bundles validation when those binaries "
-        "are absent, so the release bundles must be explicitly downloaded "
-        "BEFORE spec validation. Per-bundle vendor rejections are collected "
-        "(status 'partial'), not fatal; re-triggering an in-flight bundle is "
-        "harmless. Poll installer.bundles.list to SUCCESSFUL afterwards. "
-        "caution + requires_approval — one approval covers the batch; the "
-        "preview echoes the bundle count and ids."
+        "Sends PATCH /v1/bundles/{id} with downloadNow for every id in bundle_ids. "
+        "An offline bring-up needs this before the spec check, or the "
+        "Versions-and-Bundles check fails. A person approves the whole batch once. "
+        "A refused bundle does not stop the others (status partial)."
     ),
     parameter_schema={
         "type": "object",
@@ -865,22 +980,31 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
         },
         "required": ["bundle_ids"],
         "additionalProperties": False,
+        "examples": [{"bundle_ids": ["<bundle-id>"]}],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=BUNDLES_DOWNLOAD_RESPONSE,
     group_key=_GROUP_DEPOT,
     tags=("vcf", "installer", "bundles", "depot", "write"),
     safety_level="caution",
     requires_approval=True,
     llm_instructions=_instructions(
-        when_to_use=(
-            "Call after the bundle inventory populates to download the "
-            "release (GA) bundles before validating an SddcSpec. One "
-            "approval covers the whole batch."
+        when_to_call=(
+            "Call after the bundle list fills to download the release (GA) bundles "
+            "before you check an SddcSpec. One approval covers the whole batch."
         ),
         output_shape=(
-            "{status: 'ok'|'partial', accepted, failed, results: [{id, "
-            "status: 'accepted'|'failed', task_id?, error_code?, "
-            "message?}]}. Then poll installer.bundles.list."
+            "{status: 'ok'|'partial', accepted, failed, results: [{id, status: "
+            "'accepted'|'failed', task_id?, error_code?, message?}]}."
+        ),
+        next_step=(
+            "Call installer.bundles.list until every bundle of the release is "
+            "SUCCESSFUL. For a failed row, read installer.bundles.download-status."
+        ),
+        preconditions=(
+            "The depot catalog sync is done (installer.system.depot.sync-status) "
+            "and the ids come from installer.bundles.list. Starting a bundle that "
+            "is already downloading does no harm. A person must approve the call "
+            "before it runs."
         ),
         parameter_hints={
             "bundle_ids": (
@@ -896,7 +1020,8 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 #: failed-task retry between its submit and its poll, and the id-less task
 #: list after its poll; the depot family runs
 #: in its air-gapped lifecycle order: settings read/write → catalog sync
-#: read → trust store read/write → bundle inventory read/download).
+#: read → trust store read/write → bundle inventory read / download-detail
+#: read / download).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
@@ -910,6 +1035,7 @@ INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _TRUSTED_CERTIFICATES_LIST,
     _TRUSTED_CERTIFICATE_ADD,
     _BUNDLES_LIST,
+    _BUNDLES_DOWNLOAD_STATUS,
     _BUNDLES_DOWNLOAD,
 )
 

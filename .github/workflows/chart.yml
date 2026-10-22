@@ -1080,10 +1080,10 @@ jobs:
         #           broadcast subchart: 1500 XADDs are accepted by
         #           the chart-deployed Valkey Service. (The strict
         #           50 RPS / 30 s / p99 < 5 s rate-shape is verified
-        #           at the application layer by shape #1, the
-        #           ``backend/tests/integration/test_broadcast_load.py``
-        #           slow-lane harness — this kind-cluster equivalent
-        #           verifies the chart wiring, not the rate-shape.)
+        #           at the application layer by shape #1, a slow-lane
+        #           harness removed in #3758 with the automatic publish
+        #           path — this kind-cluster check verifies the chart
+        #           wiring, not the rate-shape.)
         #
         #   AC #2 — Valkey-pod restart resilience: a forced kill
         #           mid-load asserts pipeline RECOVERY (not data

@@ -39,7 +39,7 @@ the end, then return to the trail.
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
 | A user in `MEHO-SA-Operators` | Realm user | A second person, so a change the first admin asks for can be approved |
-| A user in no group, with `realm-management` → `realm-admin` | Realm user | The Keycloak admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its login. |
+| A user of realm `master` with every role of the client `meho-realm` | `master` user (not in realm `meho`) | The console admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its tokens. |
 
 !!! tip "There is an automation for this"
 
@@ -356,46 +356,73 @@ request. So the first admin needs this second person (or a member of
 The user's email does not need to be verified for device-code login to
 complete.
 
-## The Keycloak admin
+## The console admin
 
-The built-in Keycloak makes a third user at install,
-`keycloak-admin` (values key
-`coreKeycloak.firstLogin.keycloakAdminUsername`). It administers realm
-`meho` in the Keycloak admin console: it has the client role
-`realm-admin` of `realm-management`. Use it for the
-[Company login](login/index.md) recipes. It is in no MEHO group, so it
-cannot log in to MEHO itself.
+The built-in Keycloak makes a third user at install: the console
+admin, default name `console-admin` (values key
+`coreKeycloak.firstLogin.consoleAdminUsername`). It administers realm
+`meho` in the Keycloak admin console. Use it for the
+[Company login](login/index.md) recipes.
+
+The console admin is a user of realm `master`, not of realm `meho`. It
+holds every role of the client `meho-realm`: the client Keycloak makes in
+`master` to administer realm `meho`. That gives it the same powers over
+realm `meho` as `realm-admin`. It lives in `master` for a reason:
+`meho-admin` has `manage-users` in realm `meho`, so it can reset the
+password of any user there and take the account over. It cannot see
+users of realm `master`. MEHO refuses the console admin's tokens, because
+they do not come from realm `meho`.
 
 1. Route the admin console: set `coreKeycloak.ingress.exposeAdmin: true`
-   and run `helm upgrade`. A port-forward alone is not enough: Keycloak
+   and run `helm upgrade`. This routes `/auth/admin` and
+   `/auth/realms/master`. A port-forward alone is not enough: Keycloak
    sends the console to its public address `https://<host>/auth`, so the
    console's calls go through the ingress anyway.
-2. Read the temporary password:
+2. Read the user name and the temporary password from the Secret. Read
+   the name from the Secret, not from your values: the Secret keeps the
+   name of the first run.
 
     ```bash
-    kubectl -n <namespace> get secret <release>-core-keycloak-console \
-      -o jsonpath='{.data.password}' | base64 -d
+    kubectl -n <namespace> get secret <release>-core-console-admin \
+      -o jsonpath='{.data.username}' | base64 -d; echo
+    kubectl -n <namespace> get secret <release>-core-console-admin \
+      -o jsonpath='{.data.password}' | base64 -d; echo
     ```
 
-3. Open `https://<host>/auth/admin/meho/console/` and log in as
-   `keycloak-admin`. Keycloak asks for a new password, a name and an
-   email.
+3. Open `https://<host>/auth/admin/master/console/#/meho` and log in
+   with that name. Keycloak asks for a new password, a name and an
+   email. Then pick realm `meho` in the realm list, if the console does
+   not show it already.
 4. When you are done, set `exposeAdmin` back to `false` if you do not
    want the console on the internet.
 
-### Keycloak admin on an older install
+Only the first run of the bootstrap Job can make the console admin. That
+run uses the temporary first-start account, which is a `master` admin.
+Later runs use `meho-admin`, which cannot make users in realm `master`:
+they make nothing and only say in the log whether the Secret exists.
 
-An install made before this user existed has no account that can grant
-`realm-admin`: the temporary first-start account was removed on the
-first run, and `meho-admin` cannot grant a role it does not hold. The
-bootstrap Job then makes `keycloak-admin` and its Secret, does not fail,
-and says in its log that `realm-admin` is missing. Grant it once by hand
-with a temporary master admin
+Two names are refused:
+
+- A name that starts with `service-account-`. Keycloak uses that prefix
+  for its service accounts. This holds for all three users: the first
+  admin, the approver and the console admin.
+- A name a `master` user already has, when the Secret does not exist
+  yet. That user was not made by this install. The Job fails and asks
+  you to set `coreKeycloak.firstLogin.consoleAdminUsername` to another
+  name.
+
+### Console admin on an older install
+
+An install made before the console admin existed has no console admin,
+and the bootstrap Job cannot make one: the temporary first-start account
+was removed on the first run, and `meho-admin` cannot make users in realm
+`master`. The Job does not fail. It says in its log that there is no
+console admin and points here. Make one once by hand
 ([Keycloak: recovering the admin account](https://www.keycloak.org/server/bootstrap-admin-recovery)):
 
-1. Make a temporary admin in realm `master`. In the running Keycloak pod,
-   which already has the database settings (port 9001, because the server
-   uses 9000):
+1. Make a temporary admin in realm `master`. Skip this if you already
+   have a `master` admin. In the running Keycloak pod, which already has
+   the database settings (port 9001, because the server uses 9000):
 
     ```bash
     kubectl -n <namespace> exec -it <release>-keycloak-0 -- \
@@ -408,14 +435,27 @@ with a temporary master admin
 
 2. With `exposeAdmin: true` (see above), open
    `https://<host>/auth/admin/master/console/` and log in as `temp-admin`.
-3. Switch to realm `meho`. **Users → keycloak-admin → Role mapping →
-   Assign role → Filter by clients**, pick `realm-management`
-   `realm-admin`, **Assign**. (No `keycloak-admin` yet? Run
-   `helm upgrade` first, or create the user under **Users → Add user**.)
-4. Switch to realm `master`. **Users → temp-admin → Delete.**
+3. Stay in realm `master`. **Users → Add user**, user name
+   `console-admin` (any name that does not start with
+   `service-account-`), **Create**.
+4. **Credentials → Set password**. Turn **Temporary** on, so the user
+   picks a new password at the first login.
+5. **Role mapping → Assign role → Filter by clients**, search for
+   `meho-realm`, select all of its roles, **Assign**.
+6. Optional: keep the login in a Secret, as a new install does:
 
-The next `helm upgrade` prints `user keycloak-admin: has
-realm-management realm-admin`.
+    ```bash
+    kubectl -n <namespace> create secret generic <release>-core-console-admin \
+      --from-literal=username=console-admin \
+      --from-literal=password='<the temporary password>'
+    ```
+
+    The next `helm upgrade` then prints `console admin: kept`.
+
+7. **Users → temp-admin → Delete.** Skip this if you used an existing
+   `master` admin.
+
+Then log in as in [The console admin](#the-console-admin).
 
 ## The MCP client (`meho-mcp`)
 

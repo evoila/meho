@@ -148,8 +148,8 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert plan.realm_file == "/opt/meho/realm/meho-realm.json"
     assert plan.first_login_secret == f"{_RELEASE}-core-first-login"
     assert (plan.admin_username, plan.approver_username) == ("admin", "approver")
-    assert plan.keycloak_admin_secret == f"{_RELEASE}-core-keycloak-console"
-    assert plan.keycloak_admin_username == "keycloak-admin"
+    assert plan.console_admin_secret == f"{_RELEASE}-core-console-admin"
+    assert plan.console_admin_username == "console-admin"
     assert plan.ci.enabled is False
     assert plan.ci.secret_name == f"{_RELEASE}-core-ci-login"
     assert plan.tenants == ()
@@ -162,7 +162,7 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
             "--set",
             "coreKeycloak.firstLogin.approverUsername=second",
             "--set",
-            "coreKeycloak.firstLogin.keycloakAdminUsername=kc-root",
+            "coreKeycloak.firstLogin.consoleAdminUsername=kc-root",
             "--set",
             "coreKeycloak.ci.enabled=true",
             "--set",
@@ -172,7 +172,7 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert custom is not None
     plan = Plan.model_validate_json(_env(custom)["MEHO_CORE_KEYCLOAK_PLAN"]["value"])
     assert (plan.admin_username, plan.approver_username) == ("root-person", "second")
-    assert plan.keycloak_admin_username == "kc-root"
+    assert plan.console_admin_username == "kc-root"
     assert plan.ci.enabled is True
     assert plan.ci.tenant_id == _TENANT
 
@@ -274,7 +274,7 @@ def test_hook_role_may_read_and_patch_the_first_login_console_and_ci_secrets() -
     )
     rule = next(r for r in role["rules"] if r["verbs"] == ["get", "patch"])
     assert f"{_RELEASE}-core-first-login" in rule["resourceNames"]
-    assert f"{_RELEASE}-core-keycloak-console" in rule["resourceNames"]
+    assert f"{_RELEASE}-core-console-admin" in rule["resourceNames"]
     assert f"{_RELEASE}-core-ci-login" in rule["resourceNames"]
     assert role["metadata"]["annotations"]["helm.sh/hook"] == (
         "pre-install,pre-upgrade,post-install,post-upgrade"
@@ -310,7 +310,10 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     block = notes[notes.index("First login (built-in Keycloak)") :]
     assert '{{ printf "%s-core-first-login" .Release.Name }}' in block
     assert "kubectl -n {{ .Release.Namespace }} get secret" in block
-    assert "-o jsonpath='{.data.admin_password}' | base64 -d" in block
+    assert "-o jsonpath='{.data.admin_username}' | base64 -d" in block
+    # The Secret keeps the names of the first install, so the notes read
+    # them from it and never print the ones from values.
+    assert ".Values.coreKeycloak.firstLogin." not in block
     assert "meho login https://{{ .Values.coreKeycloak.hostname }}" in block
     assert "new password, a name and an email at the first login" in block
     assert "MEHO-Admins" in block
@@ -318,16 +321,16 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     assert "{{- if .Values.coreKeycloak.enabled }}" in notes[: notes.index("First login")]
 
 
-def test_notes_name_the_keycloak_admin_secret_and_console() -> None:
+def test_notes_name_the_console_admin_secret_and_console() -> None:
     notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
     block = notes[notes.index("Keycloak admin console (realm meho)") :]
     block = block[: block.index("{{- end }}\n{{- if and .Values.checkRunner")]
-    assert "{{ .Values.coreKeycloak.firstLogin.keycloakAdminUsername }}" in block
-    assert '{{ printf "%s-core-keycloak-console" .Release.Name }}' in block
-    assert "-o jsonpath='{.data.password}' | base64 -d" in block
-    assert "https://{{ .Values.coreKeycloak.hostname }}/auth/admin/meho/console/" in block
+    assert ".Values.coreKeycloak.firstLogin." not in block
+    assert '{{ printf "%s-core-console-admin" .Release.Name }}' in block
+    assert "-o jsonpath='{.data.username}' | base64 -d" in block
+    assert "https://{{ .Values.coreKeycloak.hostname }}/auth/admin/master/console/#/meho" in block
     assert "coreKeycloak.ingress.exposeAdmin=true" in block
-    assert "no MEHO group" in block
+    assert "a user of realm master" in block
 
 
 @pytest.mark.parametrize(
@@ -339,14 +342,24 @@ def test_notes_name_the_keycloak_admin_secret_and_console() -> None:
             "tenantId",
         ),
         (["--set", "coreKeycloak.firstLogin.adminUsername="], "adminUsername"),
-        (["--set", "coreKeycloak.firstLogin.keycloakAdminUsername="], "keycloakAdminUsername"),
+        (["--set", "coreKeycloak.firstLogin.consoleAdminUsername="], "consoleAdminUsername"),
+        (
+            ["--set", "coreKeycloak.firstLogin.consoleAdminUsername=service-account-meho-admin"],
+            "consoleAdminUsername",
+        ),
+        (
+            ["--set", "coreKeycloak.firstLogin.adminUsername=Service-Account-x"],
+            "adminUsername",
+        ),
         (["--set", "coreKeycloak.firstLogin.other=x"], "other"),
     ],
     ids=[
         "ci-needs-tenant",
         "ci-bad-tenant",
         "empty-username",
-        "empty-keycloak-admin-username",
+        "empty-console-admin-username",
+        "service-account-console-admin",
+        "service-account-admin",
         "unknown-key",
     ],
 )

@@ -11,12 +11,13 @@ matching MEHO group. Tracked in
 
 - The realm is set up and the five MEHO groups exist. See
   [Company login](index.md).
-- You can log in to the Keycloak admin console of realm `meho` as the
-  Keycloak admin (`keycloak-admin`, temporary password in the Secret
-  `<release>-core-keycloak-console`) at
-  `https://<meho-host>/auth/admin/meho/console/`. The console needs
+- You can log in to the Keycloak admin console as the console admin
+  (a user of realm `master`, default name `console-admin`; name and
+  temporary password in the Secret `<release>-core-console-admin`) at
+  `https://<meho-host>/auth/admin/master/console/#/meho`, then pick
+  realm `meho`. The console needs
   `coreKeycloak.ingress.exposeAdmin: true`. See
-  [The Keycloak admin](../keycloak-realm.md#the-keycloak-admin).
+  [The console admin](../keycloak-realm.md#the-console-admin).
 - You are an admin in authentik.
 
 Pick an alias for the identity provider, for example `authentik`. The

@@ -940,11 +940,11 @@
         "firstLogin": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): two people, with temporary passwords in <release>-core-first-login, and the Keycloak admin, with its temporary password in <release>-core-keycloak-console.",
+          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): two people, with temporary passwords in <release>-core-first-login, and the console admin (a user of realm master), with its temporary password in <release>-core-console-admin.",
           "properties": {
-            "adminUsername": { "type": "string", "minLength": 1, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
-            "approverUsername": { "type": "string", "minLength": 1, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." },
-            "keycloakAdminUsername": { "type": "string", "minLength": 1, "description": "User name of the Keycloak admin of realm meho (realm-management realm-admin, in no MEHO group). Its temporary password is in <release>-core-keycloak-console." }
+            "adminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
+            "approverUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." },
+            "consoleAdminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the console admin: a user of realm master with every role of the master client meho-realm, so it administers realm meho in the Keycloak admin console. Its temporary password is in <release>-core-console-admin." }
           }
         },
         "ci": {

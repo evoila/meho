@@ -25,10 +25,10 @@ Name of the hook ServiceAccount, Role and RoleBinding. The `bootstrap` Job
 {{/*
 Every `<release>-core-*` Secret name the hook Role may read and patch, one
 per line: the Secrets this Job makes, then the ones the realm stage (#4043:
-`first-login`, `keycloak-console`, `ci-login`) makes.
+`first-login`, `console-admin`, `ci-login`) makes.
 */}}
 {{- define "meho.core.secretNames" -}}
-{{- range list "postgres-superuser" "postgres-meho" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "broadcast-auth" "tls" "first-login" "keycloak-console" "ci-login" }}
+{{- range list "postgres-superuser" "postgres-meho" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "broadcast-auth" "tls" "first-login" "console-admin" "ci-login" }}
 {{ printf "%s-core-%s" $.Release.Name . }}
 {{- end }}
 {{- end }}

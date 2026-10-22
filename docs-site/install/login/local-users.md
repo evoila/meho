@@ -5,12 +5,13 @@ is small. You create each person in Keycloak by hand.
 
 **Before you start:** MEHO's built-in Keycloak made the realm `meho`
 at install, so the five MEHO groups exist. See
-[Company login](index.md). Log in to the admin console of realm `meho`
-as the Keycloak admin (`keycloak-admin`, temporary password in the
-Secret `<release>-core-keycloak-console`) at
-`https://<meho-host>/auth/admin/meho/console/`. The console needs
-`coreKeycloak.ingress.exposeAdmin: true`. See
-[The Keycloak admin](../keycloak-realm.md#the-keycloak-admin).
+[Company login](index.md). Log in to the Keycloak admin console as the
+console admin (a user of realm `master`, default name `console-admin`;
+name and temporary password in the Secret
+`<release>-core-console-admin`) at
+`https://<meho-host>/auth/admin/master/console/#/meho`. The console
+needs `coreKeycloak.ingress.exposeAdmin: true`. See
+[The console admin](../keycloak-realm.md#the-console-admin).
 
 ## Create a person
 

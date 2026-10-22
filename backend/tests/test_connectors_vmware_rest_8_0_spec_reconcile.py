@@ -44,6 +44,13 @@ the vendor VI/JSON file of each 8.0 update (``vcenter-8.0/vi-json-8.0u1.yaml``,
 missing method must have an entry in :data:`_NOT_IN_8_0_VI_JSON` with the reason;
 an entry that is no longer missing fails the lane too, so the list stays true.
 
+**vSAN methods against the 8.0 vSAN SDK (#4441).** The 8.0 VI/JSON files have
+no vSAN paths, so on vCenter 8.0 the connector sends vSAN methods as SOAP to
+``/vsanHealth``. The shelf-gated half checks every vSAN method the connector
+calls (every ``VsanMethod`` constant) against the method lists of the vendor's
+vSAN Management SDK for Python 8.0 U1 and U2
+(``vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt``, ``.../8.0u2/...``).
+
 The 8.0 U3 ``vcenter.yaml`` and the three 8.0 VI/JSON files are pinned on the
 shelf (provenance: the ``vsphere-8.x`` and ``vsphere-vi-json-8.0u*`` artifacts in
 ``docs/compatibility/vcf-api-contract-manifest.yaml``), and CI checks out
@@ -68,6 +75,7 @@ from meho_backplane.operations.ingest.catalog import load_spec_resource
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 from meho_backplane.operations.ingest.spec_corrections import apply_spec_correction
 from tests._spec_shelf import openapi_served_op_ids, require_shelf_spec
+from tests._vmware_vsan_methods import vsan_methods
 
 _SHIPPED_8_0_SPEC = "vmware_rest_8_0_minimal.yaml"
 _SHIPPED_9_0_SPEC = "vmware_rest_minimal.yaml"
@@ -232,16 +240,9 @@ _VI_JSON_8_0_FILES: dict[str, str] = {
 #: VI-JSON methods MEHO calls that an 8.0 VI/JSON file does not have. Each
 #: entry names the updates that lack it and why the call is still safe there.
 #: The lane fails when a file lacks a method that is not listed here, and when
-#: a listed method is in fact in the file.
-_NOT_IN_8_0_VI_JSON: dict[str, tuple[frozenset[str], str]] = {
-    "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary": (
-        frozenset(_VI_JSON_8_0_FILES),
-        "vSAN health service method, not a vim25 method: no 8.0 VI/JSON file has "
-        "the vSAN health service (VsanVcClusterHealthSystem) paths. "
-        "vmware.host.vsan_health calls it best-effort and returns "
-        "overall_health=null with a read_note when the call fails.",
-    ),
-}
+#: a listed method is in fact in the file. Empty today: the vSAN methods, which
+#: no 8.0 VI/JSON file has, go as SOAP on 8.0 (#4441, checked below).
+_NOT_IN_8_0_VI_JSON: dict[str, tuple[frozenset[str], str]] = {}
 
 #: ``POST:/<Type>/{moId}/<Method>`` -- the governed sub-op form.
 _SUB_OP_RE = re.compile(r"^POST:/([A-Z][A-Za-z0-9]*)/\{moId\}/([A-Za-z_][A-Za-z0-9_]*)$")
@@ -397,3 +398,36 @@ def test_vi_json_methods_exist_in_pinned_8_0_file(update: str) -> None:
         f"{spec_path.name} has these excluded methods, so remove {update!r} from "
         f"their _NOT_IN_8_0_VI_JSON entry: {stale}"
     )
+
+
+# ---------------------------------------------------------------------------
+# vSAN methods against the vendor vSAN Management SDK 8.0 U1 / U2 (#4441)
+# ---------------------------------------------------------------------------
+
+#: The method list of each vSAN SDK on the shelf: one ``Type.Method`` per line.
+_VSAN_8_0_METHOD_LISTS: dict[str, str] = {
+    "8.0u1": "vsan/8.0u1/vsan-8.0u1-methods.txt",
+    "8.0u2": "vsan/8.0u2/vsan-8.0u2-methods.txt",
+}
+
+
+def test_vsan_methods_are_not_vi_json_calls_on_8_0() -> None:
+    """The VI-JSON scan of the 8.0 lane does not see the vSAN methods.
+
+    On 8.0 they go as SOAP, so they must not show up as VI-JSON methods the
+    8.0 VI/JSON files would have to serve.
+    """
+    methods, _ = _scan_vi_json_calls()
+    for vsan_method in vsan_methods():
+        assert not any(op_id.endswith(f"/{vsan_method.method}") for op_id in methods)
+
+
+@pytest.mark.parametrize("update", sorted(_VSAN_8_0_METHOD_LISTS))
+def test_vsan_methods_exist_in_pinned_8_0_vsan_sdk(update: str) -> None:
+    """Each vSAN method the connector calls is in the vendor's vSAN SDK of that 8.0 update."""
+    list_path = require_shelf_spec(_SHELF_DIR, _VSAN_8_0_METHOD_LISTS[update])
+    served = {line.strip() for line in list_path.read_text(encoding="utf-8").splitlines()}
+    called = {f"{method.mo_type}.{method.method}" for method in vsan_methods()}
+    assert called, "the vSAN method collection found nothing"
+    missing = sorted(called - served)
+    assert not missing, f"{list_path.name} lacks vSAN methods MEHO calls: {missing}"

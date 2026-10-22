@@ -29,6 +29,12 @@ unconfigured (the #2980 harness contract) and run for real in CI, where
 the ``vcenter-9.0`` checkout is armed. The always-on pin test freezes
 the corrected constant strings so a regression to the unserved DRS path
 is caught even without the shelf (the portgroup lane's convention).
+
+**vSAN reads (#4441).** The vSAN methods the typed reads call (every
+``VsanMethod`` constant of the connector) are checked here too: on
+vCenter 9.x they are VI-JSON paths ``/vsan/<Type>/{moId}/<Method>``, so
+each must be a path of the pinned 9.0 ``vi-json.yaml``. Before #4441 the
+vSAN health read left out the ``/vsan`` part and vCenter answered 500.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from tests._spec_shelf import (
     openapi_served_op_ids,
     require_shelf_spec,
 )
+from tests._vmware_vsan_methods import vsan_methods, vsan_vi_json_op_id
 
 
 def _swept_op_ids() -> dict[str, str]:
@@ -140,3 +147,18 @@ def test_vim_read_sub_ops_are_served_by_the_pinned_vi_json_spec() -> None:
     served = openapi_served_op_ids(spec_path)
     _, vim = _partition_by_dispatch_leg()
     assert_op_ids_served(vim, served, spec_label="vcenter-9.0/vi-json.yaml")
+
+
+def test_vsan_read_paths_are_the_reconciled_keys() -> None:
+    """Pin the vSAN VI-JSON paths the connector calls (sandbox-safe, always runs)."""
+    assert {vsan_vi_json_op_id(method) for method in vsan_methods()} == {
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary",
+    }
+
+
+def test_vsan_read_paths_are_served_by_the_pinned_vi_json_spec() -> None:
+    """Every vSAN method the connector calls is a path of the pinned 9.0 vi-json.yaml."""
+    spec_path = require_shelf_spec("vcenter-9.0", "vi-json.yaml")
+    served = openapi_served_op_ids(spec_path)
+    vsan = {vsan_vi_json_op_id(method) for method in vsan_methods()}
+    assert_op_ids_served(vsan, served, spec_label="vcenter-9.0/vi-json.yaml")

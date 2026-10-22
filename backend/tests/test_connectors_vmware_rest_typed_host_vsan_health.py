@@ -11,14 +11,13 @@ session (no ``dispatch_child``, no ingested descriptor), so it works on a
 fresh boot with zero catalog ingest.
 
 The handler logic is exercised against a fake connector that records
-:meth:`mount_op_path` / :meth:`_post_json` calls, so the assertion
-targets are the call-shape contract (single cluster-scoped query,
-mounted, best-effort) and the parse/aggregation contract, without a live
-httpx transport. The end-to-end transport + modern/legacy mount routing
-is covered by the respx integration test in
-``tests/integration/test_connectors_vmware_rest_vcsim.py``. Output parity
-against the composite version is preserved byte-for-byte by these
-assertions (they mirror the pre-#2258 composite-read coverage).
+the :meth:`_post_vsan` calls, so the assertion targets are the call-shape
+contract (one cluster-scoped query on the vSAN health method, errors not
+hidden) and the parse/aggregation contract, without a live httpx
+transport. The real transport (VI-JSON on vCenter 9.x, SOAP on 8.0) is
+covered by ``tests/test_connectors_vmware_rest_vsan_transport.py``; the
+legacy ``/rest`` mount by the respx integration test in
+``tests/integration/test_connectors_vmware_rest_vcsim.py``.
 """
 
 from __future__ import annotations
@@ -31,16 +30,16 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.vmware_rest._mount import VsanMethod
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
 from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (
     HOST_VSAN_HEALTH_GROUP_KEY,
     VMWARE_HOST_VSAN_HEALTH_OP,
+    VSAN_QUERY_HEALTH_SUMMARY,
     build_vsan_query_health_params,
     host_vsan_health_impl,
 )
-
-_VSAN_PATH = "/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
 
 # ---------------------------------------------------------------------------
 # Fixtures / doubles
@@ -69,10 +68,10 @@ class _Target:
 
 
 class _FakeConnector:
-    """Records the transport calls ``host_vsan_health_impl`` makes.
+    """Records the vSAN calls ``host_vsan_health_impl`` makes.
 
-    Serves one canned ``VsanClusterHealthSummary`` on :meth:`_post_json`
-    (or raises ``post_error`` to exercise the best-effort path).
+    Serves one canned ``VsanClusterHealthSummary`` on :meth:`_post_vsan`
+    (or raises ``post_error``).
     """
 
     def __init__(
@@ -80,33 +79,23 @@ class _FakeConnector:
         *,
         summary: Any = None,
         post_error: Exception | None = None,
-        mount_prefix: str = "/api",
     ) -> None:
         self._summary = summary
         self._post_error = post_error
-        self._mount_prefix = mount_prefix
-        self.mount_calls: list[str] = []
-        self.post_calls: list[tuple[str, dict[str, Any]]] = []
+        self.post_calls: list[tuple[VsanMethod, dict[str, Any]]] = []
 
-    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
-        del target, operator
-        self.mount_calls.append(path)
-        return f"{self._mount_prefix}{path}"
-
-    async def _post_vmomi_json(
+    async def _post_vsan(
         self,
         target: Any,
-        path: str,
+        vsan_method: VsanMethod,
         *,
         operator: Operator,
-        json: dict[str, Any] | None = None,
+        json: dict[str, Any],
     ) -> Any:
-        # vmomi VsanQueryVcClusterHealthSummary read via the vmomi seam;
-        # the handler passes the spec-relative path (the /sdk/vim25 mount
-        # is the connector's job, #2466).
+        # The connector picks the transport (VI-JSON on 9.x, SOAP on 8.0);
+        # the handler only names the vSAN method and the arguments (#4441).
         del target, operator
-        assert json is not None
-        self.post_calls.append((path, json))
+        self.post_calls.append((vsan_method, json))
         if self._post_error is not None:
             raise self._post_error
         return self._summary
@@ -139,8 +128,16 @@ def test_build_query_params_scopes_to_cluster_moref() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_health_method_is_the_vsan_health_summary_on_the_health_system() -> None:
+    """The method, its vSAN object and the object's fixed id (vendor sample ``vsanapiutils.py``)."""
+    assert isinstance(VSAN_QUERY_HEALTH_SUMMARY, VsanMethod)
+    assert VSAN_QUERY_HEALTH_SUMMARY.mo_type == "VsanVcClusterHealthSystem"
+    assert VSAN_QUERY_HEALTH_SUMMARY.moid == "vsan-cluster-health-system"
+    assert VSAN_QUERY_HEALTH_SUMMARY.method == "VsanQueryVcClusterHealthSummary"
+
+
 @pytest.mark.asyncio
-async def test_queries_health_summary_for_cluster_mounted() -> None:
+async def test_queries_health_summary_for_cluster() -> None:
     """One health-service query fires, scoped to the cluster; groups + tests flatten."""
     summary = _vsan_summary(
         overall="green",
@@ -170,13 +167,10 @@ async def test_queries_health_summary_for_cluster_mounted() -> None:
 
     out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c123"})
 
-    # The vmomi read routes through _post_vmomi_json (not mount_op_path);
-    # the singleton moId rides the spec-relative path, the cluster MoRef is
-    # the body arg (#2466).
-    assert conn.mount_calls == []
+    # One call on the vSAN transport; the cluster MoRef is the body arg.
     assert len(conn.post_calls) == 1
-    path, body = conn.post_calls[0]
-    assert path == _VSAN_PATH
+    vsan_method, body = conn.post_calls[0]
+    assert vsan_method == VSAN_QUERY_HEALTH_SUMMARY
     assert body == {
         "cluster": {
             "_typeName": "ManagedObjectReference",
@@ -212,22 +206,67 @@ async def test_queries_health_summary_for_cluster_mounted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_is_best_effort_on_error() -> None:
-    """A failed health-service read nulls groups/overall + records a ``read_note``."""
+async def test_failed_vsan_call_raises_instead_of_empty_health() -> None:
+    """#4441: a failed vSAN call is not turned into empty health with a note."""
+    error = httpx.HTTPStatusError(
+        "vSAN fault",
+        request=httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/9.1.0.0/vsan/x"),
+        response=httpx.Response(500, json={"_typeName": "VsanFault"}),
+    )
+    conn = _FakeConnector(post_error=error)
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c404"})
+
+    assert raised.value is error
+
+
+@pytest.mark.asyncio
+async def test_answer_without_a_summary_raises() -> None:
+    """No health summary in the answer is an error, never an empty healthy-looking result."""
+    conn = _FakeConnector(summary=None)
+
+    with pytest.raises(RuntimeError, match="no health summary"):
+        await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c1"})
+
+
+@pytest.mark.asyncio
+async def test_single_group_and_test_become_lists() -> None:
+    """SOAP (vCenter 8.0) sends a list with one entry as a single dict; the op still lists it."""
     conn = _FakeConnector(
-        post_error=httpx.HTTPStatusError(
-            "boom",
-            request=httpx.Request("POST", "https://vc/vsanHealth"),
-            response=httpx.Response(400),
-        )
+        summary={
+            "overallHealth": "yellow",
+            "groups": {
+                "groupId": "com.vmware.vsan.health.test.data",
+                "groupName": "Data",
+                "groupHealth": "yellow",
+                "groupTests": {
+                    "testId": "com.vmware.vsan.health.test.objecthealth",
+                    "testName": "vSAN object health",
+                    "testHealth": "yellow",
+                    "testShortDescription": "Checks the health of vSAN objects.",
+                },
+            },
+        }
     )
 
-    out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c404"})
+    out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c1"})
 
-    assert out["cluster"] == "domain-c404"
-    assert out["overall_health"] is None
-    assert out["groups"] is None
-    assert "VsanQueryVcClusterHealthSummary" in out["read_note"]
+    assert out["groups"] == [
+        {
+            "group_id": "com.vmware.vsan.health.test.data",
+            "group_name": "Data",
+            "group_health": "yellow",
+            "tests": [
+                {
+                    "test_id": "com.vmware.vsan.health.test.objecthealth",
+                    "test_name": "vSAN object health",
+                    "test_health": "yellow",
+                    "test_short_description": "Checks the health of vSAN objects.",
+                }
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -276,6 +315,17 @@ def test_op_is_a_registered_typed_op() -> None:
     assert VMWARE_HOST_VSAN_HEALTH_OP.safety_level == "safe"
     assert VMWARE_HOST_VSAN_HEALTH_OP.requires_approval is False
     assert VMWARE_HOST_VSAN_HEALTH_OP.group_key == HOST_VSAN_HEALTH_GROUP_KEY
+
+
+def test_contract_has_no_read_note_any_more() -> None:
+    """#4441: failures are errors, so the answer has no ``read_note`` and always a group list."""
+    schema = VMWARE_HOST_VSAN_HEALTH_OP.response_schema or {}
+    assert "read_note" not in schema["properties"]
+    assert schema["properties"]["groups"]["type"] == "array"
+    assert schema["required"] == ["cluster", "overall_health", "groups"]
+    guidance = VMWARE_HOST_VSAN_HEALTH_OP.llm_instructions or {}
+    assert "read_note" not in guidance["output_shape"]
+    assert "read_note" not in VMWARE_HOST_VSAN_HEALTH_OP.description
 
 
 def test_handler_attr_resolves_to_a_connector_bound_method() -> None:

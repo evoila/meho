@@ -29,6 +29,7 @@ generic dispatcher stays vendor-neutral (CLAUDE.md postulate 5).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 SESSION_PATH_MODERN = "/api/session"
@@ -50,6 +51,17 @@ _KNOWN_API_MOUNT_PREFIXES = (f"{API_MOUNT_MODERN}/", f"{API_MOUNT_LEGACY}/")
 # accommodation, kept only as a fallback). See :func:`vmomi_mounted_path`.
 VI_JSON_MOUNT_PREFIX = "/sdk/vim25"
 
+# vSAN methods (#4441). vCenter 9.x serves them through VI-JSON under a
+# ``/vsan`` service segment: ``/sdk/vim25/{release}/vsan/{MoType}/{moId}/{method}``.
+# Source: the vendor VI/JSON files of 9.0, 9.1.0 and 9.1.1 (``servers`` url
+# ``/sdk/vim25/{release}``, path ``/vsan/VsanVcClusterHealthSystem/{moId}/
+# VsanQueryVcClusterHealthSummary``). The vendor VI/JSON files of 8.0 U1, U2
+# and U3 have no ``/vsan`` paths, so on vCenter 8.0 the connector sends vSAN
+# methods as SOAP to ``/vsanHealth`` instead (see :func:`vsan_needs_soap`).
+VSAN_PATH_PREFIX = "/vsan"
+#: The first vCenter major version whose VI/JSON API has the vSAN methods.
+VSAN_VI_JSON_MIN_MAJOR = 9
+
 # vSphere's list FilterSpec query params carry a ``filter.`` prefix on the
 # legacy ``/rest`` mount (``filter.datastores``, ``filter.hosts``, ...) but
 # are addressed by their bare name on the modern ``/api`` mount
@@ -62,12 +74,17 @@ __all__ = [
     "SESSION_PATH_LEGACY",
     "SESSION_PATH_MODERN",
     "VI_JSON_MOUNT_PREFIX",
+    "VSAN_PATH_PREFIX",
+    "VSAN_VI_JSON_MIN_MAJOR",
+    "VsanMethod",
     "adapt_filter_params",
     "api_mount_for_session_path",
     "is_vmomi_path",
     "mounted_path",
     "vmomi_mounted_path",
     "vmomi_release_from_version",
+    "vsan_method_path",
+    "vsan_needs_soap",
 ]
 
 
@@ -190,3 +207,45 @@ def vmomi_mounted_path(release: str, descriptor_path: str) -> str:
     """
     normalised = descriptor_path if descriptor_path.startswith("/") else f"/{descriptor_path}"
     return f"{VI_JSON_MOUNT_PREFIX}/{release}{normalised}"
+
+
+@dataclass(frozen=True, slots=True)
+class VsanMethod:
+    """One vSAN method on a vSAN object that vCenter serves for all clusters.
+
+    vCenter gives each of these objects a fixed id, for example
+    ``vsan-cluster-health-system`` for ``VsanVcClusterHealthSystem`` (vendor
+    sample ``vsanapiutils.py`` of the vSAN Management SDK). Every vSAN
+    operation declares the method it calls as one module-level constant of
+    this type and sends it with ``VmwareRestConnector._post_vsan``. The
+    reconcile lanes collect these constants and check each method against
+    the vendor files.
+    """
+
+    mo_type: str
+    moid: str
+    method: str
+
+
+def vsan_method_path(mo_type: str, moid: str, method: str) -> str:
+    """The VI-JSON path of one vSAN method: ``/vsan/{MoType}/{moId}/{method}``.
+
+    The one helper that builds every vSAN path. The result is spec-relative:
+    :func:`vmomi_mounted_path` puts ``/sdk/vim25/{release}`` in front of it,
+    the same as for any other VI-JSON method. With ``moid="{moId}"`` it gives
+    the path as the vendor VI/JSON file writes it.
+    """
+    return f"{VSAN_PATH_PREFIX}/{mo_type}/{moid}/{method}"
+
+
+def vsan_needs_soap(version: str | None) -> bool:
+    """``True`` when a vCenter of *version* has no VI-JSON vSAN methods (8.0 and older).
+
+    *version* is the vCenter version the connector detected (``8.0.3.0``,
+    ``9.1.0.0``, ...). An unknown or unreadable version gives ``False``: the
+    call then stays on VI-JSON, the path for current vCenter releases.
+    """
+    release = vmomi_release_from_version(version)
+    if release is None:
+        return False
+    return int(release.split(".", 1)[0]) < VSAN_VI_JSON_MIN_MAJOR

@@ -701,7 +701,8 @@ async def test_host_vsan_health_over_legacy_mount_routes_to_rest(
     legacy path, and the ``VsanQueryVcClusterHealthSummary`` call must
     route through ``/rest`` via ``mount_op_path`` or it 404s — the
     modern+legacy mount coverage on the #2258 typed-op path, with zero
-    ingested descriptors.
+    ingested descriptors. The vSAN path keeps its ``/vsan`` part on every
+    mount (#4441).
     """
 
     async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
@@ -709,7 +710,8 @@ async def test_host_vsan_health_over_legacy_mount_routes_to_rest(
 
     connector = VmwareRestConnector(session_loader=_loader)
     vsan_path = (
-        "/rest/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
+        "/rest/vsan/VsanVcClusterHealthSystem/vsan-cluster-health-system/"
+        "VsanQueryVcClusterHealthSummary"
     )
 
     async with respx.mock(

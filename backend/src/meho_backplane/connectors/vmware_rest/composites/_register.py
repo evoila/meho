@@ -105,6 +105,9 @@ from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_process_list_composite,
     guest_program_run_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._guest_event_perf_llm_instructions import (
+    GUEST_EVENT_PERF_LLM_INSTRUCTIONS,
+)
 from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
     disk_mark_flash_composite,
@@ -654,16 +657,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.event.tail",
         handler=event_tail_composite,
-        summary="Read vCenter events via EventManager.QueryEvents, with optional filters.",
+        summary="Read vCenter events, filtered by time, event type or one object.",
         description=(
-            "Calls EventManager.QueryEvents (vi-json) against the "
-            "EventManager singleton with an EventFilterSpec. Optional "
-            "filters: a time window (begin_time / end_time), event types "
-            "(event_type_ids) and one managed entity (entity). max_count "
-            "limits the result on the server. Each event comes back as a "
-            "short row: createdTime, eventTypeId, fullFormattedMessage, "
-            "entity. Equivalent of 'govc events' for the operator-facing "
-            "workflow. Read-only -- never mutates the event store."
+            "Reads events from the vCenter event log (EventManager.QueryEvents). Optional "
+            "filters: a time window, event types and one object. max_count limits the result on "
+            "the server. Each event is a short row: time, type, message and the object it is "
+            "about. Read-only."
         ),
         parameter_schema=EVENT_TAIL_PARAMETER_SCHEMA,
         response_schema=EVENT_TAIL_RESPONSE_SCHEMA,
@@ -671,19 +670,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "events", "vi-json"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.event.tail"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.performance.summary",
         handler=performance_summary_composite,
-        summary="Summarise performance metrics for one entity via PerformanceManager.",
+        summary="Read the performance counters and recent samples of one VM, host or cluster.",
         description=(
-            "Discovers available counters for the target entity via "
-            "PerformanceManager.QueryAvailablePerfMetric, then fetches "
-            "sample values via PerformanceManager.QueryPerf (both "
-            "vi-json). Returns the available-counter list plus the "
-            "capped sample list; the caller can post-filter to whichever "
-            "metric they need. Read-only -- never mutates counter "
-            "configuration."
+            "Lists the performance counters vCenter has for one object (QueryAvailablePerfMetric) "
+            "and reads their recent samples (QueryPerf). Counters are given by number. "
+            "max_samples limits the samples per counter for real-time data. Read-only."
         ),
         parameter_schema=PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
         response_schema=PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
@@ -691,6 +687,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "performance", "vi-json"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.performance.summary"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.datastore.usage",
@@ -1370,15 +1367,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.process.list",
         handler=guest_process_list_composite,
-        summary="List processes running in a VM's guest OS via VMware Tools.",
+        summary="List the processes running in a VM's guest OS (needs VMware Tools).",
         description=(
-            "Lists the guest OS processes (name / pid / owner / cmdLine / "
-            "startTime / exitCode) via the vim GuestProcessManager "
-            "ListProcessesInGuest, authenticating with the guest credential "
-            "resolved from the target's secret_ref. The exec-status shape: "
-            "'what is running / did that service start / what exit code'. "
-            "Governed replacement for 'govc guest.ps'. Read-only -- never "
-            "mutates guest state. Requires VMware Tools in the guest."
+            "Lists the processes in the guest OS (ListProcessesInGuest): name, pid, owner, "
+            "command line, start time and, for programs started with vm.guest.program.run, "
+            "end time and exit code. Uses the guest login from the target's secret. max_processes "
+            "limits the list. Read-only."
         ),
         parameter_schema=GUEST_PROCESS_LIST_PARAMETER_SCHEMA,
         response_schema=GUEST_PROCESS_LIST_RESPONSE_SCHEMA,
@@ -1386,36 +1380,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "guest", "vi-json", "tools"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Inspect what is running inside a VM's guest OS -- verifying a "
-                "service started, checking a process's exit code, triaging a "
-                "first-boot appliance. Not for host/VM-level process state (that "
-                "is the ESXi/vCenter surface), only in-guest processes."
-            ),
-            "preconditions": (
-                "VMware Tools running in the guest; the target's Vault secret "
-                "carries guest_username / guest_password. No credential goes in "
-                "params."
-            ),
-            "result_shape": (
-                "{vm, process_manager_moid, processes[], count, "
-                "max_processes_applied}; the process list is JSONFlux-wrapped "
-                "into a result handle when large -- drill in with result_query."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS[
+            "vmware.composite.vm.guest.process.list"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.env.read",
         handler=guest_env_read_composite,
-        summary="Read environment variables from a VM's guest OS via VMware Tools.",
+        summary="Read environment variables from a VM's guest OS (needs VMware Tools).",
         description=(
-            "Reads the guest user's environment variables (as NAME=value "
-            "strings) via the vim GuestProcessManager "
-            "ReadEnvironmentVariableInGuest, authenticating with the guest "
-            "credential from the target's secret_ref. Omit 'names' for the whole "
-            "environment, or pass specific names. Read-only. Requires VMware "
-            "Tools in the guest."
+            "Reads the guest user's environment variables as NAME=value strings "
+            "(ReadEnvironmentVariableInGuest). Omit names to read all of them. Uses the guest "
+            "login from the target's secret. Read-only."
         ),
         parameter_schema=GUEST_ENV_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_ENV_READ_RESPONSE_SCHEMA,
@@ -1423,33 +1399,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "guest", "vi-json", "tools"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Read the guest OS environment of a running VM -- confirming a "
-                "PATH, a proxy variable, or a first-boot configuration value the "
-                "guest exports."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref (guest_username / guest_password). Never in params."
-            ),
-            "result_shape": (
-                "{vm, process_manager_moid, variables[], count}; variables is "
-                "JSONFlux-wrapped when large."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.env.read"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.net.show",
         handler=guest_net_show_composite,
-        summary="Show Tools-reported guest network state (no guest credentials).",
+        summary="Show the network settings VMware Tools reports for a guest OS (no guest login).",
         description=(
-            "Reads the VM's Tools-reported guest network state -- per-NIC IPs / "
-            "MAC / connected (guest.net, GuestNicInfo) and routes / DNS / "
-            "gateways (guest.ipStack, GuestStackInfo) -- via RetrievePropertiesEx. "
-            "This is reported state on the VM object, so it needs NO in-guest "
-            "authentication and runs nothing inside the guest: the 'read ip "
-            "addr / routes' diagnosis without a guest login. Read-only."
+            "Reads the guest network state VMware Tools reports on the VM: per NIC the IP "
+            "addresses, MAC and connected flag (guest.net), and the routes, DNS and gateways "
+            "(guest.ipStack). Needs no guest login and runs nothing in the guest. Read-only."
         ),
         parameter_schema=GUEST_NET_SHOW_PARAMETER_SCHEMA,
         response_schema=GUEST_NET_SHOW_RESPONSE_SCHEMA,
@@ -1457,39 +1416,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "guest", "vi-json", "networking"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "See what network configuration a guest actually has (addresses, "
-                "routes, DNS, gateways) as VMware Tools reports it -- e.g. "
-                "diagnosing why an appliance is unreachable. The only guest read "
-                "that needs no guest credentials."
-            ),
-            "preconditions": "VMware Tools running in the guest (reports the state).",
-            "result_shape": "{vm, nics[], ip_stacks[]}.",
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.net.show"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.file.read",
         handler=guest_file_read_composite,
-        summary="Read a guest file's metadata, or (opt-in) fetch its bytes inline.",
+        summary="Read a guest file's size and attributes, or (opt-in) the file itself.",
         description=(
-            "Initiates a guest file read via the vim GuestFileManager "
-            "InitiateFileTransferFromGuest, authenticating with the guest "
-            "credential from the target's secret_ref, for guest_path. With "
-            "fetch_content=false (default) it returns the FileTransferInformation "
-            "(file size, POSIX/Windows attributes, and a one-time transfer URL) -- "
-            "existence + size + attributes without MEHO proxying the bytes. With "
-            "fetch_content=true MEHO fetches the bytes server-side over the "
-            "one-time transfer URL and returns them as content_lines (utf-8 text, "
-            "or wide base64 chunks for binary, flagged by content_encoding), "
-            "capped by max_inline_bytes (default 1 MiB, hard cap 8 MiB) and "
-            "JSONFlux-wrapped into a result handle when large; a file over the cap "
-            "is refused (not truncated) with an error naming its size, and the "
-            "transfer URL + token are never returned or logged. Reads run as the "
-            "in-guest login from the target's secret_ref (often root / "
-            "Administrator) with no path allow-list, so the op is caution-tier: "
-            "it auto-parks for agent / service principals (a human operator diag "
-            "read still executes immediately). Requires VMware Tools in the guest."
+            "Starts a file download from the guest OS (InitiateFileTransferFromGuest). By default "
+            "it returns size, attributes and a one-time download link. With fetch_content=true "
+            "MEHO downloads the file and returns it as text or base64 parts, up to "
+            "max_inline_bytes. Needs VMware Tools."
         ),
         parameter_schema=GUEST_FILE_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_FILE_READ_RESPONSE_SCHEMA,
@@ -1505,57 +1442,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         # conservative posture chosen in review over per-param tiering).
         safety_level="caution",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Confirm a file's existence / size / attributes in a guest OS, "
-                "or obtain a one-time transfer URL for it. Set fetch_content=true "
-                "to get the bytes inline (as content_lines); large files return a "
-                "result handle to page with result_query. Files over "
-                "max_inline_bytes are refused, not truncated. Reads as the "
-                "in-guest user (often privileged) with no allow-list, so it can "
-                "disclose sensitive file contents; caution-tier -- auto-parks for "
-                "agent / service principals."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref. Guest user must be able to read guest_path."
-            ),
-            "result_shape": (
-                "{vm, file_manager_moid, guest_path, size_bytes, attributes} plus, "
-                "when fetch_content=false: {url, content_fetch='deferred'}; when "
-                "fetch_content=true: {content_fetch='inline', content_encoding, "
-                "content_lines} (content_lines JSONFlux-wrapped when large; url "
-                "omitted)."
-            ),
-            # Preserve the identifying/size scalars on the reduced summary when a
-            # large fetched file spills content_lines to a handle (#3084), so the
-            # metadata envelope survives alongside the handle.
-            "result_scalars": {
-                "keys": [
-                    "vm",
-                    "file_manager_moid",
-                    "guest_path",
-                    "size_bytes",
-                    "content_fetch",
-                    "content_encoding",
-                ]
-            },
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.file.read"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.file.write",
         handler=guest_file_write_composite,
-        summary="Write a file into a VM's guest OS (dangerous / approval-required).",
+        summary="Write a text file into a VM's guest OS (needs approval).",
         description=(
-            "Writes UTF-8 content to guest_path inside a VM's guest OS via the "
-            "vim GuestFileManager InitiateFileTransferToGuest (which mints a "
-            "one-time PUT URL) followed by a direct PUT of the bytes -- the vim "
-            "API's two-step design. Authenticates with the guest credential from "
-            "the target's secret_ref (never in params). The single WRITE of the "
-            "guest-ops channel: dangerous / approval-required, gated through the "
-            "standard approvals plane -- a parked / denied approval mints no URL "
-            "and PUTs no bytes. The park's proposed_effect echoes path + byte "
-            "size + overwrite only, never the content. Requires VMware Tools."
+            "Writes UTF-8 text to guest_path in the guest OS: InitiateFileTransferToGuest gives "
+            "a one-time upload link, then MEHO uploads the bytes. Uses the guest login from the "
+            "target's secret. A second person must approve; the preview shows path and size, "
+            "never the content."
         ),
         parameter_schema=GUEST_FILE_WRITE_PARAMETER_SCHEMA,
         response_schema=GUEST_FILE_WRITE_RESPONSE_SCHEMA,
@@ -1563,43 +1460,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "guest", "vi-json", "file"],
         safety_level="dangerous",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Place a config/repair file into a running guest OS (e.g. an "
-                "MTU/network drop-in) without out-of-band scp. Approval-gated -- "
-                "expect the call to park for a human decision unless a standing "
-                "grant auto-executes it."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref. Guest user must be able to write guest_path."
-            ),
-            "result_shape": (
-                "On execute: {status='written', vm, file_manager_moid, "
-                "guest_path, size_bytes, overwrite}. On gate: the approval "
-                "OperationResult verbatim (awaiting_approval / denied)."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.file.write"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.program.run",
         handler=guest_program_run_composite,
-        summary="Run a program in a VM's guest OS (dangerous / approval-required).",
+        summary="Run a program in a VM's guest OS (needs approval).",
         description=(
-            "Runs a program inside a VM's guest OS via the vim "
-            "GuestProcessManager StartProgramInGuest, authenticating with the "
-            "guest credential from the target's secret_ref (never in params). "
-            "The governed replacement for out-of-band 'govc guest.run': the "
-            "freeform in-guest execution tier #3100 deliberately deferred, now "
-            "lifted. StartProgramInGuest is fire-and-forget and returns only a "
-            "PID (no output is captured); with wait=true the op polls "
-            "ListProcessesInGuest until the process exits or timeout_seconds "
-            "elapses, returning the exit code and start/end times. "
-            "dangerous / approval-required, gated through the standard "
-            "approvals plane -- a parked / denied approval starts no program. "
-            "The 'arguments' string and 'env' values may carry secrets and are "
-            "redacted from the approval preview, the result, and logs. Requires "
-            "VMware Tools."
+            "Starts a program in the guest OS (StartProgramInGuest) with the guest login from "
+            "the target's secret. No output is captured. With wait=true it waits for the exit "
+            "code, up to timeout_seconds. A second person must approve. arguments and env are "
+            "never shown in the preview, the result or logs."
         ),
         parameter_schema=GUEST_PROGRAM_RUN_PARAMETER_SCHEMA,
         response_schema=GUEST_PROGRAM_RUN_RESPONSE_SCHEMA,
@@ -1607,31 +1478,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "guest", "vi-json", "exec"],
         safety_level="dangerous",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Execute a command inside a running guest OS (e.g. "
-                "Install-WindowsFeature, an AD DS promotion, a systemctl "
-                "invocation) without out-of-band govc guest.run. Approval-gated "
-                "-- expect the call to park for a human decision unless a "
-                "standing grant auto-executes it. Set wait=true to get the exit "
-                "code; note StartProgramInGuest captures no stdout, so redirect "
-                "to a file and read it back with guest.file.read if you need "
-                "output. Setting 'env' REPLACES the guest environment rather "
-                "than augmenting it."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref. Guest user must be allowed to run the program."
-            ),
-            "result_shape": (
-                "On execute: {status, vm, process_manager_moid, program_path, "
-                "pid, exit_code, start_time, end_time, wait}. status is "
-                "'started' (wait=false), 'exited' (exit code captured), "
-                "'timeout' (still running at timeout), or 'exit_unknown' (exit "
-                "info aged out / Tools restarted). On gate: the approval "
-                "OperationResult verbatim (awaiting_approval / denied)."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.program.run"],
     ),
     # ----------------------------------------------------------------
     # namespace-management -- Supervisor (WCP) lifecycle (#3281).

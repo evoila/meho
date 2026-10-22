@@ -56,6 +56,15 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._guest_perf_response_schemas import (
+    GUEST_FILE_ATTRIBUTES_SCHEMA,
+    GUEST_NIC_INFO_SCHEMA,
+    GUEST_PROCESS_INFO_SCHEMA,
+    GUEST_STACK_INFO_SCHEMA,
+    PERF_ENTITY_METRIC_SCHEMA,
+    PERF_METRIC_ID_SCHEMA,
+)
+
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
@@ -341,6 +350,14 @@ EVENT_TAIL_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [
+        {
+            "begin_time": "2026-10-19T08:00:00Z",
+            "event_type_ids": ["VmPoweredOnEvent"],
+            "entity": {"moId": "vm-42", "type": "VirtualMachine", "recursion": "self"},
+            "max_count": 50,
+        }
+    ],
 }
 
 
@@ -418,6 +435,7 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["entity_moid"],
     "additionalProperties": False,
+    "examples": [{"entity_moid": "host-21", "interval_seconds": 20, "max_samples": 15}],
 }
 
 
@@ -744,9 +762,18 @@ EVENT_TAIL_RESPONSE_SCHEMA: dict[str, Any] = {
                     "entity": {
                         "type": ["object", "null"],
                         "properties": {
-                            "type": {"type": ["string", "null"]},
-                            "moId": {"type": ["string", "null"]},
-                            "name": {"type": ["string", "null"]},
+                            "type": {
+                                "type": ["string", "null"],
+                                "description": "vim type, e.g. 'VirtualMachine'.",
+                            },
+                            "moId": {
+                                "type": ["string", "null"],
+                                "description": "Moid, e.g. 'vm-42'.",
+                            },
+                            "name": {
+                                "type": ["string", "null"],
+                                "description": "Name of the object when the event gives it.",
+                            },
                         },
                         "description": (
                             "The managed entity the event is about (the most "
@@ -795,17 +822,19 @@ PERFORMANCE_SUMMARY_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "available_counters": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": PERF_METRIC_ID_SCHEMA,
             "description": (
-                "Counters returned by ``QueryAvailablePerfMetric`` for the entity (vi-json)."
+                "Counters ``QueryAvailablePerfMetric`` lists for the entity "
+                "(``PerfMetricId``): counter number and instance."
             ),
         },
         "samples": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": PERF_ENTITY_METRIC_SCHEMA,
             "description": (
-                "Capped sample list from ``QueryPerf`` (vi-json). "
-                "Truncated client-side to ``max_samples``."
+                "The ``QueryPerf`` answer (``PerfEntityMetric``): one entry for the entity, "
+                "with the sample times and one value series per counter. vCenter applies "
+                "``max_samples`` to real-time data."
             ),
         },
         "interval_seconds": {
@@ -5569,6 +5598,7 @@ GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "max_processes": 100}],
 }
 
 
@@ -5601,6 +5631,7 @@ GUEST_ENV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "names": ["PATH"]}],
 }
 
 
@@ -5622,6 +5653,7 @@ GUEST_NET_SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42"}],
 }
 
 
@@ -5677,6 +5709,7 @@ GUEST_FILE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "guest_path"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "guest_path": "/etc/os-release", "fetch_content": True}],
 }
 
 
@@ -5725,6 +5758,14 @@ GUEST_FILE_WRITE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "guest_path", "content"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "vm": "vm-42",
+            "guest_path": "/etc/<app-name>/<file-name>.conf",
+            "content": "<file-content>",
+            "overwrite": False,
+        }
+    ],
 }
 
 
@@ -5741,7 +5782,7 @@ GUEST_PROCESS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "processes": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": GUEST_PROCESS_INFO_SCHEMA,
             "description": (
                 "GuestProcessInfo entries (name / pid / owner / cmdLine / "
                 "startTime / endTime / exitCode), capped to ``max_processes``. "
@@ -5799,7 +5840,7 @@ GUEST_NET_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
         "vm": {"type": "string", "description": "VM moid the guest network state was read for."},
         "nics": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": GUEST_NIC_INFO_SCHEMA,
             "description": (
                 "GuestNicInfo entries from ``guest.net`` -- per-NIC MAC, "
                 "connected state, and IP addresses as Tools reports them."
@@ -5807,7 +5848,7 @@ GUEST_NET_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "ip_stacks": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": GUEST_STACK_INFO_SCHEMA,
             "description": (
                 "GuestStackInfo entries from ``guest.ipStack`` -- routing table, "
                 "DNS config, and default gateways as Tools reports them."
@@ -5844,6 +5885,7 @@ GUEST_FILE_READ_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "File size in bytes as reported by the guest file manager.",
         },
         "attributes": {
+            **GUEST_FILE_ATTRIBUTES_SCHEMA,
             "description": (
                 "GuestFileAttributes for the file (POSIX / Windows metadata). "
                 "Present on a deferred read and on an inline read returned in "
@@ -6025,6 +6067,15 @@ GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm", "program_path"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "vm": "vm-42",
+            "program_path": "/usr/bin/systemctl",
+            "arguments": "restart <service-name>",
+            "wait": True,
+            "timeout_seconds": 120,
+        }
+    ],
 }
 
 

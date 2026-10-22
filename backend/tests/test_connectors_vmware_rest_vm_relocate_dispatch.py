@@ -271,3 +271,32 @@ async def test_operator_relocate_still_waits_when_the_vm_read_fails() -> None:
     assert effect["preview"]["copied_now_bytes"] is None
     assert effect["preview"]["size_unavailable_reason"].startswith("the VM read failed (")
     assert effect["preview"]["target_datastores"][0]["free_space_bytes"] == 2000 * _GIB
+
+
+async def test_operator_relocate_still_waits_when_vcenter_cannot_read_the_vm_storage() -> None:
+    """A property vCenter could not read (a ``missingSet`` entry) parks too, with the reason."""
+    connector = _register_fake_vcenter()
+    connector.vim.unreadable[("VirtualMachine", _VM)] = {"summary.storage"}
+    await _insert_relocate_descriptor()
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_RELOCATE,
+        target=_FakeTarget(),
+        params=_RELOCATE_PARAMS,
+    )
+
+    assert result.status == "awaiting_approval", result
+    assert connector.writes == []
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, UUID(result.extras["approval_request_id"]))
+        assert row is not None
+        effect = dict(row.proposed_effect)
+    preview = effect["preview"]
+    assert preview["copied_now_bytes"] is None
+    assert preview["name"] == "nested-esxi-01"
+    assert preview["size_unavailable_reason"] == (
+        "vCenter could not read summary.storage (NoPermission) of the VM"
+    )
+    assert preview["target_datastores"][0]["free_space_bytes"] == 2000 * _GIB

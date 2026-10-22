@@ -3265,7 +3265,11 @@ row's body hash, so only the changed rows are updated.
 
 **The copy-size preview.** `vm_relocate_preview.py` registers one builder
 (`vm_relocate_preview`) under every op_id spelling of the generic relocate
-and of `RelocateVM_Task`. It reads the REST body (`placement.datastore`,
+and of `RelocateVM_Task`: with and without the `/api` mount, and with each
+spelling of the VM id parameter (`{vm}` or `{vm_id}` on the REST relocate,
+`{moId}` or `{mo_id}` on the older-API method). A test checks that every
+spelling the rule accepts has the builder, so no parked call lacks the copy
+size. It reads the REST body (`placement.datastore`,
 `disks.{disk}.datastore`) and the older-API body (`spec.datastore`,
 `spec.disk[].datastore`), then:
 
@@ -3290,11 +3294,19 @@ only some disks move, or the disks go to more than one datastore, the
 copy is *at most* this size and the summary says so. A failed VM or
 datastore read never blocks the approval: the preview keeps what it has,
 adds `size_unavailable_reason` (redacted like a `preview_error`), and the
-summary says why the size is missing. The approval row carries the preview
-under `proposed_effect.preview`.
+summary says why the size is missing. The same holds when the call
+succeeds but vCenter could not read one property (a `missingSet` entry,
+for example no permission on the storage data): the preview keeps the
+rest (name, power state, source datastores, the other datastores) and
+`size_unavailable_reason` names the property and the fault type, never
+the fault text. The approval row carries the preview under
+`proposed_effect.preview`.
 
 `read_vm_copy_size` and `read_datastore_space` are the shared size reads,
-so the typed datastore move (#4346) can show the same numbers.
+so the typed datastore move (#4346) can show the same numbers. Both keep a
+successful answer with an unreadable property and list it in
+`unreadable_properties`; only `read_vm_copy_size` raises, when the VM is
+not in the answer at all.
 
 Tests: `test_connectors_vmware_rest_vm_relocate_approval.py` (the floor on
 a hand-made spec for 8.0 and 9.0, the `vm.migrate` pin, the preview; the

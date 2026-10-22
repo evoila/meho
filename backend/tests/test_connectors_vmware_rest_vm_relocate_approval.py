@@ -122,24 +122,33 @@ def test_an_unrelated_post_keeps_its_level(op_id: str) -> None:
     assert ops[op_id].requires_approval is False
 
 
-@pytest.mark.parametrize(
-    ("method", "path", "expected"),
-    [
-        ("POST", "/vcenter/vm/{vm}?action=relocate", True),
-        ("POST", "/vcenter/vm/{vm}?action=relocate&vmw-task=true", True),
-        ("POST", "/api/vcenter/vm/{vm}?action=relocate", True),
-        ("POST", "/vcenter/vm/{vm_id}?action=relocate&vmw-task=true", True),
-        ("POST", "/VirtualMachine/{moId}/RelocateVM_Task", True),
-        ("post", "/api/VirtualMachine/{mo_id}/RelocateVM_Task", True),
-        ("GET", "/vcenter/vm/{vm}?action=relocate", False),
-        ("POST", "/vcenter/vm/{vm}?action=unregister", False),
-        ("POST", "/vcenter/vm/{vm}?action=relocate&other=1", False),
-        ("POST", "/vcenter/vm?action=relocate", False),
-        ("POST", "/VirtualMachine/{moId}/CloneVM_Task", False),
-        ("POST", "/VirtualMachine/{moId}/RelocateVM_Task?x=1", False),
-        ("POST", "/VirtualApp/{moId}/RelocateVM_Task", False),
-    ],
-)
+#: ``(method, path, the rule accepts it)``. Every accepted spelling must also
+#: carry the preview builder (checked below), or the call would wait for
+#: approval without the copy size.
+_SAFETY_RULE_CASES: list[tuple[str, str, bool]] = [
+    ("POST", "/vcenter/vm/{vm}?action=relocate", True),
+    ("POST", "/vcenter/vm/{vm}?action=relocate&vmw-task=true", True),
+    ("POST", "/api/vcenter/vm/{vm}?action=relocate", True),
+    ("POST", "/api/vcenter/vm/{vm}?action=relocate&vmw-task=true", True),
+    ("POST", "/vcenter/vm/{vm_id}?action=relocate", True),
+    ("POST", "/vcenter/vm/{vm_id}?action=relocate&vmw-task=true", True),
+    ("POST", "/api/vcenter/vm/{vm_id}?action=relocate", True),
+    ("POST", "/api/vcenter/vm/{vm_id}?action=relocate&vmw-task=true", True),
+    ("POST", "/VirtualMachine/{moId}/RelocateVM_Task", True),
+    ("POST", "/api/VirtualMachine/{moId}/RelocateVM_Task", True),
+    ("POST", "/VirtualMachine/{mo_id}/RelocateVM_Task", True),
+    ("post", "/api/VirtualMachine/{mo_id}/RelocateVM_Task", True),
+    ("GET", "/vcenter/vm/{vm}?action=relocate", False),
+    ("POST", "/vcenter/vm/{vm}?action=unregister", False),
+    ("POST", "/vcenter/vm/{vm}?action=relocate&other=1", False),
+    ("POST", "/vcenter/vm?action=relocate", False),
+    ("POST", "/VirtualMachine/{moId}/CloneVM_Task", False),
+    ("POST", "/VirtualMachine/{moId}/RelocateVM_Task?x=1", False),
+    ("POST", "/VirtualApp/{moId}/RelocateVM_Task", False),
+]
+
+
+@pytest.mark.parametrize(("method", "path", "expected"), _SAFETY_RULE_CASES)
 def test_is_vmware_vm_relocate(method: str, path: str, expected: bool) -> None:
     assert is_vmware_vm_relocate(method, path) is expected
 
@@ -256,6 +265,31 @@ def _vim_params(spec: dict[str, Any]) -> dict[str, Any]:
 def test_every_relocate_spelling_has_a_preview_builder(op_id: str) -> None:
     assert _PREVIEW_BUILDERS[op_id] is previews.vm_relocate_preview
     assert is_vmware_vm_relocate(*op_id.split(":", 1))
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [(method, path) for method, path, accepted in _SAFETY_RULE_CASES if accepted],
+)
+def test_every_spelling_the_rule_accepts_has_a_preview_builder(method: str, path: str) -> None:
+    """A call the floor parks must show the copy size: no spelling without a builder."""
+    op_id = f"{method.upper()}:{path}"
+
+    assert op_id in previews.VM_RELOCATE_OP_IDS
+    assert _PREVIEW_BUILDERS[op_id] is previews.vm_relocate_preview
+
+
+@pytest.mark.parametrize("name", ["vm", "vm_id", "moId", "mo_id"])
+async def test_preview_reads_the_vm_id_under_every_parameter_spelling(name: str) -> None:
+    conn = _vcenter()
+    params = {name: _VM, "body": {"placement": {"datastore": _TARGET}}}
+
+    preview = await previews.vm_relocate_preview(preview_ctx(params, conn))
+
+    assert preview is not None
+    assert preview["vm"] == _VM
+    assert preview["copied_now_bytes"] == 365 * _GIB
+    assert conn.vim.methods() == ["RetrievePropertiesEx", "RetrievePropertiesEx"]
 
 
 @pytest.mark.parametrize(
@@ -427,6 +461,92 @@ async def test_a_failed_datastore_read_keeps_the_size_and_says_why() -> None:
     assert f"The free space of {_TARGET} is unknown." in preview["summary"]
 
 
+async def test_an_unreadable_vm_storage_summary_keeps_the_rest_and_names_the_fault() -> None:
+    """vCenter answered, but could not read ``summary.storage`` (a ``missingSet`` entry)."""
+    conn = _vcenter()
+    conn.vim.unreadable[("VirtualMachine", _VM)] = {"summary.storage"}
+    params = _rest_params({"placement": {"datastore": _TARGET}})
+
+    preview = await previews.vm_relocate_preview(preview_ctx(params, conn))
+
+    assert preview is not None
+    assert preview["copies_disks"] is True
+    assert preview["name"] == "nested-esxi-01"
+    assert preview["power_state"] == "poweredOff"
+    assert preview["source_datastores"] == [{"id": _SOURCE, "name": "local-a"}]
+    assert preview["copied_now_bytes"] is None
+    assert preview["copy_max_bytes"] is None
+    assert preview["target_datastores"][0]["free_space_bytes"] == 2000 * _GIB
+    assert preview["target_datastores"][0]["free_space_after_copy_bytes"] is None
+    assert preview["size_unavailable_reason"] == (
+        "vCenter could not read summary.storage (NoPermission) of the VM"
+    )
+    assert preview["summary"] == (
+        "The copy size is missing: vCenter could not read summary.storage (NoPermission) "
+        f"of the VM. local-b ({_TARGET}) has 2000.0 GiB free before the copy. "
+        "The VM is stopped."
+    )
+
+
+async def test_an_unreadable_datastore_summary_keeps_the_size_and_names_the_fault() -> None:
+    """vCenter answered, but could not read the target's ``summary``."""
+    conn = _vcenter()
+    conn.vim.unreadable[("Datastore", _TARGET)] = {"summary"}
+    params = _rest_params({"placement": {"datastore": _TARGET}})
+
+    preview = await previews.vm_relocate_preview(preview_ctx(params, conn))
+
+    assert preview is not None
+    assert preview["copied_now_bytes"] == 365 * _GIB
+    assert preview["source_datastores"] == [{"id": _SOURCE, "name": "local-a"}]
+    assert preview["target_datastores"] == [
+        {
+            "id": _TARGET,
+            "name": None,
+            "capacity_bytes": None,
+            "free_space_bytes": None,
+            "free_space_after_copy_bytes": None,
+            "free_space_after_max_copy_bytes": None,
+        }
+    ]
+    assert preview["size_unavailable_reason"] == (
+        f"vCenter could not read summary (NoPermission) of datastore {_TARGET}"
+    )
+    assert preview["summary"].startswith("Copies 365.0 GiB now")
+    assert f"The free space of {_TARGET} is unknown." in preview["summary"]
+
+
+async def test_unreadable_vm_and_datastore_properties_are_both_reported() -> None:
+    conn = _vcenter()
+    conn.vim.unreadable[("VirtualMachine", _VM)] = {"summary.storage"}
+    conn.vim.unreadable[("Datastore", _TARGET)] = {"summary"}
+    params = _rest_params({"placement": {"datastore": _TARGET}})
+
+    preview = await previews.vm_relocate_preview(preview_ctx(params, conn))
+
+    assert preview is not None
+    assert preview["size_unavailable_reason"] == (
+        "vCenter could not read summary.storage (NoPermission) of the VM; "
+        f"vCenter could not read summary (NoPermission) of datastore {_TARGET}"
+    )
+
+
+async def test_a_vm_without_a_storage_summary_says_the_size_was_not_reported() -> None:
+    """An unset property has no ``missingSet`` entry; the preview still says why."""
+    conn = _vcenter()
+    del conn.vim.objects[("VirtualMachine", _VM)]["summary.storage"]
+    params = _rest_params({"placement": {"datastore": _TARGET}})
+
+    preview = await previews.vm_relocate_preview(preview_ctx(params, conn))
+
+    assert preview is not None
+    assert preview["copied_now_bytes"] is None
+    assert preview["size_unavailable_reason"] == "vCenter did not report the storage size of the VM"
+    assert preview["summary"].startswith(
+        "The copy size is missing: vCenter did not report the storage size of the VM."
+    )
+
+
 async def test_preview_declines_without_a_connector_or_a_vm_id() -> None:
     params = _rest_params({"placement": {"datastore": _TARGET}})
 
@@ -454,12 +574,49 @@ async def test_read_helpers_return_the_shared_numbers() -> None:
         source_datastores=(_SOURCE,),
         copied_now_bytes=365 * _GIB,
         copy_max_bytes=1103 * _GIB,
+        unreadable_properties=(),
     )
     assert spaces == {
         _TARGET: previews.DatastoreSpace(
-            id=_TARGET, name="local-b", capacity_bytes=4000 * _GIB, free_space_bytes=2000 * _GIB
+            id=_TARGET,
+            name="local-b",
+            capacity_bytes=4000 * _GIB,
+            free_space_bytes=2000 * _GIB,
+            unreadable_properties=(),
         ),
         _SOURCE: previews.DatastoreSpace(
-            id=_SOURCE, name="local-a", capacity_bytes=4000 * _GIB, free_space_bytes=None
+            id=_SOURCE,
+            name="local-a",
+            capacity_bytes=4000 * _GIB,
+            free_space_bytes=None,
+            unreadable_properties=(),
         ),
     }
+
+
+async def test_read_helpers_name_the_properties_vcenter_could_not_read() -> None:
+    """The shared reads keep a successful answer and name the unreadable properties."""
+    conn = _vcenter()
+    conn.vim.unreadable[("VirtualMachine", _VM)] = {"summary.storage", "datastore"}
+    conn.vim.unreadable[("Datastore", _TARGET)] = {"summary"}
+    ctx = preview_ctx({}, conn)
+
+    size = await previews.read_vm_copy_size(conn, ctx.target, ctx.operator, _VM)  # type: ignore[arg-type]
+    spaces = await previews.read_datastore_space(
+        conn,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        [_TARGET, _SOURCE],
+    )
+
+    assert size.name == "nested-esxi-01"
+    assert size.source_datastores == ()
+    assert size.copied_now_bytes is None
+    assert size.unreadable_properties == (
+        "datastore (NoPermission)",
+        "summary.storage (NoPermission)",
+    )
+    assert spaces[_TARGET].free_space_bytes is None
+    assert spaces[_TARGET].unreadable_properties == ("summary (NoPermission)",)
+    assert spaces[_SOURCE].name == "local-a"
+    assert spaces[_SOURCE].unreadable_properties == ()

@@ -20,7 +20,10 @@ The builder makes two read-only VI-JSON property reads:
 * the datastores: name, capacity, and free space before the copy.
 
 A failed read never blocks the approval: the preview keeps what it has and
-says why the size is missing. :func:`read_vm_copy_size` and
+says why the size is missing. That covers a failed call and a property
+vCenter could not read inside a successful answer (a ``missingSet`` entry,
+for example no permission on the storage data): the unreadable property and
+its fault type land in the preview too. :func:`read_vm_copy_size` and
 :func:`read_datastore_space` are the shared size reads, so the typed
 datastore move can show the same numbers.
 """
@@ -35,9 +38,15 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
-from meho_backplane.connectors.vmware_rest.composites._read import _extract_props_by_moid
+from meho_backplane.connectors.vmware_rest.composites._read import (
+    _extract_props_by_moid,
+    _unwrap_value,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none
-from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_type_name,
+    retrieve_properties_body,
+)
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
@@ -72,19 +81,25 @@ _VM_PATHS: Final = (_PROP_NAME, _PROP_POWER_STATE, _PROP_VM_DATASTORE, _PROP_STO
 _PROP_DATASTORE_SUMMARY: Final = "summary"
 
 #: The VM id rides the path: ``{vm}`` on the REST relocate, ``{moId}`` on the
-#: older-API method.
-_VM_PARAM_NAMES: Final = ("vm", "moId")
+#: older-API method. An appliance-served spec can spell them ``{vm_id}`` and
+#: ``{mo_id}``. The safety rule (``is_vmware_vm_relocate``) accepts every
+#: spelling, so the preview is registered under every one of them.
+_REST_VM_PARAM_NAMES: Final = ("vm", "vm_id")
+_VIM_VM_PARAM_NAMES: Final = ("moId", "mo_id")
+_VM_PARAM_NAMES: Final = _REST_VM_PARAM_NAMES + _VIM_VM_PARAM_NAMES
 _MOUNT_PREFIXES: Final = ("", "/api")
 _REST_QUERIES: Final = ("action=relocate", "action=relocate&vmw-task=true")
-_VIM_RELOCATE_OP_ID: Final = "POST:/VirtualMachine/{moId}/RelocateVM_Task"
 
 #: Every op_id spelling of the VM moves that copy disks: the generic relocate,
-#: with and without the task form and the ``/api`` mount, and the older-API
-#: method.
+#: with and without the task form, and the older-API method, each with and
+#: without the ``/api`` mount and with each spelling of the VM id parameter.
 VM_RELOCATE_OP_IDS: Final[frozenset[str]] = frozenset(
-    f"POST:{prefix}/vcenter/vm/{{vm}}?{query}"
-    for prefix, query in product(_MOUNT_PREFIXES, _REST_QUERIES)
-) | {_VIM_RELOCATE_OP_ID}
+    f"POST:{prefix}/vcenter/vm/{{{name}}}?{query}"
+    for prefix, name, query in product(_MOUNT_PREFIXES, _REST_VM_PARAM_NAMES, _REST_QUERIES)
+) | frozenset(
+    f"POST:{prefix}/VirtualMachine/{{{name}}}/RelocateVM_Task"
+    for prefix, name in product(_MOUNT_PREFIXES, _VIM_VM_PARAM_NAMES)
+)
 
 _GIB: Final = 1024**3
 _POWER_STATE_WORDS: Final = {
@@ -107,6 +122,8 @@ class VmCopySize:
     copied_now_bytes: int | None
     #: ``committed + uncommitted``: the most the disks can grow to.
     copy_max_bytes: int | None
+    #: ``"<property> (<fault type>)"`` for each property vCenter could not read.
+    unreadable_properties: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -117,6 +134,8 @@ class DatastoreSpace:
     name: str | None
     capacity_bytes: int | None
     free_space_bytes: int | None
+    #: ``"<property> (<fault type>)"`` for each property vCenter could not read.
+    unreadable_properties: tuple[str, ...] = ()
 
 
 def _datastore_id(value: Any) -> str | None:
@@ -157,10 +176,44 @@ def relocate_target_datastores(body: Mapping[str, Any]) -> tuple[str | None, lis
     return home, per_disk
 
 
+def _unreadable_by_moid(retrieve_result: Any) -> dict[str, tuple[str, ...]]:
+    """``{moid: ("<property> (<fault type>)", ...)}`` from the ``missingSet`` entries.
+
+    The HTTP call succeeds while vCenter still could not read a property of
+    one object (no permission, a system error). Such a property is not in
+    ``propSet``; it is in the object's ``missingSet`` with a fault. A property
+    that is simply unset has no ``missingSet`` entry and is not reported. Only
+    the fault type name is kept, never the fault text, which can echo a
+    private identifier (#3708).
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    unreadable: dict[str, tuple[str, ...]] = {}
+    for obj in objects if isinstance(objects, list) else []:
+        if not isinstance(obj, dict):
+            continue
+        ref = obj.get("obj")
+        moid = ref.get("value") if isinstance(ref, dict) else None
+        if not isinstance(moid, str):
+            continue
+        entries = [
+            f"{entry['path']} ({fault_type_name(entry.get('fault')) or 'unknown fault'})"
+            for entry in obj.get("missingSet") or []
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        ]
+        if entries:
+            unreadable[moid] = tuple(entries)
+    return unreadable
+
+
 async def _retrieve(
     connector: VmwareRestConnector, target: Any, operator: Operator, body: dict[str, Any]
-) -> dict[str, dict[str, Any]]:
-    """One ``RetrievePropertiesEx`` read, flattened to ``{moid: {property: value}}``."""
+) -> tuple[dict[str, dict[str, Any]], dict[str, tuple[str, ...]]]:
+    """One ``RetrievePropertiesEx`` read: ``({moid: {property: value}}, unreadable)``.
+
+    *unreadable* names, per object, the properties vCenter could not read
+    (:func:`_unreadable_by_moid`).
+    """
     result = await connector._post_vmomi_json(
         target,
         _RETRIEVE_PROPERTIES_PATH,
@@ -168,7 +221,7 @@ async def _retrieve(
         json=body,
         promote_managed_object_not_found=True,
     )
-    return _extract_props_by_moid(result)
+    return _extract_props_by_moid(result), _unreadable_by_moid(result)
 
 
 async def read_vm_copy_size(
@@ -176,10 +229,13 @@ async def read_vm_copy_size(
 ) -> VmCopySize:
     """Read one VM's name, power state, datastores and storage size (read-only).
 
-    Raises when the VM cannot be read; the caller decides what that means.
+    Raises when the VM cannot be read; the caller decides what that means. A
+    property vCenter could not read inside a successful answer is reported in
+    ``unreadable_properties`` and its value is ``None``.
     """
     body = retrieve_properties_body(_VM_MO_TYPE, [vm], _VM_PATHS)
-    props = (await _retrieve(connector, target, operator, body)).get(vm)
+    by_moid, unreadable = await _retrieve(connector, target, operator, body)
+    props = by_moid.get(vm)
     if props is None:
         raise ConnectorResourceNotFoundError([vm], f"VM {vm!r} was not in the vCenter answer")
     storage = props.get(_PROP_STORAGE_SUMMARY)
@@ -202,17 +258,22 @@ async def read_vm_copy_size(
         copy_max_bytes=(
             committed + uncommitted if committed is not None and uncommitted is not None else None
         ),
+        unreadable_properties=unreadable.get(vm, ()),
     )
 
 
 async def read_datastore_space(
     connector: VmwareRestConnector, target: Any, operator: Operator, datastores: Sequence[str]
 ) -> dict[str, DatastoreSpace]:
-    """Read name, capacity and free space of *datastores* in one read (read-only)."""
+    """Read name, capacity and free space of *datastores* in one read (read-only).
+
+    A datastore whose summary vCenter could not read keeps ``None`` values and
+    names the property in ``unreadable_properties``.
+    """
     if not datastores:
         return {}
     body = retrieve_properties_body(_DATASTORE_MO_TYPE, datastores, (_PROP_DATASTORE_SUMMARY,))
-    by_moid = await _retrieve(connector, target, operator, body)
+    by_moid, unreadable = await _retrieve(connector, target, operator, body)
     spaces: dict[str, DatastoreSpace] = {}
     for moid in datastores:
         summary = by_moid.get(moid, {}).get(_PROP_DATASTORE_SUMMARY)
@@ -223,6 +284,7 @@ async def read_datastore_space(
             name=name if isinstance(name, str) else None,
             capacity_bytes=_int_or_none(summary.get("capacity")),
             free_space_bytes=_int_or_none(summary.get("freeSpace")),
+            unreadable_properties=unreadable.get(moid, ()),
         )
     return spaces
 
@@ -263,7 +325,7 @@ def _summary_text(preview: Mapping[str, Any], size: VmCopySize | None) -> str:
     """One or two plain sentences: the size first, then where, then the VM state."""
     targets = preview["target_datastores"]
     at_most = "at most " if preview["copy_size_is_upper_bound"] else ""
-    if size is None:
+    if size is None or size.copied_now_bytes is None:
         parts = [f"The copy size is missing: {preview['size_unavailable_reason']}."]
     else:
         parts = [
@@ -294,12 +356,52 @@ def _summary_text(preview: Mapping[str, Any], size: VmCopySize | None) -> str:
     return " ".join(parts)
 
 
+async def _read_vm(
+    connector: VmwareRestConnector, ctx: PreviewContext, vm: str
+) -> tuple[VmCopySize | None, list[str]]:
+    """The VM read for the preview: ``(size or None, why the size is missing)``.
+
+    A failed call and a property vCenter could not read inside a successful
+    answer both land in the reasons; the park must go on either way.
+    """
+    try:
+        size = await read_vm_copy_size(connector, ctx.target, ctx.operator, vm)
+    except Exception as exc:
+        return None, [f"the VM read failed ({preview_failure_reason(exc)})"]
+    if size.unreadable_properties:
+        return size, [f"vCenter could not read {', '.join(size.unreadable_properties)} of the VM"]
+    if size.copied_now_bytes is None:
+        return size, ["vCenter did not report the storage size of the VM"]
+    return size, []
+
+
+async def _read_datastores(
+    connector: VmwareRestConnector, ctx: PreviewContext, datastores: Sequence[str]
+) -> tuple[dict[str, DatastoreSpace], list[str]]:
+    """The datastore read for the preview: ``(spaces, why free space is missing)``.
+
+    Same rule as :func:`_read_vm`: a failed call keeps the VM size and says
+    the free space is unknown; an unreadable summary names the datastore.
+    """
+    try:
+        spaces = await read_datastore_space(connector, ctx.target, ctx.operator, datastores)
+    except Exception as exc:
+        return {}, [f"the datastore read failed ({preview_failure_reason(exc)})"]
+    unreadable = [
+        f"{', '.join(space.unreadable_properties)} of datastore {moid}"
+        for moid, space in spaces.items()
+        if space.unreadable_properties
+    ]
+    return spaces, [f"vCenter could not read {'; '.join(unreadable)}"] if unreadable else []
+
+
 async def vm_relocate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview for the VM moves: whether the call copies disks, how much, and where.
 
     No datastore in the call: no disks are copied, and nothing is read. With a
-    datastore, the VM and the datastores are read; a failed read is reported in
-    ``size_unavailable_reason`` and the call still waits for approval.
+    datastore, the VM and the datastores are read; a failed read, and a
+    property vCenter could not read inside a successful answer, are reported
+    in ``size_unavailable_reason`` and the call still waits for approval.
     """
     if ctx.connector_instance is None:
         return None
@@ -318,20 +420,12 @@ async def vm_relocate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             "target_datastores": [],
         }
     connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
-    reasons: list[str] = []
-    size: VmCopySize | None = None
-    try:
-        size = await read_vm_copy_size(connector, ctx.target, ctx.operator, vm)
-    except Exception as exc:  # the park must go on; the reason lands in the preview
-        reasons.append(f"the VM read failed ({preview_failure_reason(exc)})")
+    size, reasons = await _read_vm(connector, ctx, vm)
     sources = list(size.source_datastores) if size is not None else []
-    spaces: dict[str, DatastoreSpace] = {}
-    try:
-        spaces = await read_datastore_space(
-            connector, ctx.target, ctx.operator, _unique([*sources, *targets])
-        )
-    except Exception as exc:  # same rule: keep the VM size, say the free space is unknown
-        reasons.append(f"the datastore read failed ({preview_failure_reason(exc)})")
+    spaces, datastore_reasons = await _read_datastores(
+        connector, ctx, _unique([*sources, *targets])
+    )
+    reasons += datastore_reasons
     if reasons:
         _log.warning("vm_relocate_preview_read_failed", vm=vm, reasons=reasons)
     preview: dict[str, Any] = {

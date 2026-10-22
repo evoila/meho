@@ -25,6 +25,7 @@ These tests cover:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -37,12 +38,15 @@ from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest._mount import (
+    VI_JSON_SERVICE_PREFIXES,
     is_vmomi_path,
     vmomi_mounted_path,
     vmomi_release_from_version,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import object_collect_impl
 from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
+from meho_backplane.operations.ingest import parse_openapi
+from tests._spec_shelf import require_shelf_spec
 
 _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 _RETRIEVE_BODY: dict[str, Any] = {"specSet": [], "options": {}}
@@ -544,6 +548,25 @@ async def test_about_version_resolved_once_and_cached_across_reads() -> None:
 
 _DVPG_CONFIG_PATH = "/DistributedVirtualPortgroup/dvportgroup-7/config"
 
+# One filled-in path per VI-JSON service part (#4775). The vendor 9.0
+# ``vi-json.yaml`` serves them under ``/sdk/vim25/{release}`` like every
+# other VI-JSON path; their lower-case first segment used to send them to
+# ``/api``, where vCenter answers 404.
+_SERVICE_PATHS = (
+    "/vsan/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary",
+    "/sms/SmsServiceInstance/ServiceInstance/QueryStorageManager",
+    "/pbm/PbmServiceInstance/ServiceInstance/content",
+    "/eam/EsxAgentManager/EsxAgentManager/QueryAgency",
+    "/vslm/VslmServiceInstance/ServiceInstance/content",
+)
+
+
+def test_service_paths_cover_every_vi_json_service_prefix() -> None:
+    """The per-service cases above stay in step with the connector's list."""
+    assert {path.split("/", 2)[1] for path in _SERVICE_PATHS} == {
+        prefix.lstrip("/") for prefix in VI_JSON_SERVICE_PREFIXES
+    }
+
 
 @pytest.mark.parametrize(
     ("path", "expected"),
@@ -551,6 +574,13 @@ _DVPG_CONFIG_PATH = "/DistributedVirtualPortgroup/dvportgroup-7/config"
         ("/DistributedVirtualPortgroup/dvportgroup-7/config", True),
         ("/PropertyCollector/propertyCollector/RetrievePropertiesEx", True),
         ("VirtualMachine/vm-42/ReconfigVM_Task", True),
+        *[(path, True) for path in _SERVICE_PATHS],
+        # A service part alone, or followed by a lower-case segment, is not
+        # a VI-JSON path. Neither is a longer lower-case first segment.
+        ("/vsan", False),
+        ("/vsan/", False),
+        ("/vsan/cluster", False),
+        ("/vsanx/HostVsanSystem/host-1/config", False),
         ("/vcenter/vm", False),
         ("/appliance/system/version", False),
         ("/api/vcenter/vm", False),
@@ -576,6 +606,22 @@ async def test_mount_op_path_mounts_ingested_vi_json_op_on_sdk_vim25() -> None:
                 _StubTarget(), _DVPG_CONFIG_PATH, _make_operator()
             )
         assert mounted == "/sdk/vim25/8.0.3.0/DistributedVirtualPortgroup/dvportgroup-7/config"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _SERVICE_PATHS)
+async def test_mount_op_path_mounts_vi_json_service_paths_on_sdk_vim25(path: str) -> None:
+    """A vsan / sms / pbm / eam / vslm op mounts on /sdk/vim25/{release}/<part>/... (#4775)."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "9.0.0.0"})
+            mounted = await connector.mount_op_path(_StubTarget(), path, _make_operator())
+        assert mounted == f"/sdk/vim25/9.0.0.0{path}"
     finally:
         await connector.aclose()
 
@@ -630,3 +676,44 @@ async def test_mount_op_path_vi_json_op_on_legacy_session_stays_on_rest() -> Non
         assert not about.called
     finally:
         await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Vendor files: is_vmomi_path sorts every pinned 9.0 path into the right family
+# ---------------------------------------------------------------------------
+
+
+def _spec_paths(product_dir: str, filename: str) -> set[str]:
+    """Every spec-relative path of a pinned shelf spec, or skip when unconfigured.
+
+    Runs the real ingest parser, so the paths are the ones an operator's
+    ingest of the same file would store (and ``mount_op_path`` would see).
+    """
+    spec_path: Path = require_shelf_spec(product_dir, filename)
+    rows = parse_openapi(
+        f"file://{spec_path}",
+        spec_source=f"spec:{filename}",
+        content=spec_path.read_text(encoding="utf-8"),
+    )
+    return {row.path for row in rows}
+
+
+def test_is_vmomi_path_is_true_for_every_pinned_vi_json_path() -> None:
+    """Every path of the pinned 9.0 vi-json.yaml mounts on /sdk/vim25 (#4775).
+
+    The vendor file has one ``servers`` url, ``/sdk/vim25/{release}``, for
+    all of its paths, the service-part ones included. A path this check
+    misses would be sent to ``/api`` and 404 (#3534).
+    """
+    paths = _spec_paths("vcenter-9.0", "vi-json.yaml")
+    assert paths
+    assert sorted(path for path in paths if not is_vmomi_path(path)) == []
+    served_prefixes = {f"/{path.split('/', 2)[1]}" for path in paths if path[1:2].islower()}
+    assert served_prefixes == set(VI_JSON_SERVICE_PREFIXES)
+
+
+def test_is_vmomi_path_is_false_for_every_pinned_vcenter_path() -> None:
+    """No path of the pinned 9.0 vcenter.yaml is mistaken for a VI-JSON path."""
+    paths = _spec_paths("vcenter-9.0", "vcenter.yaml")
+    assert paths
+    assert sorted(path for path in paths if is_vmomi_path(path)) == []

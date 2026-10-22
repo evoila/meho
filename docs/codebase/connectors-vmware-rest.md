@@ -3517,7 +3517,13 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   `POST:/PropertyCollector/{moId}/RetrievePropertiesEx`, ...) reach the
   wire through `mount_op_path`. It tells them apart from Automation paths
   by the PascalCase managed-object type in the first segment
-  (`_mount.is_vmomi_path`). On a modern vCenter session they mount on
+  (`_mount.is_vmomi_path`). The type may sit behind one of the five
+  service parts the vendor file uses, listed in
+  `_mount.VI_JSON_SERVICE_PREFIXES`: `/vsan` (vSAN management), `/sms`
+  (storage providers), `/pbm` (storage policies), `/eam` (ESX Agent
+  Manager) and `/vslm` (First Class Disks). Before #4775 those paths
+  went to `/api` and answered 404, because their first segment is lower
+  case. On a modern vCenter session they mount on
   `/sdk/vim25/{release}` (release from the same cached `_about_version`).
   Before #3534 they mounted on `/api` and answered a bare 404 on vCenter
   8.0.x. Limits: there is no `/api` 404 fallback on this path (the hook

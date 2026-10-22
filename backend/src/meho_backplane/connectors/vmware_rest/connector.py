@@ -262,11 +262,11 @@ def _resolve_session_max_age_seconds() -> int:
 _SESSION_MAX_AGE_SECONDS = _resolve_session_max_age_seconds()
 
 
-def _retrieve_properties_resource_ids(body: dict[str, Any] | None) -> list[str]:
-    """Return the addressed MoIDs from a ``RetrievePropertiesEx`` body."""
+def _retrieve_properties_object_refs(body: dict[str, Any] | None) -> list[tuple[Any, str]]:
+    """Return the addressed ``(type, moid)`` pairs from a ``RetrievePropertiesEx`` body."""
     if not isinstance(body, dict):
         return []
-    resource_ids: list[str] = []
+    refs: list[tuple[Any, str]] = []
     for spec in body.get("specSet", []):
         if not isinstance(spec, dict):
             continue
@@ -278,8 +278,13 @@ def _retrieve_properties_resource_ids(body: dict[str, Any] | None) -> list[str]:
                 continue
             value = obj.get("value")
             if isinstance(value, str) and value:
-                resource_ids.append(value)
-    return resource_ids
+                refs.append((obj.get("type"), value))
+    return refs
+
+
+def _retrieve_properties_resource_ids(body: dict[str, Any] | None) -> list[str]:
+    """Return the addressed MoIDs from a ``RetrievePropertiesEx`` body."""
+    return [moid for _, moid in _retrieve_properties_object_refs(body)]
 
 
 # Session endpoints + the spec-relative-op → /api-or-/rest mount
@@ -1234,10 +1239,19 @@ class VmwareRestConnector(HttpConnector):
         """Promote a vim ``ManagedObjectNotFound`` read fault.
 
         VI-JSON reports vim faults as HTTP 500, so status alone cannot
-        distinguish a deleted object from a transient vCenter failure.  Parse
-        the SOAP-shaped fault body first and only map the explicit vim fault
-        on the shared ``RetrievePropertiesEx`` read seam.
+        distinguish a deleted object from a transient vCenter failure. On
+        vCenter the fault body is JSON (the pinned ``vi-json.yaml`` gives
+        ``application/json`` for the 500 answer of ``RetrievePropertiesEx``,
+        and vCenter 9.1 sends it that way, #4776); a SOAP-shaped XML body is
+        read when the body is not JSON. Only the explicit vim fault on the
+        shared ``RetrievePropertiesEx`` read seam is mapped.
         """
+        json_fault = _vi_json_fault_body(exc)
+        if json_fault:
+            VmwareRestConnector._raise_retrieve_properties_not_found(
+                json_fault.get(VIM_TYPE_NAME_KEY), json_fault.get("obj"), vmomi_path, body
+            )
+            return
         fault = parse_soap_fault(exc.response.text)
         VmwareRestConnector._raise_managed_object_not_found_fault(fault, vmomi_path, body)
 
@@ -1247,14 +1261,42 @@ class VmwareRestConnector(HttpConnector):
         vmomi_path: str,
         body: dict[str, Any] | None,
     ) -> None:
-        """Raise the generic missing-resource signal for one parsed vim fault."""
+        """Raise the generic missing-resource signal for one parsed SOAP vim fault."""
+        if fault is None:
+            return
+        VmwareRestConnector._raise_retrieve_properties_not_found(
+            fault.fault_type, None, vmomi_path, body
+        )
+
+    @staticmethod
+    def _raise_retrieve_properties_not_found(
+        fault_type: Any,
+        fault_obj: Any,
+        vmomi_path: str,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Raise :class:`ConnectorResourceNotFoundError` for one ``ManagedObjectNotFound``.
+
+        *fault_obj* is the missing object the JSON fault names (its ``obj``,
+        required by the pinned ``vi-json.yaml``). When it is given, only an
+        object the caller asked for counts: a missing property collector is
+        not a missing VM, so that fault stays a normal error. Without it (the
+        SOAP form carries no ``obj``), every addressed object is reported.
+        """
         if not vmomi_path.endswith("/RetrievePropertiesEx"):
             return
-        if fault is None or fault.fault_type != "ManagedObjectNotFound":
+        if fault_type != "ManagedObjectNotFound":
             return
-        resource_ids = _retrieve_properties_resource_ids(body)
-        if not resource_ids:
+        refs = _retrieve_properties_object_refs(body)
+        if not refs:
             return
+        if isinstance(fault_obj, Mapping):
+            missing = (fault_obj.get("type"), fault_obj.get("value"))
+            if missing not in refs:
+                return
+            resource_ids = [missing[1]]
+        else:
+            resource_ids = [moid for _, moid in refs]
         noun = "resource" if len(resource_ids) == 1 else "resources"
         identifiers = ", ".join(repr(resource_id) for resource_id in resource_ids)
         raise ConnectorResourceNotFoundError(

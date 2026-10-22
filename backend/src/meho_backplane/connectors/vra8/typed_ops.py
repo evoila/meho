@@ -233,7 +233,17 @@ _API_FILE_GET_RESPONSE: dict[str, Any] = {
         },
         "sha256": {
             "type": _TEXT_OR_NULL,
-            "description": "SHA-256 (hex) of the file bytes; null when the status is not 2xx.",
+            "description": (
+                "SHA-256 (hex) of the file bytes as served; null when the status is not 2xx."
+            ),
+        },
+        "redacted_values": {
+            "type": "integer",
+            "description": (
+                "How many secret values (a password, token, key or private key) were "
+                "replaced with a [REDACTED:...] placeholder in the text. 0 means the text "
+                "is the file as served."
+            ),
         },
         "parts": {"type": "integer", "description": "How many text parts the file has."},
         "text_parts": {
@@ -246,7 +256,10 @@ _API_FILE_GET_RESPONSE: dict[str, Any] = {
                 },
                 "required": ["index", "text"],
             },
-            "description": "The file text, in order. Joining all parts gives the exact file.",
+            "description": (
+                "The file text, in order. Joining all parts gives the file; when "
+                "redacted_values is 0 it is the exact file and its SHA-256 equals sha256."
+            ),
         },
         "version": {
             "type": _TEXT_OR_NULL,
@@ -391,10 +404,10 @@ VRA8_TYPED_OPS: tuple[Vra8TypedOp, ...] = (
         handler_attr="api_file_get",
         summary="Read one API description page or file that an Aria Automation 8 appliance serves.",
         description=(
-            "Sends one GET with the connector's login to a documentation path (an API "
-            "landing page, the Swagger file of a service, or the Orchestrator reference) "
-            "and returns its status, content type, size, SHA-256, the version and build, "
-            "and the text in parts. Does not follow redirects. Read-only."
+            "Sends one GET with the connector's login to a documentation path (a landing "
+            "page, a Swagger file or the Orchestrator reference) and returns its status, "
+            "content type, size, SHA-256, version and build, and the text in parts with "
+            "secret values replaced. Does not follow redirects. Read-only."
         ),
         parameter_schema=_API_FILE_GET_PARAMS,
         response_schema=_API_FILE_GET_RESPONSE,

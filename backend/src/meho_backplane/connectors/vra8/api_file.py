@@ -28,27 +28,31 @@ The read is narrow on purpose:
   renews the login and retries once; every other status comes back in
   ``status``.
 * The file comes back as text parts of at most 64 KiB each. Joining the
-  parts in order gives the exact file; ``sha256`` is the hash of the
-  file bytes. A file that does not fit in one stored result, as bytes
-  or as rows, is refused with its size, never cut. Only UTF-8 text comes
-  back.
-* MEHO redacts secret-shaped text in every stored result. The read runs
-  the same redaction rules the dispatcher will apply, on the whole file
-  text and on each part, and refuses a file whose text they would
-  change, naming the rule. So the stored parts always match ``sha256``.
-* Some secret shapes pass those rules unchanged: a quoted credential key
-  (``"password": "..."``, ``"token": "..."``), a credential value of
-  fewer than eight characters, a label the rules do not know
-  (``licenseKey``), and a PEM private key block. The read looks for a
-  credential field and a private key block itself, in the whole file
-  text, and refuses a file that holds one (:data:`SECRET_SHAPES`), so no
-  clear-text secret reaches a stored result. Those text rules see a key
-  and its value on one line. A file that is valid JSON or YAML is also
-  parsed, and every credential key with a value is refused whatever the
-  layout: a value on the next line, a flow mapping such as
-  ``example: {password: abc}``, a quoted or a bare key. A documentation
-  file that shows an example credential value is refused as well; that
-  is on purpose.
+  parts in order gives the file, and the exact file when
+  ``redacted_values`` is zero (see below); ``sha256`` is the hash of the
+  file bytes as served. A file that does not fit in one stored result,
+  as bytes or as rows, is refused with its size, never cut. Only UTF-8
+  text comes back.
+* The read cleans the file text before it returns it. First it scans
+  the whole file as text, whatever its format (:mod:`.api_file_redaction`),
+  and replaces every value of a secret-named key (the one rule MEHO uses
+  for secret-named fields), the text of a secret-named XML or HTML
+  element, an HTML attribute value and a PEM private key block with the
+  placeholder ``[REDACTED:param_name]``. Then it runs the secret redaction
+  MEHO applies to every stored result, with the labels the dispatcher
+  will use, on the whole text: that pass sees a labelled pair such as
+  ``api_key=...`` (also one a part cut would split) and writes its own
+  ``[REDACTED:<rule>]`` placeholder; it leaves a placeholder of the first
+  pass alone. The replacements of both passes are counted in
+  ``redacted_values``. When it is zero, the joined parts are
+  the file as served and match ``sha256``; when it is not, ``sha256``
+  still names the file as served, and the parts hold the cleaned text.
+  An example credential in a documentation file is replaced like a real
+  one; that is on purpose.
+* The stored-result redaction runs once more when the dispatcher stores
+  the answer. The read checks that it changes nothing on the cleaned
+  text and on each part, and refuses the file if it would, naming the
+  rule. So the stored parts are always the text the read returns.
 
 The version and build come from the Orchestrator inside the appliance
 (``GET /vco/api/about``: ``version`` and ``build-number``); the IaaS API
@@ -60,19 +64,18 @@ why.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
-import yaml
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH, _VCO_ABOUT_PATH
+from meho_backplane.connectors.vra8.api_file_redaction import redact_secret_values
 from meho_backplane.connectors.vra8.session import Vra8TargetLike
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
@@ -85,7 +88,6 @@ __all__ = [
     "OP_ID",
     "PART_MAX_BYTES",
     "PATH_PATTERN",
-    "SECRET_SHAPES",
     "SERVICE_SWAGGER_FOLDER",
     "Vra8ApiFileError",
     "check_api_file_path",
@@ -114,67 +116,6 @@ SERVICE_SWAGGER_FOLDER = "/{service}/api/swagger"
 #: Largest text part, in UTF-8 bytes. One ``result_query`` answer holds at
 #: most 256 KiB, so a 64 KiB part fits even after JSON escaping.
 PART_MAX_BYTES = 64 * 1024
-
-# The secret labels of the stored-result redaction (``strip-api-key``),
-# plus ``licenseKey``, which that rule does not know. They are repeated
-# here because that rule wants a bare label right before ``=`` or ``:``
-# and a value of at least 8 characters. In a JSON file the label sits in
-# quotes, so the rule never sees ``"password": "..."``; a short value it
-# leaves alone too.
-_SECRET_LABELS = (
-    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token"
-    r"|session[_-]?token|secret(?:[_-]?(?:key|id))?|private[_-]?key"
-    r"|password|passwd|pwd|client[_-]?secret|license[_-]?key|token)"
-)
-
-# A credential key is, or ends in, a secret label (``"password"``,
-# ``"refreshToken"``, ``"x-api-key"``, ``licenseKey``). It is either in
-# quotes, anywhere in the text (JSON, quoted YAML), or bare at the start
-# of a line, after indentation or a list dash (YAML, a properties file).
-# A bare label in running text (``"description": "the token: ..."``) is
-# not a key.
-_KEY_PREFIX = r"[A-Za-z0-9_.-]*"
-_CREDENTIAL_KEY = (
-    rf"""(?:(?P<quote>["']){_KEY_PREFIX}{_SECRET_LABELS}(?P=quote)"""
-    rf"""|^[ \t]*(?:-[ \t]+)?{_KEY_PREFIX}{_SECRET_LABELS})"""
-)
-
-# The value sits on the same line as the key, after ``:`` or ``=``. It is
-# a quoted string of at least one character, with any character but its
-# own quote inside (an apostrophe in a double-quoted value counts), or a
-# bare word. An empty string, ``null``, ``true``, ``false``, a comment,
-# and an object or list (``{``, ``[``: a schema property named
-# ``password``) are not values. A key with nothing on its line (a YAML
-# mapping whose children follow) is not a value either.
-_CREDENTIAL_VALUE = r"""(?:"[^"\n]+"|'[^'\n]+'|(?!(?:null|true|false)\b)[^\s"'#{\[]\S*)"""
-
-#: Secret shapes the stored-result redaction passes through unchanged, each
-#: with a name for the error. Both run on the whole file text, so a secret
-#: the part cut splits in two is found as well. They see a key and its
-#: value on one line; :func:`_count_credential_values` covers every other
-#: layout of a file that parses as JSON or YAML.
-SECRET_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "a credential field",
-        re.compile(
-            rf"{_CREDENTIAL_KEY}[ \t]*[:=][ \t]*{_CREDENTIAL_VALUE}",
-            re.IGNORECASE | re.MULTILINE,
-        ),
-    ),
-    ("a private key block", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
-)
-
-# A parsed key is a credential key by the same rule: it is, or ends in, a
-# secret label.
-_CREDENTIAL_KEY_NAME = re.compile(rf"{_KEY_PREFIX}{_SECRET_LABELS}", re.IGNORECASE)
-
-try:
-    # LibYAML-backed loader, much faster on a large file than the
-    # pure-Python one. Optional because PyYAML wheels for some platforms
-    # ship without LibYAML support.
-    _YamlLoader: type[yaml.SafeLoader] = yaml.CSafeLoader
-except AttributeError:  # pragma: no cover - PyYAML always ships SafeLoader
-    _YamlLoader = yaml.SafeLoader
 
 # The path rule, built from named pieces. One path part holds letters,
 # digits and . _ ~ -, so no backslash, percent sign (an encoded dot or
@@ -376,22 +317,59 @@ async def _read_version(
     return answer
 
 
-def _file_fields(path: str, content_type: str | None, body: bytes) -> dict[str, Any]:
-    """Decode a ``2xx`` body and build the file fields of the answer."""
+def _decode_text(path: str, content_type: str | None, body: bytes) -> str:
+    """Decode a ``2xx`` body as UTF-8 text; refuse other content."""
     if not _is_text(content_type):
         raise Vra8ApiFileError(
             f"{path!r} is {content_type!r}, not text. This read returns only UTF-8 text."
         )
     try:
-        body.decode("utf-8")
+        return body.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise Vra8ApiFileError(
             f"{path!r} ({content_type or 'no content type'}) is not UTF-8 text: {exc.reason}."
         ) from exc
-    parts = split_text_parts(body)
+
+
+def _redaction_labels(connector: Vra8Connector, operator: Operator) -> dict[str, str | None]:
+    """The labels the dispatcher gives the stored-result redaction for this read."""
+    return {
+        "connector_id": f"{connector.impl_id}-{connector.version}",
+        "tenant": str(operator.tenant_id) if operator.tenant_id is not None else None,
+        "op": OP_ID,
+    }
+
+
+def _clean_text(text: str, connector: Vra8Connector, operator: Operator) -> tuple[str, int]:
+    """Replace every secret value in *text*; return the cleaned text and the count.
+
+    The whole-file scan (:func:`redact_secret_values`) runs first, then the
+    stored-result redaction with the dispatcher's labels, on the whole
+    text, so a labelled pair the part cut would split is found too and
+    the text the dispatcher stores is the text returned here. The count is
+    the number of secret values, whichever pass replaced them.
+    """
+    cleaned, count = redact_secret_values(text)
+    result = apply_connector_boundary_redaction(
+        {"text": cleaned}, **_redaction_labels(connector, operator)
+    )
+    redacted = result.redacted["text"] if isinstance(result.redacted, dict) else cleaned
+    if not isinstance(redacted, str):
+        raise Vra8ApiFileError(
+            "MEHO's secret redaction did not return text; the file was not returned."
+        )
+    if redacted != cleaned:
+        count += sum(entry.count for entry in result.manifest)
+    return redacted, count
+
+
+def _file_fields(body: bytes, cleaned: str, redacted_values: int) -> dict[str, Any]:
+    """Build the file fields: ``size`` and ``sha256`` of the served file, the text in parts."""
+    parts = split_text_parts(cleaned.encode("utf-8"))
     return {
         "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
+        "redacted_values": redacted_values,
         "parts": len(parts),
         "text_parts": [{"index": index, "text": text} for index, text in enumerate(parts)],
     }
@@ -426,106 +404,20 @@ def _check_fits(answer: dict[str, Any], operator: Operator) -> None:
         )
 
 
-def _parse_document(file_text: str) -> Any:
-    """Parse *file_text* as JSON, else as YAML; ``None`` when it is neither.
-
-    JSON is tried first because it is exact and fast on a one-line file
-    of a few megabytes. A landing page (HTML) parses as neither, or as
-    one YAML string, and the walk then finds no mapping.
-    """
-    try:
-        return json.loads(file_text)
-    except ValueError:
-        pass
-    try:
-        return yaml.load(file_text, Loader=_YamlLoader)
-    except yaml.YAMLError:
-        return None
-
-
-def _is_credential_value(value: Any) -> bool:
-    """True for a value that can carry a secret: a non-empty string or a number.
-
-    ``None``, ``True``, ``False``, an empty string, a mapping (a schema
-    property named ``password``) and a list (a ``required`` list) are not
-    credential values.
-    """
-    if value is None or isinstance(value, bool):
-        return False
-    return (isinstance(value, str) and bool(value)) or isinstance(value, int | float)
-
-
-def _count_credential_values(document: Any) -> int:
-    """Count the credential keys with a value anywhere in a parsed document.
-
-    The walk is iterative, and visits a shared mapping or list once, so a
-    YAML file whose aliases repeat one node many times costs its size,
-    not the size of the expanded tree.
-    """
-    count = 0
-    seen: set[int] = set()
-    stack = [document]
-    while stack:
-        node = stack.pop()
-        if not isinstance(node, dict | list) or id(node) in seen:
-            continue
-        seen.add(id(node))
-        if isinstance(node, list):
-            stack.extend(node)
-            continue
-        for key, value in node.items():
-            if isinstance(key, str) and _CREDENTIAL_KEY_NAME.fullmatch(key):
-                count += _is_credential_value(value)
-            stack.append(value)
-    return count
-
-
-def _check_no_secret_shape(path: str, file_text: str) -> None:
-    """Refuse a file that holds a secret the stored-result redaction would miss.
-
-    The text rules (:data:`SECRET_SHAPES`) run first; then a file that
-    parses as JSON or YAML is walked, so a credential value the text
-    rules cannot see (on the next line, or in a flow mapping) is found
-    too. The error names the shape and how often it occurs, never the
-    text.
-    """
-    for name, pattern in SECRET_SHAPES:
-        count = sum(1 for _ in pattern.finditer(file_text))
-        if count:
-            raise Vra8ApiFileError(
-                f"{path!r} holds {name} in {count} place(s). MEHO's secret redaction does "
-                "not cover that shape, so the file was not returned. This read never "
-                "returns a clear-text secret."
-            )
-    count = _count_credential_values(_parse_document(file_text))
-    if count:
-        raise Vra8ApiFileError(
-            f"{path!r} holds a credential field in {count} place(s). MEHO's secret "
-            "redaction does not cover that shape, so the file was not returned. This "
-            "read never returns a clear-text secret."
-        )
-
-
 def _check_redaction_keeps_text(
     answer: dict[str, Any], file_text: str, connector: Vra8Connector, operator: Operator
 ) -> None:
-    """Refuse a file whose text the stored-result redaction would change.
+    """Refuse a file whose cleaned text the stored-result redaction would still change.
 
     The dispatcher redacts every result with the policy for this
-    (connector, tenant, operation) before it stores the result. A rule
-    that fires on the file text would rewrite a part, and the joined parts
-    would no longer match ``sha256``. This runs the same middleware with
-    the same labels on the text parts and on the whole file text: a
-    secret that a part cut splits in two is invisible to the per-part
-    check, and the dispatcher would store it in clear text.
+    (connector, tenant, operation) before it stores the result.
+    :func:`_clean_text` already ran that redaction on the whole text, so
+    a second run should change nothing; this check proves it on the text
+    parts and on the whole text, and refuses the file if a rule still
+    fires, so the stored parts are always the text the read returns.
     """
     probe = {"text_parts": answer["text_parts"], "file_text": file_text}
-    result = apply_connector_boundary_redaction(
-        probe,
-        connector_id=f"{connector.impl_id}-{connector.version}",
-        tenant=str(operator.tenant_id) if operator.tenant_id is not None else None,
-        op=OP_ID,
-    )
+    result = apply_connector_boundary_redaction(probe, **_redaction_labels(connector, operator))
     if result.redacted == result.raw:
         return
     hit = result.manifest[0] if result.manifest else None
@@ -535,9 +427,9 @@ def _check_redaction_keeps_text(
         else f"policy {result.policy_id!r} changes the text"
     )
     raise Vra8ApiFileError(
-        f"{answer['path']!r} holds text that MEHO's secret redaction would change: {where}. "
-        "The stored parts would no longer match sha256, so the file was not returned. "
-        "This read never returns a changed file."
+        f"{answer['path']!r} holds text that MEHO's secret redaction would still change: "
+        f"{where}. The stored parts would not be the text of this answer, so the file was "
+        "not returned."
     )
 
 
@@ -553,10 +445,10 @@ async def vra8_api_file_get_impl(
     2. ``GET`` the file with the connector's login, without following a
        redirect.
     3. Read the version, build and IaaS API label (best effort).
-    4. Refuse a file that does not fit in one stored result, whose text
-       the stored-result redaction would change, or that holds a secret
-       shape the redaction would miss (in the text, or in the parsed
-       JSON or YAML document).
+    4. Replace every secret value in the file text with a placeholder and
+       count the replacements (``redacted_values``). Refuse a file that
+       does not fit in one stored result or whose cleaned text the
+       stored-result redaction would still change.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -572,17 +464,19 @@ async def vra8_api_file_get_impl(
         "redirect_path": fetched["redirect"],
         "size": None,
         "sha256": None,
+        "redacted_values": 0,
         "parts": 0,
         "text_parts": [],
     }
     if 200 <= fetched["status"] < 300:
-        answer.update(_file_fields(path, fetched["content_type"], fetched["body"]))
+        text = _decode_text(path, fetched["content_type"], fetched["body"])
+        cleaned, redacted_values = _clean_text(text, connector, operator)
+        answer.update(_file_fields(fetched["body"], cleaned, redacted_values))
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         file_text = "".join(part["text"] for part in answer["text_parts"])
         _check_fits(answer, operator)
         _check_redaction_keeps_text(answer, file_text, connector, operator)
-        _check_no_secret_shape(path, file_text)
 
     _log.info(
         "vra8_api_file_read",
@@ -591,6 +485,7 @@ async def vra8_api_file_get_impl(
         status=answer["status"],
         size=answer["size"],
         parts=answer["parts"],
+        redacted_values=answer["redacted_values"],
         has_build=answer["build"] is not None,
     )
     return answer

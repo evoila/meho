@@ -287,10 +287,12 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   dispatcher's session-recovery arm drops the cached bearer, logs in again
   and retries once, like every other read of this connector.
 - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-  `size` (bytes), `sha256` (of the file bytes), `parts`, `text_parts`,
-  `version`, `build`, `iaas_api_version`, `version_error`. Only UTF-8 text
-  (text, JSON, XML or YAML content types) comes back; other content is
-  refused and the error names its content type.
+  `size` (bytes) and `sha256` (both of the file as served),
+  `redacted_values` (how many secret values were replaced, see below),
+  `parts`, `text_parts`, `version`, `build`, `iaas_api_version`,
+  `version_error`. Only UTF-8 text (text, JSON, XML or YAML content types)
+  comes back; other content is refused and the error names its content
+  type.
 - **Version and build.** `version` and `build` come from the Orchestrator
   inside the appliance, `GET /vco/api/about` (`version` and `build-number`;
   checked against the vendor's Orchestrator API reference, not proven on
@@ -301,9 +303,11 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   and `version_error` says why.
 - **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
   each at most 64 KiB of UTF-8, cut only between characters. Join the `text`
-  of all parts in `index` order and encode as UTF-8; the SHA-256 of the
-  result equals `sha256`. A part is a fixed byte size, not a line, because a
-  served file can be one long line. The text parts are the one list in the
+  of all parts in `index` order and encode as UTF-8. When `redacted_values`
+  is 0, the result is the exact file and its SHA-256 equals `sha256`; when
+  it is not, the result is the file with its secret values replaced, and
+  `sha256` still names the file as served. A part is a fixed byte size, not
+  a line, because a served file can be one long line. The text parts are the one list in the
   answer, so JSONFlux stores a large answer as rows behind a result handle
   (one row per part) and keeps the scalar fields (`sha256`, `size`, `parts`,
   `build`, ...) in the inline summary. Page the handle with `result_query`
@@ -315,57 +319,71 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   and the stored record, measured as the store writes it with
   `rows_record_bytes` (the parts, the scalar fields and the record's own
   fields), must fit `result_handle_max_record_bytes` (16 MiB by default).
-- **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
-  every stored result (the dispatcher runs
-  `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
-  that fires on the file text would rewrite a part, and the joined parts
-  would no longer match `sha256`. So the read runs the same middleware, with
-  the same connector, tenant and operation labels, on the text parts and on
-  the whole file text before it returns (the whole-file pass catches a
-  secret that the part cut splits in two). When the text would change, the
-  read stops with an error that names the rule and the place, and returns no
-  file. Redaction itself stays on.
-- **Secret shapes the redaction misses.** The redaction rule for labelled
-  secrets wants a bare label right before `=` or `:` and a value of at
-  least 8 characters, and it does not know every label. So it does not see
-  a quoted key (`"password": "..."`, `"token": "..."`), a short value, a
-  `licenseKey`, or a PEM private key block. The read looks for a credential
-  field and a private key block itself (`SECRET_SHAPES` in `api_file.py`)
-  in the whole file text, so a secret cut in two by a part boundary is
-  found too. A credential field is a key that is, or ends in, a secret
-  label (the redaction's labels plus `licenseKey`), either in quotes
-  anywhere or bare at the start of a line, followed on the same line by
-  `:` or `=` and a value: a quoted string of at least one character (an
-  apostrophe inside a double-quoted value counts), or a bare word. A schema
-  property named `password` (an object, or a mapping on the next lines), a
-  `required` list that names it, `flow: password`, `format: password`, an
-  empty string, `null`, `true`, `false` and a label inside a description
-  are not credential fields. Those text rules see a key and its value on
-  one line only. So a file that is valid JSON or YAML is also parsed
-  (`json.loads`, then PyYAML's safe loader), and the parsed document is
-  walked: every key that is, or ends in, a secret label and holds a
-  non-empty string or a number is a credential field, whatever the layout
-  (a value on the next line, a flow mapping such as
-  `example: {password: abc}`, a list of mappings, a quoted or a bare key).
-  `null`, `true`, `false`, an empty string, a mapping and a list are not
-  values here either, so a schema still comes back whole. The walk visits
-  a shared node once, so YAML aliases cannot make it slow. A page that is
-  neither JSON nor YAML (HTML) is checked by the text rules only. An
-  example credential value in a documentation file is refused as well;
-  that is on purpose. A file that holds one of the shapes stops with an
-  error that names the shape and how often it occurs, never the text.
+- **Secret values are replaced before the text is returned.** An API
+  description file or a documentation page can show a clear-text secret:
+  an example `"password": "..."` in a Swagger file, a
+  `<password>...</password>` element in an XML file, a `password="..."`
+  attribute or a script block in an HTML page, a PEM private key. MEHO's
+  stored-result redaction sees only labelled pairs on one line
+  (`api_key=...` with eight or more characters), so the read cleans the
+  text itself, in two passes on the whole file as text, whatever its
+  format (so a part cut hides nothing and no format needs its own rules):
+  1. `redact_secret_values` (`api_file_redaction.py`) replaces the value
+     of every secret-named key, the text of every secret-named XML or HTML
+     element and every PEM private key block with `[REDACTED:param_name]`,
+     the placeholder the dispatcher writes for a secret-named value of a
+     governed credential read. A key is secret-named by the one rule MEHO
+     uses for every secret-named parameter and field,
+     `is_secret_param_name` in `broadcast/events.py` (`password`, `pwd`,
+     `clientSecret`, `refreshToken`, `x-api-key`, `private_key`,
+     `licenseKey`, ...); there is no second list. The key may be in quotes
+     (JSON), bare at the start of a line or after a list dash (YAML, a
+     properties file), bare in a flow mapping (`{password: abc}`) or bare
+     before `=` (an attribute, a query string). The value follows `:` or
+     `=`, on the same line or on the next non-empty line: a quoted string
+     (an apostrophe or a doubled quote inside counts), a bare word, a
+     number or a YAML block scalar with its indented lines. An empty
+     string, `null`, `true`, `false`, a comment, an object or list (a
+     schema property named `password`), a key whose children follow on
+     the next lines (`password:` then `type: string`) and a secret-named
+     word in running text (`the token: in the header`) are not values, so
+     a schema comes back whole. The element rule follows the pfSense
+     configuration read (`connectors/pfsense/redaction.py`): a
+     secret-named element loses its text (with or without a namespace
+     prefix, attributes or a CDATA section), and an element with child
+     elements is checked child by child.
+  2. The stored-result redaction itself, with the connector, tenant and
+     operation labels the dispatcher will use, on the whole cleaned text.
+     It replaces a labelled pair such as `api_key=...` (also one that a
+     part cut would split) with its own `[REDACTED:<rule>]` placeholder.
+     Its labelled-pair rule leaves a value that already is a
+     `[REDACTED:...]` placeholder alone (`redaction/patterns.py`), so the
+     first pass's placeholders and their keys stay. Running it here means
+     the text the read returns is already the text the dispatcher stores.
+
+  `redacted_values` is the number of values both passes replaced. An
+  example credential in a documentation file is replaced like a real one;
+  that is on purpose. Before the answer leaves the handler, the read runs
+  the stored-result redaction once more, on the text parts and on the
+  whole text, and refuses the file if a rule would still change anything
+  (naming the rule and the place, never the text), so the stored parts are
+  always the text the read returns.
 - **Tests.**
   [`test_connectors_vra8_api_file.py`](../../backend/tests/test_connectors_vra8_api_file.py)
   (respx: accepted and refused paths with no request, the login on the
   `GET`, status and redirect cases, large files, version failures, a file
-  that a redaction rule would change, a secret split across the part cut,
-  credential fields in JSON and YAML (quoted, short, with an apostrophe, a
-  license key) and a private key block, whole and split across the part
-  cut, credential values in layouts the text rules cannot see (a value on
-  the next line, a YAML flow mapping, a list of mappings), whole and split
-  across the part cut, a page that is neither JSON nor YAML, a YAML file
-  with shared nodes, schemas that name `password` without a value, a file
-  with more parts than the row limit, and the result-handle round trip);
+  with a labelled `password=...` pair, whole and split across the part
+  cut, a password in an HTML script block with its value on the next
+  line, in an XML element and in an HTML attribute, the same split across
+  the part cut, credential fields in JSON and YAML (quoted, short, with an
+  apostrophe, a license key, a flow mapping, a value on the next line) and
+  a private key block, the count of several values, schemas and pages
+  that name `password` without a value, a file with more parts than the
+  row limit, and the result-handle round trip);
+  [`test_connectors_vra8_api_file_redaction.py`](../../backend/tests/test_connectors_vra8_api_file_redaction.py)
+  (the whole-file scan on its own: every replaced shape with the exact
+  cleaned text, every kept shape, the count, the placeholder pinned to the
+  dispatcher's);
   [`test_connectors_vra8_typed_reads.py`](../../backend/tests/test_connectors_vra8_typed_reads.py)
   (zero-catalog dispatch, the 401 re-login, and `invalid_params` for a data
   path); and the reconcile lane below (`GET /vco/api/about` in the manifest,

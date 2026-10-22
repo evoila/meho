@@ -389,8 +389,8 @@ carry those claims; operators upgrading from v0.1 to v0.2 must apply the
 realm-side configuration that mints them, or every authenticated request
 returns `401 missing_tenant_claim`.
 
-The realm-side recipe (group attribute + realm role protocol mappers,
-verification + troubleshooting) lives at
+The realm-side recipe (group attributes + User Attribute protocol
+mappers, verification + troubleshooting) lives at
 [`docs/cross-repo/keycloak-tenant-claims.md`](./docs/cross-repo/keycloak-tenant-claims.md).
 Apply it against the realm whose issuer is configured as
 `config.keycloakIssuerUrl` in the chart values (rendered into the

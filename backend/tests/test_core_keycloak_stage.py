@@ -84,6 +84,8 @@ def _plan(realm_file: Path, **overrides: Any) -> Plan:
             "first_login_secret": "rel-core-first-login",
             "admin_username": "admin",
             "approver_username": "approver",
+            "keycloak_admin_secret": "rel-core-keycloak-console",
+            "keycloak_admin_username": "keycloak-admin",
             **overrides,
         }
     )
@@ -159,6 +161,17 @@ class FakeKeycloak:
             for binding, file_id in overrides.items():
                 overrides[binding] = file_ids[file_id]
             self._add_client(client)
+        # Keycloak makes realm-management for every realm; the import does
+        # not list it.
+        self._add_client(
+            {
+                "clientId": "realm-management",
+                "roles": {
+                    name: {"id": str(uuid.uuid4()), "name": name, "clientRole": True}
+                    for name in ("realm-admin", "manage-users", "manage-clients")
+                },
+            }
+        )
 
     def _add_flow(self, flow: Mapping[str, Any]) -> dict[str, Any]:
         made = {
@@ -223,6 +236,12 @@ class FakeKeycloak:
 
     def _client_by_id(self, client_id: str) -> dict[str, Any] | None:
         return next((c for c in self.clients.values() if c["id"] == client_id), None)
+
+    def _user_by_id(self, user_id: str) -> dict[str, Any] | None:
+        return next((u for u in self.users.values() if u["id"] == user_id), None)
+
+    def client_roles(self, username: str, client_id: str = "realm-management") -> list[str]:
+        return list(self.users[username].get("clientRoles", {}).get(client_id, []))
 
     def state(self) -> dict[str, Any]:
         return copy.deepcopy(
@@ -326,6 +345,19 @@ class FakeKeycloak:
                 case "/default-client-scopes" | "/optional-client-scopes" as kind:
                     names = client.get(f"{kind[1:].split('-')[0]}ClientScopes", [])
                     return Reply(200, [{"id": self.scopes[n]["id"], "name": n} for n in names])
+                case str(rest) if rest.startswith("/roles/"):
+                    role = client.get("roles", {}).get(rest.removeprefix("/roles/"))
+                    if role is None:
+                        return Reply(404, {"error": "Could not find role"})
+                    return Reply(200, copy.deepcopy(role))
+        if match := re.fullmatch(
+            r"/admin/realms/meho/users/([^/]+)/role-mappings/clients/([^/]+)", path
+        ):
+            user = self._user_by_id(match.group(1))
+            client = self._client_by_id(match.group(2))
+            assert user is not None and client is not None
+            names = user.get("clientRoles", {}).get(client["clientId"], [])
+            return Reply(200, [copy.deepcopy(client["roles"][n]) for n in names])
         raise AssertionError(f"unexpected GET {path}")
 
     def _post(self, path: str, body: Any, params: dict[str, str]) -> Reply:
@@ -394,6 +426,22 @@ class FakeKeycloak:
             mapper = {"id": str(uuid.uuid4()), **copy.deepcopy(body)}
             client.setdefault("protocolMappers", []).append(mapper)
             return Reply(201, None, f"{path}/{mapper['id']}")
+        if match := re.fullmatch(
+            r"/admin/realms/meho/users/([^/]+)/role-mappings/clients/([^/]+)", path
+        ):
+            # Keycloak lets a principal grant only admin roles it holds:
+            # meho-admin (manage-users, manage-clients) cannot grant realm-admin.
+            assert self.session is not None
+            if not self.session.startswith("master/"):
+                return Reply(403, {"error": "HTTP 403 Forbidden"})
+            user = self._user_by_id(match.group(1))
+            client = self._client_by_id(match.group(2))
+            assert user is not None and client is not None
+            held = user.setdefault("clientRoles", {}).setdefault(client["clientId"], [])
+            for role in body:
+                assert client["roles"][role["name"]]["id"] == role["id"]
+                held.append(role["name"])
+            return Reply(204, None)
         raise AssertionError(f"unexpected POST {path}")
 
     def _put(self, path: str, body: Any, params: dict[str, str]) -> Reply:
@@ -520,8 +568,9 @@ async def test_each_person_is_in_exactly_one_role_group(realm_file: Path) -> Non
     kc = _fresh()
     await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
 
-    for user in kc.users.values():
-        assert len(_ROLE_GROUPS & set(user["groups"])) == 1, user["username"]
+    for name in ("admin", "approver"):
+        assert len(_ROLE_GROUPS & set(kc.users[name]["groups"])) == 1, name
+    assert kc.users["keycloak-admin"]["groups"] == [], "the Keycloak admin is in no MEHO group"
     assert set(kc.groups) > _ROLE_GROUPS
     assert set(kc.groups["MEHO-Platform-Admins"]["attributes"]) == {"platform_admin"}
 
@@ -542,13 +591,15 @@ async def test_second_run_changes_nothing(
 
     assert kc.state() == first
     assert store.secrets == first_secrets
-    assert store.created == ["rel-core-first-login"]
+    assert store.created == ["rel-core-first-login", "rel-core-keycloak-console"]
     assert not [c for c in kc.calls if c[0] in ("POST", "DELETE")]
     out = capfd.readouterr().out
     assert "login: meho-admin" in out
     assert "created" not in out
     assert "user admin: kept" in out
     assert "secret rel-core-first-login: kept" in out
+    assert "user keycloak-admin: kept" in out
+    assert "user keycloak-admin: has realm-management realm-admin" in out
 
 
 async def test_upgrade_adds_what_a_newer_realm_file_brings(
@@ -857,7 +908,7 @@ async def test_output_never_contains_a_secret_value(
     values = [v for k, v in _ENV.items() if "SECRET" in k]
     values += [v for data in store.secrets.values() for k, v in data.items() if "password" in k]
     values += [store.secrets["rel-core-ci-login"]["client_secret"]]
-    assert len(values) == 7
+    assert len(values) == 8
     for value in values:
         assert value not in output
     assert "\n" in output
@@ -910,9 +961,9 @@ async def test_existing_first_login_secret_is_the_source_for_missing_people(
 
     await finish_realm(_plan(realm_file), _ENV, kc, store)
 
-    assert store.created == []
+    assert store.created == ["rel-core-keycloak-console"]
     assert store.secrets["rel-core-first-login"] == stored
-    assert set(kc.users) == {"root-person", "second"}
+    assert set(kc.users) == {"root-person", "second", "keycloak-admin"}
     assert kc.users["root-person"]["credentials"][0]["value"] == "P" * 32
 
 
@@ -1000,6 +1051,118 @@ async def test_first_login_secret_without_a_key_stops_the_stage(realm_file: Path
 
     assert '"rel-core-first-login"' in str(caught.value)
     assert '"admin_password"' in str(caught.value)
+
+
+async def test_fresh_install_makes_the_keycloak_admin_with_realm_admin(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh()
+    store = FakeStore()
+
+    await finish_realm(_plan(realm_file), _ENV, kc, store)
+
+    secret = store.secrets["rel-core-keycloak-console"]
+    assert set(secret) == {"username", "password"}
+    assert secret["username"] == "keycloak-admin"
+    assert _ALNUM_32.match(secret["password"])
+    assert "keycloak-admin" not in store.secrets["rel-core-first-login"].values()
+    user = kc.users["keycloak-admin"]
+    assert user["enabled"] is True
+    assert user["groups"] == []
+    assert user["credentials"] == [
+        {"type": "password", "value": secret["password"], "temporary": True}
+    ]
+    assert user["requiredActions"] == ["UPDATE_PASSWORD"]
+    assert kc.client_roles("keycloak-admin") == ["realm-admin"]
+    assert kc.client_roles("admin") == []
+    assert kc.master_clients == {}, "granted before the first-start account goes"
+    out = capfd.readouterr().out
+    assert "secret rel-core-keycloak-console: created" in out
+    assert "user keycloak-admin: created (in no group)" in out
+    assert "user keycloak-admin: realm-management realm-admin granted" in out
+    assert out.index("realm-admin granted") < out.index("first-start account: removed")
+
+
+async def test_upgrade_as_meho_admin_makes_the_keycloak_admin_but_cannot_grant_the_role(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An older install: the first-start account is gone, meho-admin gets no more rights."""
+    kc = _fresh(bootstrap=False)
+    env = {k: v for k, v in _ENV.items() if not k.startswith("MEHO_CORE_BOOTSTRAP")}
+    store = FakeStore()
+    plan = _plan(realm_file)
+
+    await finish_realm(plan, env, kc, store)
+
+    assert kc.session == "meho/meho-admin"
+    assert kc.users["keycloak-admin"]["groups"] == []
+    assert kc.client_roles("keycloak-admin") == []
+    assert not [c for c in kc.calls if c[0] == "POST" and "/role-mappings/" in c[1]]
+    out = capfd.readouterr().out
+    hint = (
+        "user keycloak-admin: has no realm-management realm-admin, and meho-admin "
+        "cannot grant it; grant it once by hand"
+    )
+    assert hint in out
+    assert "keycloak-realm.md" in out
+
+    # The next run, still as meho-admin, keeps everything and says it again.
+    state = kc.state()
+    await finish_realm(plan, env, kc, store)
+    assert kc.state() == state
+    out = capfd.readouterr().out
+    assert "user keycloak-admin: kept" in out
+    assert hint in out
+
+    # Once the role is granted by hand, the stage keeps it quietly.
+    kc.users["keycloak-admin"]["clientRoles"] = {"realm-management": ["realm-admin"]}
+    await finish_realm(plan, env, kc, store)
+    out = capfd.readouterr().out
+    assert "user keycloak-admin: has realm-management realm-admin" in out
+    assert "grant it once by hand" not in out
+
+
+async def test_a_keycloak_admin_without_the_role_gets_it_from_the_first_start_account(
+    realm_file: Path,
+) -> None:
+    kc = _fresh()
+    kc.users["keycloak-admin"] = {"id": "u9", "username": "keycloak-admin", "groups": []}
+
+    await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
+
+    assert kc.client_roles("keycloak-admin") == ["realm-admin"]
+    assert kc.master_clients == {}
+
+
+@pytest.mark.parametrize(
+    "keycloak_admin", ["admin", "Approver", " admin "], ids=["admin", "approver", "spaces"]
+)
+async def test_a_keycloak_admin_named_like_a_person_stops_the_stage_before_any_secret(
+    realm_file: Path, keycloak_admin: str
+) -> None:
+    kc = _fresh()
+    store = FakeStore()
+    plan = _plan(realm_file, keycloak_admin_username=keycloak_admin)
+
+    with pytest.raises(RealmStageError, match="the Keycloak admin must be its own user") as caught:
+        await finish_realm(plan, _ENV, kc, store)
+
+    assert "the chart names" in str(caught.value)
+    assert store.secrets == {}
+    assert kc.users == {}
+    assert "boot-client" in kc.master_clients
+
+
+async def test_a_console_secret_naming_a_person_stops_the_stage(realm_file: Path) -> None:
+    store = FakeStore(
+        existing={"rel-core-keycloak-console": {"username": "ADMIN", "password": "K" * 32}}
+    )
+    kc = _fresh()
+
+    with pytest.raises(RealmStageError, match='Secret "rel-core-keycloak-console" names'):
+        await finish_realm(_plan(realm_file), _ENV, kc, store)
+    assert "boot-client" in kc.master_clients
+    assert kc.client_roles("admin") == []
 
 
 async def test_ci_login_makes_a_client_a_group_and_a_secret(
@@ -1098,7 +1261,8 @@ def test_load_realm_file_errors_name_the_file(tmp_path: Path) -> None:
         ('{"keycloak_url": "u"}', "realm_file"),
         (
             '{"keycloak_url": "u", "realm_file": "f", "first_login_secret": "s", '
-            '"admin_username": "a", "approver_username": "b", "extra": 1}',
+            '"admin_username": "a", "approver_username": "b", "keycloak_admin_secret": "k", '
+            '"keycloak_admin_username": "c", "extra": 1}',
             "extra",
         ),
     ],

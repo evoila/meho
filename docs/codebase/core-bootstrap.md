@@ -17,6 +17,10 @@ today, the realm stage, finishes the Keycloak realm `meho`:
 - It makes two people with temporary passwords: the first admin and a
   second person who can approve. The passwords go into the Secret
   `<release>-core-first-login`.
+- It makes the Keycloak admin: a third user who administers realm `meho`
+  in the Keycloak admin console (`realm-management` role `realm-admin`), in
+  no MEHO group. Its temporary password goes into the Secret
+  `<release>-core-keycloak-console`.
 - On the first run it logs in with Keycloak's temporary first-start account,
   checks that `meho-admin` can log in, and then removes the first-start
   account. Every later run logs in as `meho-admin`.
@@ -32,9 +36,17 @@ What is true after the Job ran:
 - The first admin can log in with `meho login https://<host>` or in the
   browser. Keycloak asks for a new password first. The token then carries
   the first tenant's id, the role `tenant_admin` and `platform_admin`.
-- The second person is in `MEHO-SA-Operators`, the group that may approve
-  changes that wait for a second person. The first admin cannot approve
-  their own request.
+- The second person is in `MEHO-SA-Operators`. That group gives the role
+  `operator` (self-approval comes later with #3325). A change that waits
+  for a second person can be approved by any operator other than the
+  person who asked, or by a member of `MEHO-Approvers`. So the second
+  person can approve the first admin's changes. The first admin cannot
+  approve their own request.
+- The Keycloak admin can log in to the admin console of realm `meho` at
+  `https://<host>/auth/admin/meho/console/` (with
+  `coreKeycloak.ingress.exposeAdmin: true`) and set up the company login
+  (identity providers, user federation, mappers). MEHO refuses its token:
+  it has no tenant claim.
 - A second run with the same values changes nothing.
 - The Job's output names objects and says `created`, `kept` or `removed`. It
   never holds a password or a secret.
@@ -64,6 +76,45 @@ The two names must be two different Keycloak users. Keycloak ignores case
 and surrounding spaces in a user name, so `Admin` and `admin` are the same
 person. The Job refuses such a pair before it makes the Secret, so a wrong
 pair never leaves one person with a stored password that does not work.
+
+## The Keycloak admin
+
+| User | Values key (user name) | Groups | Rights |
+|---|---|---|---|
+| Keycloak admin | `coreKeycloak.firstLogin.keycloakAdminUsername` (default `keycloak-admin`) | none | `realm-management` → `realm-admin` on realm `meho` |
+
+Without it nobody could administer realm `meho`: the first-start account
+is removed on the first run, `meho-admin` has only `manage-clients` and
+`manage-users`, and the two people have no Keycloak admin rights. The
+company-login recipes (docs-site/install/login/) need an identity
+provider or a user federation, which only a realm admin can add.
+
+It is a separate user on purpose. It is in no MEHO group, so its token has
+no `tenant_id` and MEHO refuses it; the two people get no Keycloak admin
+rights. Its password is made like theirs (temporary, `UPDATE_PASSWORD`).
+The Secret `<release>-core-keycloak-console` holds `username` and
+`password`. It is a Secret of its own, not two more keys in
+`<release>-core-first-login`: the Job refuses an existing Secret that lacks
+a key, so new keys there would break every upgrade. The name must differ
+from both people (same rule as above, checked against the values and the
+Secrets).
+
+Keycloak lets a principal grant only the admin roles it holds. So:
+
+- **Fresh install** (the run logs in with the first-start account, a master
+  realm admin): the Job makes the user and grants `realm-admin` before it
+  removes the first-start account.
+- **Upgrade of an older install** (the first-start account is gone, the run
+  logs in as `meho-admin`): the Job makes the user and its Secret when
+  missing (`manage-users` allows that) but cannot grant `realm-admin`, and
+  `meho-admin` gets no more rights for it. It prints one line, `user
+  keycloak-admin: has no realm-management realm-admin, and meho-admin
+  cannot grant it; …`, and does not fail. Grant the role once by hand:
+  docs-site/install/keycloak-realm.md, "Keycloak admin on an older install".
+  Every later run keeps the user and prints the line until the role is
+  there.
+- A user that exists without the role gets it when the run has the
+  first-start account.
 
 **One role group per person.** A person is in exactly one of the five role
 groups (`docs/decisions/login-role-groups.md`). `MEHO-Platform-Admins` is
@@ -301,17 +352,21 @@ Steps of the realm stage, in order:
    request, so Keycloak makes both or neither; a run that fails here
    leaves no person without groups, and the next run makes the person
    again.
-6. **Swap.** Only when step 2 used the first-start account: check that
+6. **Keycloak admin.** Read `<release>-core-keycloak-console`; make it when
+   missing. Make the user (no groups) when missing. Grant
+   `realm-management` → `realm-admin` when it lacks it and the run has the
+   first-start account; as `meho-admin`, print how to grant it by hand.
+7. **Swap.** Only when step 2 used the first-start account: check that
    `meho-admin` logs in with its secret, then delete the first-start
    account's client in realm `master`. If `meho-admin` cannot log in, the
    first-start account stays and the Job stops.
 
 Rights: `meho-admin` has `manage-clients` and `manage-users` on realm
 `meho` (from the realm file), which covers steps 3 to 5 except the login
-flows; with the company login on, the chart adds `manage-identity-providers`
-and `manage-realm` (see "Rights" under the company login), and then the
-Job can make the login flows too. Only the first-start account can do
-step 6, and only it is needed there.
+flows, and the user in step 6; with the company login on, the chart adds
+`manage-identity-providers` and `manage-realm` (see "Rights" under the
+company login), and then the Job can make the login flows too. Only the
+first-start account can grant `realm-admin` (step 6) and do step 7.
 
 ### Network rules
 
@@ -366,10 +421,9 @@ when nothing is missing. The Secrets it makes carry only the label
   value in the Secret alone locks the Job out: it can no longer log in to
   set the new value on the client, and every later run fails. Instead:
   1. In Keycloak, set the new secret on the client `meho-admin` (realm
-     `meho`, Clients, Credentials). This needs a Keycloak admin login; the
-     first-start account is gone after the first run, so use a Keycloak
-     admin you made, or a temporary one from Keycloak's
-     `bootstrap-admin` recovery command (see the link below).
+     `meho`, Clients, Credentials). Log in as the Keycloak admin (Secret
+     `<release>-core-keycloak-console`) at
+     `https://<host>/auth/admin/meho/console/`.
   2. Write the same value into the Secret `<release>-core-keycloak-admin`
      (key `client_secret`).
   3. Restart the pods that read it, or run `helm upgrade`. The Job then

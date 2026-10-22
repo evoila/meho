@@ -29,6 +29,11 @@ running realm up to date through the Admin REST API:
   tenants' groups on groups that exist already, removes ``tenant_id``,
   ``tenant_role`` and ``approver`` from an extra tenant's groups, and
   leaves other attributes alone;
+* it makes the Keycloak admin, a third user who administers realm ``meho``
+  in the Keycloak admin console (``realm-admin``) and is in no MEHO group,
+  with a temporary password stored in ``<release>-core-keycloak-console``.
+  Only the first-start account can grant ``realm-admin``; when the stage runs
+  as ``meho-admin`` and the role is missing, it says how to grant it by hand;
 * when ``coreKeycloak.ci.enabled`` is on, it also makes a CI-only service
   client and a group for a second tenant;
 * when ``coreKeycloak.companyLogin.enabled`` is on, it sets up the company
@@ -135,6 +140,12 @@ _RESERVED_TENANT_NAMES = frozenset({"sa", "platform", "ci"})
 # Client attributes the stage adds to a client that exists already, when
 # the client does not have them yet. A value that is there stays.
 ADDED_CLIENT_ATTRIBUTES = ("client.offline.session.idle.timeout",)
+# The Keycloak admin holds this client role of ``realm-management``: full
+# rights over realm ``meho`` in the Keycloak admin console (identity
+# providers, user federation, mappers). It is in no MEHO group, so its token
+# has no tenant claim and MEHO itself refuses it.
+REALM_MANAGEMENT = "realm-management"
+REALM_ADMIN_ROLE = "realm-admin"
 
 # Seconds per request; the Job's backoffLimit decides whether it runs again.
 _HTTP_TIMEOUT_S = 30
@@ -182,6 +193,9 @@ class Plan(BaseModel):
     admin_username: str = Field(min_length=1)
     approver_username: str = Field(min_length=1)
     tenants: tuple[TenantPlan, ...] = ()
+    # The Keycloak admin of realm ``meho`` and the Secret with its login.
+    keycloak_admin_secret: str = Field(min_length=1)
+    keycloak_admin_username: str = Field(min_length=1)
     ci: CiPlan = CiPlan()
     company_login: CompanyLoginPlan = CompanyLoginPlan()
 
@@ -192,6 +206,10 @@ class Plan(BaseModel):
         if len(set(names)) != len(names) or len(set(ids)) != len(ids):
             raise ValueError("every extra tenant needs its own name and its own id")
         return self
+
+
+# Who the stage is logged in as: the first-start account or ``meho-admin``.
+Session = Literal["bootstrap", "admin"]
 
 
 class SecretStore(Protocol):
@@ -481,7 +499,7 @@ class _Realm:
                 changes.append(f"{kind} scope {name} added")
         return changes
 
-    async def ensure_user(self, username: str, password: str, groups: tuple[str, ...]) -> None:
+    async def user_id(self, username: str) -> str | None:
         found = expect(
             await self.admin.call(
                 "GET", f"{self.base}/users", params={"username": username, "exact": "true"}
@@ -489,9 +507,16 @@ class _Realm:
             200,
             what=f"cannot look up user {username}",
         )
-        if found.data:
+        return str(found.data[0]["id"]) if found.data else None
+
+    async def ensure_user(
+        self, username: str, password: str, groups: tuple[str, ...]
+    ) -> tuple[str, bool]:
+        """Make the user when missing: ``(id, created)``."""
+        found = await self.user_id(username)
+        if found is not None:
             _say(f"user {username}: kept")
-            return
+            return found, False
         for group in groups:
             if await self.group_id(group) is None:
                 raise RealmStageError(f"group {group} does not exist, so {username} cannot join it")
@@ -505,12 +530,57 @@ class _Realm:
             "requiredActions": ["UPDATE_PASSWORD"],
             "groups": [f"/{group}" for group in groups],
         }
-        expect(
+        reply = expect(
             await self.admin.call("POST", f"{self.base}/users", json=body),
             201,
             what=f"cannot create user {username}",
         )
-        _say(f"user {username}: created (in {', '.join(groups)})")
+        _say(f"user {username}: created (in {', '.join(groups) or 'no group'})")
+        return id_from(reply), True
+
+    async def realm_admin_role(self) -> tuple[str, dict[str, Any]]:
+        """The ``realm-management`` client's id and its ``realm-admin`` role."""
+        found = expect(
+            await self.admin.call(
+                "GET", f"{self.base}/clients", params={"clientId": REALM_MANAGEMENT}
+            ),
+            200,
+            what=f"cannot look up client {REALM_MANAGEMENT}",
+        )
+        if not found.data:
+            raise RealmStageError(f"realm {REALM} has no client {REALM_MANAGEMENT}")
+        client_uuid = str(found.data[0]["id"])
+        role = expect(
+            await self.admin.call(
+                "GET", f"{self.base}/clients/{client_uuid}/roles/{REALM_ADMIN_ROLE}"
+            ),
+            200,
+            what=f"cannot read role {REALM_MANAGEMENT} {REALM_ADMIN_ROLE}",
+        ).data
+        return client_uuid, role
+
+    async def has_client_role(self, user_id: str, client_uuid: str, role: str) -> bool:
+        held = expect(
+            await self.admin.call(
+                "GET", f"{self.base}/users/{user_id}/role-mappings/clients/{client_uuid}"
+            ),
+            200,
+            what="cannot read the client roles of a user",
+        ).data
+        return any(r["name"] == role for r in held or [])
+
+    async def grant_client_role(
+        self, user_id: str, client_uuid: str, role: Mapping[str, Any]
+    ) -> None:
+        expect(
+            await self.admin.call(
+                "POST",
+                f"{self.base}/users/{user_id}/role-mappings/clients/{client_uuid}",
+                json=[dict(role)],
+            ),
+            204,
+            what=f"cannot grant {REALM_MANAGEMENT} {role['name']}",
+        )
 
 
 async def _read_or_make(store: SecretStore, name: str, fresh: Mapping[str, str]) -> dict[str, str]:
@@ -533,9 +603,13 @@ async def _read_or_make(store: SecretStore, name: str, fresh: Mapping[str, str])
     return data
 
 
-def _require_two_people(admin: str, approver: str, where: str) -> None:
+def _same_user(one: str, other: str) -> bool:
     """Keycloak ignores case and surrounding spaces in a user name."""
-    if admin.strip().casefold() == approver.strip().casefold():
+    return one.strip().casefold() == other.strip().casefold()
+
+
+def _require_two_people(admin: str, approver: str, where: str) -> None:
+    if _same_user(admin, approver):
         raise RealmStageError(
             f"the first admin and the second person must be two different people, "
             f"but {where} names {admin!r} and {approver!r}, which are the same "
@@ -543,8 +617,21 @@ def _require_two_people(admin: str, approver: str, where: str) -> None:
         )
 
 
-async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> None:
+def _require_own_keycloak_admin(keycloak_admin: str, people: tuple[str, str], where: str) -> None:
+    for person in people:
+        if _same_user(keycloak_admin, person):
+            raise RealmStageError(
+                f"the Keycloak admin must be its own user, but {where} names "
+                f"{keycloak_admin!r} and {person!r}, which are the same Keycloak user"
+            )
+
+
+async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> tuple[str, str]:
+    """Make the two people; return their user names as stored."""
     _require_two_people(plan.admin_username, plan.approver_username, "the chart")
+    _require_own_keycloak_admin(
+        plan.keycloak_admin_username, (plan.admin_username, plan.approver_username), "the chart"
+    )
     fresh = {
         "admin_username": plan.admin_username,
         "admin_password": new_password(),
@@ -557,6 +644,47 @@ async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> 
     )
     await realm.ensure_user(data["admin_username"], data["admin_password"], ADMIN_GROUPS)
     await realm.ensure_user(data["approver_username"], data["approver_password"], APPROVER_GROUPS)
+    return data["admin_username"], data["approver_username"]
+
+
+async def _ensure_keycloak_admin(
+    realm: _Realm,
+    plan: Plan,
+    store: SecretStore,
+    session: Session,
+    people: tuple[str, str],
+) -> None:
+    """Make the Keycloak admin of realm ``meho`` and give it ``realm-admin``.
+
+    Keycloak lets a principal grant only the admin roles it holds: the
+    first-start account (master realm admin) can, ``meho-admin`` cannot and
+    gets no more rights for it. As ``meho-admin`` the stage still makes the
+    user (``manage-users`` allows that) and then says how to grant the role
+    by hand, without failing the Job.
+    """
+    data = await _read_or_make(
+        store,
+        plan.keycloak_admin_secret,
+        {"username": plan.keycloak_admin_username, "password": new_password()},
+    )
+    username = data["username"]
+    _require_own_keycloak_admin(username, people, f'Secret "{plan.keycloak_admin_secret}"')
+    # No groups: the Keycloak admin's token carries no tenant claim, so MEHO
+    # refuses it. It administers Keycloak, not MEHO.
+    user_id, _ = await realm.ensure_user(username, data["password"], ())
+    client_uuid, role = await realm.realm_admin_role()
+    if await realm.has_client_role(user_id, client_uuid, REALM_ADMIN_ROLE):
+        _say(f"user {username}: has {REALM_MANAGEMENT} {REALM_ADMIN_ROLE}")
+        return
+    if session == "bootstrap":
+        await realm.grant_client_role(user_id, client_uuid, role)
+        _say(f"user {username}: {REALM_MANAGEMENT} {REALM_ADMIN_ROLE} granted")
+        return
+    _say(
+        f"user {username}: has no {REALM_MANAGEMENT} {REALM_ADMIN_ROLE}, and {ADMIN_CLIENT_ID} "
+        "cannot grant it; grant it once by hand with a temporary master admin "
+        "(docs-site/install/keycloak-realm.md, 'Keycloak admin on an older install')"
+    )
 
 
 def tenant_groups(tenant: TenantPlan) -> list[dict[str, Any]]:
@@ -663,9 +791,6 @@ async def _ensure_ci(
     await realm.ensure_client(want, scope_ids, {})
 
 
-Session = Literal["bootstrap", "admin"]
-
-
 async def _log_in(admin: Admin, environ: Mapping[str, str]) -> Session:
     bootstrap_id = environ.get(BOOTSTRAP_ID_ENV, "")
     bootstrap_secret = environ.get(BOOTSTRAP_SECRET_ENV, "")
@@ -738,7 +863,8 @@ async def finish_realm(
         _require_env(environ, COMPANY_SECRET_ENV)
         secret = environ[COMPANY_SECRET_ENV]
         await ensure_company_login(admin, plan.company_login, secret, realm.group_id)
-    await _ensure_first_login(realm, plan, store)
+    people = await _ensure_first_login(realm, plan, store)
+    await _ensure_keycloak_admin(realm, plan, store, session, people)
     if session == "bootstrap":
         await _remove_bootstrap_account(admin, environ)
 

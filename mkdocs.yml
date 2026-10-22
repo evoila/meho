@@ -58,6 +58,13 @@ nav:
       - Keycloak realm setup: install/keycloak-realm.md
       - Company login with authentik: install/company-login-authentik.md
       - "OpenBao unseal key: who keeps what": install/openbao-unseal-key.md
+      - Company login:
+          - install/login/index.md
+          - Local users: install/login/local-users.md
+          - AD / LDAP: install/login/ad-ldap.md
+          - Entra ID: install/login/entra-id.md
+          - Your own Keycloak: install/login/customer-keycloak.md
+          - authentik: install/login/authentik.md
       - TLS and ingress: install/tls-ingress.md
       - Upgrades: install/upgrades.md
       - Local kind quickstart: install/kind-quickstart.md

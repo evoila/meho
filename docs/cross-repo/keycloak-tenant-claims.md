@@ -114,7 +114,9 @@ meho admin keycloak bootstrap-clients \
   --admin-user-username <first-admin>
 ```
 
-Then do Step 3 for everyone else. The steps below are the manual path,
+Then do Step 3 for everyone else. To let people log in with their
+company account (AD / LDAP, Entra ID, authentik), see the
+[company login recipes](../../docs-site/install/login/index.md). The steps below are the manual path,
 and they explain what the command does.
 
 ### Step 1 — Create the five groups
@@ -478,20 +480,25 @@ grants the claim (fail-closed). The backplane reads the claim under the
 name `platform_admin` by default, overridable with
 `JWT_PLATFORM_ADMIN_CLAIM_NAME`.
 
-Recommended mapper shape: a **Hardcoded claim** mapper
-(`Token Claim Name: platform_admin`, `Claim value: true`,
-`Claim JSON Type: boolean`, *Add to access token: on*) attached to a
-dedicated realm role (e.g. `meho-platform-admin`), so only users granted
-that role carry `"platform_admin": true`. Users without the role carry no
-claim and resolve to `False`. A per-user boolean attribute + User
-Attribute mapper is the script-free alternative (the same mapper type
-the `tenant_role` recipe uses). The backplane also accepts the string forms `"true"` /
-`"false"` for realms whose mapper emits the claim as a string.
+Recommended shape: the same as `tenant_role`. A top-level group
+**`MEHO-Platform-Admins`** carries the attribute `platform_admin` =
+`true`, and a **User Attribute** mapper named `platform-admin` on each
+login client copies it into the token (`User Attribute: platform_admin`,
+`Token Claim Name: platform_admin`, `Claim JSON Type: boolean`,
+*Add to access token: on*, *Add to userinfo: on*, *Add to ID token:
+off*, Multivalued and Aggregate attribute values off). Only members of
+that group carry `"platform_admin": true`. The group gives no tenant and
+no role, so a platform admin is also in one of the five groups.
+The built-in realm creates both the group and the mapper. Never set
+`platform_admin` on a person: a value on the person wins over the
+group. The backplane also accepts the
+string forms `"true"` / `"false"` for realms whose mapper emits the
+claim as a string.
 
 **Alternative source — a realm role, no mapper (`JWT_PLATFORM_ADMIN_ROLE_NAME`).**
 Realms that already express platform authority as a **realm role** (the
 role list Keycloak emits under `realm_access.roles` via the default
-roles scope) need not add the Hardcoded-claim mapper above. Set
+roles scope) need not add the group and mapper above. Set
 `JWT_PLATFORM_ADMIN_ROLE_NAME` (settings field
 `Settings.jwt_platform_admin_role_name`) to the role's name and the
 backplane grants `platform_admin` when **either** the boolean claim

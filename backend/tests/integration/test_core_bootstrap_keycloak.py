@@ -26,12 +26,18 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
    ``MEHO-lab-b-Operators`` gets both tenants in ``meho_tenants`` and the
    first tenant's ``tenant_id`` as before; a person only in the extra
    tenant's groups gets no ``tenant_id``.
-5. The second run logs in as ``meho-admin`` and changes nothing: the realm
+5. The first run also made the Keycloak admin: ``realm-management``
+   ``realm-admin``, in no group. With a password it can add an identity
+   provider and an LDAP user federation to realm ``meho`` (what the
+   company-login recipes need), and MEHO refuses its token.
+6. The second run logs in as ``meho-admin`` and changes nothing: the realm
    and the Secrets are the same, and the output holds no secret.
-6. On a realm whose ``meho-cli`` has no long login (as before #5516), the
+7. On a realm whose ``meho-cli`` has no long login (as before #5516), the
    next run adds ``offline_access`` and the 48-hour idle limit, and a login
    that asks for ``offline_access`` then gets an offline token. When an
    admin revokes it (the person's Consents tab), its renewal is refused.
+8. On an install whose Keycloak admin is missing, a run as ``meho-admin``
+   makes the user, cannot grant ``realm-admin``, says so and does not fail.
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
 image. Skips when Docker is missing or the container cannot start.
@@ -55,6 +61,7 @@ import httpx
 import pytest
 import yaml
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from httpx import ASGITransport
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth
@@ -139,6 +146,8 @@ def _plan() -> Plan:
         admin_username="admin",
         approver_username="approver",
         tenants=(TenantPlan(name="lab-b", id=UUID(_LAB_B_ID)),),
+        keycloak_admin_secret="rel-core-keycloak-console",
+        keycloak_admin_username="keycloak-admin",
     )
 
 
@@ -438,6 +447,120 @@ def test_a_create_with_an_unknown_group_makes_no_user(keycloak: _Keycloak) -> No
     assert found == []
 
 
+# --- The Keycloak admin of realm meho ----------------------------------------
+
+
+def _realm_admin_held(kc: _Keycloak, user_id: str) -> bool:
+    admin = f"{kc.base_url}/admin/realms/meho"
+    headers = _admin_headers(kc)
+    rm = httpx.get(
+        f"{admin}/clients", headers=headers, params={"clientId": "realm-management"}
+    ).json()[0]
+    held = httpx.get(
+        f"{admin}/users/{user_id}/role-mappings/clients/{rm['id']}", headers=headers
+    ).json()
+    return "realm-admin" in {r["name"] for r in held}
+
+
+async def test_keycloak_admin_administers_realm_meho_and_meho_refuses_it(
+    keycloak: _Keycloak, store: _FakeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    console = store.secrets["rel-core-keycloak-console"]
+    assert console["username"] == "keycloak-admin"
+    assert "user keycloak-admin: realm-management realm-admin granted" in keycloak.output
+    user = _user(keycloak, "keycloak-admin")
+    assert user["groups"] == []
+    assert user["requiredActions"] == ["UPDATE_PASSWORD"]
+    assert _realm_admin_held(keycloak, user["id"])
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    headers = _admin_headers(keycloak)
+    # The realm-level admin console (/auth/admin/meho/console/) logs in
+    # through this client of realm meho.
+    assert httpx.get(
+        f"{admin}/clients", headers=headers, params={"clientId": "security-admin-console"}
+    ).json()
+
+    # What the person does at the first console login: a new password (set
+    # here through the Admin API) and the profile.
+    password = secrets.token_urlsafe(24)
+    httpx.put(
+        f"{admin}/users/{user['id']}/reset-password",
+        headers=headers,
+        json={"type": "password", "value": password, "temporary": False},
+    ).raise_for_status()
+    _finish_first_login(keycloak, "keycloak-admin")
+
+    token = _token(
+        keycloak,
+        "meho",
+        {
+            "grant_type": "password",
+            "client_id": "admin-cli",
+            "username": "keycloak-admin",
+            "password": password,
+        },
+    )
+    assert token.status_code == 200, token.text
+    as_console = {"Authorization": f"Bearer {token.json()['access_token']}"}
+
+    idp = httpx.post(
+        f"{admin}/identity-provider/instances",
+        headers=as_console,
+        json={
+            "alias": "company-oidc",
+            "providerId": "oidc",
+            "enabled": True,
+            "config": {
+                "authorizationUrl": "https://idp.example.test/auth",
+                "tokenUrl": "https://idp.example.test/token",
+                "clientId": "meho",
+                "clientSecret": "not-a-real-secret",
+                "clientAuthMethod": "client_secret_post",
+            },
+        },
+    )
+    assert idp.status_code == 201, idp.text
+    realm_id = httpx.get(f"{keycloak.base_url}/admin/realms/meho", headers=as_console).json()["id"]
+    ldap = httpx.post(
+        f"{admin}/components",
+        headers=as_console,
+        json={
+            "name": "company-ldap",
+            "providerId": "ldap",
+            "providerType": "org.keycloak.storage.UserStorageProvider",
+            "parentId": realm_id,
+            "config": {
+                "enabled": ["false"],
+                "vendor": ["other"],
+                "connectionUrl": ["ldap://ldap.example.test:389"],
+                "usersDn": ["ou=people,dc=example,dc=test"],
+                "usernameLDAPAttribute": ["uid"],
+                "rdnLDAPAttribute": ["uid"],
+                "uuidLDAPAttribute": ["entryUUID"],
+                "userObjectClasses": ["inetOrgPerson"],
+                "authType": ["none"],
+                "editMode": ["READ_ONLY"],
+            },
+        },
+    )
+    assert ldap.status_code == 201, ldap.text
+    components = httpx.get(f"{admin}/components", headers=as_console)
+    assert components.status_code == 200
+    assert "company-ldap" in {c["name"] for c in components.json()}
+    # Leave the realm as the stage left it for the second run.
+    httpx.delete(ldap.headers["location"], headers=as_console).raise_for_status()
+    httpx.delete(
+        f"{admin}/identity-provider/instances/company-oidc", headers=as_console
+    ).raise_for_status()
+
+    # In no MEHO group: no tenant claim, so MEHO refuses its token.
+    _allow_password_grant_on_cli(keycloak)
+    with pytest.raises(HTTPException) as refused:
+        await _operator_for(keycloak, "keycloak-admin", password, monkeypatch)
+    assert refused.value.status_code == 401
+    assert refused.value.detail == "missing_tenant_claim"
+
+
 # --- The admin's credential write and the second person's approval ----------
 
 _WRITE_OP = "k8s.secret.create"  # classified credential_write by the backplane
@@ -723,3 +846,26 @@ async def test_the_stage_gives_an_older_cli_client_a_long_login(
     )
     assert renewal.status_code == 400, renewal.text
     assert renewal.json()["error"] == "invalid_grant"
+
+
+async def test_a_run_as_meho_admin_without_the_keycloak_admin_does_not_fail(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An install older than the Keycloak admin: meho-admin cannot grant realm-admin."""
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    user = _user(keycloak, "keycloak-admin")
+    httpx.delete(f"{admin}/users/{user['id']}", headers=_admin_headers(keycloak)).raise_for_status()
+    capfd.readouterr()
+
+    await _run_stage(keycloak, store)
+
+    output = capfd.readouterr().out
+    assert "login: meho-admin" in output
+    assert "user keycloak-admin: created (in no group)" in output
+    assert (
+        "user keycloak-admin: has no realm-management realm-admin, and meho-admin cannot grant it"
+        in output
+    )
+    again = _user(keycloak, "keycloak-admin")
+    assert again["groups"] == []
+    assert not _realm_admin_held(keycloak, again["id"])

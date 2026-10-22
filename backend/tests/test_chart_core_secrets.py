@@ -85,6 +85,7 @@ _CORE_NAMES = [
         "broadcast-auth",
         "tls",
         "first-login",
+        "keycloak-console",
         "ci-login",
     )
 ]

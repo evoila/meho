@@ -940,10 +940,11 @@
         "firstLogin": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The two people the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md). Their temporary passwords are in <release>-core-first-login.",
+          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): two people, with temporary passwords in <release>-core-first-login, and the Keycloak admin, with its temporary password in <release>-core-keycloak-console.",
           "properties": {
             "adminUsername": { "type": "string", "minLength": 1, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
-            "approverUsername": { "type": "string", "minLength": 1, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." }
+            "approverUsername": { "type": "string", "minLength": 1, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." },
+            "keycloakAdminUsername": { "type": "string", "minLength": 1, "description": "User name of the Keycloak admin of realm meho (realm-management realm-admin, in no MEHO group). Its temporary password is in <release>-core-keycloak-console." }
           }
         },
         "ci": {

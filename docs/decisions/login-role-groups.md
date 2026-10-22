@@ -3,7 +3,7 @@
 **Status:** decided — product owner, 2026-10-19
 **Issue:** [#4590](https://github.com/evoila/meho/issues/4590)
 **Initiative:** [#3959](https://github.com/evoila/meho/issues/3959) — people log in with their company account, and their group decides their tenant and role
-**Used by:** `meho admin keycloak bootstrap-clients`, the built-in Keycloak setup ([#4040](https://github.com/evoila/meho/issues/4040)), the company login recipes under #3959
+**Used by:** `meho admin keycloak bootstrap-clients`, the built-in Keycloak setup ([#4040](https://github.com/evoila/meho/issues/4040)), the company login recipes under #3959 ([`docs-site/install/login/`](../../docs-site/install/login/index.md))
 
 ## The decision
 
@@ -147,6 +147,11 @@ The design is in
   the three mappers, and puts the first admin user in `MEHO-Admins`.
   On a realm made by the older version, it turns the fixed-value
   `tenant-id` / `tenant-role` mappers into User Attribute mappers.
+- The built-in Keycloak (`coreKeycloak.enabled: true`) gets the same
+  groups and mappers from the chart's realm file.
+- [`docs-site/install/login/`](../../docs-site/install/login/index.md)
+  holds the company login recipes: local users, AD / LDAP, Entra ID
+  and authentik.
 - [`docs/cross-repo/keycloak-tenant-claims.md`](../cross-repo/keycloak-tenant-claims.md)
   is the full recipe for a realm set up by hand.
 - [`docs-site/install/keycloak-realm.md`](../../docs-site/install/keycloak-realm.md)

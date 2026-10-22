@@ -17,6 +17,8 @@ mounted into the Job.
   "admin_username" .Values.coreKeycloak.firstLogin.adminUsername
   "approver_username" .Values.coreKeycloak.firstLogin.approverUsername
   "tenants" (default (list) .Values.coreKeycloak.tenants)
+  "keycloak_admin_secret" (printf "%s-core-keycloak-console" $rel)
+  "keycloak_admin_username" .Values.coreKeycloak.firstLogin.keycloakAdminUsername
   "ci" (dict "enabled" $ci.enabled "tenant_id" $ci.tenantId "secret_name" (printf "%s-core-ci-login" $rel))
 -}}
 {{- /* Only when on, so the render with the company login off stays the same. */}}

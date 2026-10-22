@@ -1286,6 +1286,12 @@ coreKeycloak:
     adminUsername: admin
     # -- User name of the second person, who can approve (MEHO-SA-Operators).
     approverUsername: approver
+    # -- User name of the Keycloak admin: a third user who administers realm
+    # `meho` in the Keycloak admin console (`realm-management` role
+    # `realm-admin`), for example to add your company login. It is in no
+    # MEHO group, so MEHO itself refuses it. Its temporary password is in
+    # `<release>-core-keycloak-console`. Must differ from the two above.
+    keycloakAdminUsername: keycloak-admin
   # A login for automated install proofs. Off by default; turn it on only
   # on a test install. When on, the bootstrap Job makes the service client
   # `meho-ci` (a tenant admin of the first tenant, secret in

@@ -99,6 +99,20 @@ Company login (built-in Keycloak):
   (for example when the company login is down), set coreKeycloak.companyLogin.autoRedirect=false and run helm upgrade.
 {{- end }}
 {{- end }}
+
+Keycloak admin console (realm meho):
+  The install also made {{ .Values.coreKeycloak.firstLogin.keycloakAdminUsername }}, who administers realm meho in the
+  Keycloak admin console (realm-admin; for example to add your company login).
+  It is in no MEHO group, so it cannot log in to MEHO. Its temporary password:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-keycloak-console" .Release.Name }} -o jsonpath='{.data.password}' | base64 -d
+  (keys: username, password)
+  The console is https://{{ .Values.coreKeycloak.hostname }}/auth/admin/meho/console/
+{{- if .Values.coreKeycloak.ingress.exposeAdmin }}
+  (routed: coreKeycloak.ingress.exposeAdmin=true).
+{{- else }}
+  and needs coreKeycloak.ingress.exposeAdmin=true (helm upgrade --set coreKeycloak.ingress.exposeAdmin=true).
+{{- end }}
+  On an install older than this user, the bootstrap Job log says how to grant realm-admin by hand.
 {{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 

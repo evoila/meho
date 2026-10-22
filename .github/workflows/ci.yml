@@ -373,10 +373,9 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods) — #761.
-    # Four shards fit inside the 5-pod ceiling. Only the pytest sweep is
-    # CPU/memory-bound enough to want the extra cores; ruff/mypy run once in
-    # python-lint on a GitHub-hosted runner.
+    # The heavy runner pool (#761); its sizes live outside this repo. Only the
+    # pytest sweep is CPU/memory-bound enough to want the extra cores;
+    # ruff/mypy run once in python-lint on a GitHub-hosted runner.
     runs-on: meho-runners-ci-heavy
     strategy:
       # 4 stride shards (#3251 started with 3; #4655 raised it to 4 after the
@@ -465,6 +464,47 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Start memory sampling
+        # Feeds the "Print peak memory" step at the end of this job. A small
+        # background loop reads this container's cgroup v2 memory files once a
+        # second and keeps the highest values until that step stops it. It
+        # never fails the job.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
+            echo "No cgroup v2 memory files here, so no sampling."
+            exit 0
+          fi
+          sample() {
+            total_max=0; ws_max=0; anon_max=0; n=0
+            while :; do
+              read -r total < "${cg}/memory.current"
+              anon=0; inactive_file=0
+              while read -r key value; do
+                case "${key}" in
+                  anon) anon=${value} ;;
+                  inactive_file) inactive_file=${value} ;;
+                esac
+              done < "${cg}/memory.stat"
+              total=${total:-0}
+              ws=$(( total - inactive_file ))
+              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
+              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
+              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
+              n=$(( n + 1 ))
+              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
+              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
+              sleep 1
+            done
+          }
+          sample </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second."
 
       - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
         # The vendor OpenAPI specs (vSphere: vcenter.yaml ~961 paths +
@@ -883,6 +923,59 @@ jobs:
             exit 1
           fi
 
+      - name: Print peak memory
+        # Prints how much memory this job's runner container used and how many
+        # CPUs it had, so a change to the heavy runner pool can be checked
+        # against real numbers. Reads the cgroup files (v2 first, else v1) and
+        # the samples from "Start memory sampling". The kernel's peak also
+        # counts file cache: copies of files that the kernel keeps in memory
+        # and frees when memory runs short. So the sampled working set and
+        # program memory show better what the job really needs. A missing
+        # file is skipped; this step never fails the job.
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          mib() { case "$1" in max) echo "none" ;; ''|*[!0-9]*) echo "${1:-unknown}" ;; *) echo "$(( $1 / 1048576 )) MiB" ;; esac; }
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null
+          fi
+          if [ -r "${RUNNER_TEMP}/memory-samples.txt" ]; then
+            read -r total_max ws_max anon_max samples < "${RUNNER_TEMP}/memory-samples.txt"
+          fi
+          if [ -r "${cg}/memory.peak" ]; then
+            peak="$(mib "$(cat "${cg}/memory.peak")") (kernel count)"
+          elif [ -r "${cg}/memory/memory.max_usage_in_bytes" ]; then
+            peak="$(mib "$(cat "${cg}/memory/memory.max_usage_in_bytes")") (kernel count, cgroup v1)"
+          elif [ -n "${total_max}" ]; then
+            peak="$(mib "${total_max}") (highest sample; no kernel peak file here)"
+          else
+            peak="not available"
+          fi
+          echo "Memory and CPU of this job's runner container (1 MiB = 1,048,576 bytes):"
+          echo "- Peak memory: ${peak}. The most the container held at one time, file cache included."
+          echo "- Highest working set: $(mib "${ws_max}"). Memory in use without the file cache that the kernel frees first (kubectl top shows this)."
+          echo "- Highest program memory: $(mib "${anon_max}"). Memory the programs asked for; the kernel cannot free it."
+          echo "- Samples: ${samples:-none} (one per second)."
+          if [ -r "${cg}/memory.current" ]; then
+            echo "- Memory now: $(mib "$(cat "${cg}/memory.current")")."
+          fi
+          if [ -r "${cg}/memory.max" ]; then
+            echo "- Memory limit: $(mib "$(cat "${cg}/memory.max")")."
+          fi
+          if [ -r "${cg}/memory.events" ]; then
+            echo "- Out-of-memory kills: $(awk '$1 == "oom_kill" { print $2 }' "${cg}/memory.events")."
+          fi
+          echo "- CPUs this job can see (nproc): $(nproc)."
+          if [ -r "${cg}/cpu.max" ]; then
+            echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
+          fi
+          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/4)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          exit 0
+
   python-unit-lane:
     name: Python (ruff + mypy + pytest)
     # FAN-IN carrying the branch-protection required context (#3251). This job
@@ -1006,7 +1099,7 @@ jobs:
           fi
 
   python-coverage:
-    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/3)
+    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/5)
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
@@ -1072,17 +1165,19 @@ jobs:
     # serial wall at ~57 min — past the 45-min step cap, the 55-min job cap,
     # and brushing the ~60-min external pod reap, so a monolithic sweep was
     # structurally out of road (proven by run 33149016521: healthy 14Gi pod,
-    # steady progress, killed at 93%). The sweep now runs as 3 stride shards
-    # of the sorted test-file list (~240 files / ~19 min each), fanned into
-    # the python-coverage-combine job below which merges all shards' parallel
-    # data and uploads the single `python-coverage` artifact — the
-    # quality-gate.yml contract is unchanged. Per-shard memory sits well
-    # under the 14Gi pod (session-state accumulation scales with
-    # tests-per-process; 14Gi is the ceiling the 15.62-GiB-allocatable nodes
-    # support). If a shard's wall approaches its 30-min step cap, raise the
-    # shard count — bump BOTH the matrix and TOTAL in the pytest step, in
-    # lockstep. This job stays non-blocking; a shard OOM merely thins one
-    # shard's coverage.
+    # steady progress, killed at 93%). The sweep now runs as 5 stride shards
+    # of the sorted test-file list (~190 files each; #3172 started with 3),
+    # fanned into the python-coverage-combine job below which merges all
+    # shards' parallel data and uploads the single `python-coverage`
+    # artifact — the quality-gate.yml contract is unchanged. A shard's
+    # memory grows with the number of tests in its one pytest process, so
+    # more shards means less memory per shard: 5 shards keep each one well
+    # under a smaller heavy runner. The "Print peak memory" step at the end
+    # of each shard shows the real numbers. If a shard's wall approaches its
+    # 30-min step cap, or its memory nears the runner's limit, raise the
+    # shard count — bump the matrix, TOTAL in the pytest step AND the
+    # combine job's download steps, in lockstep. This job stays
+    # non-blocking; a shard OOM merely thins one shard's coverage.
     # Runs on push to main, OR on a PR explicitly opted in via the
     # `ci-coverage-validate` label (the on-runner validation escape hatch
     # described above). The fork-PR guard still applies on the PR path so
@@ -1094,12 +1189,12 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 3 stride shards (#3172) — see the SHARDED paragraph in the header
-      # comment. fail-fast off: one shard's red tests must not cancel the
-      # other shards' coverage data (partial coverage beats none).
+      # 5 stride shards (#3172 started with 3) — see the SHARDED paragraph in
+      # the header comment. fail-fast off: one shard's red tests must not
+      # cancel the other shards' coverage data (partial coverage beats none).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
     # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
     # runner-loss on this pool — which silently killed coverage on every main
@@ -1129,10 +1224,11 @@ jobs:
     #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
     #      step (checkout / uv sync / model warm — never observed). Every
     #      post-pytest step in this shard job is step-capped too (#3172:
-    #      shard-data upload 2, log upload 2 — the v0.31.0 cut proved a hang
-    #      CAN escape into a post-pytest step via the pytest step's debris),
-    #      so the bounded-step worst case is 30 + 2 + 2 = 34 min + pre-pytest
-    #      setup (35–75 s observed) ≈ 35 — the step caps always fire before
+    #      shard-data upload 2, log upload 2, memory print 1 — the v0.31.0
+    #      cut proved a hang CAN escape into a post-pytest step via the
+    #      pytest step's debris), so the bounded-step worst case is
+    #      30 + 2 + 2 + 1 = 35 min + pre-pytest setup (35–75 s observed)
+    #      ≈ 36 — the step caps always fire before
     #      this job cap for any hang under a bounded step, and a job-level
     #      expiry (which CANCELS the job; `cancelled` leaks past
     #      continue-on-error into the run conclusion — the exact
@@ -1164,6 +1260,47 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Start memory sampling
+        # Feeds the "Print peak memory" step at the end of this job. A small
+        # background loop reads this container's cgroup v2 memory files once a
+        # second and keeps the highest values until that step stops it. It
+        # never fails the job.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
+            echo "No cgroup v2 memory files here, so no sampling."
+            exit 0
+          fi
+          sample() {
+            total_max=0; ws_max=0; anon_max=0; n=0
+            while :; do
+              read -r total < "${cg}/memory.current"
+              anon=0; inactive_file=0
+              while read -r key value; do
+                case "${key}" in
+                  anon) anon=${value} ;;
+                  inactive_file) inactive_file=${value} ;;
+                esac
+              done < "${cg}/memory.stat"
+              total=${total:-0}
+              ws=$(( total - inactive_file ))
+              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
+              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
+              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
+              n=$(( n + 1 ))
+              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
+              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
+              sleep 1
+            done
+          }
+          sample </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second."
 
       - name: Docker Hub login (for testcontainers pulls)
         # Empty-secret guard — see the python-tests job's login step for
@@ -1216,10 +1353,10 @@ jobs:
         # never a cancellation. But #2865 proved a pytest hang can outlive it
         # when the runner is wedged, so the PRIMARY guard is the in-process
         # `--timeout` on the run below, not this cap.
-        # 30 per shard (#3172): the honest per-shard wall is ~19 min (57-min
-        # serial total / 3 shards at 13,311 tests), so 30 gives ~50% suite-
-        # growth headroom while keeping shard+combine far inside the 55-min
-        # job cap.
+        # 30 per shard (#3172): set when 3 shards ran ~19 min each (57-min
+        # serial total / 3 shards at 13,311 tests). With 5 shards each shard
+        # has less work, so 30 leaves more suite-growth headroom while
+        # keeping shard+combine far inside the 55-min job cap.
         timeout-minutes: 30
         # Force bash so the run below gets pipefail + PIPESTATUS: the
         # self-hosted pool's default shell does NOT enable `pipefail`, which
@@ -1277,13 +1414,13 @@ jobs:
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
           # Deterministic stride shard (#3172): the sorted test-file list,
-          # every 3rd file to this shard. File-level split keeps conftest
+          # every 5th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
           # blocks) spreads the heavyweight suites across shards. The
-          # three shards partition the full set exactly (NR mod 3 hits
+          # five shards partition the full set exactly (NR mod 5 hits
           # each residue once); integration stays excluded by the find,
           # matching the old --ignore.
-          TOTAL=3
+          TOTAL=5
           SHARD="${{ matrix.shard }}"
           mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
@@ -1301,7 +1438,7 @@ jobs:
         # for THIS shard — the python-coverage-combine job below merges every
         # shard's set and writes the single coverage.xml quality-gate.yml
         # consumes (#3172). `.coveragerc.ci` sets relative_files=true, so
-        # data from three different runners combines cleanly.
+        # data from five different runners combines cleanly.
         # include-hidden-files: upload-artifact v4+ excludes dotfiles by
         # default, and every coverage data file is a dotfile.
         # timeout-minutes (#3172): same job-cap-cancel hole as every
@@ -1336,6 +1473,59 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      - name: Print peak memory
+        # Prints how much memory this job's runner container used and how many
+        # CPUs it had, so a change to the heavy runner pool can be checked
+        # against real numbers. Reads the cgroup files (v2 first, else v1) and
+        # the samples from "Start memory sampling". The kernel's peak also
+        # counts file cache: copies of files that the kernel keeps in memory
+        # and frees when memory runs short. So the sampled working set and
+        # program memory show better what the job really needs. A missing
+        # file is skipped; this step never fails the job.
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          mib() { case "$1" in max) echo "none" ;; ''|*[!0-9]*) echo "${1:-unknown}" ;; *) echo "$(( $1 / 1048576 )) MiB" ;; esac; }
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null
+          fi
+          if [ -r "${RUNNER_TEMP}/memory-samples.txt" ]; then
+            read -r total_max ws_max anon_max samples < "${RUNNER_TEMP}/memory-samples.txt"
+          fi
+          if [ -r "${cg}/memory.peak" ]; then
+            peak="$(mib "$(cat "${cg}/memory.peak")") (kernel count)"
+          elif [ -r "${cg}/memory/memory.max_usage_in_bytes" ]; then
+            peak="$(mib "$(cat "${cg}/memory/memory.max_usage_in_bytes")") (kernel count, cgroup v1)"
+          elif [ -n "${total_max}" ]; then
+            peak="$(mib "${total_max}") (highest sample; no kernel peak file here)"
+          else
+            peak="not available"
+          fi
+          echo "Memory and CPU of this job's runner container (1 MiB = 1,048,576 bytes):"
+          echo "- Peak memory: ${peak}. The most the container held at one time, file cache included."
+          echo "- Highest working set: $(mib "${ws_max}"). Memory in use without the file cache that the kernel frees first (kubectl top shows this)."
+          echo "- Highest program memory: $(mib "${anon_max}"). Memory the programs asked for; the kernel cannot free it."
+          echo "- Samples: ${samples:-none} (one per second)."
+          if [ -r "${cg}/memory.current" ]; then
+            echo "- Memory now: $(mib "$(cat "${cg}/memory.current")")."
+          fi
+          if [ -r "${cg}/memory.max" ]; then
+            echo "- Memory limit: $(mib "$(cat "${cg}/memory.max")")."
+          fi
+          if [ -r "${cg}/memory.events" ]; then
+            echo "- Out-of-memory kills: $(awk '$1 == "oom_kill" { print $2 }' "${cg}/memory.events")."
+          fi
+          echo "- CPUs this job can see (nproc): $(nproc)."
+          if [ -r "${cg}/cpu.max" ]; then
+            echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
+          fi
+          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/5)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          exit 0
+
   python-coverage-combine:
     name: Python coverage combine (SonarCloud artifact)
     # Fan-in for the sharded python-coverage matrix above (#3172): downloads
@@ -1358,11 +1548,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
     runs-on: meho-runners-ci
-    # 15 > the 12 min of bounded step caps below + ~1-2 min of honest
+    # 20 > the 16 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
     # cancellation (the #2800/#3172 leak).
-    timeout-minutes: 15
+    timeout-minutes: 20
     continue-on-error: true
     defaults:
       run:
@@ -1384,7 +1574,7 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Download shard 1 coverage data
-        # Same pinned download-artifact as quality-gate.yml. Three explicit
+        # Same pinned download-artifact as quality-gate.yml. Five explicit
         # name-addressed downloads (not a pattern match) keep the step free
         # of newer-action feature dependencies; continue-on-error tolerates
         # a shard that produced no artifact (see the job header).
@@ -1411,11 +1601,27 @@ jobs:
           name: python-coverage-data-shard-3
           path: backend
 
+      - name: Download shard 4 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-4
+          path: backend
+
+      - name: Download shard 5 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-5
+          path: backend
+
       - name: Combine coverage + write XML (offline, all shards)
         # Runs in this fan-in job with every shard's pytest long gone, so
         # `coverage combine` merges the downloaded per-worker parallel data
         # files standalone (cheap). Uses .coveragerc.ci (relative_files=true)
-        # so paths are repo-relative across the three shard runners and for
+        # so paths are repo-relative across the five shard runners and for
         # SonarCloud cross-job mapping (#1987 AC6).
         #
         # `if: always()` + the ls guard: combine whatever shards delivered —
@@ -1436,9 +1642,9 @@ jobs:
         # RELEASING.md tag gate. A step cap converts that hang into an
         # absorbed step FAILURE — run stays `success`, coverage degrades to
         # "none for this push", the documented lossy contract. This fan-in
-        # job's budget: downloads 2+2+2 + this step 4 + upload 2 = 12 min of
-        # bounded steps + checkout/uv/sync (~1-2 min honest) under the
-        # 15-min job cap, so step caps always fire first.
+        # job's budget: downloads 2+2+2+2+2 + this step 4 + upload 2 = 16 min
+        # of bounded steps + checkout/uv/sync (~1-2 min honest) under the
+        # 20-min job cap, so step caps always fire first.
         if: always()
         timeout-minutes: 4
         run: |

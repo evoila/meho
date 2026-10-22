@@ -2758,9 +2758,10 @@ static portgroup), optional `numPorts`, and a `VMwareDVSPortSetting.vlan`
 that is **either** a VLAN trunk
 (`VmwareDistributedVirtualSwitchTrunkVlanSpec` with a `NumericRange[]`
 `vlanId`, e.g. `0..4094` at bootstrap — the nested-ESXi case) **or** a single
-access VLAN (`VmwareDistributedVirtualSwitchVlanIdSpec`). Passing both
-refuses with `status='invalid_vlan_spec'` before any write; passing neither
-inherits the switch default. The returned Task's `TaskInfo.result` MoRef is
+access VLAN (`VmwareDistributedVirtualSwitchVlanIdSpec`). The parameter
+schema refuses both (a `not` clause), so MEHO stops such a call before the
+handler runs; the handler still answers `status='invalid_vlan_spec'` if it is
+called with both. Passing neither inherits the switch default. The returned Task's `TaskInfo.result` MoRef is
 the new portgroup; its `config` (`name` + `defaultPortConfig.vlan`) is read
 back into the response's `observed` verification rows.
 
@@ -2801,12 +2802,30 @@ merged-adjacent, so `[{0,0},{1,4094}]` and `[{0,4094}]` compare equal) and a
 request that already matches returns `status='unchanged'` with no
 `ReconfigureDVPortgroup_Task`; otherwise the reconfigure is polled to terminal
 and the applied VLAN is read back into the `before` / `after` normalised views.
-Both/neither VLAN mode refuses `status='invalid_vlan_spec'` before any write.
+The parameter schema takes exactly one VLAN mode (a `oneOf`), so MEHO refuses
+both or neither before the handler runs; the handler still answers
+`status='invalid_vlan_spec'` for both, neither or `replace=false`.
 
 None of the three composites registers a park-time preview builder (matching
 `vm.import_from_library`); the read-back rows in each response
 (`observed` for `create`, `previous` / `observed` for `security.set`,
 `before` / `after` for `vlan.set`) are the verification surface.
+
+### AI guidance of the storage and network operations
+
+The thirteen storage and network multi-step operations (`datastore.usage`,
+`datastore.refresh`, `datastore.dir.create`, `datastore.file.delete`, the three
+`storage_policy.*` operations, `network.portgroup.audit` / `.create` /
+`.security.set` / `.vlan.set` / `.delete` and `host.standard_portgroup.delete`)
+keep their AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
+`output_shape`, `next_step`) in `composites/_storage_network_llm_instructions.py`,
+one entry per op id. Their descriptions in `_register.py` stay short. Each
+parameter schema has one example call under `examples`, and
+`test_connectors_vmware_rest_storage_network_composite_contracts.py` checks that
+every example validates and that the two VLAN rules above hold. The response
+schemas name the nested fields: the `object` and `blockers` of the four teardown
+operations, the `observed` VLAN of `portgroup.create`, the security values of
+`portgroup.security.set` and the VLAN views of `portgroup.vlan.set`.
 
 ### Supervisor (WCP) namespace-management composites (`supervisor.enable` / `supervisor.disable` / `supervisor.status`, #3281)
 

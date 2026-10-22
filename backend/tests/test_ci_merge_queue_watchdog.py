@@ -9,7 +9,9 @@ check did not pass, or when the queue has dropped the group and deleted the
 queue branch. It must never cancel a run that passed and merged.
 
 A merged run has also lost its queue branch, so the watchdog may only look at
-the branch while a required job is still running. These tests run the real
+the branch while a required job is still running, and it reads the jobs once
+more after the branch is gone, because the group can merge between the two
+lookups. These tests run the real
 step script, taken from the workflow file, with ``gh``, ``curl``, ``sleep``
 and ``timeout`` replaced by shell functions. The shell is started the way the
 runner starts a ``run:`` step (``bash --noprofile --norc -eo pipefail``), so
@@ -98,6 +100,7 @@ class _Outcome:
         self.cancelled = (log_dir / "cancel.log").exists()
         branch_log = log_dir / "branch.log"
         self.branch_lookups = len(branch_log.read_text().splitlines()) if branch_log.exists() else 0
+        self.jobs_lookups = int((log_dir / "polls.txt").read_text())
 
 
 def _run_watchdog(tmp_path: Path, polls: list[str], branch_code: str = "200") -> _Outcome:
@@ -182,11 +185,47 @@ def test_all_jobs_finished_ends_quietly(tmp_path: Path) -> None:
 
 
 def test_dropped_group_with_required_job_running_is_cancelled(tmp_path: Path) -> None:
+    """The branch is gone and a second look at the jobs still shows required work open."""
     polls = [_jobs(_job("Python unit shard 2/4", status="in_progress", conclusion=None))]
     outcome = _run_watchdog(tmp_path, polls, branch_code="404")
     assert outcome.returncode == 0, outcome.output
     assert outcome.cancelled, outcome.output
+    assert outcome.jobs_lookups == 2, outcome.output
     assert "queue branch" in outcome.output
+
+
+def test_group_merged_between_jobs_lookup_and_branch_lookup_is_not_cancelled(
+    tmp_path: Path,
+) -> None:
+    """The last required job passes, and the group merges, between the two lookups.
+
+    The jobs lookup still saw a shard running. The branch lookup then answers
+    404 because the merge deleted the queue branch. The watchdog must read the
+    jobs again, see that every required job has finished, and not cancel.
+    """
+    polls = [
+        _jobs(_job("Python unit shard 2/4", status="in_progress", conclusion=None)),
+        _jobs(),
+    ]
+    outcome = _run_watchdog(tmp_path, polls, branch_code="404")
+    assert outcome.returncode == 0, outcome.output
+    assert not outcome.cancelled, outcome.output
+    assert outcome.branch_lookups == 1, outcome.output
+    assert "since the last look" in outcome.output
+    assert "nothing left to watch" in outcome.output
+
+
+def test_jobs_unreadable_after_branch_is_gone_keeps_the_run(tmp_path: Path) -> None:
+    """A 404 with no fresh view of the jobs is not enough to cancel."""
+    polls = [
+        _jobs(_job("Python unit shard 2/4", status="in_progress", conclusion=None)),
+        _API_FAILURE,
+    ]
+    outcome = _run_watchdog(tmp_path, polls, branch_code="404")
+    assert outcome.returncode == 0, outcome.output
+    assert not outcome.cancelled, outcome.output
+    assert outcome.branch_lookups == 1, outcome.output
+    assert "could not be read again" in outcome.output
 
 
 def test_live_group_with_required_job_running_keeps_the_run(tmp_path: Path) -> None:

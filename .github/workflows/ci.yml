@@ -2357,7 +2357,8 @@ jobs:
   # branch, so a new group never replaces the run of an old group, and a
   # cancelled live check drops its group (see the `concurrency:` comment).
   #
-  # What the job does, about once a minute, with 2 API calls per poll:
+  # What the job does, about once a minute, with 2 API calls per poll (3
+  # on the one poll that finds the branch gone):
   #   1. Lists this run's jobs. If every job other than this one and the
   #      `CLI API snapshot freshness` job has finished, it ends with
   #      success — checked on two polls in a row, because a job that still
@@ -2375,8 +2376,14 @@ jobs:
   #      snapshot job is not required: its failure alone keeps the group,
   #      so it must not cancel the run.
   #   3. Asks GitHub whether this run's queue branch (`github.ref_name`)
-  #      still exists. Only a `404` cancels the run (rule b). Any other
+  #      still exists. Only a `404` can cancel the run (rule b). Any other
   #      answer or error (timeout, 403, 429, 5xx) keeps the run alive.
+  #      Before it cancels, it lists the jobs once more: the last required
+  #      job can pass, and the group can merge, between step 1 and step 3,
+  #      and a merged run has lost its branch too. It cancels only when
+  #      that second look still shows required work open (or a red job).
+  #      If the second look fails, or shows every required job finished,
+  #      the run stays alive.
   #
   # It never fails (the runner starts the step with `bash -e`, so every
   # call is checked; a failed or unreadable call only means "look again
@@ -2432,17 +2439,16 @@ jobs:
             return 1
           }
 
-          echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
-          while [ "${SECONDS}" -lt "${stop_after}" ]; do
-            # 1 + 2: this run's own jobs. Required ones done -> leave. One red -> cancel.
-            # When the jobs cannot be listed or read, this poll ends here: the
-            # branch check below must not run while the jobs' state is unknown,
-            # because a run that passed and merged has lost its branch too.
+          # Reads this run's jobs into `open` (jobs that carry or feed a
+          # required check and are still queued or running) and `red` (such
+          # jobs that did not pass). Returns 1 when the jobs cannot be listed
+          # or read. The caller must then not cancel: a run that passed and
+          # merged has lost its branch too, so the branch alone proves nothing.
+          read_jobs() {
+            local jobs
             if ! jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
-              quiet_polls=0
-              echo "jobs API did not answer (${jobs}); keeping the run alive and looking again next minute"
-              sleep "${interval}"
-              continue
+              echo "jobs API did not answer (${jobs})"
+              return 1
             fi
             # The runner starts this step with `bash -e`, so every jq call is
             # guarded: an unreadable answer must not end the watchdog.
@@ -2452,8 +2458,19 @@ jobs:
                   '[.jobs[] | select(.name != $me and .name != $ok
                      and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
                    | .name] | join(", ")' <<<"${jobs}")"; then
+              echo "jobs API answer could not be read"
+              return 1
+            fi
+          }
+
+          echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
+          while [ "${SECONDS}" -lt "${stop_after}" ]; do
+            # 1 + 2: this run's own jobs. Required ones done -> leave. One red -> cancel.
+            # When the jobs cannot be listed or read, this poll ends here: the
+            # branch check below must not run while the jobs' state is unknown.
+            if ! read_jobs; then
               quiet_polls=0
-              echo "jobs API answer could not be read; keeping the run alive and looking again next minute"
+              echo "keeping the run alive and looking again next minute"
               sleep "${interval}"
               continue
             fi
@@ -2484,7 +2501,22 @@ jobs:
               "${GITHUB_API_URL}/${api}/branches/${QUEUE_BRANCH}" 2>/dev/null)" || code="000"
             case "${code}" in
               200) echo "queue branch still exists" ;;
-              404) cancel_run "The queue branch '${QUEUE_BRANCH}' is gone: the queue has dropped this group and this run's result no longer counts." && exit 0 ;;
+              404)
+                # The last required job can pass, and the queue can merge the
+                # group, between the jobs lookup above and this branch lookup.
+                # A merged run has lost its branch too, so read the jobs once
+                # more: only required work that is still open proves a drop.
+                if ! read_jobs; then
+                  quiet_polls=0
+                  echo "the queue branch is gone, but the jobs could not be read again; keeping the run alive and looking again next minute"
+                elif [ -n "${red}" ]; then
+                  cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
+                elif [ "${open}" -eq 0 ]; then
+                  quiet_polls=1
+                  echo "the queue branch is gone, but every required job has finished since the last look, so the group may have merged; not cancelling"
+                else
+                  cancel_run "The queue branch '${QUEUE_BRANCH}' is gone while ${open} required job(s) still run: the queue has dropped this group and this run's result no longer counts." && exit 0
+                fi ;;
               *)   echo "branch lookup answered '${code}', which is not conclusive; keeping the run alive" ;;
             esac
             sleep "${interval}"

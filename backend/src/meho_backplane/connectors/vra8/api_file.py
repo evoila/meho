@@ -36,11 +36,15 @@ The read is narrow on purpose:
   the same redaction rules the dispatcher will apply, on the whole file
   text and on each part, and refuses a file whose text they would
   change, naming the rule. So the stored parts always match ``sha256``.
-* Two secret shapes pass those rules unchanged: a quoted JSON credential
-  field (``"password": "..."``, ``"token": "..."``) and a PEM private
-  key block. The read looks for them in the whole file text and refuses
-  a file that holds one (:data:`SECRET_SHAPES`), so no clear-text secret
-  reaches a stored result.
+* Some secret shapes pass those rules unchanged: a quoted credential key
+  (``"password": "..."``, ``"token": "..."``), a credential value of
+  fewer than eight characters, a label the rules do not know
+  (``licenseKey``), and a PEM private key block. The read looks for a
+  credential field and a private key block itself, in the whole file
+  text, and refuses a file that holds one (:data:`SECRET_SHAPES`), so no
+  clear-text secret reaches a stored result. A documentation file that
+  shows an example credential value is refused as well; that is on
+  purpose.
 
 The version and build come from the Orchestrator inside the appliance
 (``GET /vco/api/about``: ``version`` and ``build-number``); the IaaS API
@@ -106,29 +110,47 @@ SERVICE_SWAGGER_FOLDER = "/{service}/api/swagger"
 PART_MAX_BYTES = 64 * 1024
 
 # The secret labels of the stored-result redaction (``strip-api-key``),
-# repeated here because that rule wants the label right before ``=`` or
-# ``:``. In a JSON file the label sits in quotes, so the rule never sees
-# ``"password": "..."``.
+# plus ``licenseKey``, which that rule does not know. They are repeated
+# here because that rule wants a bare label right before ``=`` or ``:``
+# and a value of at least 8 characters. In a JSON file the label sits in
+# quotes, so the rule never sees ``"password": "..."``; a short value it
+# leaves alone too.
 _SECRET_LABELS = (
     r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token"
     r"|session[_-]?token|secret(?:[_-]?(?:key|id))?|private[_-]?key"
-    r"|password|passwd|pwd|client[_-]?secret|token)"
+    r"|password|passwd|pwd|client[_-]?secret|license[_-]?key|token)"
 )
 
+# A credential key is, or ends in, a secret label (``"password"``,
+# ``"refreshToken"``, ``"x-api-key"``, ``licenseKey``). It is either in
+# quotes, anywhere in the text (JSON, quoted YAML), or bare at the start
+# of a line, after indentation or a list dash (YAML, a properties file).
+# A bare label in running text (``"description": "the token: ..."``) is
+# not a key.
+_KEY_PREFIX = r"[A-Za-z0-9_.-]*"
+_CREDENTIAL_KEY = (
+    rf"""(?:(?P<quote>["']){_KEY_PREFIX}{_SECRET_LABELS}(?P=quote)"""
+    rf"""|^[ \t]*(?:-[ \t]+)?{_KEY_PREFIX}{_SECRET_LABELS})"""
+)
+
+# The value sits on the same line as the key, after ``:`` or ``=``. It is
+# a quoted string of at least one character, with any character but its
+# own quote inside (an apostrophe in a double-quoted value counts), or a
+# bare word. An empty string, ``null``, ``true``, ``false``, a comment,
+# and an object or list (``{``, ``[``: a schema property named
+# ``password``) are not values. A key with nothing on its line (a YAML
+# mapping whose children follow) is not a value either.
+_CREDENTIAL_VALUE = r"""(?:"[^"\n]+"|'[^'\n]+'|(?!(?:null|true|false)\b)[^\s"'#{\[]\S*)"""
+
 #: Secret shapes the stored-result redaction passes through unchanged, each
-#: with a name for the error. A quoted credential field is a JSON or YAML
-#: key that is, or ends in, a secret label (``"password"``,
-#: ``"refreshToken"``, ``"x-api-key"``) with a quoted value of at least 8
-#: characters; a key with an object or short placeholder value, as in a
-#: schema, does not match. A private key block is matched by its PEM
-#: header, whatever the key type. Both run on the whole file text, so a
-#: secret the part cut splits in two is found as well.
+#: with a name for the error. Both run on the whole file text, so a secret
+#: the part cut splits in two is found as well.
 SECRET_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
-        "a quoted credential field",
+        "a credential field",
         re.compile(
-            r"""(["'])[A-Za-z0-9_.-]*""" + _SECRET_LABELS + r"""\1\s*:\s*(["'])[^"']{8,}\2""",
-            re.IGNORECASE,
+            rf"{_CREDENTIAL_KEY}[ \t]*[:=][ \t]*{_CREDENTIAL_VALUE}",
+            re.IGNORECASE | re.MULTILINE,
         ),
     ),
     ("a private key block", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),

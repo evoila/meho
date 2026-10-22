@@ -326,24 +326,33 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   read stops with an error that names the rule and the place, and returns no
   file. Redaction itself stays on.
 - **Secret shapes the redaction misses.** The redaction rule for labelled
-  secrets wants the label right before `=` or `:`, so it does not see a
-  quoted JSON key (`"password": "..."`, `"token": "..."`) or a PEM private
-  key block. The read looks for both shapes itself (`SECRET_SHAPES` in
-  `api_file.py`) in the whole file text, so a secret cut in two by a part
-  boundary is found too. A quoted credential field is a key that is, or
-  ends in, a secret label with a quoted value of at least 8 characters; a
-  schema property named `password` (an object value) or a placeholder such
-  as `"string"` does not count. A file that holds one of the shapes stops
-  with an error that names the shape and how often it occurs, never the
-  text.
+  secrets wants a bare label right before `=` or `:` and a value of at
+  least 8 characters, and it does not know every label. So it does not see
+  a quoted key (`"password": "..."`, `"token": "..."`), a short value, a
+  `licenseKey`, or a PEM private key block. The read looks for a credential
+  field and a private key block itself (`SECRET_SHAPES` in `api_file.py`)
+  in the whole file text, so a secret cut in two by a part boundary is
+  found too. A credential field is a key that is, or ends in, a secret
+  label (the redaction's labels plus `licenseKey`), either in quotes
+  anywhere or bare at the start of a line, followed on the same line by
+  `:` or `=` and a value: a quoted string of at least one character (an
+  apostrophe inside a double-quoted value counts), or a bare word. A schema
+  property named `password` (an object, or a mapping on the next lines), a
+  `required` list that names it, `flow: password`, `format: password`, an
+  empty string, `null`, `true`, `false` and a label inside a description
+  are not credential fields. An example credential value in a
+  documentation file is refused as well; that is on purpose. A file that
+  holds one of the shapes stops with an error that names the shape and how
+  often it occurs, never the text.
 - **Tests.**
   [`test_connectors_vra8_api_file.py`](../../backend/tests/test_connectors_vra8_api_file.py)
   (respx: accepted and refused paths with no request, the login on the
   `GET`, status and redirect cases, large files, version failures, a file
   that a redaction rule would change, a secret split across the part cut,
-  quoted JSON credentials and a private key block, whole and split across
-  the part cut, a file with more parts than the row limit, and the
-  result-handle round trip);
+  credential fields in JSON and YAML (quoted, short, with an apostrophe, a
+  license key) and a private key block, whole and split across the part
+  cut, schemas that name `password` without a value, a file with more parts
+  than the row limit, and the result-handle round trip);
   [`test_connectors_vra8_typed_reads.py`](../../backend/tests/test_connectors_vra8_typed_reads.py)
   (zero-catalog dispatch, the 401 re-login, and `invalid_params` for a data
   path); and the reconcile lane below (`GET /vco/api/about` in the manifest,

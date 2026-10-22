@@ -637,15 +637,41 @@ def _swagger_with(field: str, value: str) -> str:
     return _SWAGGER.replace('"swagger": "2.0"', f'"swagger": "2.0", "{field}": "{value}"')
 
 
+_SWAGGER_YAML = "swagger: '2.0'\ninfo:\n  title: Example IaaS API\n  version: 2021-07-15\n"
+
+
+def _swagger_yaml_with(line: str) -> str:
+    return _SWAGGER_YAML + line + "\npaths: {}\n"
+
+
 @pytest.mark.parametrize(
     ("body", "shape"),
     [
-        (_swagger_with("password", "made-up-pass-value-0123"), "a quoted credential field"),
-        (_swagger_with("token", "made-up-token-value-0123"), "a quoted credential field"),
-        (_swagger_with("refreshToken", "made-up-token-value-0123"), "a quoted credential field"),
+        (_swagger_with("password", "made-up-pass-value-0123"), "a credential field"),
+        (_swagger_with("token", "made-up-token-value-0123"), "a credential field"),
+        (_swagger_with("refreshToken", "made-up-token-value-0123"), "a credential field"),
+        (_swagger_with("password", "it's-made-up"), "a credential field"),
+        (_swagger_with("password", "abc"), "a credential field"),
+        (_swagger_with("pwd", "a"), "a credential field"),
+        (_swagger_with("licenseKey", "MADE-UP-0000-0000"), "a credential field"),
+        (_swagger_yaml_with("licenseKey: MADE-UP-0000-0000"), "a credential field"),
+        (_swagger_yaml_with("  password: abc"), "a credential field"),
+        (_swagger_yaml_with("- token: 'it''s-made-up'"), "a credential field"),
         (_PEM_BLOCK, "a private key block"),
     ],
-    ids=["json-password", "json-token", "json-refresh-token", "private-key"],
+    ids=[
+        "json-password",
+        "json-token",
+        "json-refresh-token",
+        "json-password-with-apostrophe",
+        "json-short-password",
+        "json-one-character-pwd",
+        "json-license-key",
+        "yaml-license-key",
+        "yaml-short-password",
+        "yaml-list-token-with-apostrophe",
+        "private-key",
+    ],
 )
 async def test_secret_shape_the_redaction_misses_is_refused(body: str, shape: str) -> None:
     # The stored-result redaction leaves these shapes as they are; that is why
@@ -671,23 +697,62 @@ async def test_secret_shape_the_redaction_misses_is_refused(body: str, shape: st
     assert "made-up-" not in message and "MIIE" not in message
 
 
-async def test_schema_fields_named_like_a_secret_are_not_a_secret() -> None:
-    """A Swagger schema names ``password`` as a property and as an OAuth flow; both come back."""
-    body = _SWAGGER.replace(
-        '"paths"',
-        '"definitions": {"Login": {"properties": {"password": {"type": "string"}, '
-        '"token": {"type": "string", "example": "string"}}}}, '
-        '"securityDefinitions": {"oauth": {"flow": "password", '
-        '"tokenUrl": "https://example.invalid/token"}}, "paths"',
-    )
+_YAML_SCHEMA_WITH_PASSWORD = _SWAGGER_YAML + (
+    "definitions:\n"
+    "  Login:\n"
+    "    properties:\n"
+    "      password:\n"
+    "        type: string\n"
+    "        format: password\n"
+    "      token: {type: string, example: ''}\n"
+    "    required:\n"
+    "      - username\n"
+    "      - password\n"
+    "securityDefinitions:\n"
+    "  oauth:\n"
+    "    flow: password\n"
+    "    tokenUrl: https://example.invalid/token\n"
+    "    description: 'Send the token: in the Authorization header'\n"
+    "paths: {}\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "content_type"),
+    [
+        (
+            _SWAGGER_PATH,
+            _SWAGGER.replace(
+                '"paths"',
+                '"definitions": {"Login": {"properties": {"password": {"type": "string"}, '
+                '"token": {"type": "string", "example": ""}}, '
+                '"required": ["username", "password"]}}, '
+                '"securityDefinitions": {"oauth": {"flow": "password", '
+                '"tokenUrl": "https://example.invalid/token"}}, '
+                '"x-example": {"username": "u", "password": null, "pwd": false}, "paths"',
+            ),
+            "application/json",
+        ),
+        (f"{_SWAGGER_PATH}/swagger.yaml", _YAML_SCHEMA_WITH_PASSWORD, "application/yaml"),
+    ],
+    ids=["json", "yaml"],
+)
+async def test_schema_fields_named_like_a_secret_are_not_a_secret(
+    path: str, body: str, content_type: str
+) -> None:
+    """A schema names ``password`` as a property, in a required list and as an OAuth flow.
+
+    None of these is a credential value: the property is an object (or a
+    mapping on the next lines), the list holds the name only, ``flow`` and
+    ``format`` are the keys, ``null`` and ``false`` are no secret, and a
+    label inside a description is running text. The file comes back whole.
+    """
     assert not any(pattern.search(body) for _, pattern in SECRET_SHAPES)
     connector = _connector()
     async with respx.mock(base_url=_BASE) as mock:
         _mock_login_and_version(mock)
-        mock.get(_SWAGGER_PATH).respond(
-            200, content=body.encode(), headers={"Content-Type": "application/json"}
-        )
-        answer = await _call(connector, _SWAGGER_PATH)
+        mock.get(path).respond(200, content=body.encode(), headers={"Content-Type": content_type})
+        answer = await _call(connector, path)
     await connector.aclose()
     assert _joined(answer) == body.encode()
 
@@ -704,18 +769,45 @@ def _json_with_text_across_the_part_cut(text: str, before_cut: int) -> bytes:
     return (before + text + '"}').encode()
 
 
+def _yaml_with_text_across_the_part_cut(text: str, before_cut: int) -> bytes:
+    """YAML where the line *text* starts *before_cut* bytes before the first part cut."""
+    head = "pad: "
+    before = head + "a" * (PART_MAX_BYTES - before_cut - len(head) - 1) + "\n"
+    assert len(before) == PART_MAX_BYTES - before_cut
+    return (before + text + "\n").encode()
+
+
 @pytest.mark.parametrize(
-    ("text", "before_cut", "shape"),
+    ("text", "before_cut", "shape", "yaml"),
     [
-        ('", "password": "made-up-pass-value-0123', 8, "a quoted credential field"),
-        (_PEM_HEADER, 14, "a private key block"),
+        ('", "password": "made-up-pass-value-0123', 8, "a credential field", False),
+        ('", "password": "it\'s-made-up', 8, "a credential field", False),
+        ('", "password": "it\'s-made-up', 18, "a credential field", False),
+        ('", "pwd": "abc', 6, "a credential field", False),
+        ('", "licenseKey": "MADE-UP-0000-0000', 10, "a credential field", False),
+        ("licenseKey: MADE-UP-0000-0000", 7, "a credential field", True),
+        ("  password: abc", 5, "a credential field", True),
+        (_PEM_HEADER, 14, "a private key block", False),
     ],
-    ids=["json-password", "private-key-header"],
+    ids=[
+        "json-password",
+        "json-password-with-apostrophe-cut-in-the-key",
+        "json-password-with-apostrophe-cut-in-the-value",
+        "json-short-pwd",
+        "json-license-key",
+        "yaml-license-key",
+        "yaml-short-password",
+        "private-key-header",
+    ],
 )
 async def test_secret_shape_split_across_the_part_cut_is_refused(
-    text: str, before_cut: int, shape: str
+    text: str, before_cut: int, shape: str, yaml: bool
 ) -> None:
-    body = _json_with_text_across_the_part_cut(text, before_cut)
+    body = (
+        _yaml_with_text_across_the_part_cut(text, before_cut)
+        if yaml
+        else _json_with_text_across_the_part_cut(text, before_cut)
+    )
     parts = split_text_parts(body)
     assert parts[0].endswith(text[:before_cut]) and parts[1].startswith(text[before_cut:])
     # No part alone holds the shape; the whole text does.

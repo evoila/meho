@@ -169,6 +169,18 @@ _REFUSED = {
         1,
         "EC PRIVATE KEY",
     ),
+    # The reviewer's example on the second round: a naming attribute
+    # behind another one.
+    "html-input-id-before-name": (
+        '<input id="login-field" name="password" value="madeup">',
+        1,
+        "value",
+    ),
+    "html-input-name-before-id": (
+        '<input name="password" id="login-field" value="madeup">',
+        1,
+        "value",
+    ),
 }
 
 
@@ -261,6 +273,8 @@ def test_the_description_names_the_field_and_the_place_never_the_value() -> None
     assert hit.description == "the element 'password' at character 10"
     (hit,) = find_api_file_secrets('<property name="password" value="madeup"/>')
     assert hit.description == "the attribute 'value' at character 33"
+    (hit,) = find_api_file_secrets('<input id="login-field" name="password" value="madeup">')
+    assert hit.description == "the attribute 'value' at character 47"
     (hit,) = find_api_file_secrets(_PEM_HEADER + "\nMADEUP\n" + _PEM_FOOTER)
     assert hit.description == "a PEM private key (RSA PRIVATE KEY) at character 32"
 

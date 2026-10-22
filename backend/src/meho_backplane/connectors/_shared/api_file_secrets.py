@@ -130,7 +130,8 @@ _ATTR_RE: Final[re.Pattern[str]] = re.compile(
     r"""(?P<name>[\w.:-]+)\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')"""
 )
 #: Attributes that name an element (``name="password"``) and the
-#: attributes that then hold its value.
+#: attributes that then hold its value. Every naming attribute is
+#: checked: ``id="login-field" name="password"`` names a password.
 _NAMING_ATTRS: Final[frozenset[str]] = frozenset({"name", "key", "id", "property"})
 _VALUE_ATTRS: Final[frozenset[str]] = frozenset({"value", "content"})
 
@@ -454,6 +455,21 @@ def _element_content(
     return None if close_at is None else (start, close_at)
 
 
+def _secret_naming_attr(attrs: dict[str, re.Match[str]]) -> str | None:
+    """Return the secret name a naming attribute gives the element, or ``None``.
+
+    Every naming attribute is checked, in order, so an ``id`` before a
+    ``name="password"`` does not hide it.
+    """
+    for key, attr in attrs.items():
+        if key not in _NAMING_ATTRS:
+            continue
+        value = attr.group("dq") if attr.group("dq") is not None else attr.group("sq")
+        if _is_secret_name(value):
+            return value
+    return None
+
+
 def _find_elements(text: str) -> list[SecretValue]:
     hits: list[SecretValue] = []
     closings: dict[str, int | None] = {}
@@ -462,15 +478,8 @@ def _find_elements(text: str) -> list[SecretValue]:
             attr.group("name").lower(): attr for attr in _ATTR_RE.finditer(tag.group("attrs") or "")
         }
         local = tag.group("name").rsplit(":", 1)[-1]
-        named_by_attr = next(
-            (
-                attr.group("dq") if attr.group("dq") is not None else attr.group("sq")
-                for key, attr in attrs.items()
-                if key in _NAMING_ATTRS
-            ),
-            None,
-        )
-        if named_by_attr is not None and _is_secret_name(named_by_attr):
+        named_by_attr = _secret_naming_attr(attrs)
+        if named_by_attr is not None:
             for key, attr in attrs.items():
                 if key in _VALUE_ATTRS:
                     group = "dq" if attr.group("dq") is not None else "sq"

@@ -696,6 +696,15 @@ _SECRET_SHAPED_FILES = {
         '<html><script>var cfg = {"password":\n  "made-up"};</script></html>',
         "the field 'password'",
     ),
+    # The reviewer's second-round example: an id attribute before the name.
+    "html-input-id-before-name": (
+        '<html><body><input id="login-field" name="password" value="made-up"></body></html>',
+        "the attribute 'value'",
+    ),
+    "html-input-name-before-id": (
+        '<html><body><input name="password" id="login-field" value="made-up"></body></html>',
+        "the attribute 'value'",
+    ),
 }
 
 

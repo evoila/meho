@@ -85,12 +85,13 @@ read, a cluster/DRS read, an event/perf query) lets an
 branch wraps it into a ``connector_error`` :class:`OperationResult` for
 the composite parent, whose ``str(exc)`` already carries the upstream
 status code + offending URL. Optional enrichment legs (per-datastore
-VM placement, per-host property read, vSAN health) degrade best-effort
+VM placement, per-host property read) degrade best-effort
 instead -- they catch the transport error, null the enriched fields,
 and record an ``enrichment_note`` rather than sinking the whole
 aggregation. (The former per-host ``network_uplinks`` and per-cluster
 ``vsan_health`` best-effort reads were re-shipped as typed ops in #2258;
-see :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
+see :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`. Since #4441
+``vsan_health`` raises on a failed vSAN call instead of degrading.)
 
 Op_id contract for sub-ops
 --------------------------

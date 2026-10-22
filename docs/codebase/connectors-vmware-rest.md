@@ -127,12 +127,15 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   best-effort (a failed read nulls the network detail with a
   `read_note` rather than sinking the op).
   `vmware.host.vsan_health` (`#2135`) queries the vSAN
-  health-service vmomi method `VsanQueryVcClusterHealthSummary` on the
-  `vsan-cluster-health-system` singleton, scoped to the target
+  health-service method `VsanQueryVcClusterHealthSummary` on the
+  `vsan-cluster-health-system` object, scoped to the target
   cluster's MoRef — the `govc vsan.health.*` equivalent, returning the
   cluster-wide `overall_health` colour plus the health-test `groups`
-  list. It is likewise best-effort (a failed health-service read nulls
-  `groups` / `overall_health` with a `read_note`).
+  list. It is **not** best-effort (`#4441`): when the vSAN call fails,
+  the operation returns an error with vCenter's fault type and text, and
+  a cluster id that does not exist gives `not_found`. It never returns
+  empty health fields that look like a healthy cluster. How the call is
+  sent: see "vSAN calls" below.
 - **Write composites** (`composites/_write.py`) — the module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
@@ -860,9 +863,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    method the connector calls (from the source) and checks it against the
    vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
    version gate or an entry with the reason in the lane's exclusion list.
-   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
-   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
-   `vmware.host.vsan_health` calls it best-effort. See
+   The list is empty today. No 8.0 VI/JSON file has vSAN paths, so on
+   vCenter 8.0 the vSAN methods go as SOAP (`#4441`, see "vSAN calls"
+   below); the same lane checks them against the vendor's vSAN SDK of
+   8.0 U1 and U2 instead. See
    [vcf-api-compatibility.md](vcf-api-compatibility.md).
    **Operation summaries (#4329).** Search and the operation-group step
    read each operation's one-line `summary`. The full vendor specs fall
@@ -3473,10 +3477,10 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   maxSample}]`, the shape the pinned `vi-json.yaml` declares.
 - **VI-JSON mount for vmomi reads *and writes* — `/sdk/vim25/{release}`
   (#2466, mutating writes #2893)** —
-  vmomi (VI-JSON) methods (`RetrievePropertiesEx`,
-  `VsanQueryVcClusterHealthSummary`, `QueryEvents`,
+  vmomi (VI-JSON) methods (`RetrievePropertiesEx`, `QueryEvents`,
   `QueryAvailablePerfMetric`, `QueryPerf`, and now the mutating
-  `ReconfigVM_Task`) are served under the
+  `ReconfigVM_Task`; the vSAN methods have their own path, see "vSAN
+  calls" below) are served under the
   documented release-versioned base
   `/sdk/vim25/{release}/{MoType}/{moId}/{method}` (Broadcom Web Services
   SDK guide, "Building JSON Request URLs"; available since vCenter 8.0U1,
@@ -3514,6 +3518,42 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   `/api` form; legacy `/rest` (vcsim) and ESXi sessions are unchanged.
   For managed-object property reads, `vmware.object.collect` stays the
   preferred op: it builds the PropertyCollector body for the caller.
+- **vSAN calls — `VmwareRestConnector._post_vsan` (#4441)** — every vSAN
+  operation sends its vSAN method through this one method. The method
+  is a `VsanMethod` constant (`_mount.py`): the vSAN object type, its
+  fixed id on vCenter (for example `vsan-cluster-health-system`), and
+  the method name. How the call is sent depends on the vCenter version
+  the connector detected (the same version that gives `{release}`):
+  - **vCenter 9.x: VI-JSON.** `POST /sdk/vim25/{release}/vsan/{MoType}/{moId}/{method}`,
+    through `_post_vmomi_json`. `_mount.vsan_method_path` builds the
+    `/vsan/...` part; it is the path of the vendor VI/JSON files of 9.0,
+    9.1.0 and 9.1.1. Before #4441 the vSAN health read left out `/vsan`,
+    and vCenter 9.1 answered HTTP 500 `ManagedObjectNotFound` for the
+    vSAN health object.
+  - **vCenter 8.0: SOAP.** The vendor VI/JSON files of 8.0 U1, U2 and U3
+    have no vSAN paths. So the method goes as SOAP to `/vsanHealth`
+    (namespace `urn:vsan`, codec in `soap_vsan.py`). It is authenticated
+    by the `vmware_soap_session` cookie of a vCenter SOAP login on `/sdk`
+    (`_vcenter_soap_login`, the same login the PBM calls use), sent as
+    the HTTP `Cookie`. The `SOAPAction` is `urn:vsan/<version>`, with the
+    version from `/sdk/vsanServiceVersions.xml`. Source: the vendor
+    sample `vsanapiutils.py` of the vSAN Management SDK for Python 8.0.
+    The cookie is kept per target; a `NotAuthenticated` fault (vCenter
+    dropped the idle session) makes the call log in again and retry once.
+    SOAP has no list marker, so a list with one entry comes back as a
+    single dict; the operation turns its list fields back into lists.
+  - An unknown version stays on VI-JSON. A legacy `/rest` session
+    (vcsim) mounts the same `/vsan/...` path on `/rest`.
+
+  Errors are not swallowed. A vSAN fault raises with vCenter's fault
+  type and text (`extras.upstream_fault` in the error answer). When the
+  fault is `ManagedObjectNotFound` for an object the caller sent (such as
+  the `cluster`), the call raises `ConnectorResourceNotFoundError`, so the
+  answer is MEHO's normal `not_found`. A `ManagedObjectNotFound` for the
+  vSAN object itself stays a normal error. The reconcile lanes collect
+  every `VsanMethod` constant: the read lane checks each against the
+  pinned 9.0 `vi-json.yaml`, and the 8.0 lane checks each against the
+  method lists of the vendor's vSAN SDK of 8.0 U1 and U2.
 - **All hand-authored composites shipped** — T5 (#508) ships 5 read;
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6

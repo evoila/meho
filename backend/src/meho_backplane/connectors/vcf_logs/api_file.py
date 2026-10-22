@@ -42,7 +42,12 @@ path next. Only UTF-8 text comes back. A compressed body (``gzip`` or
 grow past the limit. A file whose stored record does not fit in one
 result handle stops with an error that names its size -- the read never
 returns a cut file. A file that the secret-redaction rules would change
-stops too, so the read never claims an exact file it cannot return.
+stops too, so the read never claims an exact file it cannot return. The
+read also refuses, on its own, the secret-bearing forms the shared rules
+do not see: a quoted field named like a secret (``"password": "..."``,
+the JSON form an API reference shows in its examples), a private-key
+block, and a licence key, labelled or bare. The check runs on the whole
+text, so a secret that crosses a part boundary is found too.
 
 Version and build come from the connector's own version detection
 (``GET /api/v2/version``, which needs no login). If that read fails, the
@@ -57,6 +62,7 @@ reuses the handler.
 from __future__ import annotations
 
 import hashlib
+import re
 import zlib
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -142,12 +148,58 @@ class VrliApiFileNotTextError(ValueError):
 
 
 class VrliApiFileRedactedError(ValueError):
-    """The secret-redaction rules would change the file; the read stopped."""
+    """The file holds a secret or text the redaction rules would change; the read stopped."""
 
 
 #: The operation id the dispatcher labels this read with. The redaction
 #: check and the stored-record estimate use the same label.
 _OP_ID = "vrli.api_file.get"
+
+#: Field names that carry a secret: the labels of the shared ``api_key``
+#: redaction rule plus the licence key. The shared rule sees ``password=``
+#: and ``password:`` but not a quoted key, so the read checks that form here.
+_SECRET_LABELS = (
+    r"api[_-]?key"
+    r"|access[_-]?token"
+    r"|refresh[_-]?token"
+    r"|auth[_-]?token"
+    r"|session[_-]?token"
+    r"|secret(?:[_-]?(?:key|id))?"
+    r"|private[_-]?key"
+    r"|password|passwd|pwd"
+    r"|client[_-]?secret"
+    r"|token"
+    r"|licen[cs]e[_-]?key"
+)
+#: A value of at least 8 characters, as the shared rule asks: quoted (the
+#: quote bounds it, so it may hold spaces) or bare (up to the next space or
+#: quote). An object or list after the label (``"password": {"type": ...}``,
+#: a schema, not a value) does not match: the first character is a brace.
+_SECRET_VALUE = r"(?:['\"][^'\"\n]{8,4096}['\"]|[^\s'\"{\[]{8,4096})"
+
+#: The secret-bearing forms this read refuses on its own. Each name says what
+#: was found; the error never shows the matched text.
+_SECRET_FORMS: dict[str, re.Pattern[str]] = {
+    # ``"password": "..."`` -- a quoted field name, as in a JSON example.
+    "quoted-secret-field": re.compile(
+        r"['\"](?:" + _SECRET_LABELS + r")['\"]\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
+    ),
+    # ``licenseKey: ...`` -- the shared rule has no licence label.
+    "licence-key-field": re.compile(
+        r"(?<![\w-])licen[cs]e[_-]?key\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
+    ),
+    # ``XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`` with letters and digits mixed -- the
+    # shape of a VMware licence key under any field name (the Logs licence
+    # API names it ``key``). A placeholder of one kind of character passes.
+    # Both look-aheads stay inside the 29 characters, so a long run of key
+    # characters is scanned once, not once per position.
+    "licence-key-value": re.compile(
+        r"(?<![\w-])(?=[A-Z0-9-]{0,28}[0-9])(?=[A-Z0-9-]{0,28}[A-Z])"
+        r"[A-Z0-9]{5}(?:-[A-Z0-9]{5}){4}(?![\w-])"
+    ),
+    # The PEM header of a private key of any kind (RSA, EC, OpenSSH, PGP, ...).
+    "private-key-block": re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----"),
+}
 
 #: The statuses that mean "the session is gone": ``401`` and the system's
 #: own ``440``. Raised so the dispatcher re-logs-in and dispatches once more.
@@ -490,6 +542,25 @@ def _assert_not_redacted(
         )
 
 
+def _assert_no_secret_form(answer: dict[str, Any], text: str) -> None:
+    """Stop when *text* holds one of the secret-bearing forms in :data:`_SECRET_FORMS`.
+
+    The shared redaction rules leave these forms unchanged, so
+    :func:`_assert_not_redacted` does not see them. The check runs on the
+    whole *text*, not on its parts, so a secret whose label ends one part
+    and whose value starts the next is found. The error names the forms
+    and counts the places, never the matched text.
+    """
+    found = {name: len(pattern.findall(text)) for name, pattern in _SECRET_FORMS.items()}
+    forms = sorted(name for name, count in found.items() if count)
+    if not forms:
+        return
+    raise VrliApiFileRedactedError(
+        f"GET {answer['path']}: the text holds a secret ({forms}) in {sum(found.values())} "
+        "place(s), so the file cannot be returned; the read stopped"
+    )
+
+
 def _decode_text(response: httpx.Response, path: str) -> str:
     """Return the body as text; refuse anything that is not UTF-8 text."""
     content_type = response.headers.get("content-type")
@@ -585,4 +656,5 @@ async def vrli_api_file_get_impl(
     _assert_not_redacted(
         answer, text, operator, connector_id=f"{connector.impl_id}-{connector.version}"
     )
+    _assert_no_secret_form(answer, text)
     return answer

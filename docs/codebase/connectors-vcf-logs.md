@@ -361,6 +361,29 @@ answer, and stops with an error that names the rules and the number of
 places. Redaction stays on; the read just never claims an exact file it
 cannot return.
 
+The shared rules see `password=value` and `password: value`, but not
+every form a secret takes in an API file. So the read has checks of its
+own, run on the whole text (a secret whose label ends one part and whose
+value starts the next is found too). It stops, with an error that names
+the form and the number of places but never the value, when the text
+holds:
+
+- a quoted field named like a secret with a value of 8 or more
+  characters, for example `"password": "..."`, `"sessionToken": "..."`
+  or `"licenseKey": "..."` (the JSON form an API reference shows in a
+  request example). A schema entry such as `"password": {"type":
+  "string"}` is not a value and passes; so does a short placeholder like
+  `"string"`;
+- a licence-key field without quotes (`licenseKey: ...`);
+- a bare VMware licence key, five groups of five letters and digits
+  mixed (`AB12C-3D4EF-...`), under any field name, because the Logs
+  licence API names it `key`. A placeholder of only one kind of character
+  (`XXXXX-XXXXX-...`) passes;
+- a PEM private-key block (`-----BEGIN ... PRIVATE KEY-----`).
+
+A vendor page that holds such an example cannot be read through this
+operation; the error says which form stopped it.
+
 Version and build come from the connector's own version detection
 (`fingerprint`, the unauthenticated `GET /api/v2/version`). If that read
 fails (no connection, an error status, an answer with no `version`), the

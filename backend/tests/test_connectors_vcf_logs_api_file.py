@@ -28,6 +28,11 @@ What is covered, with a respx-mocked Logs system and no ingested catalog:
   back from the result store with every part, through ``dispatch()``;
 * a page the secret-redaction rules would change stops with an error, also
   when the secret's label ends one part and its value starts the next;
+* the secret-bearing forms the shared rules leave unchanged (a quoted
+  JSON password or token field, a private-key block, a licence key as a
+  field or as a bare value) stop with an error that never shows the
+  value, also when the form crosses a part boundary; a schema entry or a
+  placeholder named like a secret still passes;
 * content that is not text is refused with its content type;
 * the version read fails (HTTP 500, no connection, an answer with no
   version) and the file still comes back with the reason;
@@ -69,6 +74,7 @@ from meho_backplane.connectors.vcf_logs import (
     register_vrli_typed_operations,
 )
 from meho_backplane.connectors.vcf_logs.api_file import (
+    _SECRET_FORMS,
     DOCS_FOLDERS,
     DOCS_PAGES,
     PART_BYTES,
@@ -938,6 +944,146 @@ async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
     assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
     )
+
+
+def _private_key_block(kind: str, body: str) -> str:
+    """Build a PEM private-key block at run time, so no key header sits in this file."""
+    header = " ".join(word for word in ("BEGIN", kind, "PRIVATE", "KEY") if word)
+    footer = header.replace("BEGIN", "END")
+    return f"-----{header}-----\n{body}\n-----{footer}-----\n"
+
+
+_SECRET_FORM_PAGES: list[tuple[str, str, str]] = [
+    (
+        "quoted-secret-field",
+        "<pre>POST /api/v2/sessions\n"
+        '{"username": "admin", "password": "example-secret-value-0123456789"}</pre>',
+        "example-secret-value-0123456789",
+    ),
+    (
+        "quoted-secret-field",
+        '{"sessionToken": "example-session-token-0123456789"}',
+        "example-session-token-0123456789",
+    ),
+    (
+        "quoted-secret-field",
+        "{'token': 'example token with spaces inside'}",
+        "example token with spaces inside",
+    ),
+    (
+        "quoted-secret-field",
+        '{"licenseKey": "example-licence-key-value-0123456789"}',
+        "example-licence-key-value-0123456789",
+    ),
+    (
+        "licence-key-field",
+        "license_key: example-licence-key-value-0123456789\n",
+        "example-licence-key-value-0123456789",
+    ),
+    (
+        "licence-key-value",
+        '{"key": "AAAA1-AAAA1-AAAA1-AAAA1-AAAA1"}',
+        "AAAA1-AAAA1-AAAA1-AAAA1-AAAA1",
+    ),
+    (
+        "private-key-block",
+        _private_key_block("RSA", "example-private-key-body"),
+        "example-private-key-body",
+    ),
+    (
+        "private-key-block",
+        _private_key_block("", "example-private-key-body"),
+        "example-private-key-body",
+    ),
+]
+
+
+@pytest.mark.parametrize(("form", "page", "secret"), _SECRET_FORM_PAGES)
+@pytest.mark.asyncio
+async def test_secret_form_the_shared_rules_leave_unchanged_stops_with_an_error(
+    _stub_embedding: AsyncMock, session: AsyncSession, form: str, page: str, secret: str
+) -> None:
+    """The shared rules do not change these pages; the read's own checks refuse them."""
+    await _register_and_resolve(_stub_embedding)
+    set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
+    shared = apply_connector_boundary_redaction(
+        {"text": page}, connector_id=VRLI_CONNECTOR_ID, tenant=None, op="vrli.api_file.get"
+    )
+    assert shared.redacted == shared.raw, "the shared rules must not see this form; the gap is real"
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/rest-api/example.html").respond(
+            200, text=page, headers={"Content-Type": "text/html"}
+        )
+        result = await _dispatch("/rest-api/example.html")
+
+    assert result.status == "error"
+    message = result.extras["exception_message"]
+    assert form in message
+    assert "1 place(s)" in message
+    assert "the read stopped" in message
+    assert secret not in json.dumps(result.result) + json.dumps(result.extras, default=str)
+
+
+@pytest.mark.asyncio
+async def test_quoted_secret_field_that_crosses_a_part_boundary_stops_with_an_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """``"password": "`` ends the first part and the value starts the second."""
+    await _register_and_resolve(_stub_embedding)
+    set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
+    label = b'{"password": "'
+    page = b"x" * (PART_BYTES - len(label)) + label + b'example-secret-value-0123456789"}\n'
+    parts = [part.decode() for part in split_parts(page)]
+    assert parts[0].endswith('"password": "')
+    assert parts[1].startswith("example-secret-value")
+    for text in parts:
+        assert not any(pattern.search(text) for pattern in _SECRET_FORMS.values()), (
+            "a part alone must not match; the gap is real"
+        )
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/rest-api/split.html").respond(
+            200, content=page, headers={"Content-Type": "text/html"}
+        )
+        result = await _dispatch("/rest-api/split.html")
+
+    assert result.status == "error"
+    message = result.extras["exception_message"]
+    assert "quoted-secret-field" in message
+    assert "1 place(s)" in message
+    assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
+        result.extras, default=str
+    )
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        '{"password": {"type": "string", "format": "password", "description": "The password"}}',
+        '{"username": "string", "password": "string"}',
+        '{"info": {"license": {"name": "Apache 2.0"}}}',
+        "licenseKey:\n  type: string\n  description: The licence key of the system\n",
+        '{"key": "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"}',
+        '{"required": ["password", "token"], "token": null}',
+        "-----BEGIN CERTIFICATE-----\nMIIEexample\n-----END CERTIFICATE-----\n",
+    ],
+)
+@pytest.mark.asyncio
+async def test_schema_entries_and_placeholders_named_like_a_secret_still_come_back(
+    _stub_embedding: AsyncMock, session: AsyncSession, page: str
+) -> None:
+    """A field named ``password`` with a schema or a placeholder as its value is not a secret."""
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(_API_DOCS).respond(200, text=page, headers={"Content-Type": "application/json"})
+        result = await _dispatch(_API_DOCS)
+
+    assert result.status == "ok", result.error
+    assert "".join(item["text"] for item in result.result["items"]) == page
 
 
 @pytest.mark.asyncio

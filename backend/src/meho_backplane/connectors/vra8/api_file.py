@@ -42,9 +42,13 @@ The read is narrow on purpose:
   (``licenseKey``), and a PEM private key block. The read looks for a
   credential field and a private key block itself, in the whole file
   text, and refuses a file that holds one (:data:`SECRET_SHAPES`), so no
-  clear-text secret reaches a stored result. A documentation file that
-  shows an example credential value is refused as well; that is on
-  purpose.
+  clear-text secret reaches a stored result. Those text rules see a key
+  and its value on one line. A file that is valid JSON or YAML is also
+  parsed, and every credential key with a value is refused whatever the
+  layout: a value on the next line, a flow mapping such as
+  ``example: {password: abc}``, a quoted or a bare key. A documentation
+  file that shows an example credential value is refused as well; that
+  is on purpose.
 
 The version and build come from the Orchestrator inside the appliance
 (``GET /vco/api/about``: ``version`` and ``build-number``); the IaaS API
@@ -56,11 +60,13 @@ why.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
+import yaml
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
@@ -144,7 +150,9 @@ _CREDENTIAL_VALUE = r"""(?:"[^"\n]+"|'[^'\n]+'|(?!(?:null|true|false)\b)[^\s"'#{
 
 #: Secret shapes the stored-result redaction passes through unchanged, each
 #: with a name for the error. Both run on the whole file text, so a secret
-#: the part cut splits in two is found as well.
+#: the part cut splits in two is found as well. They see a key and its
+#: value on one line; :func:`_count_credential_values` covers every other
+#: layout of a file that parses as JSON or YAML.
 SECRET_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "a credential field",
@@ -155,6 +163,18 @@ SECRET_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("a private key block", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
 )
+
+# A parsed key is a credential key by the same rule: it is, or ends in, a
+# secret label.
+_CREDENTIAL_KEY_NAME = re.compile(rf"{_KEY_PREFIX}{_SECRET_LABELS}", re.IGNORECASE)
+
+try:
+    # LibYAML-backed loader, much faster on a large file than the
+    # pure-Python one. Optional because PyYAML wheels for some platforms
+    # ship without LibYAML support.
+    _YamlLoader: type[yaml.SafeLoader] = yaml.CSafeLoader
+except AttributeError:  # pragma: no cover - PyYAML always ships SafeLoader
+    _YamlLoader = yaml.SafeLoader
 
 # The path rule, built from named pieces. One path part holds letters,
 # digits and . _ ~ -, so no backslash, percent sign (an encoded dot or
@@ -406,10 +426,68 @@ def _check_fits(answer: dict[str, Any], operator: Operator) -> None:
         )
 
 
+def _parse_document(file_text: str) -> Any:
+    """Parse *file_text* as JSON, else as YAML; ``None`` when it is neither.
+
+    JSON is tried first because it is exact and fast on a one-line file
+    of a few megabytes. A landing page (HTML) parses as neither, or as
+    one YAML string, and the walk then finds no mapping.
+    """
+    try:
+        return json.loads(file_text)
+    except ValueError:
+        pass
+    try:
+        return yaml.load(file_text, Loader=_YamlLoader)
+    except yaml.YAMLError:
+        return None
+
+
+def _is_credential_value(value: Any) -> bool:
+    """True for a value that can carry a secret: a non-empty string or a number.
+
+    ``None``, ``True``, ``False``, an empty string, a mapping (a schema
+    property named ``password``) and a list (a ``required`` list) are not
+    credential values.
+    """
+    if value is None or isinstance(value, bool):
+        return False
+    return (isinstance(value, str) and bool(value)) or isinstance(value, int | float)
+
+
+def _count_credential_values(document: Any) -> int:
+    """Count the credential keys with a value anywhere in a parsed document.
+
+    The walk is iterative, and visits a shared mapping or list once, so a
+    YAML file whose aliases repeat one node many times costs its size,
+    not the size of the expanded tree.
+    """
+    count = 0
+    seen: set[int] = set()
+    stack = [document]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict | list) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        for key, value in node.items():
+            if isinstance(key, str) and _CREDENTIAL_KEY_NAME.fullmatch(key):
+                count += _is_credential_value(value)
+            stack.append(value)
+    return count
+
+
 def _check_no_secret_shape(path: str, file_text: str) -> None:
     """Refuse a file that holds a secret the stored-result redaction would miss.
 
-    The error names the shape and how often it occurs, never the text.
+    The text rules (:data:`SECRET_SHAPES`) run first; then a file that
+    parses as JSON or YAML is walked, so a credential value the text
+    rules cannot see (on the next line, or in a flow mapping) is found
+    too. The error names the shape and how often it occurs, never the
+    text.
     """
     for name, pattern in SECRET_SHAPES:
         count = sum(1 for _ in pattern.finditer(file_text))
@@ -419,6 +497,13 @@ def _check_no_secret_shape(path: str, file_text: str) -> None:
                 "not cover that shape, so the file was not returned. This read never "
                 "returns a clear-text secret."
             )
+    count = _count_credential_values(_parse_document(file_text))
+    if count:
+        raise Vra8ApiFileError(
+            f"{path!r} holds a credential field in {count} place(s). MEHO's secret "
+            "redaction does not cover that shape, so the file was not returned. This "
+            "read never returns a clear-text secret."
+        )
 
 
 def _check_redaction_keeps_text(
@@ -470,7 +555,8 @@ async def vra8_api_file_get_impl(
     3. Read the version, build and IaaS API label (best effort).
     4. Refuse a file that does not fit in one stored result, whose text
        the stored-result redaction would change, or that holds a secret
-       shape the redaction would miss.
+       shape the redaction would miss (in the text, or in the parsed
+       JSON or YAML document).
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.

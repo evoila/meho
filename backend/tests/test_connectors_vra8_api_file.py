@@ -713,6 +713,7 @@ _YAML_SCHEMA_WITH_PASSWORD = _SWAGGER_YAML + (
     "    flow: password\n"
     "    tokenUrl: https://example.invalid/token\n"
     "    description: 'Send the token: in the Authorization header'\n"
+    "x-example: {username: u, password: null, pwd: '', token: {}}\n"
     "paths: {}\n"
 )
 
@@ -744,8 +745,10 @@ async def test_schema_fields_named_like_a_secret_are_not_a_secret(
 
     None of these is a credential value: the property is an object (or a
     mapping on the next lines), the list holds the name only, ``flow`` and
-    ``format`` are the keys, ``null`` and ``false`` are no secret, and a
-    label inside a description is running text. The file comes back whole.
+    ``format`` are the keys, ``null``, ``false``, an empty string and an
+    empty mapping are no secret, and a label inside a description is
+    running text. The file comes back whole, through the text rules and
+    through the parsed document alike.
     """
     assert not any(pattern.search(body) for _, pattern in SECRET_SHAPES)
     connector = _connector()
@@ -828,6 +831,162 @@ async def test_secret_shape_split_across_the_part_cut_is_refused(
     assert shape in message
     assert "not returned" in message
     assert "made-up-" not in message
+
+
+# ---------------------------------------------------------------------------
+# Credential values the text rules cannot see: found in the parsed document
+# ---------------------------------------------------------------------------
+
+_JSON_HEAD = '{"swagger": "2.0", "info": {"title": "Example IaaS API"}, '
+
+
+def _json_document_with(text: str) -> str:
+    """Valid JSON with *text* as one more member, in the layout *text* has."""
+    return _JSON_HEAD + text + ', "paths": {}}'
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _json_document_with('"password":\n    "made-up-pass-value-0123"'),
+        _json_document_with('"token"\n  :\n  "made-up-token-value-0123"'),
+        _json_document_with('"pwd":\n    1234'),
+        _json_document_with('"x-example": {"username": "u",\n  "password":\n    "abc"}'),
+        _json_document_with('"examples": [{"refreshToken":\n "made-up-token-value-0123"}]'),
+        _swagger_yaml_with("example: {password: abc}"),
+        _swagger_yaml_with("example: {username: u, licenseKey: MADE-UP-0000-0000}"),
+        _swagger_yaml_with("examples: [{token: abc}]"),
+        _swagger_yaml_with('"password":\n  abc'),
+        _swagger_yaml_with("password:\n  abc"),
+        _swagger_yaml_with("Password:\n  'abc'"),
+    ],
+    ids=[
+        "json-value-on-the-next-line",
+        "json-colon-and-value-on-their-own-lines",
+        "json-number-on-the-next-line",
+        "json-example-object-value-on-the-next-line",
+        "json-list-of-objects",
+        "yaml-flow-mapping",
+        "yaml-flow-mapping-license-key",
+        "yaml-flow-list-of-mappings",
+        "yaml-quoted-key-value-on-the-next-line",
+        "yaml-bare-key-value-on-the-next-line",
+        "yaml-capitalised-key-quoted-value-on-the-next-line",
+    ],
+)
+async def test_credential_value_in_another_layout_is_refused(body: str) -> None:
+    """A credential value the text rules do not see is found in the parsed document."""
+    # The text rules want the key and the value on one line, and the
+    # stored-result redaction leaves these layouts as they are.
+    assert not any(pattern.search(body) for _, pattern in SECRET_SHAPES)
+    redaction = _redact_like_the_dispatcher({"text": body})
+    assert redaction.manifest == () and redaction.redacted == redaction.raw
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body.encode(), headers={"Content-Type": "application/json"}
+        )
+        with pytest.raises(Vra8ApiFileError) as excinfo:
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert _SWAGGER_PATH in message
+    assert "a credential field in 1 place(s)" in message
+    assert "not returned" in message
+    assert "made-up-" not in message and "abc" not in message and "1234" not in message
+
+
+async def test_every_credential_value_in_the_document_is_counted() -> None:
+    body = _json_document_with(
+        '"x-examples": [{"password":\n "abc"}, {"token":\n "def"}, {"pwd": null}]'
+    )
+    assert not any(pattern.search(body) for _, pattern in SECRET_SHAPES)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body.encode(), headers={"Content-Type": "application/json"}
+        )
+        with pytest.raises(Vra8ApiFileError, match=r"a credential field in 2 place\(s\)"):
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+
+@pytest.mark.parametrize(
+    ("text", "before_cut", "yaml"),
+    [
+        ('", "password":\n    "made-up-pass-value-0123', 8, False),
+        ('", "password":\n    "made-up-pass-value-0123', 14, False),
+        ('", "password":\n    "made-up-pass-value-0123', 24, False),
+        ("example: {password: abc}", 14, True),
+        ("example: {password: abc}", 20, True),
+        ('"password":\n  abc', 13, True),
+    ],
+    ids=[
+        "json-cut-in-the-key",
+        "json-cut-at-the-line-break",
+        "json-cut-in-the-value",
+        "yaml-flow-cut-in-the-key",
+        "yaml-flow-cut-in-the-value",
+        "yaml-quoted-key-cut-at-the-line-break",
+    ],
+)
+async def test_credential_value_in_another_layout_split_across_the_part_cut_is_refused(
+    text: str, before_cut: int, yaml: bool
+) -> None:
+    """The parsed document is the whole file, so a part cut hides nothing."""
+    body = (
+        _yaml_with_text_across_the_part_cut(text, before_cut)
+        if yaml
+        else _json_with_text_across_the_part_cut(text, before_cut)
+    )
+    parts = split_text_parts(body)
+    assert parts[0].endswith(text[:before_cut]) and parts[1].startswith(text[before_cut:])
+    assert not any(pattern.search(body.decode()) for _, pattern in SECRET_SHAPES)
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body, headers={"Content-Type": "application/json"}
+        )
+        with pytest.raises(Vra8ApiFileError) as excinfo:
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    message = str(excinfo.value)
+    assert "a credential field in 1 place(s)" in message
+    assert "not returned" in message
+    assert "made-up-" not in message and "abc" not in message
+
+
+async def test_a_file_that_is_neither_json_nor_yaml_is_not_parsed() -> None:
+    """An HTML page with a broken YAML shape still comes back; only the text rules apply."""
+    body = "<!DOCTYPE html>\n<html><body>\n<p>Docs: [not: yaml: {</p>\n</body></html>\n"
+    assert api_file._parse_document(body) is None
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/automation/api-docs").respond(
+            200, content=body.encode(), headers={"Content-Type": "text/html; charset=utf-8"}
+        )
+        answer = await _call(connector, "/automation/api-docs")
+    await connector.aclose()
+    assert _joined(answer) == body.encode()
+
+
+def test_a_shared_yaml_node_is_walked_once() -> None:
+    """Aliases that repeat one node many times cost the file's size, not the tree's."""
+    lines = ["a: &a [{password: x}, {password: y}]"]
+    previous = "a"
+    for name in "bcdefghij":
+        lines.append(f"{name}: &{name} [" + ", ".join([f"*{previous}"] * 10) + "]")
+        previous = name
+    document = api_file._parse_document("\n".join(lines) + "\n")
+    assert api_file._count_credential_values(document) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -340,10 +340,20 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   property named `password` (an object, or a mapping on the next lines), a
   `required` list that names it, `flow: password`, `format: password`, an
   empty string, `null`, `true`, `false` and a label inside a description
-  are not credential fields. An example credential value in a
-  documentation file is refused as well; that is on purpose. A file that
-  holds one of the shapes stops with an error that names the shape and how
-  often it occurs, never the text.
+  are not credential fields. Those text rules see a key and its value on
+  one line only. So a file that is valid JSON or YAML is also parsed
+  (`json.loads`, then PyYAML's safe loader), and the parsed document is
+  walked: every key that is, or ends in, a secret label and holds a
+  non-empty string or a number is a credential field, whatever the layout
+  (a value on the next line, a flow mapping such as
+  `example: {password: abc}`, a list of mappings, a quoted or a bare key).
+  `null`, `true`, `false`, an empty string, a mapping and a list are not
+  values here either, so a schema still comes back whole. The walk visits
+  a shared node once, so YAML aliases cannot make it slow. A page that is
+  neither JSON nor YAML (HTML) is checked by the text rules only. An
+  example credential value in a documentation file is refused as well;
+  that is on purpose. A file that holds one of the shapes stops with an
+  error that names the shape and how often it occurs, never the text.
 - **Tests.**
   [`test_connectors_vra8_api_file.py`](../../backend/tests/test_connectors_vra8_api_file.py)
   (respx: accepted and refused paths with no request, the login on the
@@ -351,8 +361,11 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   that a redaction rule would change, a secret split across the part cut,
   credential fields in JSON and YAML (quoted, short, with an apostrophe, a
   license key) and a private key block, whole and split across the part
-  cut, schemas that name `password` without a value, a file with more parts
-  than the row limit, and the result-handle round trip);
+  cut, credential values in layouts the text rules cannot see (a value on
+  the next line, a YAML flow mapping, a list of mappings), whole and split
+  across the part cut, a page that is neither JSON nor YAML, a YAML file
+  with shared nodes, schemas that name `password` without a value, a file
+  with more parts than the row limit, and the result-handle round trip);
   [`test_connectors_vra8_typed_reads.py`](../../backend/tests/test_connectors_vra8_typed_reads.py)
   (zero-catalog dispatch, the 401 re-login, and `invalid_params` for a data
   path); and the reconcile lane below (`GET /vco/api/about` in the manifest,

@@ -72,14 +72,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
-- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
-  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
-  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+- **Missing managed objects on typed PropertyCollector reads (`#3481`, `#4776`)** — vCenter reports
+  an addressed, deleted vim object as a `ManagedObjectNotFound` fault inside
+  an HTTP 500. On the vCenter VI-JSON transport the fault body is JSON
+  (`{"_typeName": "ManagedObjectNotFound", "obj": {...}}`, the shape the
+  pinned `vi-json.yaml` documents and vCenter 9.1 sends); a standalone ESXi
+  host sends the SOAP-shaped XML fault. The addressed read operations `vmware.vm.info`,
   `vmware.host.usage`, `vmware.host.storage_devices`,
   `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
   into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
-  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
-  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  reads the fault in either form (JSON first, then XML) and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). A JSON fault
+  names the missing object in `obj`; it maps to `not_found` only when that
+  object is one the read asked for (a missing property collector is not a
+  missing VM), and a JSON fault without `obj` reports every addressed
+  object, as the XML form does. The dispatcher
   returns `status="not_found"` with `extras.error_code="not_found"`,
   `extras.resource_ids`, and the singular `extras.resource_id` when one object
   was addressed. A different fault, a non-PropertyCollector vmomi method, or

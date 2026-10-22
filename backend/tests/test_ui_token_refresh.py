@@ -512,11 +512,11 @@ def test_refresh_failure_reasons_map_per_contract(
 ) -> None:
     """AC: each failure class logs its structured reason and fails closed.
 
-    The two ``non-json-*`` cases pin the #1711 B1 regression: authlib
-    parses every sub-500 token-endpoint response with ``resp.json()``,
-    so a non-JSON body (200 included) raises ``json.JSONDecodeError``
-    -- which must land in the ``malformed_response`` mapping and the
-    clean login redirect, never escape as an unhandled 500.
+    The two ``non-json-*`` cases pin the #1711 B1 regression: a
+    non-JSON sub-500 token-endpoint body raises ``ValueError`` (200) or,
+    since authlib 1.9, ``HTTPStatusError`` (4xx) -- both must land in
+    the ``malformed_response`` mapping and the clean login redirect,
+    never escape as an unhandled 500.
     """
     response, captured, token_route = _run_failed_refresh(
         token_mock=token_mock,

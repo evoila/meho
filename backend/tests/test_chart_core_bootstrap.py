@@ -53,7 +53,12 @@ _BASE_OVERRIDES = [
     "--set",
     "networkPolicy.enabled=false",
 ]
+# The chart then derives the issuer, so the hand-set one is cleared (#4591).
 _CORE_ON = [
+    "--set",
+    "keycloak.issuer=",
+    "--set",
+    "config.keycloakIssuerUrl=",
     "--set",
     "corePostgres.enabled=true",
     "--set",

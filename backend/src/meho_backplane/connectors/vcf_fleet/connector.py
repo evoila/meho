@@ -133,6 +133,11 @@ from meho_backplane.connectors.vcf_fleet.session import (
     VcfFleetTargetLike,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.vcf_fleet.version import (
+    FleetApplianceVersion,
+    parse_appliance_version,
+)
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 __all__ = ["VcfFleetConnector"]
 
@@ -402,8 +407,11 @@ class VcfFleetConnector(HttpConnector):
     # bound methods to the per-process connector instance and threads
     # ``operator`` by name (see ``dispatch_typed``); ``operator`` is
     # forwarded to ``_get_json`` so the credential loader reads the
-    # per-target Basic credentials under the operator's identity. Both are
+    # per-target Basic credentials under the operator's identity. All are
     # read-only — no write op ships here (writes are out of #2266 scope).
+    # ``fleet.api_file.get`` (``api_file_get`` below, body in ``api_file.py``)
+    # reads the API descriptions the appliance serves so the vendor's
+    # ``/lcm`` files can be pinned.
     # ------------------------------------------------------------------
 
     async def about(
@@ -445,6 +453,53 @@ class VcfFleetConnector(HttpConnector):
             target, _FLEET_ENVIRONMENTS_PATH, operator=operator
         )
         return {"environments": environments}
+
+    async def appliance_version(
+        self, target: VcfFleetTargetLike, operator: Operator
+    ) -> FleetApplianceVersion:
+        """Read the product version and build from ``about``. Never raises.
+
+        One ``GET`` with no retry: on VCF 9.0 builds the call answers HTTP
+        500 every time, so retrying only delays the caller. A failure is
+        named in ``error`` and the caller still gets its own answer. The
+        request guard catches every :exc:`httpx.RequestError`, not only
+        the transport kind: a body that fails to decode or a redirect loop
+        raises inside ``client.get`` too, and neither may cost the caller
+        its own answer.
+        """
+        client = await self._http_client(target)
+        headers = await self.auth_headers(target, operator)
+        span = flight_recorder_capture.span_start()
+        try:
+            resp = await client.get(
+                _FLEET_ABOUT_PATH,
+                headers={"Accept": "application/json", **headers},
+                extensions=self._request_extensions(target),
+            )
+        except httpx.RequestError as exc:
+            flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
+            return FleetApplianceVersion(
+                version=None, build=None, error=f"{type(exc).__name__}: {exc}"
+            )
+        flight_recorder_capture.record_vendor_call(
+            span, method="GET", request_headers=headers, response=resp
+        )
+        try:
+            resp.raise_for_status()
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            return FleetApplianceVersion(
+                version=None, build=None, error=f"{type(exc).__name__}: {exc}"
+            )
+        return parse_appliance_version(payload)
+
+    async def api_file_get(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.api_file.get`` shim; the body lives in :mod:`.api_file`."""
+        from meho_backplane.connectors.vcf_fleet.api_file import fleet_api_file_get_impl
+
+        return await fleet_api_file_get_impl(self, operator, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

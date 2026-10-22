@@ -3229,6 +3229,80 @@ every reviewer surface that renders `proposed_effect` verbatim (REST
 approvals show`), so "blast-radius unknown" is distinguishable from a
 genuinely small action. The read composites register no builder.
 
+### VM moves that copy disks wait for approval and show the copy size (#4749)
+
+A VM move that names a datastore copies the VM's disks to that datastore.
+(A datastore is the storage volume that holds a VM's files and disks.) In a
+cold move the VM is off for the whole copy, and the copy fills the target
+datastore. So every call that can copy disks waits for approval, the same
+way the typed `vmware.composite.vm.migrate` waits, and the approver sees the
+copy size first.
+
+**Which calls copy disks.** Three operations, on `vmware-rest-8.0` and
+`vmware-rest-9.0`:
+
+- the generic relocate `POST:/vcenter/vm/{vm}?action=relocate`, also the
+  task form `POST:/vcenter/vm/{vm}?action=relocate&vmw-task=true`;
+- the older-API method `POST:/VirtualMachine/{moId}/RelocateVM_Task`
+  (VI-JSON), where `vi-json.yaml` is ingested;
+- the typed `vmware.composite.vm.migrate` (a host move; it stays
+  `dangerous` with `requires_approval: true`, pinned by a test).
+
+**The rule.** `ingest_safety.py` (`is_vmware_vm_relocate`, used by
+`_requires_vmware_safety_floor`) puts the generic relocate and
+`RelocateVM_Task` in the `dangerous` risk level with `requires_approval:
+true`, next to the VM power and hardware writes. The rule is on the
+operation, not on the request body: the call waits for approval with or
+without a datastore in it. A floor only raises a level; a row that is
+already `destructive` stays `destructive`. The rule covers the `/api`
+mount and any spelling of the path parameter.
+
+**Running installs.** Rows already in the database change only on the
+next ingest. To get the new level, run the catalog ingest again for
+`vmware/8.0` and `vmware/9.0` (the same `--spec` ingest of `vcenter.yaml`
+and `vi-json.yaml` the install used before). The level is part of the
+row's body hash, so only the changed rows are updated.
+
+**The copy-size preview.** `vm_relocate_preview.py` registers one builder
+(`vm_relocate_preview`) under every op_id spelling of the generic relocate
+and of `RelocateVM_Task`. It reads the REST body (`placement.datastore`,
+`disks.{disk}.datastore`) and the older-API body (`spec.datastore`,
+`spec.disk[].datastore`), then:
+
+- **No datastore in the call:** the preview says that no disks are copied.
+  Nothing is read.
+- **A datastore for the VM or for a disk:** two read-only VI-JSON
+  `RetrievePropertiesEx` reads, on the connector session like
+  `vmware.vm.info` (no catalog ingest needed). The VM read gives the name,
+  `runtime.powerState`, the datastores the VM's files are on, and
+  `summary.storage` (`committed` = the data copied now; `committed +
+  uncommitted` = the most the disks can grow to, for thin disks). The
+  datastore read gives the name, capacity and free space of the source
+  and target datastores.
+
+The preview is a dict with a plain-language `summary` sentence first,
+then `vm`, `name`, `power_state`, `copies_disks`, `copy_scope`
+(`whole_vm` / `some_disks` / `none`), `copy_size_is_upper_bound`,
+`copied_now_bytes`, `copy_max_bytes`, `source_datastores` (`[{id, name}]`)
+and `target_datastores` (`[{id, name, capacity_bytes, free_space_bytes,
+free_space_after_copy_bytes, free_space_after_max_copy_bytes}]`). When
+only some disks move, or the disks go to more than one datastore, the
+copy is *at most* this size and the summary says so. A failed VM or
+datastore read never blocks the approval: the preview keeps what it has,
+adds `size_unavailable_reason` (redacted like a `preview_error`), and the
+summary says why the size is missing. The approval row carries the preview
+under `proposed_effect.preview`.
+
+`read_vm_copy_size` and `read_datastore_space` are the shared size reads,
+so the typed datastore move (#4346) can show the same numbers.
+
+Tests: `test_connectors_vmware_rest_vm_relocate_approval.py` (the floor on
+a hand-made spec for 8.0 and 9.0, the `vm.migrate` pin, the preview; the
+shelf-gated lane checks each rule against the pinned 8.0 and 9.0
+`vcenter.yaml` and the 9.0 `vi-json.yaml`) and
+`test_connectors_vmware_rest_vm_relocate_dispatch.py` (a person's call
+waits for approval with the copy size on the row).
+
 ### Version check for typed operations (`_version_gate.py`, #4316)
 
 Some vCenter calls exist only from a given version on. Examples: the

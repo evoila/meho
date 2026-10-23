@@ -13,11 +13,23 @@ by hand (and often got wrong, because a raw ref call needs the exact
   (``GET /repos/{owner}/{repo}/git/trees/{tree_sha}``, ``recursive=1`` on
   request).
 * ``gh.composite.branch_commit_files`` -- write text files to a branch as one
-  new commit: read the branch, read its commit for the base tree, create a
-  tree on top of it, create the commit, move the branch to it. The branch
-  update is never forced. If the branch moved after the read, the call stops
-  with ``status="precondition_failed"`` and changes nothing visible (a tree
-  or commit object that was already created is unreachable and harmless).
+  new commit on top of ``base_sha``, the commit the caller read with
+  ``git_ref_view`` and the approver saw: check the branch is still at
+  ``base_sha``, read that commit for the base tree, create a tree on top of
+  it, create the commit, check the branch again, move it with
+  ``force=false``. If the branch is not at ``base_sha`` at any of these
+  points, the call stops with ``status="precondition_failed"`` and changes
+  nothing visible (a tree or commit object that was already created is
+  unreachable and harmless).
+
+Names in the URL path
+---------------------
+
+Owner, repository, branch, tag and tree values become URL path parts. Each
+is checked first (:func:`check_name`, git's ``check-ref-format`` rules plus
+"no '..' part", so a value can never point at another API path) and then
+percent-encoded with :func:`urllib.parse.quote`, so a branch like ``fix#1``
+reaches GitHub as ``heads/fix%231`` instead of being cut at the ``#``.
 
 All three use the direct-session substrate: the handler declares a
 ``connector`` parameter and calls the resolved connector's own session, so
@@ -25,15 +37,16 @@ they work on a fresh deploy with no gh catalog ingest.
 
 The write is registered ``safety_level="dangerous"`` /
 ``requires_approval=True``: every call waits for approval. The approver sees
-the park-time preview built in :mod:`._git_preview` (branch, the commit it
-starts from, each file's path, size and SHA-256 -- never the content).
+the park-time preview built in :mod:`._git_preview`.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote
 
 import httpx
 
@@ -53,6 +66,7 @@ __all__ = [
     "STATUS_PRECONDITION_FAILED",
     "GitRepo",
     "branch_commit_files_composite",
+    "check_name",
     "describe_files",
     "git_ref_view_composite",
     "git_tree_view_composite",
@@ -64,7 +78,8 @@ STATUS_INVALID_REQUEST: Final = "invalid_request"
 
 # GitHub REST wire paths, keyed with ``str.format`` placeholders. The
 # connector mounts them under ``https://api.github.com``; ``mount_op_path``
-# is identity for github.com.
+# is identity for github.com. Every placeholder value is checked and
+# percent-encoded before it is formatted in (see ``GitRepo``).
 _REF_PATH: Final = "/repos/{owner}/{repo}/git/ref/{ref}"
 _REFS_PATH: Final = "/repos/{owner}/{repo}/git/refs/{ref}"
 _TREE_PATH: Final = "/repos/{owner}/{repo}/git/trees/{tree}"
@@ -74,15 +89,60 @@ _COMMITS_PATH: Final = "/repos/{owner}/{repo}/git/commits"
 
 _REF_PREFIX_BY_KIND: Final[dict[str, str]] = {"branch": "heads", "tag": "tags"}
 _BLOB_MODE: Final = "100644"
+_SHA1: Final = re.compile(r"^[0-9a-f]{40}$")
+
+# Characters git refuses in a ref name (check-ref-format), plus control
+# characters and space.
+_FORBIDDEN_CHARS: Final = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
 # Status codes GitHub uses to refuse a branch update that is not a fast
 # forward (``force=false``). The exact wording is GitHub's; MEHO quotes it.
 _REFUSED_UPDATE_STATUSES: Final = frozenset({409, 422})
 
 
+def check_name(value: object, *, allow_slash: bool) -> str | None:
+    """Return why ``value`` is not a safe owner / repo / ref / tree name, or ``None``.
+
+    Follows git's ``check-ref-format`` rules: no control characters, space
+    or ``~ ^ : ? * [ \\``, no ``..``, no ``@{``, no part that starts with
+    ``.`` or ends with ``.lock``, no leading, trailing or double ``/``, no
+    trailing ``.``. Owner and repository names (``allow_slash=False``) may
+    not contain ``/`` at all. A value that passes can only ever name one
+    path part (or, with slashes, parts under the same prefix), never a
+    different API path.
+    """
+    if not isinstance(value, str) or not value:
+        return "name is empty"
+    if _FORBIDDEN_CHARS.search(value):
+        return f"name {value!r} contains a control character, space or one of ~ ^ : ? * [ \\"
+    if ".." in value or "@{" in value:
+        return f"name {value!r} contains '..' or '@{{'"
+    if value.endswith(".") or value.endswith("/") or value.startswith("/"):
+        return f"name {value!r} starts or ends with '/' or ends with '.'"
+    if not allow_slash and "/" in value:
+        return f"name {value!r} contains '/'"
+    for part in value.split("/"):
+        if not part:
+            return f"name {value!r} contains '//'"
+        if part.startswith(".") or part.endswith(".lock"):
+            return f"name {value!r} has a part that starts with '.' or ends with '.lock'"
+    return None
+
+
+def _checked(value: object, *, what: str, allow_slash: bool) -> str:
+    problem = check_name(value, allow_slash=allow_slash)
+    if problem is not None:
+        raise ValueError(f"{what}: {problem}")
+    return str(value)
+
+
 @dataclass(frozen=True)
 class GitRepo:
-    """One repository reached through the resolved connector's session."""
+    """One repository reached through the resolved connector's session.
+
+    ``owner`` and ``repo`` are checked on creation. Path parts passed to
+    :meth:`get` / :meth:`send` are percent-encoded (``/`` kept for refs).
+    """
 
     connector: GitHubRestConnector
     target: Any
@@ -90,10 +150,16 @@ class GitRepo:
     owner: str
     repo: str
 
+    def __post_init__(self) -> None:
+        _checked(self.owner, what="owner", allow_slash=False)
+        _checked(self.repo, what="repo", allow_slash=False)
+
     async def _path(self, template: str, **fields: str) -> str:
-        return await self.connector.mount_op_path(
-            self.target, template.format(owner=self.owner, repo=self.repo, **fields), self.operator
+        encoded = {name: quote(value, safe="/") for name, value in fields.items()}
+        path = template.format(
+            owner=quote(self.owner, safe=""), repo=quote(self.repo, safe=""), **encoded
         )
+        return await self.connector.mount_op_path(self.target, path, self.operator)
 
     async def get(
         self, template: str, *, params: dict[str, Any] | None = None, **fields: str
@@ -157,9 +223,13 @@ async def git_ref_view_composite(
     params: dict[str, Any],
     connector: GitHubRestConnector,
 ) -> dict[str, Any]:
-    """Return the commit a branch or tag points to (``gh.composite.git_ref_view``)."""
-    name = params["name"]
+    """Return the commit a branch or tag points to (``gh.composite.git_ref_view``).
+
+    Raises :class:`ValueError` when the owner, repository or name is not a
+    safe path part (see :func:`check_name`).
+    """
     kind = params.get("kind", "branch")
+    name = _checked(params["name"], what=kind, allow_slash=True)
     ref = f"{_REF_PREFIX_BY_KIND[kind]}/{name}"
     payload = await _repo(connector, target, operator, params).read_ref(ref)
     obj = payload.get("object") if isinstance(payload, dict) else None
@@ -182,10 +252,15 @@ async def git_tree_view_composite(
     params: dict[str, Any],
     connector: GitHubRestConnector,
 ) -> dict[str, Any]:
-    """Return the files and folders of a tree (``gh.composite.git_tree_view``)."""
+    """Return the files and folders of a tree (``gh.composite.git_tree_view``).
+
+    Raises :class:`ValueError` when the owner, repository or tree value is
+    not a safe path part (see :func:`check_name`).
+    """
     recursive = bool(params.get("recursive", False))
+    tree = _checked(params["tree"], what="tree", allow_slash=True)
     payload = await _repo(connector, target, operator, params).get(
-        _TREE_PATH, params={"recursive": "1"} if recursive else None, tree=params["tree"]
+        _TREE_PATH, params={"recursive": "1"} if recursive else None, tree=tree
     )
     raw_entries = payload.get("tree")
     entries = [
@@ -260,6 +335,24 @@ def describe_files(files: object) -> tuple[list[dict[str, Any]], list[str]]:
     return described, problems
 
 
+def check_commit_request(params: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Check the names, ``base_sha`` and files of a commit call before any vendor call.
+
+    Shared by the handler and the park-time preview. Returns the described
+    files and the problems found (empty when the request is well-formed).
+    """
+    problems: list[str] = []
+    for key, allow_slash in (("owner", False), ("repo", False), ("branch", True)):
+        problem = check_name(params.get(key), allow_slash=allow_slash)
+        if problem is not None:
+            problems.append(f"{key}: {problem}")
+    base_sha = params.get("base_sha")
+    if not isinstance(base_sha, str) or not _SHA1.match(base_sha):
+        problems.append("base_sha must be the 40-character lowercase SHA-1 of a commit")
+    files, file_problems = describe_files(params.get("files"))
+    return files, problems + file_problems
+
+
 def _stopped(
     status: str, reason: str, *, branch: str, base_sha: str | None, files: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -310,6 +403,12 @@ async def _create_commit(
     )
 
 
+def _moved(base_sha: str, sha_now: str | None) -> str:
+    if sha_now is None:
+        return f"branch is at {base_sha} no more: it does not exist; nothing changed"
+    return f"branch is at {sha_now}, not at base_sha {base_sha}; nothing changed"
+
+
 async def _move_branch(repo: GitRepo, *, ref: str, base_sha: str, commit_sha: str) -> str | None:
     """Move ``ref`` from ``base_sha`` to ``commit_sha`` without force.
 
@@ -317,7 +416,7 @@ async def _move_branch(repo: GitRepo, *, ref: str, base_sha: str, commit_sha: st
     """
     sha_now = await repo.ref_sha(ref)
     if sha_now != base_sha:
-        return f"branch moved from {base_sha} to {sha_now} after the read; nothing changed"
+        return _moved(base_sha, sha_now)
     try:
         await repo.send("PATCH", _REFS_PATH, json={"sha": commit_sha, "force": False}, ref=ref)
     except httpx.HTTPStatusError as exc:
@@ -339,29 +438,32 @@ async def branch_commit_files_composite(
 ) -> dict[str, Any]:
     """Write text files to a branch as one commit (``gh.composite.branch_commit_files``).
 
-    Steps: read the branch; read its commit for the base tree; create a tree
-    on top of it with the files; create the commit with the branch's commit
-    as parent; read the branch again and move it with ``force=false``. Any
-    step that finds the branch gone or moved returns
-    ``status="precondition_failed"`` and the branch is not touched. A
-    transport error or an unexpected status raises, so the dispatcher
+    Steps: check names, ``base_sha`` and files (``invalid_request`` on a
+    problem, nothing called); read the branch and stop with
+    ``precondition_failed`` unless it is at ``base_sha``; read that commit
+    for the base tree; create a tree on top of it with the files; create
+    the commit with ``base_sha`` as parent; read the branch again and move
+    it with ``force=false``. Any step that finds the branch gone or moved
+    returns ``status="precondition_failed"`` and the branch is not touched.
+    A transport error or an unexpected status raises, so the dispatcher
     records the call as failed.
     """
-    branch = params["branch"]
-    ref = f"heads/{branch}"
-    files, problems = describe_files(params.get("files"))
+    branch = str(params.get("branch", ""))
+    files, problems = check_commit_request(params)
     if problems:
         return _stopped(
             STATUS_INVALID_REQUEST, "; ".join(problems), branch=branch, base_sha=None, files=files
         )
+    base_sha = params["base_sha"]
+    ref = f"heads/{branch}"
     repo = _repo(connector, target, operator, params)
-    base_sha = await repo.ref_sha(ref)
-    if base_sha is None:
+    sha_now = await repo.ref_sha(ref)
+    if sha_now != base_sha:
         return _stopped(
             STATUS_PRECONDITION_FAILED,
-            f"branch {branch!r} does not exist in {repo.owner}/{repo.repo}",
+            f"branch {branch!r}: {_moved(base_sha, sha_now)}",
             branch=branch,
-            base_sha=None,
+            base_sha=base_sha,
             files=files,
         )
     commit = await _create_commit(

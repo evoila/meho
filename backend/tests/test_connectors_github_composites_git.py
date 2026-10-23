@@ -35,6 +35,7 @@ from meho_backplane.connectors.github.composites._git import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
     branch_commit_files_composite,
+    check_name,
     describe_files,
     git_ref_view_composite,
     git_tree_view_composite,
@@ -183,6 +184,7 @@ def _commit_params(**overrides: Any) -> dict[str, Any]:
         "owner": "acme",
         "repo": "widgets",
         "branch": "main",
+        "base_sha": _BASE_SHA,
         "message": "docs: add notes",
         "files": [
             {"path": "docs/notes.md", "content": "# Notes\n"},
@@ -375,7 +377,7 @@ async def test_branch_commit_files_stops_when_the_branch_moved_after_the_read() 
         connector=connector,  # type: ignore[arg-type]
     )
     assert result["status"] == STATUS_PRECONDITION_FAILED
-    assert "moved" in result["reason"]
+    assert "not at base_sha" in result["reason"]
     assert _BASE_SHA in result["reason"] and _OTHER_SHA in result["reason"]
     assert result["commit_sha"] is None
     assert result["base_sha"] == _BASE_SHA
@@ -503,6 +505,8 @@ async def test_preview_shows_branch_base_commit_and_file_digests_only() -> None:
     assert preview is not None
     assert preview["branch"] == "main"
     assert preview["base_sha"] == _BASE_SHA
+    assert preview["branch_sha_now"] == _BASE_SHA
+    assert "problems" not in preview
     assert preview["file_count"] == 2
     assert preview["total_bytes"] == 14
     assert preview["files"][0] == {
@@ -519,7 +523,8 @@ async def test_preview_shows_branch_base_commit_and_file_digests_only() -> None:
 async def test_preview_without_connector_skips_the_live_read() -> None:
     preview = await branch_commit_files_preview(_preview_ctx(None, _commit_params()))
     assert preview is not None
-    assert preview["base_sha"] is None
+    assert preview["base_sha"] == _BASE_SHA
+    assert preview["branch_sha_now"] is None
     assert preview["file_count"] == 2
 
 
@@ -528,10 +533,227 @@ async def test_preview_names_a_missing_branch_instead_of_failing() -> None:
     connector = _RecordingConnector(get={_REF_PATH: _http_error(404)})
     preview = await branch_commit_files_preview(_preview_ctx(connector, _commit_params()))
     assert preview is not None
-    assert preview["base_sha"] is None
-    assert "does not exist" in preview["base_sha_error"]
+    assert preview["branch_sha_now"] is None
+    assert "does not exist" in preview["problems"][0]
 
 
 @pytest.mark.asyncio
 async def test_preview_declines_without_the_identity_fields() -> None:
     assert await branch_commit_files_preview(_preview_ctx(None, {"files": []})) is None
+
+
+# ---------------------------------------------------------------------------
+# base_sha is enforced; names are checked and percent-encoded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_branch_commit_files_stops_when_the_branch_is_not_at_base_sha() -> None:
+    """The head the approver saw (base_sha) is enforced before any write."""
+    connector = _happy_connector()
+    connector._get[_REF_PATH] = [_ref_payload(_OTHER_SHA)]
+    result = await branch_commit_files_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_commit_params(),
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["status"] == STATUS_PRECONDITION_FAILED
+    assert _OTHER_SHA in result["reason"] and _BASE_SHA in result["reason"]
+    assert result["base_sha"] == _BASE_SHA
+    assert connector.post_calls == [], "no tree, commit or branch update when the head differs"
+    assert [path for path, _ in connector.get_calls] == [_REF_PATH]
+
+
+@pytest.mark.asyncio
+async def test_branch_commit_files_refuses_a_malformed_base_sha_before_any_call() -> None:
+    connector = _RecordingConnector()
+    result = await branch_commit_files_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_commit_params(base_sha="main"),
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["status"] == STATUS_INVALID_REQUEST
+    assert "base_sha" in result["reason"]
+    assert connector.get_calls == [] and connector.post_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("branch", "a/../b"), ("branch", "fix 1"), ("owner", "../x"), ("repo", "a/b")],
+)
+async def test_branch_commit_files_refuses_unsafe_names_before_any_call(
+    key: str, value: str
+) -> None:
+    connector = _RecordingConnector()
+    result = await branch_commit_files_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_commit_params(**{key: value}),
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["status"] == STATUS_INVALID_REQUEST
+    assert key in result["reason"]
+    assert connector.get_calls == [] and connector.post_calls == []
+
+
+@pytest.mark.asyncio
+async def test_branch_commit_files_percent_encodes_the_branch_name() -> None:
+    """A branch like ``fix#1`` reaches GitHub as ``heads/fix%231``, not ``heads/fix``."""
+    ref_path = "/repos/acme/widgets/git/ref/heads/fix%231"
+    refs_path = "/repos/acme/widgets/git/refs/heads/fix%231"
+    connector = _RecordingConnector(
+        get={
+            ref_path: [_ref_payload(), _ref_payload()],
+            _COMMIT_PATH: {"sha": _BASE_SHA, "tree": {"sha": _BASE_TREE_SHA}},
+        },
+        post={
+            ("POST", _TREES_PATH): {"sha": _NEW_TREE_SHA},
+            ("POST", _COMMITS_PATH): {"sha": _NEW_COMMIT_SHA, "tree": {"sha": _NEW_TREE_SHA}},
+            ("PATCH", refs_path): _ref_payload(_NEW_COMMIT_SHA),
+        },
+    )
+    result = await branch_commit_files_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_commit_params(branch="fix#1"),
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["status"] == STATUS_COMMITTED
+    assert result["branch"] == "fix#1"
+    assert connector.post_calls[-1]["path"] == refs_path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "encoded"),
+    [("fix#1", "fix%231"), ("a%b", "a%25b"), ("release/1.2", "release/1.2")],
+)
+async def test_git_ref_view_percent_encodes_the_name(name: str, encoded: str) -> None:
+    path = f"/repos/acme/widgets/git/ref/heads/{encoded}"
+    connector = _RecordingConnector(get={path: _ref_payload()})
+    result = await git_ref_view_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"owner": "acme", "repo": "widgets", "name": name},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert connector.get_calls == [(path, None)]
+    assert result["ref"] == f"heads/{name}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["a/../b", "..", "/main", "main/", "a//b", "x.lock", "@{1}"])
+async def test_git_ref_view_refuses_unsafe_names_before_any_call(name: str) -> None:
+    connector = _RecordingConnector()
+    with pytest.raises(ValueError, match="branch"):
+        await git_ref_view_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"owner": "acme", "repo": "widgets", "name": name},
+            connector=connector,  # type: ignore[arg-type]
+        )
+    assert connector.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_git_ref_view_refuses_an_unsafe_owner_before_any_call() -> None:
+    connector = _RecordingConnector()
+    with pytest.raises(ValueError, match="owner"):
+        await git_ref_view_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"owner": "../user", "repo": "widgets", "name": "main"},
+            connector=connector,  # type: ignore[arg-type]
+        )
+    assert connector.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_git_tree_view_refuses_and_encodes_the_tree_value() -> None:
+    connector = _RecordingConnector()
+    with pytest.raises(ValueError, match="tree"):
+        await git_tree_view_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"owner": "acme", "repo": "widgets", "tree": "../../user"},
+            connector=connector,  # type: ignore[arg-type]
+        )
+    assert connector.get_calls == []
+    path = "/repos/acme/widgets/git/trees/fix%231"
+    connector = _RecordingConnector(get={path: _TREE_PAYLOAD})
+    await git_tree_view_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"owner": "acme", "repo": "widgets", "tree": "fix#1"},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert connector.get_calls == [(path, None)]
+
+
+@pytest.mark.parametrize(
+    "name", ["main", "release/1.2", "fix#1", "v1.0", "feature.x", "a-b_c", "0123abcd"]
+)
+def test_check_name_accepts_ordinary_git_names(name: str) -> None:
+    assert check_name(name, allow_slash=True) is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "a b",
+        "a~b",
+        "a^b",
+        "a:b",
+        "a?b",
+        "a*b",
+        "a[b",
+        "a\\b",
+        "a..b",
+        "a@{b",
+        ".hidden",
+        "a/.b",
+        "a.lock",
+        "a/",
+        "/a",
+        "a//b",
+        "a.",
+        "a\x7fb",
+        "\x01",
+    ],
+)
+def test_check_name_refuses_names_git_refuses(name: str) -> None:
+    assert check_name(name, allow_slash=True) is not None
+
+
+@pytest.mark.asyncio
+async def test_preview_flags_a_branch_that_is_not_at_base_sha() -> None:
+    connector = _RecordingConnector(get={_REF_PATH: _ref_payload(_OTHER_SHA)})
+    preview = await branch_commit_files_preview(_preview_ctx(connector, _commit_params()))
+    assert preview is not None
+    assert preview["base_sha"] == _BASE_SHA
+    assert preview["branch_sha_now"] == _OTHER_SHA
+    assert "not at base_sha" in preview["problems"][0]
+
+
+@pytest.mark.asyncio
+async def test_preview_renders_a_failed_live_read_with_the_shared_helper() -> None:
+    connector = _RecordingConnector(get={_REF_PATH: _http_error(500)})
+    preview = await branch_commit_files_preview(_preview_ctx(connector, _commit_params()))
+    assert preview is not None
+    assert preview["branch_sha_now"] is None
+    assert "http_500" in preview["branch_sha_error"]
+
+
+@pytest.mark.asyncio
+async def test_preview_lists_request_problems_without_a_live_read() -> None:
+    connector = _RecordingConnector()
+    preview = await branch_commit_files_preview(
+        _preview_ctx(connector, _commit_params(base_sha="main"))
+    )
+    assert preview is not None
+    assert any("base_sha" in problem for problem in preview["problems"])
+    assert connector.get_calls == [], "a bad request is not read live"

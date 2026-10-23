@@ -195,30 +195,44 @@ response schemas, agent guidance and one example each) live in
 |---|---|---|---|
 | `gh.composite.git_ref_view` | The commit a branch or tag points to. Takes `owner`, `repo`, `name` and `kind` (`branch`, the default, or `tag`). MEHO builds the ref (`heads/<name>` or `tags/<name>`) itself. A missing branch or tag answers `found: false`, not an error. | `GET /repos/{owner}/{repo}/git/ref/{ref}` | `safe`, runs at once |
 | `gh.composite.git_tree_view` | The files and folders of a tree: path, type, mode, SHA-1 and size. One level by default; every file with its full path when `recursive` is true. `tree` takes a branch name, a tag name, a commit SHA or a tree SHA. A long list comes back behind a result handle; the agent reads it with `result_query`. `truncated: true` means GitHub cut the list. | `GET /repos/{owner}/{repo}/git/trees/{tree_sha}` (`recursive=1` when asked) | `safe`, runs at once |
-| `gh.composite.branch_commit_files` | Write one or more text files to an existing branch as one new commit. Takes `owner`, `repo`, `branch`, `message` and `files` (`path` + full `content`). | `GET .../git/ref/heads/{branch}`, `GET .../git/commits/{sha}`, `POST .../git/trees`, `POST .../git/commits`, `GET .../git/ref/heads/{branch}` again, `PATCH .../git/refs/heads/{branch}` with `force: false` | `dangerous`, `requires_approval: true`: every call waits for approval |
+| `gh.composite.branch_commit_files` | Write one or more text files to an existing branch as one new commit on top of `base_sha`. Takes `owner`, `repo`, `branch`, `base_sha` (the sha `git_ref_view` returned), `message` and `files` (`path` + full `content`). | `GET .../git/ref/heads/{branch}`, `GET .../git/commits/{sha}`, `POST .../git/trees`, `POST .../git/commits`, `GET .../git/ref/heads/{branch}` again, `PATCH .../git/refs/heads/{branch}` with `force: false` | `dangerous`, `requires_approval: true`: every call waits for approval |
 
 **How the write stays safe.**
 
-- It never forces. It reads the branch, builds the tree and the commit on
-  top of that commit, reads the branch again, and only then moves the
-  branch with `force: false`. If the branch moved after the first read, or
+- It builds on `base_sha`, the commit the caller read with `git_ref_view`
+  and the approver saw. It never forces. It reads the branch and stops
+  unless the branch is at `base_sha`; builds the tree and the commit on
+  top of `base_sha`; reads the branch again; and only then moves the
+  branch with `force: false`. If the branch is not at `base_sha` at any
+  of these points (someone pushed while the call waited for approval), or
   GitHub refuses the update (status 409 or 422), the call returns
   `status: precondition_failed` with the reason and the branch is not
   touched. A tree or commit object that was already created is unreachable
   and harmless.
-- It checks the files before any call: at most 100 files, 256 KiB per file,
-  1 MiB in total, UTF-8 text only, no path that starts with `/` or has a
-  `.` or `..` part, no path twice. A bad file list returns
-  `status: invalid_request` and nothing is called.
+- It checks the request before any call: `owner`, `repo` and `branch`
+  must be safe names (git's ref-name rules, no `..`, no `/` in owner or
+  repo), `base_sha` must be a 40-character SHA-1, and the files must be at
+  most 100, 256 KiB per file, 1 MiB in total, UTF-8 text only, with no
+  path that starts with `/` or has a `.` or `..` part, and no path twice.
+  A bad request returns `status: invalid_request` and nothing is called.
+- Every name that goes into a URL path (owner, repo, branch, tag, tree) is
+  checked the same way in all three operations and then percent-encoded,
+  so a branch like `fix#1` reaches GitHub as `heads/fix%231` and a value
+  can never point at another API path. The reads raise a `ValueError` on
+  a bad name; the write returns `invalid_request`.
 - The second read of the commit object (`GET .../git/commits/{sha}`) is
   needed to get the base tree SHA; the create-tree call takes a tree SHA,
   not a commit SHA.
 - The approval preview (`composites/_git_preview.py`, registered with
-  `register_preview_builder`) shows the repository, the branch, the commit
-  the branch points to right now (one live read), the message, and each
-  file's path, size and SHA-256. The file content is never stored in the
-  approval row. The handler and the preview share `describe_files`, so the
-  approver reads exactly the list the commit writes.
+  `register_preview_builder`) shows the repository, the branch, `base_sha`,
+  the commit the branch points to right now (one live read), the message,
+  and each file's path, size and SHA-256. When the branch is not at
+  `base_sha`, the preview says so under `problems`. The preview does not
+  show the file content. The approval row keeps the call's parameters,
+  content included, only so the call can run after approval; no read view
+  shows them. The handler and the preview share `check_commit_request`,
+  so the approver reads exactly the list the commit writes and exactly
+  the problems that would stop it.
 
 **Result shape of the write.** `{status: committed|precondition_failed|
 invalid_request, reason, branch, base_sha, tree_sha, commit_sha, html_url,
@@ -228,7 +242,8 @@ the file list goes behind a result handle.
 
 **Tests.** `backend/tests/test_connectors_github_composites_git.py` drives
 the handlers and the preview with saved responses (no live GitHub),
-including the branch-moved and refused-update cases.
+including the branch-not-at-base_sha, branch-moved, refused-update and
+unsafe-name cases.
 `backend/tests/test_connectors_github_composites_git_register.py` checks the
 risk level and approval flag of each operation, the `git` group, the
 preview builder, and that each operation passes the operation contract

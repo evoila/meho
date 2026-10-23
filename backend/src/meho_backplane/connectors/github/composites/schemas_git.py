@@ -236,7 +236,7 @@ BRANCH_COMMIT_FILES_PARAMETER_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": ["owner", "repo", "branch", "message", "files"],
+    "required": ["owner", "repo", "branch", "base_sha", "message", "files"],
     "properties": {
         "owner": _OWNER,
         "repo": _REPO,
@@ -244,6 +244,15 @@ BRANCH_COMMIT_FILES_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": "The branch to commit to. It must exist; MEHO creates no branch.",
+        },
+        "base_sha": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "The 40-character SHA-1 of the commit the branch points to, as read with "
+                "gh.composite.git_ref_view. The new commit is built on it. If the branch "
+                "is not at this commit any more, the call stops and changes nothing."
+            ),
         },
         "message": {
             "type": "string",
@@ -290,6 +299,7 @@ BRANCH_COMMIT_FILES_PARAMETER_SCHEMA: dict[str, Any] = {
             "owner": "<owner>",
             "repo": "<repo>",
             "branch": "<branch>",
+            "base_sha": "<sha from git_ref_view>",
             "message": "docs: add the release notes",
             "files": [{"path": "docs/release-notes.md", "content": "# Release notes\n"}],
         }
@@ -330,9 +340,9 @@ BRANCH_COMMIT_FILES_RESPONSE_SCHEMA: dict[str, Any] = {
             "enum": ["committed", "precondition_failed", "invalid_request"],
             "description": (
                 "'committed': the branch now points to the new commit. "
-                "'precondition_failed': the branch does not exist or moved after the "
-                "read; nothing changed. 'invalid_request': a file path or size is not "
-                "allowed; nothing changed."
+                "'precondition_failed': the branch does not exist or is not at base_sha; "
+                "nothing changed. 'invalid_request': a name, base_sha, file path or size "
+                "is not allowed; nothing changed."
             ),
         },
         "reason": {
@@ -342,7 +352,9 @@ BRANCH_COMMIT_FILES_RESPONSE_SCHEMA: dict[str, Any] = {
         "branch": {"type": "string", "description": "Echo of the branch name."},
         "base_sha": {
             **_SHA,
-            "description": "The commit the branch pointed to when MEHO read it (the parent).",
+            "description": (
+                "Echo of base_sha, the parent of the new commit. Null on invalid_request."
+            ),
         },
         "tree_sha": {**_SHA, "description": "SHA-1 of the new tree. Null when not committed."},
         "commit_sha": {
@@ -368,14 +380,17 @@ BRANCH_COMMIT_FILES_LLM_INSTRUCTIONS: dict[str, Any] = {
         "commit, for example to add a document or change a config file."
     ),
     "preconditions": (
-        "The branch must exist. The files are UTF-8 text, at most 256 KiB each and "
-        "1 MiB in total, at most 100 per call. The call waits for approval; the "
-        "approver sees the branch, the commit it starts from, and each file's path, "
-        "size and SHA-256. MEHO never forces: if the branch moved after the read, "
-        "the call stops and changes nothing."
+        "Read the branch first with gh.composite.git_ref_view and pass its sha as "
+        "base_sha. The branch must still be at base_sha when the call runs. The files "
+        "are UTF-8 text, at most 256 KiB each and 1 MiB in total, at most 100 per "
+        "call. The call waits for approval; the approver sees the branch, base_sha, "
+        "the commit the branch is at now, and each file's path, size and SHA-256. "
+        "MEHO never forces: if the branch is not at base_sha, the call stops and "
+        "changes nothing."
     ),
     "parameter_hints": {
         "branch": "Just the branch name, like 'main' or 'feature/x'.",
+        "base_sha": "The sha that gh.composite.git_ref_view returned for the branch.",
         "files": "Each entry needs the full new content of the file, not a diff.",
     },
     "output_shape": (
@@ -384,10 +399,10 @@ BRANCH_COMMIT_FILES_LLM_INSTRUCTIONS: dict[str, Any] = {
         "sha256}]}."
     ),
     "next_step": (
-        "On committed, report commit_sha and html_url. On precondition_failed because "
-        "the branch moved, read the branch again with gh.composite.git_ref_view and "
-        "call again with content based on the new commit. On invalid_request, fix the "
-        "path or size named in reason."
+        "On committed, report commit_sha and html_url. On precondition_failed, read "
+        "the branch again with gh.composite.git_ref_view, check the new commit, and "
+        "call again with the new sha as base_sha and content based on it. On "
+        "invalid_request, fix the name, sha, path or size named in reason."
     ),
     "result_scalars": {
         "keys": [

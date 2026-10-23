@@ -35,6 +35,7 @@ from meho_backplane.connectors.github.composites._git import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
     branch_commit_files_composite,
+    check_github_name,
     check_name,
     describe_files,
     git_ref_view_composite,
@@ -582,7 +583,15 @@ async def test_branch_commit_files_refuses_a_malformed_base_sha_before_any_call(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("branch", "a/../b"), ("branch", "fix 1"), ("owner", "../x"), ("repo", "a/b")],
+    [
+        ("branch", "a/../b"),
+        ("branch", "fix 1"),
+        ("owner", "../x"),
+        ("owner", ".."),
+        ("repo", "."),
+        ("repo", "a/b"),
+        ("repo", "a b"),
+    ],
 )
 async def test_branch_commit_files_refuses_unsafe_names_before_any_call(
     key: str, value: str
@@ -757,3 +766,41 @@ async def test_preview_lists_request_problems_without_a_live_read() -> None:
     assert preview is not None
     assert any("base_sha" in problem for problem in preview["problems"])
     assert connector.get_calls == [], "a bad request is not read live"
+
+
+@pytest.mark.asyncio
+async def test_git_ref_view_accepts_the_dot_github_repo() -> None:
+    """``.github`` is a valid repository name; GitHub's name rule allows it."""
+    path = "/repos/acme/.github/git/ref/heads/main"
+    connector = _RecordingConnector(get={path: _ref_payload()})
+    result = await git_ref_view_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"owner": "acme", "repo": ".github", "name": "main"},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert connector.get_calls == [(path, None)]
+    assert result["found"] is True
+
+
+@pytest.mark.asyncio
+async def test_branch_commit_files_accepts_the_dot_github_repo() -> None:
+    ref_path = "/repos/acme/.github/git/ref/heads/main"
+    connector = _RecordingConnector(get={ref_path: _http_error(404)})
+    result = await branch_commit_files_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_commit_params(repo=".github"),
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["status"] == STATUS_PRECONDITION_FAILED, result["reason"]
+
+
+@pytest.mark.parametrize("name", [".github", "octo-cat", "my_repo", "a.b", "Hello123"])
+def test_check_github_name_accepts_github_names(name: str) -> None:
+    assert check_github_name(name) is None
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a b", "a#b", "a%b", "../x", "a\\b"])
+def test_check_github_name_refuses_unsafe_names(name: str) -> None:
+    assert check_github_name(name) is not None

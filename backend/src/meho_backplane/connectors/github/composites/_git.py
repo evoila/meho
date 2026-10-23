@@ -26,10 +26,13 @@ Names in the URL path
 ---------------------
 
 Owner, repository, branch, tag and tree values become URL path parts. Each
-is checked first (:func:`check_name`, git's ``check-ref-format`` rules plus
-"no '..' part", so a value can never point at another API path) and then
-percent-encoded with :func:`urllib.parse.quote`, so a branch like ``fix#1``
-reaches GitHub as ``heads/fix%231`` instead of being cut at the ``#``.
+is checked first and then percent-encoded with :func:`urllib.parse.quote`,
+so a branch like ``fix#1`` reaches GitHub as ``heads/fix%231`` instead of
+being cut at the ``#``, and a value can never point at another API path.
+Owner and repository names follow GitHub's name rule
+(:func:`check_github_name`: letters, digits, ``.``, ``-`` and ``_``, but
+not ``.`` or ``..`` alone, so the repo ``.github`` is fine). Branch, tag and
+tree values follow git's ``check-ref-format`` rules (:func:`check_name`).
 
 All three use the direct-session substrate: the handler declares a
 ``connector`` parameter and calls the resolved connector's own session, so
@@ -66,6 +69,7 @@ __all__ = [
     "STATUS_PRECONDITION_FAILED",
     "GitRepo",
     "branch_commit_files_composite",
+    "check_github_name",
     "check_name",
     "describe_files",
     "git_ref_view_composite",
@@ -95,21 +99,39 @@ _SHA1: Final = re.compile(r"^[0-9a-f]{40}$")
 # characters and space.
 _FORBIDDEN_CHARS: Final = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
+# What GitHub allows in a user, organisation or repository name.
+_GITHUB_NAME: Final = re.compile(r"^[A-Za-z0-9._-]+$")
+
 # Status codes GitHub uses to refuse a branch update that is not a fast
 # forward (``force=false``). The exact wording is GitHub's; MEHO quotes it.
 _REFUSED_UPDATE_STATUSES: Final = frozenset({409, 422})
 
 
+def check_github_name(value: object) -> str | None:
+    """Return why ``value`` is not a safe owner or repository name, or ``None``.
+
+    GitHub names hold letters, digits, ``.``, ``-`` and ``_`` only. The
+    names ``.`` and ``..`` are refused because the URL encoding keeps dots,
+    so they would point at another API path. ``.github`` is a valid name.
+    """
+    if not isinstance(value, str) or not value:
+        return "name is empty"
+    if value in (".", ".."):
+        return f"name {value!r} is not allowed"
+    if not _GITHUB_NAME.match(value):
+        return f"name {value!r} may hold only letters, digits, '.', '-' and '_'"
+    return None
+
+
 def check_name(value: object, *, allow_slash: bool) -> str | None:
-    """Return why ``value`` is not a safe owner / repo / ref / tree name, or ``None``.
+    """Return why ``value`` is not a safe ref or tree name, or ``None``.
 
     Follows git's ``check-ref-format`` rules: no control characters, space
     or ``~ ^ : ? * [ \\``, no ``..``, no ``@{``, no part that starts with
     ``.`` or ends with ``.lock``, no leading, trailing or double ``/``, no
-    trailing ``.``. Owner and repository names (``allow_slash=False``) may
-    not contain ``/`` at all. A value that passes can only ever name one
-    path part (or, with slashes, parts under the same prefix), never a
-    different API path.
+    trailing ``.``. With ``allow_slash=False`` the value may not contain
+    ``/`` at all. A value that passes can only ever name one path part (or,
+    with slashes, parts under the same prefix), never a different API path.
     """
     if not isinstance(value, str) or not value:
         return "name is empty"
@@ -136,6 +158,13 @@ def _checked(value: object, *, what: str, allow_slash: bool) -> str:
     return str(value)
 
 
+def _checked_github_name(value: object, *, what: str) -> str:
+    problem = check_github_name(value)
+    if problem is not None:
+        raise ValueError(f"{what}: {problem}")
+    return str(value)
+
+
 @dataclass(frozen=True)
 class GitRepo:
     """One repository reached through the resolved connector's session.
@@ -151,8 +180,8 @@ class GitRepo:
     repo: str
 
     def __post_init__(self) -> None:
-        _checked(self.owner, what="owner", allow_slash=False)
-        _checked(self.repo, what="repo", allow_slash=False)
+        _checked_github_name(self.owner, what="owner")
+        _checked_github_name(self.repo, what="repo")
 
     async def _path(self, template: str, **fields: str) -> str:
         encoded = {name: quote(value, safe="/") for name, value in fields.items()}
@@ -342,10 +371,13 @@ def check_commit_request(params: dict[str, Any]) -> tuple[list[dict[str, Any]], 
     files and the problems found (empty when the request is well-formed).
     """
     problems: list[str] = []
-    for key, allow_slash in (("owner", False), ("repo", False), ("branch", True)):
-        problem = check_name(params.get(key), allow_slash=allow_slash)
+    for key in ("owner", "repo"):
+        problem = check_github_name(params.get(key))
         if problem is not None:
             problems.append(f"{key}: {problem}")
+    branch_problem = check_name(params.get("branch"), allow_slash=True)
+    if branch_problem is not None:
+        problems.append(f"branch: {branch_problem}")
     base_sha = params.get("base_sha")
     if not isinstance(base_sha, str) or not _SHA1.match(base_sha):
         problems.append("base_sha must be the 40-character lowercase SHA-1 of a commit")

@@ -209,14 +209,15 @@ response schemas, agent guidance and one example each) live in
   `status: precondition_failed` with the reason and the branch is not
   touched. A tree or commit object that was already created is unreachable
   and harmless.
-- It checks the request before any call: `owner`, `repo` and `branch`
-  must be safe names (git's ref-name rules, no `..`, no `/` in owner or
-  repo), `base_sha` must be a 40-character SHA-1, and the files must be at
+- It checks the request before any call: `owner` and `repo` must be
+  GitHub names (letters, digits, `.`, `-` and `_`; not `.` or `..`, so
+  `.github` is fine), `branch` must be a safe git ref name (git's
+  ref-name rules, no `..`), `base_sha` must be a 40-character SHA-1, and the files must be at
   most 100, 256 KiB per file, 1 MiB in total, UTF-8 text only, with no
   path that starts with `/` or has a `.` or `..` part, and no path twice.
   A bad request returns `status: invalid_request` and nothing is called.
 - Every name that goes into a URL path (owner, repo, branch, tag, tree) is
-  checked the same way in all three operations and then percent-encoded,
+  checked this way in all three operations and then percent-encoded,
   so a branch like `fix#1` reaches GitHub as `heads/fix%231` and a value
   can never point at another API path. The reads raise a `ValueError` on
   a bad name; the write returns `invalid_request`.

@@ -4688,16 +4688,18 @@ async def vm_snapshot_revert_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Revert a VM to a named snapshot. Idempotent; ambiguity-rejecting.
+    """Revert a VM to a snapshot, by name or by id. Idempotent; ambiguity-rejecting.
 
     Op-id: ``vmware.composite.vm.snapshot.revert``. Multiple snapshots
     sharing the name -> ``status='ambiguous'``; missing -> ``not_found``.
-    Revert never dispatches on either. The revert is a vim ``*_Task``:
-    a task fault raises (the dispatcher wraps it ``connector_error``);
-    a poll timeout returns ``status='timeout'`` with the task id.
+    A ``snapshot_id`` must be in the VM's own snapshot tree, else
+    ``not_found``. Revert never dispatches on any of these. The revert is a
+    vim ``*_Task``: a task fault raises (the dispatcher wraps it
+    ``connector_error``); a poll timeout returns ``status='timeout'`` with
+    the task id.
     """
     vm_moid = params["vm"]
-    snapshot_name = params["snapshot_name"]
+    snapshot_id = params.get("snapshot_id")
 
     tree_result = await connector._post_vmomi_json(
         target,
@@ -4708,13 +4710,21 @@ async def vm_snapshot_revert_composite(
     snapshot_info = _extract_single_prop(tree_result, _PROP_SNAPSHOT)
     root_list = snapshot_info.get("rootSnapshotList") if isinstance(snapshot_info, dict) else None
     entries = _flatten_snapshot_tree(root_list)
-    matches = [e for e in entries if e["name"] == snapshot_name]
+    if isinstance(snapshot_id, str):
+        matches = [e for e in entries if e["snapshot"] == snapshot_id]
+        missing = (
+            f"vm {vm_moid!r} has no snapshot {snapshot_id!r}; list its snapshots with "
+            "vmware.snapshot.list"
+        )
+    else:
+        matches = [e for e in entries if e["name"] == params["snapshot_name"]]
+        missing = f"no snapshot named {params['snapshot_name']!r} on vm {vm_moid!r}"
     if not matches:
         return {
             "status": "not_found",
             "snapshot_id": None,
             "candidates": [],
-            "guidance": f"no snapshot named {snapshot_name!r} on vm {vm_moid!r}",
+            "guidance": missing,
         }
     if len(matches) > 1:
         return {
@@ -4734,7 +4744,7 @@ async def vm_snapshot_revert_composite(
         op_id=_OP_REVERT_TO_SNAPSHOT_TASK,
         vmomi_path=f"/{_VM_SNAPSHOT_MO_TYPE}/{snapshot_moid}/RevertToSnapshot_Task",
         body={},
-        params={"vm": vm_moid, "snapshot_name": snapshot_name, "snapshot": snapshot_moid},
+        params={"vm": vm_moid, "snapshot_name": matches[0]["name"], "snapshot": snapshot_moid},
     )
     if gate is not None:
         return gate

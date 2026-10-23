@@ -168,7 +168,8 @@ VROPS_LICENSING_VCENTER_QUERY_OP = VropsTypedOp(
     summary="Read the licence state of each vCenter: evaluation or licensed, and the end date.",
     description=(
         "Sends POST /suite-api/internal/extension/vcf-entitlement/vcenter-systems/query "
-        "with optional page and pageSize. Returns each vCenter with its licence state, "
+        "with optional page and pageSize (MEHO sends pageSize 1000 when none is given). "
+        "Returns each vCenter with its licence state, "
         f"end date and usage per product family. {_NOT_PUBLISHED} Read-only."
     ),
     parameter_schema={
@@ -182,7 +183,7 @@ VROPS_LICENSING_VCENTER_QUERY_OP = VropsTypedOp(
             "pageSize": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Number of vCenters per page.",
+                "description": ("Number of vCenters per page. MEHO sends 1000 when none is given."),
             },
         },
         "additionalProperties": False,
@@ -200,15 +201,23 @@ VROPS_LICENSING_VCENTER_QUERY_OP = VropsTypedOp(
             "unlicensedUsage is 0 for every product family."
         ),
         "parameter_hints": {
-            "pageSize": "Raise it when VCF Operations manages many vCenters.",
+            "pageSize": (
+                "Leave it out to get up to 1000 vCenters in one call. If a page has "
+                "exactly pageSize entries, read the next page (page + 1) until a page "
+                "has fewer entries."
+            ),
         },
         "output_shape": (
             "{vcenterSystems: [{id, host, vcfAdapterName, version, state, "
             "expirationTimestamp, productFamilies: [{productFamily, type, "
-            "licensedUsage, unlicensedUsage, licenses: [{allocationId, name}]}]}]}."
+            "licensedUsage, unlicensedUsage, licenses: [{allocationId, name}]}]}]}. "
+            "Some builds use an older shape: id, host and vcfAdapterName sit under "
+            "vcenterInfo in each entry (vcenterInfo.id, vcenterInfo.host). No total "
+            "count is known for this answer; page by the number of entries."
         ),
         "next_step": (
-            "Pass id and host of a vCenter that is not LICENSED to vrops.licensing.assign."
+            "Pass id and host (or vcenterInfo.id and vcenterInfo.host) of a vCenter "
+            "that is not LICENSED to vrops.licensing.assign."
         ),
     },
 )
@@ -257,12 +266,17 @@ VROPS_LICENSING_ASSIGN_OP = VropsTypedOp(
             "vcenterId": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The vCenter id, from vrops.licensing.vcenter.query (id).",
+                "description": (
+                    "The vCenter id, from vrops.licensing.vcenter.query (id or vcenterInfo.id)."
+                ),
             },
             "vcenterHost": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The vCenter address, from vrops.licensing.vcenter.query (host).",
+                "description": (
+                    "The vCenter address, from vrops.licensing.vcenter.query "
+                    "(host or vcenterInfo.host)."
+                ),
             },
             "licenseIds": {
                 "type": "array",

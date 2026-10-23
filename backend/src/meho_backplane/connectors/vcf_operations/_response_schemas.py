@@ -250,8 +250,21 @@ VROPS_LICENSING_VCENTER_QUERY_RESPONSE = _object(
     "The licence state of each vCenter. Not published by the vendor.",
     {
         "vcenterSystems": _list_of(
-            "One entry per vCenter.",
+            "One entry per vCenter. Some builds use an older shape: id, host and "
+            "vcfAdapterName sit under vcenterInfo instead of at the top of the entry.",
             {
+                "vcenterInfo": _object(
+                    "Older shape only: the vCenter id, address and VCF instance.",
+                    {
+                        "id": _field("string", "The vCenter id. Pass it to the assign call."),
+                        "host": _field(
+                            "string", "The vCenter address. Pass it to the assign call."
+                        ),
+                        "vcfAdapterName": _field(
+                            "string", "The VCF instance that manages the vCenter."
+                        ),
+                    },
+                ),
                 "id": _field("string", "The vCenter id. Pass it to the assign call."),
                 "host": _field("string", "The vCenter address. Pass it to the assign call."),
                 "vcfAdapterName": _field("string", "The VCF instance that manages the vCenter."),

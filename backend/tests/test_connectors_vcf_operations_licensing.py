@@ -7,7 +7,9 @@ Checks, without a network call (respx):
 
 * each handler calls the right method and path, with the
   ``X-vRealizeOps-API-use-unsupported`` header and the ``OpsToken`` session;
-* the vCenter query sends ``page`` / ``pageSize`` as query params;
+* the vCenter query sends ``page`` / ``pageSize`` as query params, and a
+  large default ``pageSize`` when none is given;
+* the vCenter query metadata names the older ``vcenterInfo`` answer shape;
 * the assign call sends the vendor's JSON array body;
 * the calls with an unpublished answer return it under ``payload``;
 * the metadata: the reads are safe and read-only, the assign call waits for
@@ -30,9 +32,13 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vcf_operations import VROPS_TYPED_OPS, VcfOperationsConnector
+from meho_backplane.connectors.vcf_operations.licensing_handlers import (
+    VCENTER_QUERY_DEFAULT_PAGE_SIZE,
+)
 from meho_backplane.connectors.vcf_operations.licensing_ops import (
     VROPS_LICENSING_ASSIGN_OP,
     VROPS_LICENSING_OPS,
+    VROPS_LICENSING_VCENTER_QUERY_OP,
 )
 from meho_backplane.operations._validate import validate_params
 
@@ -247,3 +253,27 @@ async def test_9x_registrar_registers_the_licensing_ops(monkeypatch: pytest.Monk
     for op in VROPS_LICENSING_OPS:
         assert registered[op.op_id]["version"] == "9.0"
         assert registered[op.op_id]["when_to_use"]
+
+
+@pytest.mark.asyncio
+async def test_vcenter_query_sends_a_large_default_page_size() -> None:
+    connector = VcfOperationsConnector(credentials_loader=_stub_loader)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"token": _OPS_TOKEN})
+        route = mock.post(f"{_ENT}/vcenter-systems/query").respond(200, json={"vcenterSystems": []})
+        await connector.licensing_vcenter_query(_operator(), _StubTarget(), {"page": 1})
+    await connector.aclose()
+
+    sent = route.calls[0].request.url.params
+    assert sent["page"] == "1"
+    assert sent["pageSize"] == str(VCENTER_QUERY_DEFAULT_PAGE_SIZE)
+
+
+def test_vcenter_query_tells_the_agent_how_to_page_and_the_older_shape() -> None:
+    hints = VROPS_LICENSING_VCENTER_QUERY_OP.llm_instructions
+    assert "page + 1" in hints["parameter_hints"]["pageSize"]
+    assert "vcenterInfo.id" in hints["output_shape"]
+    assert "vcenterInfo.host" in hints["output_shape"]
+    entry = VROPS_LICENSING_VCENTER_QUERY_OP.response_schema["properties"]["vcenterSystems"]
+    older = entry["items"]["properties"]["vcenterInfo"]["properties"]
+    assert {"id", "host"} <= set(older)

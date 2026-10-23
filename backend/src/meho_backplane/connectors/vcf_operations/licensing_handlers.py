@@ -39,6 +39,9 @@ _REGISTRATION_STATUS_PATH = f"{_CLOUD_INTEGRATION}/registration/status"
 _LICENSE_SERVERS_PATH = f"{_CLOUD_INTEGRATION}/license-servers"
 _ENTITLEMENTS_QUERY_PATH = f"{_ENTITLEMENT}/entitlements/query"
 _VCENTER_SYSTEMS_QUERY_PATH = f"{_ENTITLEMENT}/vcenter-systems/query"
+#: Sent as ``pageSize`` when the caller gives none, so one call returns all
+#: vCenters of a normal install instead of only the vendor's first page.
+VCENTER_QUERY_DEFAULT_PAGE_SIZE = 1000
 _ENTITLEMENT_LICENSE_SERVERS_QUERY_PATH = f"{_ENTITLEMENT}/license-servers/query"
 _ASSIGN_PATH = f"{_ENTITLEMENT}/assign"
 
@@ -127,11 +130,13 @@ class VropsLicensingHandlers(_Base):
     ) -> dict[str, Any]:
         """``vrops.licensing.vcenter.query`` — POST ``vcenter-systems/query``.
 
-        ``page`` / ``pageSize`` ride as query params. Returned unchanged.
+        ``page`` / ``pageSize`` ride as query params. With no ``pageSize``
+        the handler sends ``VCENTER_QUERY_DEFAULT_PAGE_SIZE``. Returned unchanged.
         """
         query = {key: params[key] for key in ("page", "pageSize") if params.get(key) is not None}
+        query.setdefault("pageSize", VCENTER_QUERY_DEFAULT_PAGE_SIZE)
         result: dict[str, Any] = await self._licensing_query(
-            operator, target, _VCENTER_SYSTEMS_QUERY_PATH, params=query or None
+            operator, target, _VCENTER_SYSTEMS_QUERY_PATH, params=query
         )
         return result
 

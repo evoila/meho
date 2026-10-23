@@ -304,7 +304,15 @@ All paths start with `/suite-api/internal/extension/`.
 - **Answers.** `entitlement.query` and `vcenter.query` return the vendor answer
   as it is; their response schemas name the known fields. The other four calls
   have no known answer shape, so the handler returns
-  `{"payload": <vendor answer>}`.
+  `{"payload": <vendor answer>}`. The `vcenter.query` answer has two shapes.
+  Newer builds put `id`, `host` and `vcfAdapterName` at the top of each
+  `vcenterSystems` entry. Older builds put them under `vcenterInfo`
+  (`vcenterInfo.id`, `vcenterInfo.host`). The schema and the agent hints name
+  both, so the agent can find the values for `assign`.
+- **Paging.** `vcenter.query` sends `pageSize=1000` when the caller gives
+  none, so one call returns all vCenters of a normal install. No total count
+  is known for this answer. To read more, ask for the next `page` until a page has fewer
+  than `pageSize` entries.
 - **Safety.** The five reads are `safe` and read-only. `vrops.licensing.assign`
   is `dangerous` with `requires_approval=True`: it waits until a person
   approves it.

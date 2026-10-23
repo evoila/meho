@@ -443,7 +443,7 @@ as "the gate is broken" -- the meta-tests rule out the second case.
 **Where the gate runs.** The harness is a standard pytest file
 under `backend/tests/`, so it is picked up by the required unit
 sweep in `.github/workflows/ci.yml` — since #3251 the
-`python-unit-shard` matrix (whichever stride slice its file lands
+`python-unit-shard` matrix (whichever shard its file lands
 in), reported through the `python-unit-lane` fan-in that carries
 the branch-protection required context. That check is in the
 required-status-checks set, so a round-trip mismatch blocks merge

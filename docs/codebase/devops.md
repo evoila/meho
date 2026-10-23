@@ -931,14 +931,14 @@ The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
 not the product.
 
 **Not yet:** the setup Job `vault-init-<hash>` (the first start, the key
-and login setup, the policies) and the unlock after a restart (#4046).
-Until they land, the server runs empty and locked.
+and login setup, the policies). Until it lands, the server runs empty and
+locked, and nothing makes the Secret `<release>-core-vault-unseal`.
 
 **What it renders.**
 
 | Object | Shape |
 | --- | --- |
-| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data` |
+| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data`; a second container `unseal` (below) |
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
@@ -955,6 +955,36 @@ waits until the pod is ready before it rolls out a change, so a locked pod
 would keep the old version and be replaced, locked again, right after
 someone unlocks it. Keep the line: the field cannot be changed after the
 first install.
+
+**Unseal after a restart (#4046).** The `unseal` container (same image,
+same security settings, `coreVault.unseal.resources`) checks `bao status`
+every 5 seconds. When the server is sealed and `/unseal/key` exists, it runs
+`tr -d '[:space:]' </unseal/key | bao write sys/unseal key=-` against
+`127.0.0.1:8200`. The key file is the Secret `<release>-core-vault-unseal`,
+mounted only in this container, `optional: true` and without `subPath`.
+The Secret's `key` value is the key alone. White space around it (such as
+the line break `echo` adds) is dropped, so the setup Job (#4044 part 2),
+the installers and an operator restoring by hand can write it either way;
+without the `tr`, a key with a line break never unseals.
+
+- The mode is whether the Secret exists; there is no mode value. Secret
+  present: self-unseal. Secret absent: "keyholder at boot", the pod stays
+  not ready and `/ready` says `vault: sealed`.
+- The key goes from the file through a pipe into `bao` on every pass, and
+  the call's output is thrown away. The key is never on a command line, in a shell variable or
+  in a log, and nothing keeps it: a deleted Secret takes effect on the next
+  pass once the kubelet removes the file (about one to two minutes on a
+  running pod).
+- The log has fixed lines only, printed when the state changes
+  (`unseal: unsealed`, `unseal: sealed, no unseal key in /unseal ...`).
+- No RBAC, no CronJob. NOTES print the `kubectl get secret` command for the
+  key, never the key.
+- Switching modes, the trade-off and recovery mode: the operator page
+  `docs-site/install/openbao-unseal-key.md`.
+- Cluster check: `scripts/ci/check-openbao-unseal.sh <namespace> <release>`
+  (pod restart, keyholder mode, server process restart without the Secret,
+  and a search for the key in pod logs and `helm get`). Checked on RKE2
+  v1.37.1 with the CIS profile, after install and after an upgrade.
 
 **Audit.** OpenBao refuses audit devices made through the API, so the
 device is in the config file. The lines go to the container log, which the

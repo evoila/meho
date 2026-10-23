@@ -402,7 +402,37 @@ async def test_blueprint_request_existing_deployment_name_is_unchanged(
     assert out["status"] == "unchanged", out
     assert out["deployment"]["id"] == "d-1"
     assert lookup.calls.last.request.url.params["apiVersion"] == _API_VERSION
+    assert (
+        lookup.calls.last.request.url.params["$filter"]
+        == "name eq 'team-a-first-vm' and projectId eq 'p-1'"
+    )
     assert not post.called
+
+
+async def test_blueprint_request_same_name_in_another_project_is_submitted(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """A deployment of that name in another project does not block this project."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_DEPLOYMENTS).respond(
+            200, json={"content": [{"id": "d-9", "name": "team-a-first-vm", "projectId": "p-2"}]}
+        )
+        post = mock.post(_BP_REQUESTS).respond(
+            202, json={"id": "req-2", "status": "CREATED", "plan": False, "projectId": "p-1"}
+        )
+        result = await run(
+            "vcfa.tenant.blueprint_request.create",
+            {
+                "project_id": "p-1",
+                "content": "formatVersion: 1",
+                "deployment_name": "team-a-first-vm",
+            },
+        )
+    out = result["result"]
+    assert out["status"] == "submitted", out
+    assert out["request"]["id"] == "req-2"
+    assert _body(post)["projectId"] == "p-1"
 
 
 @pytest.mark.parametrize(
@@ -481,7 +511,7 @@ async def test_deployment_delete_preview_names_the_deployment(
     )
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
-        mock.get(f"{_DEPLOYMENTS}/d-1").respond(
+        read = mock.get(f"{_DEPLOYMENTS}/d-1").respond(
             200, json={"id": "d-1", "name": "team-a-first-vm", "projectId": "p-1"}
         )
         preview = await builder(ctx)
@@ -491,3 +521,4 @@ async def test_deployment_delete_preview_names_the_deployment(
         "name": "team-a-first-vm",
         "project_id": "p-1",
     }
+    assert read.calls.last.request.url.params["apiVersion"] == _API_VERSION

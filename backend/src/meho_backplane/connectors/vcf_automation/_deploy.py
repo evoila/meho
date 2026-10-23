@@ -95,8 +95,9 @@ async def tenant_blueprint_request_create(
 
     Exactly one of ``blueprint_id`` and ``content`` must be set, else
     ``invalid_request`` before any call. A real request (not a plan) whose
-    ``deployment_name`` already names a deployment answers ``unchanged``, so
-    a second run does not build a second deployment.
+    ``deployment_name`` already names a deployment in the same project
+    answers ``unchanged``, so a second run does not build a second
+    deployment. A deployment of that name in another project does not count.
     """
     if bool(params.get("blueprint_id")) == bool(params.get("content")):
         return {
@@ -117,13 +118,17 @@ async def tenant_blueprint_request_create(
             TENANT_DEPLOYMENTS_PATH,
             name,
             params={"apiVersion": TENANT_IAAS_API_VERSION},
+            match={"projectId": str(params["project_id"])},
         )
         if existing is not None:
             return {
                 "status": "unchanged",
                 "request": None,
                 "deployment": {key: existing.get(key) for key in ("id", "name", "projectId")},
-                "guidance": f"a deployment named {name!r} already exists; nothing was requested",
+                "guidance": (
+                    f"a deployment named {name!r} already exists in this project; "
+                    "nothing was requested"
+                ),
             }
     created = await connector._post_json(
         target,

@@ -250,8 +250,11 @@ true).
   whole tag list back, so no tag is lost and none is removed.
   `network_profile.create` answers `unchanged` for an existing name. A real
   `blueprint_request.create` whose `deployment_name` already names a
-  deployment answers `unchanged` and requests nothing. `deployment.delete`
-  answers `unchanged` on a `404`.
+  deployment in the same project (`name` and `projectId` both match)
+  answers `unchanged` and requests nothing; the same name in another
+  project does not count. `deployment.delete` answers `unchanged` on a
+  `404`; its approval preview reads the deployment with
+  `apiVersion=2021-07-15`.
 - **Two traps in the guidance.** A plan (`plan: true`) only checks the
   template and its inputs; it does not find placement errors (no fitting
   zone, network or quota) — only a real request does. VCF Automation reads

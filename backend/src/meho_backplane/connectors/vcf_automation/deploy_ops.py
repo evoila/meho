@@ -97,8 +97,8 @@ _BLUEPRINT_REQUEST_CREATE = VcfaTypedOp(
                 "minLength": 1,
                 "maxLength": 128,
                 "description": (
-                    "The name of the new deployment. When a deployment with this name "
-                    "exists, nothing is requested."
+                    "The name of the new deployment. When the project already has a "
+                    "deployment with this name, nothing is requested."
                 ),
             },
             "description": {
@@ -147,7 +147,7 @@ _BLUEPRINT_REQUEST_CREATE = VcfaTypedOp(
             },
             "deployment": {
                 **obj(
-                    "Only on 'unchanged': the deployment that has this name.",
+                    "Only on 'unchanged': the deployment in this project that has this name.",
                     {
                         "id": field(["string", "null"], "The deployment id."),
                         "name": field("string", "The deployment name."),

@@ -975,7 +975,7 @@ the default-allow immediate branch. `requires_approval=True` would park
 humans too; `safety_level="dangerous"` would deny agents rather than
 park them.
 
-Three synthetic connectors follow this mould (natural key
+Four synthetic connectors follow this mould (natural key
 `(product, "1.x", impl_id)` → wire `connector_id`):
 
 | Wire `connector_id` | Op | MCP front | Since |
@@ -983,6 +983,7 @@ Three synthetic connectors follow this mould (natural key
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+| `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last

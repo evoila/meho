@@ -413,6 +413,12 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (  # noqa: E
     VM_INFO_WHEN_TO_USE,
     VMWARE_VM_INFO_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (  # noqa: E402
+    VM_QUESTION_GROUP_KEY,
+    VM_QUESTION_WHEN_TO_USE,
+    VMWARE_VM_QUESTION_ANSWER_OP,
+    VMWARE_VM_QUESTION_GET_OP,
+)
 
 #: Curated ``when_to_use`` blurb per typed-op group.
 #: ``register_typed_operation`` requires a non-empty string whenever
@@ -437,6 +443,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
     TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE,
     SSO_ADMIN_API_FILE_GROUP_KEY: SSO_ADMIN_API_FILE_WHEN_TO_USE,
+    VM_QUESTION_GROUP_KEY: VM_QUESTION_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -501,7 +508,9 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: standalone-ESXi); and the incident-survival reads ``vm.info`` +
 #: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
 #: (#3701, tasks older than the recent list); and the SSO Admin API
-#: description read ``vcenter.sso_admin.api_file.get``. The tuple shape lets
+#: description read ``vcenter.sso_admin.api_file.get``; and the VM question
+#: read and answer ``vm.question.get`` / ``vm.question.answer`` (the answer
+#: is the one typed change here: it waits for approval). The tuple shape lets
 #: future typed reads join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
@@ -513,6 +522,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_TASKS_RECENT_OP,
     VMWARE_TASKS_HISTORY_OP,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
+    VMWARE_VM_QUESTION_GET_OP,
+    VMWARE_VM_QUESTION_ANSWER_OP,
 )
 
 

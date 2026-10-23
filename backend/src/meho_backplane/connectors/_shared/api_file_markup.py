@@ -13,8 +13,8 @@ lowercases element and attribute names, so they are checked with the
 rule for names whose case is lost. In both, a secret-named element loses
 its content, a secret-named attribute loses its value, and an element
 that a ``name``, ``id``, ``key`` or ``type`` attribute marks as secret
-loses its content and the values of its other attributes. A ``<script>``
-block comes back only when its content is JSON.
+loses its content and every attribute value except the label that marks
+it. A ``<script>`` block comes back only when its content is JSON.
 """
 
 from __future__ import annotations
@@ -43,9 +43,9 @@ from meho_backplane.connectors._shared.api_file_values import (
 
 __all__ = ["check_html", "check_xml"]
 
-#: Attributes that name an element (``<input name="password">``). Their
-#: values are labels and stay; the element's content and other attributes
-#: are replaced when one of them is a secret name.
+#: Attributes that name an element (``<input name="password">``). One
+#: whose value is a secret name is a label and stays; the element's
+#: content and every other attribute value are replaced.
 _NAMING_ATTRIBUTES: Final[frozenset[str]] = frozenset({"name", "id", "key", "type"})
 
 #: HTML elements that never have content or a closing tag.
@@ -198,7 +198,7 @@ class _XmlWriter:
         return f"{prefix}:{local}" if prefix else local
 
     def _attribute_value(self, local: str, value: str, element_is_secret: bool) -> str:
-        if is_secret_param_name(local) or (element_is_secret and local not in _NAMING_ATTRIBUTES):
+        if is_secret_param_name(local) or (element_is_secret and not _is_label(local, value)):
             self.scrubber.count += 1
             return REDACTED
         return self.scrubber.text(value)
@@ -260,6 +260,17 @@ def _element_is_secret(
         if split(key)[1] in _NAMING_ATTRIBUTES and value and is_secret_param_name(value):
             return True
     return False
+
+
+def _is_label(local: str, value: str | None) -> bool:
+    """True for a naming attribute whose value is a secret name.
+
+    Such an attribute is what marks its element as secret
+    (``name="password"``); it stays so the reader sees which value was
+    replaced. Every other attribute of the element is replaced, also
+    another naming attribute (``id="abc"``): its value can be anything.
+    """
+    return local in _NAMING_ATTRIBUTES and bool(value) and is_secret_param_name(value or "")
 
 
 def _xml_text(value: str) -> str:
@@ -353,7 +364,7 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
         if value is None:
             head.append(f" {key}")
             continue
-        if is_secret_param_name_lowercased(key) or (secret and key not in _NAMING_ATTRIBUTES):
+        if is_secret_param_name_lowercased(key) or (secret and not _is_label(key, value)):
             scrubber.count += 1
             value = REDACTED
         else:

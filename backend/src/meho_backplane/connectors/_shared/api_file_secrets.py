@@ -225,7 +225,9 @@ def _check_yaml(text: str, path: str) -> tuple[str, int]:
                 return "", 0
             count = _redact_yaml_nodes(root)
             data = loader.construct_document(root)
-        except yaml.YAMLError as exc:
+        except RecursionError:
+            raise
+        except Exception as exc:
             raise ApiFileFormatError(
                 f"{path} is not well-formed YAML ({_yaml_reason(exc)}); the file is not returned"
             ) from None
@@ -242,11 +244,16 @@ def _check_yaml(text: str, path: str) -> tuple[str, int]:
     return text_out, scrubber.count
 
 
-def _yaml_reason(exc: yaml.YAMLError) -> str:
+def _yaml_reason(exc: Exception) -> str:
     """The kind of YAML error and where it is, never what the file says there.
 
     PyYAML's ``problem`` text can quote the file (an unknown tag names the
-    tag), so only the error class and the position are returned.
+    tag), so only the error class and the position are returned. Building
+    the values can fail outside PyYAML's own errors too: a tagged scalar
+    that does not fit its tag (``!!int made-up``, ``!!float``,
+    ``!!timestamp``, ``!!bool``) raises the error of the stdlib call that
+    read it, and that error quotes the value. Such an error has no
+    position, so only its class is returned.
     """
     kind = type(exc).__name__
     if isinstance(exc, yaml.MarkedYAMLError):

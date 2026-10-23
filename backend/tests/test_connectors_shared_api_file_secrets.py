@@ -100,6 +100,10 @@ def test_a_file_that_does_not_parse_is_refused_without_its_text() -> None:
         ('{"password": "' + _SECRET, _JSON, "not well-formed JSON"),
         (f"password: [{_SECRET}\n", _YAML, "not well-formed YAML"),
         (f"x: !{_SECRET} 1\n", _YAML, r"YAML \(ConstructorError at line 1, column 4\)"),
+        (f"x: !!int {_SECRET}\n", _YAML, r"YAML \(ValueError\)"),
+        (f"x: !!float {_SECRET}\n", _YAML, r"YAML \(ValueError\)"),
+        (f"x: !!timestamp {_SECRET}\n", _YAML, r"YAML \(\w+Error\)"),
+        (f"x: !!bool {_SECRET}\n", _YAML, r"YAML \(KeyError\)"),
         (f"<a><password>{_SECRET}</a>", _XML, "not well-formed XML"),
         (f'<!DOCTYPE a [<!ENTITY x "{_SECRET}">]><a>&x;</a>', _XML, "refuses to parse"),
     ]
@@ -363,13 +367,13 @@ _WSDL = """<?xml version="1.0" encoding="UTF-8"?>
 
 def test_wsdl_keeps_its_namespace_prefixes_and_schema_elements() -> None:
     text, count = _check(_WSDL, "text/xml")
-    assert count == 0
+    assert count == 1
     assert text.startswith(
         '<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" '
         'xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:example:admin" '
         'targetNamespace="urn:example:admin">'
     )
-    assert '<xsd:element name="password" type="xsd:string"/>' in text
+    assert f'<xsd:element name="password" type="{REDACTED}"/>' in text
     assert '<xsd:element name="user" type="tns:User" minOccurs="0"/>' in text
     assert "<?xml" not in text
 
@@ -404,6 +408,43 @@ def test_xml_element_named_secret_by_its_type_attribute_loses_its_other_values()
     assert count == 3
 
 
+@pytest.mark.parametrize(
+    ("document", "expected", "count"),
+    [
+        pytest.param(
+            f'<r><field name="password" id="abc" value="{_SECRET}"/></r>',
+            f'<r><field name="password" id="{REDACTED}" value="{REDACTED}"/></r>',
+            2,
+            id="id-after-name",
+        ),
+        pytest.param(
+            f'<r><field id="{_SECRET}" name="password"/></r>',
+            f'<r><field id="{REDACTED}" name="password"/></r>',
+            1,
+            id="id-before-name",
+        ),
+        pytest.param(
+            f'<r><field type="password" name="api_key" key="{_SECRET}"/></r>',
+            f'<r><field type="password" name="api_key" key="{REDACTED}"/></r>',
+            1,
+            id="two-labels",
+        ),
+        pytest.param(
+            f'<r><password name="{_SECRET}" type="string"/></r>',
+            f'<r><password name="{REDACTED}" type="{REDACTED}"/></r>',
+            2,
+            id="secret-named-element",
+        ),
+    ],
+)
+def test_xml_only_the_label_of_a_secret_element_stays(
+    document: str, expected: str, count: int
+) -> None:
+    text, replaced = _check(document, _XML)
+    assert text == expected
+    assert replaced == count
+
+
 def test_xml_special_characters_are_written_back_escaped() -> None:
     document = '<a title="1 &gt; 0 &amp; &quot;q&quot;">a &lt; b &amp; c</a>'
     text, count = _check(document, _XML)
@@ -421,7 +462,6 @@ def test_xml_special_characters_are_written_back_escaped() -> None:
     [
         pytest.param(f'<input name="password" value="{_SECRET}">', id="quoted"),
         pytest.param(f"<input name=password value={_SECRET}>", id="unquoted"),
-        pytest.param(f'<input id="login-field" name="password" value="{_SECRET}">', id="after-id"),
         pytest.param(f'<INPUT NAME="Password" VALUE="{_SECRET}">', id="upper-case"),
         pytest.param(f'<input name="password" value="{_SECRET}" />', id="self-closing"),
         pytest.param(f'<form><input type="password" value="{_SECRET}"></form>', id="type"),
@@ -429,16 +469,61 @@ def test_xml_special_characters_are_written_back_escaped() -> None:
         pytest.param(f'<meta name="csrf-token" content="{_SECRET}">', id="meta"),
         pytest.param(f'<a licenseKey="{_SECRET}"></a>', id="camel-case-attribute"),
         pytest.param(f'<input name="licenseKey" value="{_SECRET}">', id="camel-case-name"),
-        pytest.param(f'<input name="password" name="normal" value="{_SECRET}">', id="repeated"),
-        pytest.param(
-            f'<input value="{_SECRET}" name="normal" name="password">', id="repeated-last"
-        ),
     ],
 )
 def test_html_secret_attribute_value_is_replaced(document: str) -> None:
     text, count = _check(document, _HTML)
     assert f'="{REDACTED}"' in text
     assert count == 1
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "count"),
+    [
+        pytest.param(
+            f'<input id="login-field" name="password" value="{_SECRET}">',
+            f'<input id="{REDACTED}" name="password" value="{REDACTED}">',
+            2,
+            id="after-id",
+        ),
+        pytest.param(
+            f'<input name="password" id="{_SECRET}">',
+            f'<input name="password" id="{REDACTED}">',
+            1,
+            id="only-id",
+        ),
+        pytest.param(
+            f'<input name="password" name="normal" value="{_SECRET}">',
+            f'<input name="password" name="{REDACTED}" value="{REDACTED}">',
+            2,
+            id="repeated",
+        ),
+        pytest.param(
+            f'<input value="{_SECRET}" name="normal" name="password">',
+            f'<input value="{REDACTED}" name="{REDACTED}" name="password">',
+            2,
+            id="repeated-last",
+        ),
+        pytest.param(
+            f'<input type="password" name="api_key" id="{_SECRET}" disabled>',
+            f'<input type="password" name="api_key" id="{REDACTED}" disabled>',
+            1,
+            id="two-labels",
+        ),
+        pytest.param(
+            f'<password name="{_SECRET}" type="text">x</password>',
+            f'<password name="{REDACTED}" type="{REDACTED}">{REDACTED}</password>',
+            3,
+            id="secret-named-element",
+        ),
+    ],
+)
+def test_html_only_the_label_of_a_secret_element_stays(
+    document: str, expected: str, count: int
+) -> None:
+    text, replaced = _check(document, _HTML)
+    assert text == expected
+    assert replaced == count
 
 
 def test_html_camel_case_element_is_secret_although_the_parser_lowercases_it() -> None:

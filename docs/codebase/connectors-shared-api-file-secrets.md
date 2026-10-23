@@ -71,7 +71,10 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
    `defusedxml` (a file that declares entities is refused); HTML with
    `html.parser`. A parse error names the kind of error and the line
    and column, never the text there (a YAML error message would quote
-   an unknown tag).
+   an unknown tag). A YAML value that does not fit its tag (`!!int
+   made-up`) fails outside PyYAML's own errors, in the stdlib call that
+   reads it, and that error quotes the value; the file is refused with
+   the error class only.
 3. Replace:
    - JSON and YAML: the whole value of every secret-named key, at any
      depth, also inside lists, whatever it is (text, number, list,
@@ -82,9 +85,10 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
    - XML and HTML: the whole content of a secret-named element, and the
      value of a secret-named attribute. An element whose `name`, `id`,
      `key` or `type` attribute is a secret name (`<input type="password"
-     value="...">`) loses its content and the values of its other
-     attributes; the naming attributes stay, so `<xsd:element
-     name="password" type="xsd:string"/>` comes back as written. Every
+     value="...">`) loses its content and every attribute value except
+     the label that marks it: `<input name="password" id="abc">` comes
+     back with `id="[REDACTED:param_name]"`, and `<xsd:element
+     name="password" type="xsd:string"/>` loses its `type`. Every
      attribute the parser saw is checked, so a repeated attribute name
      (`name="password" name="normal"`) cannot hide the first one. The
      HTML parser lowercases element and attribute names, so `licenseKey`
@@ -126,14 +130,17 @@ refused with its size, before parsing. The last check stays too: the
 read stops when MEHO's general redaction rules (`redaction/patterns.py`)
 would still change the copy, for example an `Authorization` header line
 in free text. The `api_key` rule skips a value that already is a
-`[REDACTED:...]` placeholder, so a replaced value does not set it off.
+complete `[REDACTED:...]` placeholder, so a replaced value does not set
+it off.
 
 ## What the reader loses
 
 - The parts give the checked copy, not the bytes the appliance sent:
   the same content, without comments, with secret values replaced.
 - A value under a secret name is replaced even when it is a schema or a
-  path item.
+  path item. In XML and HTML, an element that a `name`, `id`, `key` or
+  `type` attribute marks as secret keeps only that label; its other
+  attribute values go too, also a schema `type`.
 - Inline JavaScript does not come back. JavaScript, CSS and plain text
   files are refused.
 - Free text that is not JSON, such as "the password is abc", cannot be

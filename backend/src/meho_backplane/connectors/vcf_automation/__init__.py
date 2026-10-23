@@ -45,7 +45,9 @@ from meho_backplane.connectors.vcf_automation.connector import (
     VcfAutomationConfigurationError,
     VcfAutomationConnector,
 )
+from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.session import (
     SessionCredentials,
@@ -117,16 +119,18 @@ register_connector_v2(
 
 # Queue the typed-op upsert onto the lifespan-driven registrar list. The
 # runner (``run_typed_op_registrars``) iterates after
-# ``_eager_import_connectors`` so the typed descriptors (the seven reads +
-# the #3890 provisioning ops) land
+# ``_eager_import_connectors`` so the typed descriptors (the seven reads,
+# the #3890 provisioning ops, and the network + deploy ops) land
 # before the first dispatch — no ingested catalog state required (VCFA
 # ships no vendor spec; typed conversion is the only working read path).
 register_typed_op_registrar(register_vcfa_typed_operations)
 
 __all__ = [
     "VCFA_CONNECTOR_ID",
+    "VCFA_DEPLOY_OPS",
     "VCFA_IMAGE_OPS",
     "VCFA_IMPL_ID",
+    "VCFA_NETWORK_OPS",
     "VCFA_PRODUCT",
     "VCFA_PROVISIONING_OPS",
     "VCFA_TYPED_OPS",

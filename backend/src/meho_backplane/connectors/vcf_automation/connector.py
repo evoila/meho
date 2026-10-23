@@ -1044,16 +1044,123 @@ class VcfAutomationConnector(HttpConnector):
 
         return await tenant_image_profile_mapping_update(self, operator, target, params)
 
+    # ------------------------------------------------------------------
+    # A project's own network and its first deployment -- thin shims over
+    # ``_network`` / ``_deploy``, lazily imported like the provisioning ops.
+    # Metadata lives in :mod:`.network_ops` / :mod:`.deploy_ops`.
+    # ------------------------------------------------------------------
+
+    async def tenant_fabric_network_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.fabric_network.list`` — see :mod:`._network`."""
+        from meho_backplane.connectors.vcf_automation._network import tenant_fabric_network_list
+
+        return await tenant_fabric_network_list(self, operator, target, params)
+
+    async def tenant_fabric_compute_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.fabric_compute.list`` — see :mod:`._network`."""
+        from meho_backplane.connectors.vcf_automation._network import tenant_fabric_compute_list
+
+        return await tenant_fabric_compute_list(self, operator, target, params)
+
+    async def tenant_region_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.region.list`` — see :mod:`._network`."""
+        from meho_backplane.connectors.vcf_automation._network import tenant_region_list
+
+        return await tenant_region_list(self, operator, target, params)
+
+    async def tenant_zone_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.zone.list`` — see :mod:`._network`."""
+        from meho_backplane.connectors.vcf_automation._network import tenant_zone_list
+
+        return await tenant_zone_list(self, operator, target, params)
+
+    async def tenant_fabric_network_update(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.fabric_network.update`` — see :mod:`._network`."""
+        from meho_backplane.connectors.vcf_automation._network import tenant_fabric_network_update
+
+        return await tenant_fabric_network_update(self, operator, target, params)
+
+    async def tenant_network_profile_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.network_profile.create`` — see :mod:`._network`."""
+        from meho_backplane.connectors.vcf_automation._network import tenant_network_profile_create
+
+        return await tenant_network_profile_create(self, operator, target, params)
+
+    async def tenant_blueprint_request_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.blueprint_request.create`` — see :mod:`._deploy`."""
+        from meho_backplane.connectors.vcf_automation._deploy import tenant_blueprint_request_create
+
+        return await tenant_blueprint_request_create(self, operator, target, params)
+
+    async def tenant_blueprint_request_get(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.blueprint_request.get`` — see :mod:`._deploy`."""
+        from meho_backplane.connectors.vcf_automation._deploy import tenant_blueprint_request_get
+
+        return await tenant_blueprint_request_get(self, operator, target, params)
+
+    async def tenant_deployment_delete(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.deployment.delete`` — see :mod:`._deploy`."""
+        from meho_backplane.connectors.vcf_automation._deploy import tenant_deployment_delete
+
+        return await tenant_deployment_delete(self, operator, target, params)
+
     @classmethod
     async def register_typed_operations(cls) -> None:
-        """Upsert every typed op (reads, provisioning and image ops) into ``endpoint_descriptor``.
+        """Upsert every typed op (reads, provisioning, image, network, deploy) as a descriptor row.
 
         Called from the application lifespan via the registrar queued in
         :mod:`meho_backplane.connectors.vcf_automation.__init__`. Walks
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_OPS`
         plus
-        :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`
-        and :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS` and
+        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1067,7 +1174,9 @@ class VcfAutomationConnector(HttpConnector):
         # Lazy import: the operations package pulls in the embedding
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
+        from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
         from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+        from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
             VCFA_PROVISIONING_OPS,
         )
@@ -1077,7 +1186,13 @@ class VcfAutomationConnector(HttpConnector):
         )
         from meho_backplane.operations.typed_register import register_typed_operation
 
-        all_ops = (*VCFA_TYPED_OPS, *VCFA_PROVISIONING_OPS, *VCFA_IMAGE_OPS)
+        all_ops = (
+            *VCFA_TYPED_OPS,
+            *VCFA_PROVISIONING_OPS,
+            *VCFA_IMAGE_OPS,
+            *VCFA_NETWORK_OPS,
+            *VCFA_DEPLOY_OPS,
+        )
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:

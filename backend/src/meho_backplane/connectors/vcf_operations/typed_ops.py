@@ -47,6 +47,12 @@ surface from resource *identity* to resource *metric values*:
   where the backplane could find resources and see alerts but never
   read the values vROps exists to compute.
 
+Another typed read, ``vrops.api_file.get``, reads one documentation page
+or API description file the appliance serves (the Swagger page under
+``/suite-api/doc/`` and the files it loads), so the lab can pin the API
+file of a version that has no vendor download. Its metadata lives in
+:mod:`meho_backplane.connectors.vcf_operations.typed_ops_api_file`.
+
 Sibling precedent for the dataclass + registrar shape:
 :mod:`meho_backplane.connectors.argocd.ops` (metadata dataclasses here,
 thin bound-method handlers on the connector, a module-level registrar
@@ -96,6 +102,7 @@ if TYPE_CHECKING:
 __all__ = [
     "VROPS_9_ONLY_TYPED_OPS",
     "VROPS_ALERT_LIST_OP",
+    "VROPS_API_FILE_GET_OP",
     "VROPS_LICENSE_INFO_OP",
     "VROPS_LIVENESS_OP",
     "VROPS_RESOURCE_KIND_PROPERTIES_OP",
@@ -203,6 +210,12 @@ class VropsTypedOp:
     llm_instructions: dict[str, Any] | None
 
 
+from meho_backplane.connectors.vcf_operations.typed_ops_api_file import (  # noqa: E402
+    API_FILE_GROUP_KEY,
+    API_FILE_WHEN_TO_USE,
+    VROPS_API_FILE_GET_OP,
+)
+
 #: Curated ``when_to_use`` blurb per typed-op group.
 #: :func:`register_typed_operation` requires a non-empty string whenever
 #: ``group_key`` is set (typed_register ``_validate_when_to_use_pairing``).
@@ -238,6 +251,7 @@ VROPS_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "using?' or 'how much capacity is left?'. Feed resource UUIDs from "
         "the vrops-resource-query group. Read-only."
     ),
+    API_FILE_GROUP_KEY: API_FILE_WHEN_TO_USE,
     _RESOURCE_KIND_GROUP_KEY: (
         "Use to learn what a VCF Operations resource kind offers: which "
         "property keys exist for one kind of object (for example "
@@ -714,13 +728,14 @@ VROPS_LICENSE_INFO_OP = VropsTypedOp(
 
 #: The typed ops :class:`VcfOperationsConnector` registers at lifespan
 #: startup — the audited vROps read set (#2303) plus the sizing stat-value
-#: read (#2838). The tuple shape lets a future typed read join without
-#: touching the registrar.
+#: read (#2838) and the API description read ``vrops.api_file.get``. The
+#: tuple shape lets a future typed read join without touching the registrar.
 VROPS_TYPED_OPS: tuple[VropsTypedOp, ...] = (
     VROPS_LIVENESS_OP,
     VROPS_ALERT_LIST_OP,
     VROPS_RESOURCE_QUERY_OP,
     VROPS_RESOURCE_STATS_OP,
+    VROPS_API_FILE_GET_OP,
 )
 
 #: Typed ops only the 9.x connector registers. The 8.x registrar reuses

@@ -86,7 +86,7 @@ Both the happy matrix and the open-fallback limitation are pinned in
 
 ## Scope: the modern audited typed read set, reused
 
-The 8.x impl reuses the modern sibling's audited **4-op typed read set** verbatim
+The 8.x impl reuses the modern sibling's audited **typed read set** verbatim
 (`source_kind="typed"`, working on a fresh boot with zero catalog ingest) — the
 registrar (`register_vrops8_typed_operations`) upserts the same op_ids under the
 `(vrops, 8.0, vrops-vrops8)` triple:
@@ -97,6 +97,52 @@ registrar (`register_vrops8_typed_operations`) upserts the same op_ids under the
 | `vrops-alert-triage` | `vrops.alert.list` | `GET /suite-api/api/alerts` |
 | `vrops-resource-query` | `vrops.resource.query` | `POST /suite-api/api/resources/query` |
 | `vrops-resource-stats` | `vrops.resource.stats` | `GET /suite-api/api/resources/stats/latest` |
+| `vrops-api-files` | `vrops.api_file.get` | `GET /suite-api/doc/...` (a documentation path) |
+
+### `vrops.api_file.get` on 8.x
+
+The read gets one documentation page or API description file that the
+appliance serves. It exists so the lab can pin the API file of **Aria
+Operations 8.18**: the vendor publishes no 8.18 reference (the developer
+portal stops at 8.10.0), so a running 8.18 appliance is the only source.
+The handler and the path rule live on the modern module
+(`vcf_operations/typed_ops_api_file.py`); the 8.x impl inherits them and
+sends the `GET` with its own `vRealizeOpsToken` login header.
+
+| Versions | Catalog |
+|---|---|
+| Aria Operations 8.18 | `vrops-vrops8-8.0` |
+
+- **What it reads.** The API start page `/suite-api/`, a path under the
+  documentation folder `/suite-api/doc/` (the Swagger page
+  `/suite-api/doc/swagger-ui.html`, the Swagger 2.0 document an 8.x
+  appliance serves at `/suite-api/doc/v2/api-docs`, and the files the page
+  loads), or a Swagger / OpenAPI file at its usual place. Every other path
+  is refused before a request goes out; see the modern doc for the full
+  rule.
+- **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
+  `size`, `sha256`, `secrets_replaced`, `parts`, `text_parts`, `version`,
+  `build`, `version_error`. `version` and `build` are the `releaseName` and
+  `buildNumber` of `GET /suite-api/api/versions/current`; if that read
+  fails, the file still comes back and `version_error` says why.
+- **No secret comes back.** The read runs the shared check
+  ([`connectors-shared-api-file-secrets.md`](connectors-shared-api-file-secrets.md))
+  on the whole file before it cuts it into parts. The check parses the
+  file (JSON, YAML, XML or HTML) and replaces every value under a secret
+  name with `[REDACTED:param_name]`; `secrets_replaced` says how many. A
+  file that does not parse, or a JavaScript, CSS or plain text file, is
+  refused. A secret-named query value in `redirect_path` is replaced too.
+- **How to rebuild the checked copy.** `text_parts` is a list of
+  `{index, text}`, each at most 64 KiB, measured as JSON text, so a part
+  always fits one `result_query` answer. A large answer is a result handle
+  whose rows are the parts; page them with `result_query` (`offset`, small
+  `limit`). Join the `text` of all parts in `index` order and encode as
+  UTF-8; the SHA-256 of the result equals `sha256`. A file too big for one
+  stored result stops with an error that names its size; the read never
+  returns a cut file.
+
+Details (the path rule, redirects, redaction, limits):
+[`connectors-vcf-operations.md`](connectors-vcf-operations.md).
 
 Op ids are **shared** with the modern impl on purpose (the same logical operation
 dispatched to whichever impl the target resolves to); `endpoint_descriptor` rows are
@@ -123,7 +169,10 @@ is an **op-set drift guard**, not a path pin: the subclass introduces no new pat
 `vcf-operations-9.0` OpenAPI 3.0 served set by the modern lane — path existence is
 stable across 8.x↔9.x). The lane pins that the 8.x impl reuses exactly the modern
 typed op-set and adds no `_*_PATH` constants of its own, so a future 9.x-only op
-cannot silently inherit into the 8.x surface. Evidenced exclusion (8.x publishes only
+cannot silently inherit into the 8.x surface. It also lists the one path
+`vrops.api_file.get` adds, `GET /suite-api/doc/`, as a documentation path, not in
+the API file: an API file never lists the path that serves it, so no served-set
+check can cover it (the modern lane pins that the spec serves nothing under it). Evidenced exclusion (8.x publishes only
 a per-instance Swagger 2.0 doc, moot for path coverage): the `vrops-vrops8` entry of
 [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
@@ -146,7 +195,7 @@ a per-instance Swagger 2.0 doc, moot for path coverage): the `vrops-vrops8` entr
   dialled; the scheme swap + inherited handlers are unit-tested end-to-end (respx).
   Live verification (incl. confirming the `resources/stats/latest` payload shape on a
   live 8.x target) is the deferred tail.
-- **Ingested browse breadth is 9.x-only.** The typed 4-op core is the 8.x surface; a
+- **Ingested browse breadth is 9.x-only.** The typed read core is the 8.x surface; a
   wider inventory would need typed ops or an 8.x spec to ingest (none exists).
 - **Unfingerprinted targets resolve to modern** (wildcard owned by `vrops-rest`); a
   probed 8.x target fingerprints its real version and resolves here.
@@ -154,6 +203,7 @@ a per-instance Swagger 2.0 doc, moot for path coverage): the `vrops-vrops8` entr
 ## References
 
 - Task: <https://github.com/evoila/meho/issues/3067>
+- Task (API description read): <https://github.com/evoila/meho/issues/4605>
 - Parent initiative: <https://github.com/evoila/meho/issues/3056>
 - Dual-version policy of record: <https://github.com/evoila/meho/issues/3033>
 - Tests: [`test_connectors_vrops8_auth.py`](../../backend/tests/test_connectors_vrops8_auth.py)

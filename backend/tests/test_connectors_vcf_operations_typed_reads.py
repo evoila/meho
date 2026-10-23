@@ -550,6 +550,7 @@ def test_typed_ops_are_read_only_and_well_formed() -> None:
         "vrops.alert.list",
         "vrops.resource.query",
         "vrops.resource.stats",
+        "vrops.api_file.get",
     }
     for op in VROPS_TYPED_OPS:
         assert op.safety_level == "safe", f"{op.op_id} must be safe (read-only surface)"

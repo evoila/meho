@@ -62,6 +62,7 @@ docs/decisions/spec-reconcile-guards-standard.md.
 from __future__ import annotations
 
 from meho_backplane.connectors.vcf_operations import connector as _connector
+from meho_backplane.connectors.vcf_operations import typed_ops_api_file as _api_file
 from tests._spec_shelf import (
     assert_op_ids_served,
     openapi_served_op_ids,
@@ -86,6 +87,18 @@ _METHOD_BY_CONSTANT: dict[str, str] = {
     "_LICENSING_EDITION_PATH": "GET",
     "_LICENSING_INFO_PATH": "GET",
 }
+
+
+#: The one path the typed read ``vrops.api_file.get`` adds, as ``METHOD:/path``:
+#: a documentation path, not in the API file. An API file never lists the path
+#: that serves it, so the served-path check skips it with that reason and
+#: instead pins that the spec serves nothing under it. The read's version call
+#: is ``_VERSIONS_CURRENT_PATH`` above and stays checked as before.
+_EXPECTED_DOCUMENTATION_ONLY = {"GET:/suite-api/doc/"}
+
+
+def _documentation_call() -> str:
+    return f"GET:{_api_file.DOC_FOLDER}"
 
 
 def _path_constants() -> dict[str, str]:
@@ -126,8 +139,28 @@ def test_path_constants_are_all_discovered_and_method_mapped() -> None:
     )
 
 
+def test_api_file_read_declares_the_documentation_path_only() -> None:
+    """Shape gate (always runs): the API file read adds one documentation path."""
+    assert {_documentation_call()} == _EXPECTED_DOCUMENTATION_ONLY
+    assert _api_file._VERSIONS_CURRENT_PATH is _connector._VERSIONS_CURRENT_PATH
+    assert _api_file.PATH_PATTERN.count(_api_file.DOC_FOLDER) == 1
+
+
 def test_declared_op_ids_are_served_by_the_pinned_spec() -> None:
     """Every hand-coded op_id is served by the pinned vcf-operations-9.0 spec."""
     spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
     assert_op_ids_served(_declared_op_ids(), served, spec_label=_SPEC_LABEL)
+
+
+def test_documentation_folder_is_not_in_the_pinned_spec() -> None:
+    """Path existence (skips without the shelf): nothing is served under ``/suite-api/doc/``."""
+    spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    doc_served = sorted(
+        op_id for op_id in served if op_id.partition(":")[2].startswith(_api_file.DOC_FOLDER)
+    )
+    assert not doc_served, (
+        f"pinned {_SPEC_LABEL} unexpectedly serves {doc_served}; the documentation "
+        "folder is a documentation path, not in the API file"
+    )

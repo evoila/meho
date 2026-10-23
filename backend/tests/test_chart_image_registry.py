@@ -71,6 +71,11 @@ _BASE_OVERRIDES = [
 
 # Every part on: the five subcharts and the three `helm test` pods.
 _ALL_ON = [
+    # The chart derives the issuer from the built-in Keycloak (#4591).
+    "--set",
+    "keycloak.issuer=",
+    "--set",
+    "config.keycloakIssuerUrl=",
     "--set",
     "corePostgres.enabled=true",
     "--set",

@@ -1859,6 +1859,7 @@ async def test_vmware_ingested_catalog_guard_rejects_before_policy_and_transport
         )
         assert len(audits) == 1
         assert audits[0].payload["result_status"] == "unqualified_target_version"
+        assert result.audit_id == audits[0].id
         approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
         assert approvals == []
 
@@ -4044,6 +4045,8 @@ async def test_dispatch_agent_deny_grant_on_client_id_denies_safe_op(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].status_code == 403
+    # #4669: the refused call answers with the id of its own denied row.
+    assert result.audit_id == rows[0].id
 
 
 @pytest.mark.asyncio
@@ -4736,6 +4739,7 @@ async def test_park_refused_when_preflight_says_write_will_be_denied(
             assert op_rows[0].payload["result_status"] == "denied"
             assert op_rows[0].status_code == 403
             assert op_rows[0].payload["error"]["error_code"] == "write_capability_denied"
+            assert result.audit_id == op_rows[0].id
             assert op_rows[0].payload["error"]["granted"] == ["read"]
             assert op_rows[0].payload["error"]["required"] == ["create", "update"]
         else:

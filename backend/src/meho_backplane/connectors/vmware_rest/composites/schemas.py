@@ -5563,6 +5563,26 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 # are the ``dangerous`` / ``requires_approval`` writes.
 
 
+#: Optional per-call guest credential reference shared by the five guest ops
+#: that log into the guest OS (#3364). A reference string only -- the value is
+#: read in-process under the operator's identity and never enters params.
+_GUEST_SECRET_REF_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": (
+        "Optional reference to the secret holding this VM's guest login "
+        "(guest_username / guest_password), in the same form as a target's "
+        "secret_ref (e.g. 'targets/app-vm-01', 'vault:targets/app-vm-01', "
+        "'gsm:<project>/<secret>'). Omit to use the vCenter target's own "
+        "secret. The reference must fall under the target's allowed "
+        "guest-secret prefix (by default the namespace of the target's "
+        "secret_ref, or extras.guest_secret_prefix); any other reference "
+        "is rejected before any secret is read. Only the reference travels "
+        "in params; the credential value never does."
+    ),
+}
+
+
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.
 GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -5595,6 +5615,7 @@ GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Override only if a deployment names the singleton differently."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
@@ -5628,6 +5649,7 @@ GUEST_ENV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
@@ -5706,6 +5728,7 @@ GUEST_FILE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Ignored when fetch_content is false."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path"],
     "additionalProperties": False,
@@ -5755,6 +5778,7 @@ GUEST_FILE_WRITE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path", "content"],
     "additionalProperties": False,
@@ -6064,6 +6088,7 @@ GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "program_path"],
     "additionalProperties": False,

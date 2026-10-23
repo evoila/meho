@@ -17,7 +17,9 @@ The channel rides **VMware Tools guest operations** (the vim
 (`VmwareRestConnector._post_vmomi_json`) — the same substrate the #2890
 mutating-vmomi wave used. No `pyvmomi`, no in-guest agent of MEHO's own,
 no shell. Guest OS credentials are resolved from the target's Vault
-`secret_ref` and never travel in operation params.
+`secret_ref` — or, per call, from a `guest_secret_ref` the caller names
+(#3364, see "Per-VM guest credentials" below) — and never travel in
+operation params.
 
 The channel shipped in two increments: **#3100** (four read-only guest
 ops plus one approval-gated `guest.file.write`, proving the governance
@@ -132,7 +134,12 @@ load-bearing-ness:
    flight recorder's `classify_body_exclusion` hard-excludes its
    vendor-call + typed spans from body recording — the vim request body,
    guest password included, is never recorded (#3717; `net.show` is not
-   pinned — it sends no in-guest login). For the guest **login** credential this is a
+   pinned — it sends no in-guest login). The same five ops accept an
+   optional `guest_secret_ref` (#3364): a *reference* to another secret
+   holding this VM's `guest_username` / `guest_password`, read the same
+   way under the operator's identity and bounded to the target's allowed
+   prefix. Only the reference rides in params; see "Per-VM guest
+   credentials" below. For the guest **login** credential this is a
    deliberate improvement on the GOSC `credential-class` ops
    (`guest.customization_spec.create`), which accept the Windows admin
    password *in params*: here the login secret is never in params to begin
@@ -231,6 +238,59 @@ load-bearing-ness:
    `requires_approval=True` approval decision). `guest.file.read` mutates
    nothing but is `caution`, so it parks for agent / service principals only
    (never for a human seat) — a content-disclosure guard, not a mutation gate.
+
+## Per-VM guest credentials (`guest_secret_ref`, #3364)
+
+One vCenter target manages many VMs, and those VMs often carry different
+guest logins. Before #3364 the channel read `guest_username` /
+`guest_password` only from the vCenter target's own `secret_ref`, so an
+operator who needed a second guest login had to register a **duplicate
+vCenter target** whose secret carried it. The five ops that log into the
+guest (`process.list` / `env.read` / `file.read` / `file.write` /
+`program.run`) now accept an optional `guest_secret_ref` parameter;
+`net.show` sends no guest login and is unchanged.
+
+How it works (`composites/_guest_secret_ref.py`, threaded through the one
+shared `_guest_auth` helper):
+
+- **A reference, never a value.** `guest_secret_ref` is a credential
+  reference in the same forms a target `secret_ref` accepts (schemeless,
+  `vault:`, `gsm:`). The credential value is read in-process and lives
+  only in the ephemeral `NamePasswordAuthentication` object; it never
+  enters params, the result, the audit row, the broadcast event (the ops
+  are pinned aggregate-only anyway), the approval preview, or a log line.
+  The sub-op gate params and the park previews are unchanged.
+- **Read under the operator's identity.** The read goes through
+  `load_param_secret_data` (the same scheme-dispatched backend seam as the
+  keycloak `password_secret_ref`), forwarding the operator's JWT. Vault
+  RBAC and Vault audit still gate it per operator. A denied or unreadable
+  reference raises `SecretRefReadError`, which the dispatcher reports as
+  `vault_credentials_read_error` naming the `guest_secret_ref` param and
+  the ref cut to its prefix — never the full path or its contents. There
+  is **no fallback** to the target's own secret on any failure.
+- **Bounded to a per-target allowed prefix.** Because the reference is
+  caller-chosen per call and the `safe` reads auto-execute for a granted
+  agent, an unbounded reference would let a caller aim guest logins at
+  any secret the operator's JWT can read and learn from the outcome
+  whether it holds a valid guest credential. So the reference must fall
+  under the target's allowed prefix:
+  - by default the parent namespace of the target's own `secret_ref`
+    (`targets/vc-01` allows `targets/<anything>`, same backend kind);
+  - or the per-target setting `extras["guest_secret_prefix"]`, which an
+    operator sets to widen or narrow that namespace.
+  A reference outside the prefix, a backend-kind mismatch, a `.` / `..` /
+  empty path segment, or a target with no resolvable prefix (no
+  `secret_ref`, or a single-segment one, and no setting) is rejected with
+  `GuestSecretRefScopeError` **before any store read** — no fallback, no
+  guest login attempt. This is a different failure from a store denial:
+  the operator may well be allowed to read the secret; it is simply not
+  one this target's guests may use.
+- **Omitted → unchanged.** Without `guest_secret_ref` the credential
+  resolves from the target `secret_ref` exactly as before.
+
+Rejected alternative: a per-VM credential map inside the target's one
+secret. That would put every VM's login behind one Vault path and one
+ACL; per-secret references keep Vault's per-path RBAC meaningful.
 
 ## The op family
 
@@ -449,7 +509,8 @@ signal when done).
 ## References
 
 - Issues: evoila/meho#3100 (reads + `file.write`), evoila/meho#3255
-  (`program.run` — the freeform-exec tier lifted).
+  (`program.run` — the freeform-exec tier lifted), evoila/meho#3364
+  (`guest_secret_ref` per-VM guest credentials).
 - v0.1-spec §3 (operations), §4 (JSONFlux), §6 (audit), §7 (approval).
 - Handlers: `composites/_guest.py` (`guest_program_run_composite` +
   `_poll_for_exit`); preview: `composites/_write_preview.py`
@@ -459,7 +520,8 @@ signal when done).
   `composites/_write.py` (`_write_vmomi_sub_op`, the #2254 gate),
   `composites/_read.py` (`_read_sub_op`), `vim_body.py`.
 - Credential resolution: `connectors/_shared/vault_creds.py`
-  (`load_basic_credentials`).
+  (`load_basic_credentials`, `load_param_secret_data`); per-call override
+  + allowed-prefix bound: `composites/_guest_secret_ref.py` (#3364).
 - Redaction precedent: `guest.file.write` excludes `content` the same way
   `guest.program.run` excludes `arguments` / `env`
   (`operations/_preview.py`, `broadcast/events.py` `scrub_broadcast_params`).

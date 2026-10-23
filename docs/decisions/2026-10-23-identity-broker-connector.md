@@ -111,8 +111,19 @@ then `Authorization: OpsToken <token>`). See
 
 ## The usual work
 
-Risk levels: a **read** is `safe` and runs at once. A **change** waits until a
-second person approves.
+Risk levels: a **read** is `safe` and runs at once for every caller. The one
+**change**, `idb.directory.sync`, is `caution`. What `caution` means depends
+on who calls:
+
+- An agent login waits until a person approves. No grant can change that
+  for a `caution` operation.
+- A person runs it at once.
+- A service account waits for approval, unless a standing grant covers it.
+  Then it runs at once.
+
+So the risk level alone does not force a second person to approve a sync.
+The full rules are in
+[`docs/codebase/agent-permission-model.md`](../codebase/agent-permission-model.md).
 
 | Operation (proposed id) | What it does | Workspace ONE Access 3.3 | Identity Broker 9.x | Risk |
 |---|---|---|---|---|

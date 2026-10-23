@@ -3,15 +3,18 @@
 
 """XML and HTML for :mod:`.api_file_secrets`: parse, replace secrets, write back.
 
-XML is parsed with :mod:`defusedxml` and written back with the namespace
-prefixes as the file declared them, because WSDL and XSD files use the
-prefixes inside attribute values (``type="xsd:string"``). HTML is parsed
-with :mod:`html.parser` into a small tree and written back without
-comments. In both, a secret-named element loses its content, a
-secret-named attribute loses its value, and an element that a ``name``,
-``id``, ``key`` or ``type`` attribute marks as secret loses its content
-and the values of its other attributes. A ``<script>`` block comes back
-only when its content is JSON.
+XML is parsed with :mod:`defusedxml` and written back with every
+namespace declaration on the element that declared it, with the prefixes
+as the file declared them, because WSDL and XSD files use the prefixes
+inside attribute values (``type="xsd:string"``) and a prefix can mean
+another namespace inside a child. HTML is parsed with :mod:`html.parser`
+into a small tree and written back without comments; the parser
+lowercases element and attribute names, so they are checked with the
+rule for names whose case is lost. In both, a secret-named element loses
+its content, a secret-named attribute loses its value, and an element
+that a ``name``, ``id``, ``key`` or ``type`` attribute marks as secret
+loses its content and the values of its other attributes. A ``<script>``
+block comes back only when its content is JSON.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from __future__ import annotations
 import html
 import io
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Final
@@ -27,7 +30,10 @@ from typing import Any, Final
 import defusedxml.ElementTree as DefusedET
 from defusedxml import DefusedXmlException
 
-from meho_backplane.broadcast.events import is_secret_param_name
+from meho_backplane.broadcast.events import (
+    is_secret_param_name,
+    is_secret_param_name_lowercased,
+)
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
     ApiFileFormatError,
@@ -64,6 +70,10 @@ _HTML_VOID: Final[frozenset[str]] = frozenset(
 
 _XML_NAMESPACE: Final[str] = "http://www.w3.org/XML/1998/namespace"
 
+#: One namespace declaration: ``(prefix, uri)``; the default namespace
+#: has the empty prefix, ``xmlns=""`` has the empty uri too.
+_Declaration = tuple[str, str]
+
 
 # ---------------------------------------------------------------------------
 # XML: parsed with defusedxml, written back with the prefixes as declared
@@ -71,9 +81,16 @@ _XML_NAMESPACE: Final[str] = "http://www.w3.org/XML/1998/namespace"
 
 
 def check_xml(text: str, path: str) -> tuple[str, int]:
+    declared_on: dict[int, list[_Declaration]] = {}
+    pending: list[_Declaration] = []
     try:
-        events = DefusedET.iterparse(io.StringIO(text), events=("start-ns",))
-        declared = [(prefix, uri) for _event, (prefix, uri) in events]
+        events = DefusedET.iterparse(io.StringIO(text), events=("start-ns", "start"))
+        for event, payload in events:
+            if event == "start-ns":
+                pending.append(payload)
+            else:
+                declared_on[id(payload)] = pending
+                pending = []
         root = events.root
     except DefusedET.ParseError as exc:
         raise ApiFileFormatError(
@@ -83,9 +100,9 @@ def check_xml(text: str, path: str) -> tuple[str, int]:
         raise ApiFileFormatError(
             f"{path} is XML that MEHO refuses to parse ({type(exc).__name__}); not returned"
         ) from None
-    writer = _XmlWriter(declared)
+    writer = _XmlWriter(declared_on)
     out: list[str] = []
-    writer.element(root, out, "", first=True)
+    writer.element(root, out, ())
     return "".join(out), writer.scrubber.count
 
 
@@ -98,70 +115,51 @@ def _split_tag(tag: str) -> tuple[str, str]:
 
 
 class _XmlWriter:
-    """Write an element tree back as text, keeping the namespace prefixes.
+    """Write an element tree back as text, keeping the namespace declarations.
 
-    ElementTree keeps a tag as ``{uri}local`` and forgets the prefix. WSDL
-    and XSD files use the prefixes inside attribute values (``type=
-    "xsd:string"``), so they must come back as declared. Every prefixed
-    declaration of the file goes on the root element; a default namespace
-    is declared where it starts, as in the file.
+    ElementTree keeps a tag as ``{uri}local`` and forgets the prefix and
+    where the namespace was declared. WSDL and XSD files use the prefixes
+    inside attribute values (``type="xsd:string"``), and a child can bind
+    a prefix to another namespace, so every declaration is written back
+    on the element that declared it. A name is then qualified from the
+    declarations in scope, innermost first.
+
+    *declared_on* maps the id of each parsed element to the declarations
+    the file made on it, in order.
     """
 
-    def __init__(self, declared: list[tuple[str, str]]) -> None:
+    def __init__(self, declared_on: dict[int, list[_Declaration]]) -> None:
         self.scrubber = Scrubber()
-        self._prefix_of_uri: dict[str, str] = {_XML_NAMESPACE: "xml"}
-        self._declarations: list[tuple[str, str]] = []
-        self._used = {"xml", "xmlns"}
-        for prefix, uri in declared:
-            if prefix and prefix in self._used:
-                prefix = self._fresh_prefix()
-            if prefix:
-                self._used.add(prefix)
-                self._declarations.append((prefix, uri))
-            self._prefix_of_uri.setdefault(uri, prefix)
+        self._declared_on = declared_on
 
-    def _fresh_prefix(self) -> str:
-        number = 0
-        while f"ns{number}" in self._used:
-            number += 1
-        return f"ns{number}"
-
-    def _attribute_prefix(self, uri: str) -> str:
-        """An attribute in a namespace always needs a prefix, never the default."""
-        prefix = self._prefix_of_uri.get(uri, "")
-        if prefix:
-            return prefix
-        prefix = self._fresh_prefix()
-        self._used.add(prefix)
-        self._declarations.append((prefix, uri))
-        self._prefix_of_uri[uri] = prefix
-        return prefix
-
-    def element(self, el: Any, out: list[str], default_uri: str, *, first: bool) -> None:
+    def element(self, el: Any, out: list[str], outer: tuple[list[_Declaration], ...]) -> None:
         """Write *el*, a node parsed by ``defusedxml``, and everything under it.
 
         The node is typed ``Any`` on purpose: naming the stdlib ``Element``
         type would import ``xml.etree``, which the security scan flags.
+        *outer* holds the declarations of every enclosing element.
         """
+        declarations = list(self._declared_on.get(id(el), ()))
+        scopes = (*outer, declarations)
         uri, local = _split_tag(el.tag)
-        prefix = self._prefix_of_uri.get(uri, "")
-        if prefix:
-            name = f"{prefix}:{local}"
-            child_default = default_uri
-            declare_default = None
-        else:
-            name = local
-            child_default = uri
-            declare_default = uri if uri != default_uri else None
-        attributes = self._attributes(el, _element_is_secret(local, el.attrib, _split_tag))
+        secret = _element_is_secret(local, el.attrib.items(), _split_tag, is_secret_param_name)
+        name = self._qualify(local, uri, scopes, attribute=False)
+        attributes = [
+            (
+                self._qualify(attribute_local, attribute_uri, scopes, attribute=True),
+                self._attribute_value(attribute_local, value, secret),
+            )
+            for key, value in el.attrib.items()
+            for attribute_uri, attribute_local in (_split_tag(key),)
+        ]
         head = [f"<{name}"]
-        if first:
-            head.extend(f' xmlns:{p}="{_xml_attr(u)}"' for p, u in self._declarations)
-        if declare_default is not None:
-            head.append(f' xmlns="{_xml_attr(declare_default)}"')
+        head.extend(
+            f' xmlns:{prefix}="{_xml_attr(bound)}"' if prefix else f' xmlns="{_xml_attr(bound)}"'
+            for prefix, bound in declarations
+        )
         head.extend(f' {key}="{_xml_attr(value)}"' for key, value in attributes)
         out.append("".join(head))
-        if _element_is_secret(local, el.attrib, _split_tag) and (el.text or len(el)):
+        if secret and (el.text or len(el)):
             self.scrubber.count += 1
             out.append(f">{REDACTED}</{name}>")
         elif el.text or len(el):
@@ -169,20 +167,35 @@ class _XmlWriter:
             if el.text:
                 out.append(_xml_text(self.scrubber.text(el.text)))
             for child in el:
-                self.element(child, out, child_default, first=False)
+                self.element(child, out, scopes)
             out.append(f"</{name}>")
         else:
             out.append("/>")
         if el.tail:
             out.append(_xml_text(self.scrubber.text(el.tail)))
 
-    def _attributes(self, el: Any, element_is_secret: bool) -> list[tuple[str, str]]:
-        written: list[tuple[str, str]] = []
-        for key, value in el.attrib.items():
-            uri, local = _split_tag(key)
-            name = f"{self._attribute_prefix(uri)}:{local}" if uri else local
-            written.append((name, self._attribute_value(local, value, element_is_secret)))
-        return written
+    def _qualify(
+        self, local: str, uri: str, scopes: tuple[list[_Declaration], ...], *, attribute: bool
+    ) -> str:
+        """The name to write for *local* in *uri*, from the declarations in scope.
+
+        An attribute in a namespace always needs a prefix, never the
+        default. A name without a namespace needs ``xmlns=""`` when a
+        default namespace is in scope. When nothing in scope fits (the
+        parser accepted the file, so this does not happen for its own
+        names), a declaration is added to the innermost element.
+        """
+        if uri == _XML_NAMESPACE:
+            return f"xml:{local}"
+        if not uri:
+            if not attribute and _bound_uri(scopes, ""):
+                scopes[-1].append(("", ""))
+            return local
+        prefix = _prefix_in_scope(scopes, uri, attribute=attribute)
+        if prefix is None:
+            prefix = _fresh_prefix(scopes)
+            scopes[-1].append((prefix, uri))
+        return f"{prefix}:{local}" if prefix else local
 
     def _attribute_value(self, local: str, value: str, element_is_secret: bool) -> str:
         if is_secret_param_name(local) or (element_is_secret and local not in _NAMING_ATTRIBUTES):
@@ -191,13 +204,59 @@ class _XmlWriter:
         return self.scrubber.text(value)
 
 
+def _bound_uri(scopes: tuple[list[_Declaration], ...], prefix: str) -> str | None:
+    """The uri *prefix* is bound to in the innermost scope that binds it."""
+    for scope in reversed(scopes):
+        for bound_prefix, uri in scope:
+            if bound_prefix == prefix:
+                return uri
+    return None
+
+
+def _prefix_in_scope(
+    scopes: tuple[list[_Declaration], ...], uri: str, *, attribute: bool
+) -> str | None:
+    """A prefix bound to *uri* that no inner scope rebinds; ``None`` when there is none.
+
+    An element whose namespace is the default in scope is written without
+    a prefix, as a schema file usually writes it.
+    """
+    if not attribute and _bound_uri(scopes, "") == uri:
+        return ""
+    rebound: set[str] = set()
+    for scope in reversed(scopes):
+        for prefix, bound in scope:
+            if prefix in rebound:
+                continue
+            rebound.add(prefix)
+            if bound == uri and (prefix or not attribute):
+                return prefix
+    return None
+
+
+def _fresh_prefix(scopes: tuple[list[_Declaration], ...]) -> str:
+    number = 0
+    while _bound_uri(scopes, f"ns{number}") is not None:
+        number += 1
+    return f"ns{number}"
+
+
 def _element_is_secret(
-    local: str, attrib: Mapping[str, str | None], split: Callable[[str], tuple[str, str]]
+    local: str,
+    attributes: Iterable[tuple[str, str | None]],
+    split: Callable[[str], tuple[str, str]],
+    name_is_secret: Callable[[str], bool],
 ) -> bool:
-    """True for a secret-named element, or one a naming attribute makes secret."""
-    if is_secret_param_name(local):
+    """True for a secret-named element, or one a naming attribute makes secret.
+
+    *attributes* is every pair the parser saw, so a repeated attribute
+    name cannot hide an earlier value. *name_is_secret* checks the
+    element name, which an HTML parser lowercases; attribute values keep
+    their case and go through the exact rule.
+    """
+    if name_is_secret(local):
         return True
-    for key, value in attrib.items():
+    for key, value in attributes:
         if split(key)[1] in _NAMING_ATTRIBUTES and value and is_secret_param_name(value):
             return True
     return False
@@ -286,14 +345,15 @@ def _html_children(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
 
 
 def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
-    attrib = dict(node.attrs)
-    secret = _element_is_secret(node.tag.rpartition(":")[2], attrib, lambda key: ("", key))
+    secret = _element_is_secret(
+        node.tag.rpartition(":")[2], node.attrs, _html_name, is_secret_param_name_lowercased
+    )
     head = [f"<{node.tag}"]
     for key, value in node.attrs:
         if value is None:
             head.append(f" {key}")
             continue
-        if is_secret_param_name(key) or (secret and key not in _NAMING_ATTRIBUTES):
+        if is_secret_param_name_lowercased(key) or (secret and key not in _NAMING_ATTRIBUTES):
             scrubber.count += 1
             value = REDACTED
         else:
@@ -313,6 +373,11 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
     else:
         _html_children(node, out, scrubber)
     out.append(f"</{node.tag}>")
+
+
+def _html_name(key: str) -> tuple[str, str]:
+    """An HTML attribute name has no namespace."""
+    return "", key
 
 
 def _html_script(node: _HtmlNode, scrubber: Scrubber) -> str:

@@ -15,6 +15,7 @@ import pytest
 
 from meho_backplane.broadcast.events import (
     _is_secret_param_name,
+    is_secret_param_name_lowercased,
     scrub_broadcast_params,
 )
 
@@ -77,6 +78,9 @@ def test_scrub_tier1_pass_redacts_labelled_string_shapes() -> None:
         ("kubeconfig", True),
         ("secret_id", True),
         ("continue_token", True),
+        ("license_key", True),
+        ("licenseKey", True),
+        ("licence-key", True),
         # attribute / reference names — not the secret itself
         ("token_policies", False),
         ("token_ttl", False),
@@ -91,3 +95,24 @@ def test_scrub_tier1_pass_redacts_labelled_string_shapes() -> None:
 )
 def test_is_secret_param_name(name: str, expected: bool) -> None:
     assert _is_secret_param_name(name) is expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("licensekey", True),
+        ("clientsecret", True),
+        ("apikey", True),
+        ("x-licensekey", True),
+        ("xlicense_keyy", True),
+        ("passwordless", True),
+        ("password", True),
+        ("name", False),
+        ("key", False),
+        ("tokenttl", False),
+        ("secretname", False),
+        ("", False),
+    ],
+)
+def test_is_secret_param_name_lowercased(name: str, expected: bool) -> None:
+    assert is_secret_param_name_lowercased(name) is expected

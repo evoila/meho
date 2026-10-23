@@ -26,6 +26,7 @@ import respx
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.vault import VaultUnreachableError
+from meho_backplane.connectors._shared.api_file_secrets import REDACTED, check_api_file
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import AuthModel
@@ -67,6 +68,14 @@ _WSDL = """<?xml version="1.0" encoding="UTF-8"?>
   </wsdl:types>
 </wsdl:definitions>
 """
+
+
+def _copy_of(body: bytes, content_type: str = "text/xml") -> bytes:
+    """The checked copy the read returns for *body*: parsed and written back."""
+    return check_api_file(body.decode(), content_type=content_type, path=_WSDL_PATH).text.encode()
+
+
+_WSDL_COPY = _copy_of(_WSDL.encode()).decode()
 
 
 @pytest.fixture(autouse=True)
@@ -169,11 +178,14 @@ async def test_reads_a_wsdl_with_size_hash_imports_version_and_parts() -> None:
     assert answer["status"] == 200
     assert answer["content_type"] == "text/xml"
     assert answer["redirect_path"] is None
-    assert answer["size"] == len(body)
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
+    assert answer["size"] == len(_WSDL_COPY.encode())
+    assert answer["sha256"] == hashlib.sha256(_WSDL_COPY.encode()).hexdigest()
+    assert answer["secrets_replaced"] == 0
     assert answer["imports"] == ["admin-messages.wsdl", "admin-types.xsd", "admin-faults.xsd"]
     assert answer["parts"] == 1
-    assert answer["text_parts"] == [{"index": 0, "text": _WSDL}]
+    assert answer["text_parts"] == [{"index": 0, "text": _WSDL_COPY}]
+    assert "<?xml" not in _WSDL_COPY
+    assert '<xsd:import namespace="urn:example:admin:types" schemaLocation=' in _WSDL_COPY
     assert answer["version"] == "8.0.3.00000"
     assert answer["build"] == "11111111"
     assert answer["version_error"] is None
@@ -339,7 +351,7 @@ async def test_failed_version_read_still_returns_the_file(version_status: int) -
         answer = await _call(connector, _WSDL_PATH)
     await connector.aclose()
 
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
+    assert answer["sha256"] == hashlib.sha256(_copy_of(body)).hexdigest()
     assert answer["version"] is None
     assert answer["build"] is None
     assert "/api/appliance/system/version" in answer["version_error"]
@@ -373,8 +385,8 @@ async def test_credential_failure_on_the_version_read_still_returns_the_file(
     await connector.aclose()
 
     assert answer["status"] == 200
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
-    assert answer["text_parts"] == [{"index": 0, "text": _WSDL}]
+    assert answer["sha256"] == hashlib.sha256(_copy_of(body)).hexdigest()
+    assert answer["text_parts"] == [{"index": 0, "text": _WSDL_COPY}]
     assert answer["version"] is None
     assert answer["build"] is None
     assert error_name in answer["version_error"]
@@ -382,7 +394,7 @@ async def test_credential_failure_on_the_version_read_still_returns_the_file(
 
 
 # ---------------------------------------------------------------------------
-# Large files: joining the parts gives the exact file
+# Large files: joining the parts gives the checked copy
 # ---------------------------------------------------------------------------
 
 
@@ -411,7 +423,10 @@ async def test_joined_parts_have_the_file_sha256(body: bytes) -> None:
         answer = await _call(connector, _WSDL_PATH)
     await connector.aclose()
 
-    assert answer["size"] == len(body)
+    copy = _copy_of(body)
+    assert answer["size"] == len(copy)
+    assert answer["secrets_replaced"] == 0
+    assert _joined(answer) == copy
     assert answer["parts"] == len(answer["text_parts"]) > 1
     assert [part["index"] for part in answer["text_parts"]] == list(range(answer["parts"]))
     assert all(len(part["text"].encode()) <= PART_MAX_BYTES for part in answer["text_parts"])
@@ -441,7 +456,7 @@ async def test_file_too_big_for_one_result_stops_with_its_size(
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_session_and_version(mock)
         mock.get(_WSDL_PATH).respond(200, content=body, headers={"Content-Type": "text/xml"})
-        with pytest.raises(SsoAdminApiFileError, match=f"is {len(body)} bytes"):
+        with pytest.raises(SsoAdminApiFileError, match=f"is {len(_copy_of(body))} bytes"):
             await _call(connector, _WSDL_PATH)
     await connector.aclose()
 
@@ -516,22 +531,27 @@ async def test_file_whose_text_redaction_would_change_is_refused() -> None:
 
 
 def _xml_with_a_secret_across_the_part_cut() -> bytes:
-    """Valid one-line XML whose ``password="..."`` label straddles the first part cut.
+    """Valid one-line XML whose ``password=...`` label straddles the first part cut.
 
-    All characters are ASCII, so the cut falls exactly at ``PART_MAX_BYTES``:
-    ``pass`` ends part 0 and ``word="..."`` starts part 1.
+    The label sits in free text (not under a secret-named key, so the
+    file check leaves it), and the file is written as the check writes it
+    back, so the copy is the file. All characters are ASCII, so the cut
+    falls exactly at ``PART_MAX_BYTES``: ``pass`` ends part 0 and
+    ``word=...`` starts part 1.
     """
-    head = '<?xml version="1.0"?><root><pad n="'
-    joint = '"/><entry '
+    head = '<root><pad n="'
+    joint = '"/><note>'
     before = head + "a" * (PART_MAX_BYTES - 4 - len(head) - len(joint)) + joint
     assert len(before) == PART_MAX_BYTES - 4
-    return (before + 'password="made-up-pass-value-0123"/></root>').encode()
+    body = (before + "password=made-up-pass-value-0123</note></root>").encode()
+    assert _copy_of(body) == body
+    return body
 
 
 async def test_secret_split_across_the_part_cut_is_refused() -> None:
     body = _xml_with_a_secret_across_the_part_cut()
     parts = split_text_parts(body)
-    assert parts[0].endswith("pass") and parts[1].startswith('word="')
+    assert parts[0].endswith("pass") and parts[1].startswith("word=")
     # The per-part check alone misses the split label; the whole text trips it.
     per_part = _redact_like_the_dispatcher(
         {"text_parts": [{"index": i, "text": text} for i, text in enumerate(parts)]}
@@ -552,6 +572,45 @@ async def test_secret_split_across_the_part_cut_is_refused() -> None:
     assert "file_text" in message
     assert "not returned" in message
     assert "made-up-pass-value" not in message
+
+
+def _xml_with_a_password_across_the_part_cut() -> bytes:
+    """One-line XML whose ``password="..."`` attribute straddles the first part cut."""
+    head = '<root><pad n="'
+    joint = '"/><entry '
+    before = head + "a" * (PART_MAX_BYTES - 4 - len(head) - len(joint)) + joint
+    return (before + 'password="made-up-pass-value-0123"/></root>').encode()
+
+
+async def test_file_with_a_password_comes_back_with_the_placeholder_and_the_count() -> None:
+    """The file is parsed before it is cut, so a part cut cannot hide the value."""
+    body = _xml_with_a_password_across_the_part_cut()
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_WSDL_PATH).respond(200, content=body, headers={"Content-Type": "text/xml"})
+        answer = await _call(connector, _WSDL_PATH)
+    await connector.aclose()
+
+    joined = _joined(answer).decode()
+    assert answer["secrets_replaced"] == 1
+    assert f'<entry password="{REDACTED}"/>' in joined
+    assert "made-up-pass-value" not in json.dumps(answer)
+    assert answer["size"] == len(joined.encode())
+    assert answer["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
+
+
+async def test_file_that_does_not_parse_is_refused_with_the_reason() -> None:
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_WSDL_PATH).respond(
+            200, content=b"<root><password>made-up-4</root>", headers={"Content-Type": "text/xml"}
+        )
+        with pytest.raises(SsoAdminApiFileError, match="not well-formed XML") as excinfo:
+            await _call(connector, _WSDL_PATH)
+    await connector.aclose()
+    assert "made-up-4" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize(

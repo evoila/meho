@@ -17,7 +17,7 @@ Mounts six routes. Five dispatch through the T1
   to ``work_ref=<path>`` (exact match); the "show every write
   authorised by change-ticket X" lookup (work_ref I1-T1 #1655).
 * ``GET /api/v1/audit/my-recent`` — pre-canned shortcut bound to
-  ``principal=<operator.sub>``.
+  ``principal_sub=<operator.sub>`` (exact match on the user id).
 * ``GET /api/v1/audit/show/{audit_id}`` — single-row fetch. 404 (not
   403) when the audit row is not in the operator's tenant, so the
   route never leaks the existence of an audit row across tenants.
@@ -339,10 +339,10 @@ async def my_recent(
 ) -> MyRecentPage:
     """Audit rows the calling operator produced within the *since* window.
 
-    Principal is taken from ``operator.sub`` (the JWT subject); an
-    operator cannot see another operator's recent activity through
-    this route — for that, the full POST surface filters on
-    ``principal``.
+    The user id is taken from ``operator.sub`` (the JWT subject) and
+    matched exactly, so an operator cannot see another operator's
+    recent activity through this route — for that, the full POST
+    surface filters on ``principal`` (user id or name, partial match).
 
     Returns the unified ``{"items": [...], "next_cursor": ...}`` list
     envelope per ``docs/codebase/api-shape-conventions.md`` §2 (#2338
@@ -361,7 +361,7 @@ async def my_recent(
         since_dt = parse_duration(since, now=now)
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    filters = AuditQueryFilters(principal=operator.sub, since=since_dt, limit=limit)
+    filters = AuditQueryFilters(principal_sub=operator.sub, since=since_dt, limit=limit)
     result = await _dispatch(filters, tenant_id=operator.tenant_id)
     return MyRecentPage(items=result.rows, next_cursor=result.next_cursor)
 

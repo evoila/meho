@@ -299,8 +299,15 @@ _API_FILE_GET = FleetTypedOp(
                 "type": ["string", "null"],
                 "description": "Content-Type header of the answer.",
             },
-            "size": {"type": "integer", "description": "Size of the file in bytes."},
-            "sha256": {"type": "string", "description": "SHA-256 of the file, hex."},
+            "size": {"type": "integer", "description": "Size of the checked copy in bytes."},
+            "sha256": {"type": "string", "description": "SHA-256 of the checked copy, hex."},
+            "secrets_replaced": {
+                "type": "integer",
+                "description": (
+                    "How many values under a secret name (password, token, licence key, "
+                    "...) were replaced by [REDACTED:param_name] in the copy."
+                ),
+            },
             "version": {
                 "type": ["string", "null"],
                 "description": "Product version from GET /lcm/lcops/api/v2/about.",
@@ -330,7 +337,9 @@ _API_FILE_GET = FleetTypedOp(
             "parts": {"type": "integer", "description": "How many text parts there are."},
             "items": {
                 "type": "array",
-                "description": "The text parts, in order. Joined, they are the exact file.",
+                "description": (
+                    "The text parts of the checked copy, in order. Joined, they are the copy."
+                ),
                 "items": _PART_ITEM_SCHEMA,
             },
         },
@@ -350,20 +359,24 @@ _API_FILE_GET = FleetTypedOp(
             "appliance version serves."
         ),
         "output_shape": (
-            "{path, status, content_type, size, sha256, version, build, version_error, "
-            "lcm_api_version, redirect_to, parts, items: [{index, text}]}. items hold the "
-            "text in parts of at most 64 KiB, in order; a long file is behind a result "
-            "handle. Join the parts in order to rebuild the exact file; its SHA-256 equals "
-            "sha256. On VCF 9.0 builds version and build are null and version_error names "
-            "the HTTP 500 of the about call; lcm_api_version still names the API version."
+            "{path, status, content_type, size, sha256, secrets_replaced, version, build, "
+            "version_error, lcm_api_version, redirect_to, parts, items: [{index, text}]}. "
+            "items hold the checked copy of the file in parts of at most 64 KiB, in order; "
+            "a long file is behind a result handle. The copy is the parsed file written "
+            "back (JSON, YAML, XML or HTML) with every value under a secret name replaced "
+            "by [REDACTED:param_name]; secrets_replaced counts them. Join the parts in "
+            "order to rebuild the copy; its SHA-256 equals sha256. On VCF 9.0 builds version "
+            "and build are null and version_error names the HTTP 500 of the about call; "
+            "lcm_api_version still names the API version."
         ),
         "next_step": (
             "If redirect_to is set, call again with that path. If status is not 200, "
             "read the text for the appliance's message. To rebuild the file, page the "
             "result handle with result_query in index order and join the text fields. "
-            "A refused path means the path is outside the rule; fix the path. A read that "
-            "stops because the secret-redaction rules would change the file cannot return "
-            "that file exactly; report it instead of retrying."
+            "A refused path means the path is outside the rule; fix the path. A file that "
+            "does not parse, or is JavaScript, CSS or plain text, is refused; report it "
+            "instead of retrying. A read that stops because the secret-redaction rules "
+            "would change the copy cannot return it; report it instead of retrying."
         ),
         "result_scalars": {
             "keys": [
@@ -372,6 +385,7 @@ _API_FILE_GET = FleetTypedOp(
                 "content_type",
                 "size",
                 "sha256",
+                "secrets_replaced",
                 "version",
                 "build",
                 "version_error",

@@ -8,8 +8,12 @@ Only a running HCX Manager serves its API documentation, at
 ``https://{server}/hybridity/docs`` and the files that page loads. This
 read fetches one such page or file and returns its path, HTTP status,
 content type, size, SHA-256 and the Manager version, with the text in
-parts behind a result handle. Joining the parts in order gives the exact
-file, so the vendor API files can be pinned and compared.
+parts behind a result handle. The text is the checked copy of the file:
+MEHO parses the file (JSON, YAML, XML or HTML) and replaces every value
+under a secret name with a placeholder before it is cut into parts
+(:mod:`meho_backplane.connectors._shared.api_file_secrets`). Joining the
+parts in order gives that copy, so the vendor API files can be pinned
+and compared.
 
 What the read accepts
 ---------------------
@@ -39,9 +43,12 @@ carries bytes after a ``deflate`` stream, is refused; a ``gzip`` body
 made of several members is decoded whole, under the same limit. A file
 whose stored record does not fit in one result handle stops with an
 error that names its size -- the read never returns a cut file. A file
-that the secret-redaction rules would change stops too, so the read never
-claims an exact file it cannot return; the rules run on the whole text
-and on the answer, so a secret that spans two parts is found as well.
+that does not parse, or whose format is unknown (JavaScript, CSS, plain
+text), is refused with the reason. The checked copy is what ``size`` and
+``sha256`` describe, and ``secrets_replaced`` says how many values were
+replaced. A copy that the general secret-redaction rules would still
+change stops too; the rules run on the whole text and on the answer, so
+a secret that spans two parts is found as well.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ from urllib.parse import parse_qsl
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
 from meho_backplane.connectors.hcx import HCX_CONNECTOR_ID
 from meho_backplane.connectors.hcx.session import HcxTargetLike
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
@@ -125,7 +133,7 @@ class HcxApiFileNotTextError(ValueError):
 
 
 class HcxApiFileRedactedError(ValueError):
-    """The secret-redaction rules would change the file; the read stopped."""
+    """The general secret-redaction rules would change the checked copy; the read stopped."""
 
 
 #: The operation id the dispatcher labels this read with. The redaction
@@ -436,14 +444,16 @@ def _assert_fits_result_handle(
 
 
 def _assert_not_redacted(answer: dict[str, Any], text: str, operator: Operator) -> None:
-    """Stop when the shared redaction step would change the file's text.
+    """Stop when the shared redaction step would change the checked copy.
 
-    The dispatcher redacts every answer before the caller sees it. A file
-    that holds, for example, an ``Authorization`` header as a documentation
-    example would come back changed while ``sha256`` still names the
-    original. Running the same rules here, with the same labels, finds that
+    The dispatcher redacts every answer before the caller sees it. A copy
+    that still holds, for example, an ``Authorization`` header line in a
+    text block would come back changed while ``sha256`` names the copy as
+    checked. Running the same rules here, with the same labels, finds that
     case before the answer leaves the read. Redaction stays on; the error
-    names the rules and the places, never the matched text.
+    names the rules and the places, never the matched text. The rules skip
+    the placeholder the file check writes, so a replaced value does not
+    set them off.
 
     The rules run twice: on the whole *text*, because a secret whose label
     ends one part and whose value starts the next is not seen in either
@@ -461,7 +471,7 @@ def _assert_not_redacted(answer: dict[str, Any], text: str, operator: Operator) 
         places = sum(entry.count for entry in outcome.manifest)
         raise HcxApiFileRedactedError(
             f"GET {answer['path']}: the secret-redaction rules {rules} would change the text in "
-            f"{places} place(s), so the exact file cannot be returned; the read stopped"
+            f"{places} place(s), so the file cannot be returned; the read stopped"
         )
 
 
@@ -523,9 +533,12 @@ async def hcx_api_file_get_impl(
     if response.status_code == httpx.codes.UNAUTHORIZED:
         response.raise_for_status()
 
-    text = _decode_text(response, path)
-    body = response.content
+    checked = check_api_file(
+        _decode_text(response, path), content_type=response.headers.get("content-type"), path=path
+    )
+    body = checked.text.encode("utf-8")
     items = _text_items(body)
+    redirect_to, redirect_replaced = _redirect(response)
     version = await connector.manager_version(target, operator)
     answer: dict[str, Any] = {
         "path": url,
@@ -533,13 +546,22 @@ async def hcx_api_file_get_impl(
         "content_type": response.headers.get("content-type"),
         "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
+        "secrets_replaced": checked.secrets_replaced + redirect_replaced,
         "version": version.version,
         "build": version.build,
         "version_error": version.error,
-        "redirect_to": _redirect_target(response.headers.get("location"), response.request.url),
+        "redirect_to": redirect_to,
         "parts": len(items),
     }
     _assert_fits_result_handle(answer, items, operator_sub=operator.sub, max_bytes=max_bytes)
     answer["items"] = items
-    _assert_not_redacted(answer, text, operator)
+    _assert_not_redacted(answer, checked.text, operator)
     return answer
+
+
+def _redirect(response: httpx.Response) -> tuple[str | None, int]:
+    """The redirect path with any secret-named query value replaced, and the count."""
+    target = _redirect_target(response.headers.get("location"), response.request.url)
+    if target is None:
+        return None, 0
+    return scrub_query_string(target)

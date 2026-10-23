@@ -533,7 +533,12 @@ def test_by_work_ref_builds_exact_work_ref_filter(client: TestClient) -> None:
 
 
 def test_my_recent_injects_principal_from_jwt(client: TestClient) -> None:
-    """AC5: ``principal`` filter is the operator's JWT subject — not from the URL."""
+    """AC5: the user id filter is the operator's JWT subject — not from the URL.
+
+    #4668: it is the exact ``principal_sub`` filter, not the partial
+    ``principal`` filter (which also matches names), so the route can
+    never return another person's rows.
+    """
     key = make_rsa_keypair("kid-A")
     token = _token(key, sub="op-42-jwt-sub")
     mock_query = AsyncMock(return_value=_empty_result())
@@ -548,7 +553,8 @@ def test_my_recent_injects_principal_from_jwt(client: TestClient) -> None:
         )
     assert resp.status_code == 200
     filters = mock_query.await_args.args[0]
-    assert filters.principal == "op-42-jwt-sub"
+    assert filters.principal_sub == "op-42-jwt-sub"
+    assert filters.principal is None
 
 
 def test_audit_query_row_includes_policy_decision(client: TestClient) -> None:

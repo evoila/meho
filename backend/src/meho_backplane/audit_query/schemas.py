@@ -94,7 +94,13 @@ class AuditQueryFilters(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     target: str | None = None
+    # Partial, case-insensitive match on the user id (``operator_sub``) or
+    # the name (``payload['principal_name']``) -- #4668.
     principal: str | None = None
+    # Exact match on the user id only. Not on the REST body or the MCP
+    # input schema: the "my recent" views set it from the caller's own
+    # token so the result never widens to another person's rows.
+    principal_sub: str | None = None
     op_id: str | None = None
     op_class: str | None = None
     result_status: str | None = None

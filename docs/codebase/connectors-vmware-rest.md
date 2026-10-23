@@ -2701,6 +2701,54 @@ source mechanics are proven by mock-transport unit tests
 (`test_connectors_vmware_rest_ovf_import.py` /
 `test_connectors_vmware_rest_library_download.py`).
 
+### Copy helper: vCenter download to a destination URL (`_transfer.py`, #4343)
+
+`_transfer.copy_files` copies files from a vCenter download (a content
+library download session, a host configuration download, a datastore file)
+to a destination URL that accepts HTTP `PUT`. It adds no operation. The
+content library export, the host configuration backup and restore, and the
+datastore file export use it. Other connectors keep their own upload code.
+
+The calling operation owns the vCenter side. It passes the source files
+(name, download URL, expected size when known), the destination
+(`Destination`: an `https://` base URL plus a Vault reference to its token),
+a keep-alive callback, a clean-up callback, and optionally a callback that
+lists and removes leftovers from an earlier run.
+
+Per file, one at a time:
+
+1. `HEAD` the final path: `401` / `403` stops (no write access); a file that
+   is there stops unless `overwrite` is set.
+2. `HEAD` `<name>.meho-partial`: a partial file from an earlier run is
+   deleted, or the new `PUT` replaces it.
+3. Stream the `GET` into a `PUT` of `<name>.meho-partial`, in chunks of at
+   most 8 MiB, counting bytes and computing SHA-256. It stops at the per-file
+   or total size limit, on a size that does not match, or on an error answer.
+4. `MOVE` the partial file to its final name. A destination without `MOVE`
+   (`405` / `501`) keeps the temporary name and the row says `partial`.
+
+Each result row has `name`, `size`, `sha256`, `destination_path` (a path, no
+token) and `status` (`done`, `partial`, `failed`). On a stop it raises
+`TransferError`, which carries the rows so far.
+
+**Credentials.** No redirect is followed: a `3xx` from the source or the
+destination stops the run, so the token goes only to the destination host and
+the vCenter session only to vCenter. The destination host passes the same
+address screen as a target host (`targets/ssrf_guard.py`, through the
+address-pinning transport). Rows, errors and logs never carry the
+vCenter download URL or a token; a transport error shows only its class name.
+
+**Clean-up.** The clean-up callback runs in a `finally` block on success,
+error and cancel. When the MEHO process dies, it cannot run. What is left, and
+how it goes away:
+
+- the vCenter download session expires after its own timeout;
+- a temporary library item or session carries a name from `meho_temp_name`
+  (prefix `meho-transfer-`); the next run of the same operation lists and
+  removes it through `remove_leftovers`;
+- a `.meho-partial` file at the destination is removed or replaced by the
+  next run. It never looks like a complete file.
+
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 
 Two more vim-only writes ride the #2893 substrate (Task E). Neither has a

@@ -220,15 +220,18 @@ def _op(
     user_tag: str,
     when_to_use: str,
     output_shape: str,
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"],
+    requires_approval: bool,
     parameter_schema: dict[str, Any] | None = None,
     extra_tags: tuple[str, ...] = (),
 ) -> RabbitMqOp:
-    """Build a :class:`RabbitMqOp` with the shared read-only defaults.
+    """Build a :class:`RabbitMqOp` with the shared read-only tags.
 
-    Keeps the op table declarative: every op is ``safety_level="safe"`` +
-    ``requires_approval=False`` and carries the ``read-only`` / ``rabbitmq``
-    tags plus the RabbitMQ *user tag* (``monitoring`` / ``policymaker`` /
-    ``administrator``) the surface requires.
+    Keeps the op table declarative: every op carries the ``read-only`` /
+    ``rabbitmq`` tags plus the RabbitMQ *user tag* (``monitoring`` /
+    ``policymaker`` / ``administrator``) the surface requires. Every op
+    states its own ``safety_level`` and ``requires_approval``; the helper
+    has no default for either, so a new op cannot inherit one by accident.
     """
     return RabbitMqOp(
         op_id=op_id,
@@ -240,8 +243,8 @@ def _op(
         group_key=group_key,
         tags=("read-only", "rabbitmq", user_tag, *extra_tags),
         llm_instructions={"when_to_use": when_to_use, "output_shape": output_shape},
-        safety_level="safe",
-        requires_approval=False,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
     )
 
 
@@ -261,6 +264,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-cluster",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call first for cluster identity, version, and aggregate health.",
         output_shape="An object: {rabbitmq_version, cluster_name, object_totals, message_stats}.",
     ),
@@ -278,6 +283,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-cluster",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to check per-node running state and resource alarms.",
         output_shape="An array of node objects: [{name, running, type, mem_alarm, ...}].",
     ),
@@ -294,6 +301,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-topology",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to enumerate exchanges and their types/durability.",
         output_shape="An array of exchange objects: [{name, vhost, type, durable, ...}].",
         parameter_schema=_VHOST_OPTIONAL_PARAMS,
@@ -311,6 +320,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-topology",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to inspect queue depth, consumer counts, and state.",
         output_shape="An array of queue objects: [{name, vhost, messages, consumers, state, ...}].",
         parameter_schema=_VHOST_OPTIONAL_PARAMS,
@@ -328,6 +339,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-topology",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to see how exchanges and queues are wired together.",
         output_shape="An array of binding objects: [{source, destination, routing_key, ...}].",
         parameter_schema=_VHOST_OPTIONAL_PARAMS,
@@ -344,6 +357,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-topology",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to list the virtual hosts on the broker.",
         output_shape="An array of vhost objects: [{name, description, messages, ...}].",
     ),
@@ -359,6 +374,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-connectivity",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to list open client connections and their users.",
         output_shape="An array of connection objects: [{name, user, vhost, state, ...}].",
     ),
@@ -374,6 +391,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-connectivity",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to inspect open channels and their consumer/ack counts.",
         output_shape="An array of channel objects: [{name, user, consumer_count, ...}].",
     ),
@@ -389,6 +408,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-connectivity",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to list active consumers and the queues they drain.",
         output_shape="An array of consumer objects: [{queue, consumer_tag, active, ...}].",
     ),
@@ -407,6 +428,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-federation",
         user_tag="policymaker",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to read how dynamic shovels are configured (URIs redacted).",
         output_shape="An array of shovel-parameter objects: [{name, vhost, value:{src-uri, ...}}].",
         parameter_schema=_VHOST_OPTIONAL_PARAMS,
@@ -426,6 +449,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-federation",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to check whether shovels are currently running.",
         output_shape="An array of shovel-status objects: [{name, vhost, state, ...}].",
         parameter_schema=_VHOST_OPTIONAL_PARAMS,
@@ -444,6 +469,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-federation",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to check federation link status across sites.",
         output_shape="An array of federation-link objects: [{upstream, vhost, status, ...}].",
         extra_tags=("federation",),
@@ -461,6 +488,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-federation",
         user_tag="policymaker",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to list all runtime parameters (URIs redacted).",
         output_shape="An array of parameter objects: [{component, name, vhost, value}].",
         extra_tags=("federation",),
@@ -478,6 +507,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-federation",
         user_tag="policymaker",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call to read the policies that govern queues/exchanges.",
         output_shape="An array of policy objects: [{name, vhost, pattern, definition}].",
         parameter_schema=_VHOST_OPTIONAL_PARAMS,
@@ -497,6 +528,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-definitions",
         user_tag="administrator",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use="Call for the full backup/audit snapshot of the broker (secrets redacted).",
         output_shape=(
             "An object: {rabbitmq_version, users, vhosts, permissions, parameters, "
@@ -519,6 +552,8 @@ RABBITMQ_OPS: tuple[RabbitMqOp, ...] = (
         ),
         group_key="rabbitmq-raw",
         user_tag="monitoring",
+        safety_level="safe",
+        requires_approval=False,
         when_to_use=(
             "Call only when no curated op covers the needed path; supply the full "
             "'/api/...' path. Non-GET/HEAD methods are refused."

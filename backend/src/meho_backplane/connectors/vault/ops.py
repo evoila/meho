@@ -1343,6 +1343,7 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
         "response_schema": _VAULT_KV_LIST_RESPONSE_SCHEMA,
         "tags": ["read-only", "credential-read"],
         "safety_level": "safe",
+        "requires_approval": False,
         "llm_instructions": _VAULT_KV_LIST_LLM_INSTRUCTIONS,
     },
     {
@@ -1406,6 +1407,7 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
         "response_schema": _VAULT_KV_VERSIONS_RESPONSE_SCHEMA,
         "tags": ["read-only", "metadata"],
         "safety_level": "safe",
+        "requires_approval": False,
         "llm_instructions": _VAULT_KV_VERSIONS_LLM_INSTRUCTIONS,
     },
     {

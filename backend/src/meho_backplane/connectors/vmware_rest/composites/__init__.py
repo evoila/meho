@@ -120,6 +120,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._license import license_assign_composite
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
@@ -230,6 +231,7 @@ __all__ = [
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "host_standard_portgroup_delete_composite",
+    "license_assign_composite",
     "namespace_create_composite",
     "namespace_delete_composite",
     "namespace_status_composite",

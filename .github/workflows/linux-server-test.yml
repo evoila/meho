@@ -2,7 +2,8 @@
 # Copyright (c) 2026 evoila Group
 
 # Tests of the form-2 scripts in deploy/linux-server/: the install script
-# (#4733) and the scripts that build and check the download (#4734).
+# (#4733), its host firewall (#4635), and the scripts that build and check
+# the download (#4734).
 #
 # shellcheck checks every shell script there: the *.sh files and any file
 # that starts with a shell shebang, so a script without an extension (for
@@ -12,6 +13,11 @@
 # stub registry tools and small image archives built in Python. They need
 # no root, no RKE2 and no network. One step checks that the upstream
 # local-path manifest the tests compare against is the real v0.0.37 file.
+#
+# The firewall tests also check the MEHO nftables file with the real nft
+# and kernel, in a new user and network namespace, so the runner's own
+# firewall stays as it is. MEHO_REQUIRE_NFT_CHECK=1 makes those tests fail,
+# not skip, when the runner cannot run them.
 #
 # The chart's values files are a trigger too: a test checks that every
 # image repository of the chart has a licence line for the download
@@ -96,5 +102,29 @@ jobs:
             https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml \
             | cmp - deploy/linux-server/tests/fixtures/local-path-storage-v0.0.37.yaml
 
+      - name: Install nftables for the firewall file check
+        # Same `sudo -n apt-get` pattern as the php-cli step in ci.yml. A
+        # failed index refresh is a warning: the install below fails on its
+        # own when the Ubuntu indexes are missing. nft is in /usr/sbin, which
+        # the PATH of a non-root runner user may not hold.
+        run: |
+          set -euo pipefail
+          if ! command -v nft >/dev/null 2>&1 && [ ! -x /usr/sbin/nft ]; then
+            if ! sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+              echo "::warning::apt-get update could not refresh every package index; installing nftables from the indexes that did download"
+            fi
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables
+          fi
+          case ":${PATH}:" in
+            *:/usr/sbin:*) ;;
+            *)
+              echo /usr/sbin >> "${GITHUB_PATH}"
+              PATH="/usr/sbin:${PATH}"
+              ;;
+          esac
+          nft --version
+
       - name: Run the unit tests
+        env:
+          MEHO_REQUIRE_NFT_CHECK: '1'
         run: python -m unittest discover -s deploy/linux-server/tests -v

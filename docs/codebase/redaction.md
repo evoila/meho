@@ -818,6 +818,17 @@ which commonly carry appliance credentials under a vendor-specific `id` no
 key-name heuristic or shape net can place — keeping the `id` and every
 non-secret field (network mappings, name, placement) intact.
 
+A connector can also mask a body itself before the span is recorded.
+`HttpConnector.trace_response_body(response)` returns the body the trace
+records in place of the raw bytes, or `None` for the raw bytes (the
+default). The shared engine still runs on what it returns. This is for a
+vendor answer that carries a secret in a field the shape net cannot place
+and the op family does not exclude: the HCX connector masks every
+secret-named field (`password`, `vcPassword`, `token`, ...) of every
+answer this way, so a stored pairing password never reaches the trace
+(`docs/codebase/connectors-hcx.md`). The hook runs only while a trace is
+being captured.
+
 **F2.3 — hard-excluded op families** (`families.py`). Some op families
 carry secrets *as their body* — credential reads, session mints, token
 issuance, password resets, key material — so their bodies are **never

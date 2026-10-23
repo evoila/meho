@@ -6,10 +6,11 @@
 Importing this package registers :class:`HcxConnector` against the v2
 connector registry under ``(product="hcx", version="9.0",
 impl_id="hcx-rest")`` plus the product wildcard, and queues the typed-op
-registrar so ``hcx.api_file.get`` and the eight reads (``hcx.about`` and
-the site pairing, service mesh, appliance, job, alert and inventory reads)
-land in ``endpoint_descriptor`` before the first dispatch. The class pin tracks the VCF 9 line; the
-``>=4.7,<10.0`` range keeps HCX 4.x dispatchable through the same class.
+registrar so ``hcx.api_file.get`` and the reads (``hcx.about`` and the
+site pairing, service mesh, diagnostics, appliance, job, alert and
+inventory reads) land in ``endpoint_descriptor`` before the first
+dispatch. The class pin tracks the VCF 9 line; the ``>=4.7,<10.0`` range
+keeps HCX 4.x dispatchable through the same class.
 """
 
 from typing import Final

@@ -4,9 +4,11 @@
 """Typed-op metadata + registrar for :class:`HcxConnector`.
 
 ``hcx.api_file.get`` is defined here (its body lives in
-:mod:`meho_backplane.connectors.hcx.api_file`); the eight reads of the
-manager, site pairings, service mesh, jobs, alerts and inventory are
-defined in :mod:`meho_backplane.connectors.hcx.read_ops`. The dataclass +
+:mod:`meho_backplane.connectors.hcx.api_file`); the reads of the manager,
+site pairings, service mesh, jobs, alerts and inventory are defined in
+:mod:`meho_backplane.connectors.hcx.read_ops`,
+:mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
+:mod:`meho_backplane.connectors.hcx.inventory_ops`. The dataclass +
 tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
@@ -14,6 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.hcx.diagnostics_ops import HCX_DIAGNOSTICS_OPS
+from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
 from meho_backplane.connectors.hcx.op_types import HcxTypedOp
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS, HCX_READ_WHEN_TO_USE_BY_GROUP
 
@@ -159,7 +163,12 @@ _API_FILE_GET = HcxTypedOp(
     },
 )
 
-HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (_API_FILE_GET, *HCX_READ_OPS)
+HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
+    _API_FILE_GET,
+    *HCX_READ_OPS,
+    *HCX_DIAGNOSTICS_OPS,
+    *HCX_INVENTORY_OPS,
+)
 
 
 async def register_hcx_typed_operations(

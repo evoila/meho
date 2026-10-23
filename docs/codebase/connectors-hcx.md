@@ -14,21 +14,24 @@ Today the connector ships:
 - a **version helper** that reads the Manager version,
 - the **read** `hcx.api_file.get`, which fetches the API documentation
   that a running HCX Manager serves, and
-- **eight reads** of the usual work: the Manager version and role, site
+- **thirteen reads** of the usual work: the Manager version and role, site
   pairings, service meshes, appliances and their tunnels, the service
-  mesh diagnostics, jobs, alerts and the inventory for a migration.
+  mesh diagnostics (start a run, list the runs, read the findings), jobs,
+  alerts and the inventory for a migration (resource containers, the
+  compute tree, datastores and networks).
 
 Why `hcx.api_file.get` came first: Broadcom publishes no file and no
 versioned reference of the main HCX API (`/hybridity/api/...`). Only a
 running HCX Manager serves its documentation. This read is how the vendor
 API files get pinned.
 
-Where the paths of the eight reads come from: no HCX API file is pinned
-yet. The paths come from Broadcom's public reference "HCX Workload
-Migration APIs", which names no HCX version, and for
-`POST /hybridity/api/service/inventory/cloud/list` from VMware's own
-Terraform provider for HCX. The reconcile lane checks them once the files
-are pinned (see Known issues).
+Where the paths of the reads come from: no HCX API file is pinned yet.
+The paths come from Broadcom's public reference "HCX Workload Migration
+APIs", which names no HCX version, and for the calls under
+`/hybridity/api/service/inventory/` other than `resourcecontainer/list`
+(`cloud/list`, `vc/list`, `vc/datastores/query`, `networks`) from VMware's
+own Terraform provider for HCX. The reconcile lane checks them once the
+files are pinned (see Known issues).
 
 Package: `backend/src/meho_backplane/connectors/hcx/`.
 
@@ -40,9 +43,14 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.service_mesh.list` | The service meshes with their state, services, status and last task. | `GET /hybridity/api/interconnect/serviceMesh` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.appliance.list` | The interconnect, network extension and other appliances: state, overall, transport and tunnel status, tunnel counts, version and build. | `GET /hybridity/api/interconnect/appliances` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.service_mesh.diagnose` | Start the diagnostics of one service mesh and return the started task. It changes no configuration. | `POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnose` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.service_mesh.diagnostics.list` | The diagnostics runs of one service mesh: run id, status, message, times, who started it, the appliances tested. Optional status filter. | `POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/query` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.service_mesh.diagnostics.get` | The findings of one diagnostics run (`details`), with its status, message, times and the Manager's warnings and errors. | `GET /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/{serviceMeshDiagId}` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.job.get` | One job: done, failed, cancelled, progress and times. | `GET /hybridity/api/jobs/{jobid}` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.alert.list` | The alerts, with an optional filter by severity, state, module, category or object. | `POST /hybridity/api/alerts?action=query` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.list` | The resource containers (vCenter instances) of the local and the paired sites, for planning a migration. | `POST /hybridity/api/service/inventory/resourcecontainer/list` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.inventory.compute.list` | The vCenter instances HCX knows with their datacenters and clusters, as a flat list with parent ids. | `POST /hybridity/api/service/inventory/vc/list` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.inventory.datastore.list` | The datastores of one or more clusters of a vCenter instance. | `POST /hybridity/api/service/inventory/vc/datastores/query` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.inventory.network.list` | The networks (port groups, segments) of one site. | `POST /hybridity/api/service/inventory/networks` | read (`safe`, no approval) | 4.11, 9.x |
 
 Every operation in the table exists on every version the connector
 covers, so none stops early with a version message.
@@ -65,12 +73,15 @@ covers, so none stops early with a version message.
 - `hcx_api_file_get_impl`, `check_path`, `split_parts` (`api_file.py`) --
   the read's body, the path rule and the part splitter.
 - `HCX_READ_OPS`, `HCX_READ_WHEN_TO_USE_BY_GROUP` (`read_ops.py`) -- the
-  metadata and group texts of the eight reads. `HcxTypedOp` lives in
-  `op_types.py`, so both op modules share it.
-- `typed_reads.py` -- the bodies of the eight reads, `VENDOR_CALLS` (every
-  `(method, path)` they send; the reconcile lane checks them),
-  `rows_of` (takes the rows out of `items` or `data.items`) and
-  `redact_secrets`.
+  metadata of the first eight reads and the group texts of all of them.
+  `HCX_DIAGNOSTICS_OPS` (`diagnostics_ops.py`) and `HCX_INVENTORY_OPS`
+  (`inventory_ops.py`) hold the other five. `HcxTypedOp`, the group keys
+  and the schema helpers live in `op_types.py`, so every op module shares
+  them.
+- `typed_reads.py` -- the bodies of the thirteen reads, `VENDOR_CALLS`
+  (every `(method, path)` they send; the reconcile lane checks them),
+  `rows_of` (takes the rows out of `items` or `data.items`),
+  `flatten_inventory_tree` and `redact_secrets`.
 
 ## Control flow
 
@@ -199,16 +210,22 @@ and the answer's scalars. The read measures that record with
 record does not fit stops with an error that names the file's size and
 the record's size. The read never returns a cut file.
 
-### The eight reads
+### The thirteen reads
+
+The op metadata lives in three modules: `read_ops.py` (the first eight
+reads), `diagnostics_ops.py` (the two diagnostics reads) and
+`inventory_ops.py` (the three inventory reads below the containers).
+`op_types.py` holds the shared record and schema helpers. The bodies of
+all thirteen are in `typed_reads.py`.
 
 Groups (the text the agent reads in `list_operation_groups`):
 
 | Group | Reads |
 |---|---|
 | `hcx-manager` | `hcx.about`, `hcx.site_pairing.list` |
-| `hcx-service-mesh` | `hcx.service_mesh.list`, `hcx.appliance.list`, `hcx.service_mesh.diagnose` |
+| `hcx-service-mesh` | `hcx.service_mesh.list`, `hcx.appliance.list`, `hcx.service_mesh.diagnose`, `hcx.service_mesh.diagnostics.list`, `hcx.service_mesh.diagnostics.get` |
 | `hcx-jobs-alerts` | `hcx.job.get`, `hcx.alert.list` |
-| `hcx-inventory` | `hcx.inventory.list` |
+| `hcx-inventory` | `hcx.inventory.list`, `hcx.inventory.compute.list`, `hcx.inventory.datastore.list`, `hcx.inventory.network.list` |
 
 What each read sends and returns:
 
@@ -222,7 +239,8 @@ What each read sends and returns:
   version helper, `hcx.about` raises a vendor error, so a `401` makes a
   new login.
 - The list reads (`hcx.site_pairing.list`, `hcx.service_mesh.list`,
-  `hcx.appliance.list`, `hcx.alert.list`, `hcx.inventory.list`) return
+  `hcx.appliance.list`, `hcx.service_mesh.diagnostics.list`,
+  `hcx.alert.list` and the four inventory reads) return
   `{"items": [...]}`: one row per vendor object, taken out of the vendor
   envelope (`items` or `data.items`). The vendor fields stay. MEHO stores
   a long list behind a result handle; the agent reads it with
@@ -234,8 +252,17 @@ What each read sends and returns:
   (`major.minor.patch`), `build` and `update_available` to each row.
 - `hcx.service_mesh.diagnose` takes `service_mesh_id` and sends an empty
   JSON body. The Manager answers `202` with the task id. The read returns
-  `service_mesh_id`, `interconnect_task_id`, `warnings` and `errors`. The
-  run's progress shows as the mesh's last task in `hcx.service_mesh.list`.
+  `service_mesh_id`, `interconnect_task_id`, `warnings` and `errors`.
+- `hcx.service_mesh.diagnostics.list` takes `service_mesh_id` and an
+  optional `status` list. It sends `{"filter": {}}`, or
+  `{"filter": {"status": [...]}}`, and returns one row per run: `diagId`,
+  `serviceMeshId`, `status`, `message`, `reason`, `triggeredBy`,
+  `applianceIds`, `startTime`, `endTime`. The flow after a diagnose call:
+  list the runs, take the newest, and when its status says it is done,
+  read it.
+- `hcx.service_mesh.diagnostics.get` takes `service_mesh_id` and `diag_id`
+  and returns the run's fields flat, plus `details` (the findings, as the
+  Manager returns them), `warnings` and `errors`.
 - `hcx.job.get` takes `job_id` and returns the vendor job object
   (`jobId`, `isDone`, `didFail`, `isCancelled`, `isRolledBack`,
   `percentComplete`, `startTime`, `endTime`, ...).
@@ -245,6 +272,19 @@ What each read sends and returns:
 - `hcx.inventory.list` takes an optional `site`: `local` sends
   `{"filter": {"cloud": {"local": true, "remote": false}}}`, `remote` the
   opposite, and no `site` sends `{}`.
+- `hcx.inventory.compute.list` sends `{}` and gets a tree: one vCenter
+  instance per item, its datacenters as `children`, their clusters as
+  `children` again. The read flattens it (`flatten_inventory_tree`): one
+  row per node, parents before children, without `children`, with
+  `parent_id` (the parent's `entity_id`) and `depth` (0, 1, 2). The vendor
+  fields are `entity_id`, `name`, `entityType`, `vcenter_instanceId`.
+- `hcx.inventory.datastore.list` takes `vcenter_id` and `cluster_ids` and
+  sends `{"filter": {"vcenter_instanceId": ..., "computeType":
+  "ClusterComputeResource", "computeIds": [...]}}`. Rows: `id`, `name`,
+  `entity_type`.
+- `hcx.inventory.network.list` takes `endpoint_id` and sends
+  `{"filter": {"cloud": {"endpointId": ...}}}`. Rows: `entity_id`, `name`,
+  `entityType`.
 
 Secrets: every read replaces a field whose name says password, secret,
 token, authorization, private key or licence key (any case, with or
@@ -252,6 +292,15 @@ without `_` or `-`) with `***REDACTED***`, at any depth. A name that ends
 with one of these words (for example `vcPassword`) counts too. The key stays,
 so the shape does not change. The dispatcher's own redaction runs after
 that.
+
+The same rule protects the flight-recorder trace. The shared trace
+redaction knows secrets by shape (a bearer token, a key) and by op family
+(a login); a stored pairing password in a `cloudConfigs` row is neither.
+So `HcxConnector.trace_response_body` parses every vendor answer and masks
+the secret-named fields before `record_vendor_call` stores the span (the
+hook is `HttpConnector.trace_response_body`, see
+`docs/codebase/redaction.md`). A test dispatches `hcx.site_pairing.list`
+with capture on and checks the stored span.
 
 ### Shutdown
 
@@ -272,7 +321,10 @@ is sent.
 - `operations/typed_register.py`: the typed-op registrar.
 - Broadcom's "HCX Workload Migration APIs" reference
   (https://developer.broadcom.com/xapis/hcx-workload-migration-apis/latest/):
-  the paths and fields of the eight reads.
+  the paths and fields of the reads.
+- VMware's Terraform provider for HCX (`hcx/utils.go` in
+  https://github.com/vmware/terraform-provider-hcx): the inventory calls
+  `cloud/list`, `vc/list`, `vc/datastores/query` and `networks`.
 - `settings.py`: the result-handle limits the read checks against.
 
 ## Known issues
@@ -280,18 +332,19 @@ is sent.
 - The HCX API files are not pinned yet, so the reconcile lane
   (`tests/test_connectors_hcx_spec_reconcile.py`) skips its served check
   until the shelf holds `hcx-4.11/`, `hcx-9.0/` and `hcx-9.1/`. The
-  manifest-pin test runs always and lists every call of the eight reads.
+  manifest-pin test runs always and lists every call of the reads.
   When the files are pinned, add their folders to the spec-shelf sparse
   checkout and the required-file list in `.github/workflows/ci.yml`.
-- `hcx.inventory.list` returns the resource containers (vCenter
-  instances) of each site, not single VMs, networks or datastores: that is
-  what `resourcecontainer/list` returns in the vendor reference. A read of
-  the VMs, networks and datastores of a container needs another call,
-  checked against the pinned file.
-- `hcx.service_mesh.diagnose` returns the started task, not the
-  diagnostics findings. The vendor reference has a separate diagnostics
-  summary call (`POST .../serviceMesh/{serviceMeshId}/diagnostics/query`);
-  it is not a MEHO read yet.
+- There is no read of single virtual machines yet. Neither Broadcom's
+  public reference nor VMware's Terraform provider for HCX names a call
+  that lists the VMs of a site (the reference's `vms` calls list only the
+  VMs on an extended network). The VM read waits for the pinned HCX API
+  file, which a running Manager serves. Folders are not in the compute
+  tree the Manager returns (vCenter, datacenters, clusters).
+- The inventory calls other than `resourcecontainer/list` and the
+  diagnostics calls come from the Terraform provider and the vendor
+  reference, with no HCX version named. The datastore query always sends
+  `computeType: ClusterComputeResource`, the only shape the provider uses.
 - The vendor reference writes the job path as `/hybridity/api/jobs/{jobid}`
   (lower-case `id`); the reconcile lane uses that spelling.
 - `role` in `hcx.about` is derived from `systemType`. The vendor upgrade
@@ -308,7 +361,7 @@ is sent.
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
-  #4545 (the eight reads that build on it); #4395 (the same read for NSX);
+  #4545 (the reads that build on it); #4395 (the same read for NSX);
   #4505 (the same shape for Site Recovery Manager).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one

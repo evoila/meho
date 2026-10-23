@@ -1,78 +1,65 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Metadata of the eight HCX reads (the bodies live in ``typed_reads``).
+"""Metadata of the first eight HCX reads (the bodies live in ``typed_reads``).
 
 ``hcx.about``, ``hcx.site_pairing.list``, ``hcx.service_mesh.list``,
 ``hcx.appliance.list``, ``hcx.service_mesh.diagnose``, ``hcx.job.get``,
 ``hcx.alert.list`` and ``hcx.inventory.list``. All are ``safe`` and need
-no approval. :mod:`meho_backplane.connectors.hcx.typed_ops` adds them to
+no approval. The diagnostics reads live in ``diagnostics_ops`` and the
+other inventory reads in ``inventory_ops``.
+:mod:`meho_backplane.connectors.hcx.typed_ops` adds them all to
 ``HCX_TYPED_OPS`` and registers them at start-up.
 """
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Final
 
-from meho_backplane.connectors.hcx.op_types import HcxTypedOp
+from meho_backplane.connectors.hcx.op_types import (
+    GROUP_INVENTORY,
+    GROUP_JOBS_ALERTS,
+    GROUP_MANAGER,
+    GROUP_SERVICE_MESH,
+    NO_PARAMS_SCHEMA,
+    HcxTypedOp,
+    list_response_schema,
+    string_schema,
+)
 
 __all__ = ["HCX_READ_OPS", "HCX_READ_WHEN_TO_USE_BY_GROUP"]
 
-_GROUP_MANAGER = "hcx-manager"
-_GROUP_SERVICE_MESH = "hcx-service-mesh"
-_GROUP_JOBS_ALERTS = "hcx-jobs-alerts"
-_GROUP_INVENTORY = "hcx-inventory"
-
-#: Group texts: which reads each group holds, in plain words.
+#: Group texts: which reads each group holds, in plain words. The service
+#: mesh and inventory groups also hold the reads of ``diagnostics_ops`` and
+#: ``inventory_ops``.
 HCX_READ_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
-    _GROUP_MANAGER: (
+    GROUP_MANAGER: (
         "Use to read the HCX Manager itself and its partner sites: the Manager "
         "version, build and role, connector or cloud (hcx.about), and the site "
         "pairings with the paired site's address (hcx.site_pairing.list)."
     ),
-    _GROUP_SERVICE_MESH: (
+    GROUP_SERVICE_MESH: (
         "Use to check the HCX service meshes and their appliances: the service "
         "meshes with their state and last task (hcx.service_mesh.list), the "
         "interconnect, network extension and other appliances with version, "
-        "state and tunnel state (hcx.appliance.list), and a diagnostics run of "
-        "one service mesh (hcx.service_mesh.diagnose)."
+        "state and tunnel state (hcx.appliance.list), and the diagnostics of one "
+        "service mesh: start a run (hcx.service_mesh.diagnose), list the runs "
+        "with their status (hcx.service_mesh.diagnostics.list) and read the "
+        "findings of one run (hcx.service_mesh.diagnostics.get)."
     ),
-    _GROUP_JOBS_ALERTS: (
+    GROUP_JOBS_ALERTS: (
         "Use to follow HCX work and problems: one job with its state, progress "
         "and failure flag (hcx.job.get), and the HCX alerts, with an optional "
         "filter by severity, state, module, category or object (hcx.alert.list)."
     ),
-    _GROUP_INVENTORY: (
+    GROUP_INVENTORY: (
         "Use to plan a migration: the resource containers (vCenter instances) "
-        "of the local and the paired sites, with the site each one belongs to "
-        "(hcx.inventory.list)."
+        "of the local and the paired sites (hcx.inventory.list), the vCenter "
+        "instances with their datacenters and clusters (hcx.inventory.compute.list), "
+        "the datastores of a cluster (hcx.inventory.datastore.list) and the "
+        "networks of a site (hcx.inventory.network.list)."
     ),
 }
-
-_NO_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-    "examples": [{}],
-}
-
-
-def _string(description: str) -> dict[str, Any]:
-    return {"type": ["string", "null"], "description": description}
-
-
-def _list_response(description: str, row_properties: dict[str, Any]) -> dict[str, Any]:
-    """A ``{"items": [row, ...]}`` response schema."""
-    return {
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "description": description,
-                "items": {"type": "object", "properties": row_properties},
-            }
-        },
-    }
 
 
 _ABOUT = HcxTypedOp(
@@ -83,26 +70,28 @@ _ABOUT = HcxTypedOp(
         "Returns the HCX Manager version and build, its system type and role "
         "(connector or cloud), and the id, name, type and address of its local site."
     ),
-    parameter_schema=_NO_PARAMS,
+    parameter_schema=NO_PARAMS_SCHEMA,
     response_schema={
         "type": "object",
         "properties": {
-            "version": _string("HCX Manager version as the Manager reports it."),
-            "build": _string("Build number, when the Manager reports one."),
-            "system_type": _string("Vendor system type of the Manager, for example 'HCX Cloud'."),
-            "system_name": _string("Name of the Manager as the Manager reports it."),
+            "version": string_schema("HCX Manager version as the Manager reports it."),
+            "build": string_schema("Build number, when the Manager reports one."),
+            "system_type": string_schema(
+                "Vendor system type of the Manager, for example 'HCX Cloud'."
+            ),
+            "system_name": string_schema("Name of the Manager as the Manager reports it."),
             "role": {
                 "type": "string",
                 "enum": ["connector", "cloud", "unknown"],
                 "description": "connector (the source side), cloud (the target side) or unknown.",
             },
-            "local_endpoint_id": _string("Id of the Manager's local site."),
-            "local_endpoint_name": _string("Name of the local site."),
-            "local_endpoint_type": _string("Vendor endpoint type of the local site."),
-            "local_url": _string("Address of the local site."),
+            "local_endpoint_id": string_schema("Id of the Manager's local site."),
+            "local_endpoint_name": string_schema("Name of the local site."),
+            "local_endpoint_type": string_schema("Vendor endpoint type of the local site."),
+            "local_url": string_schema("Address of the local site."),
         },
     },
-    group_key=_GROUP_MANAGER,
+    group_key=GROUP_MANAGER,
     tags=("read-only", "hcx", "version", "manager"),
     safety_level="safe",
     requires_approval=False,
@@ -131,17 +120,17 @@ _SITE_PAIRING_LIST = HcxTypedOp(
         "Returns one row per site pairing: the remote site's endpoint id, cloud type, "
         "address and the user the pairing logs in with. Passwords never come back."
     ),
-    parameter_schema=_NO_PARAMS,
-    response_schema=_list_response(
+    parameter_schema=NO_PARAMS_SCHEMA,
+    response_schema=list_response_schema(
         "One row per site pairing.",
         {
-            "endpointId": _string("Id of the paired site."),
-            "cloudType": _string("Vendor cloud type of the paired site."),
-            "url": _string("Address of the paired HCX Manager."),
-            "username": _string("User the pairing logs in with."),
+            "endpointId": string_schema("Id of the paired site."),
+            "cloudType": string_schema("Vendor cloud type of the paired site."),
+            "url": string_schema("Address of the paired HCX Manager."),
+            "username": string_schema("User the pairing logs in with."),
         },
     ),
-    group_key=_GROUP_MANAGER,
+    group_key=GROUP_MANAGER,
     tags=("read-only", "hcx", "site-pairing"),
     safety_level="safe",
     requires_approval=False,
@@ -166,13 +155,13 @@ _SERVICE_MESH_LIST = HcxTypedOp(
         "Returns one row per service mesh: id, name, state, the services and their "
         "status, the compute profiles and the last task with its status."
     ),
-    parameter_schema=_NO_PARAMS,
-    response_schema=_list_response(
+    parameter_schema=NO_PARAMS_SCHEMA,
+    response_schema=list_response_schema(
         "One row per service mesh.",
         {
-            "serviceMeshId": _string("Id of the service mesh."),
-            "name": _string("Name of the service mesh."),
-            "state": _string("Vendor state of the service mesh."),
+            "serviceMeshId": string_schema("Id of the service mesh."),
+            "name": string_schema("Name of the service mesh."),
+            "state": string_schema("Vendor state of the service mesh."),
             "updateAvailable": {
                 "type": ["boolean", "null"],
                 "description": "True when a newer appliance version is available.",
@@ -182,19 +171,21 @@ _SERVICE_MESH_LIST = HcxTypedOp(
                 "description": "The HCX services the mesh runs.",
                 "items": {
                     "type": "object",
-                    "properties": {"name": _string("Service name.")},
+                    "properties": {"name": string_schema("Service name.")},
                 },
             },
             "status": {
                 "type": ["object", "null"],
                 "description": "Status per service: services[] with serviceName, status, reason.",
             },
-            "last_task_id": _string("Id of the mesh's last task (interconnect task)."),
-            "last_task_type": _string("Type of the last task, for example a diagnostics run."),
-            "last_task_status": _string("Status of the last task."),
+            "last_task_id": string_schema("Id of the mesh's last task (interconnect task)."),
+            "last_task_type": string_schema(
+                "Type of the last task, for example a diagnostics run."
+            ),
+            "last_task_status": string_schema("Status of the last task."),
         },
     ),
-    group_key=_GROUP_SERVICE_MESH,
+    group_key=GROUP_SERVICE_MESH,
     tags=("read-only", "hcx", "service-mesh"),
     safety_level="safe",
     requires_approval=False,
@@ -223,18 +214,18 @@ _APPLIANCE_LIST = HcxTypedOp(
         "Returns one row per appliance: id, type, name, service mesh, state, overall, "
         "transport and tunnel status, active and total tunnels, version and build."
     ),
-    parameter_schema=_NO_PARAMS,
-    response_schema=_list_response(
+    parameter_schema=NO_PARAMS_SCHEMA,
+    response_schema=list_response_schema(
         "One row per appliance.",
         {
-            "applianceId": _string("Id of the appliance."),
-            "applianceType": _string("Vendor appliance type, for example HCX-NET-EXT."),
-            "applianceName": _string("Name of the appliance."),
-            "serviceMeshId": _string("Id of the service mesh the appliance belongs to."),
-            "state": _string("Appliance state (applianceStatus.state)."),
-            "overall_status": _string("Overall status of the appliance."),
-            "transport_status": _string("Overall transport status."),
-            "tunnel_status": _string("Overall status of the encrypted tunnels."),
+            "applianceId": string_schema("Id of the appliance."),
+            "applianceType": string_schema("Vendor appliance type, for example HCX-NET-EXT."),
+            "applianceName": string_schema("Name of the appliance."),
+            "serviceMeshId": string_schema("Id of the service mesh the appliance belongs to."),
+            "state": string_schema("Appliance state (applianceStatus.state)."),
+            "overall_status": string_schema("Overall status of the appliance."),
+            "transport_status": string_schema("Overall transport status."),
+            "tunnel_status": string_schema("Overall status of the encrypted tunnels."),
             "tunnels_active": {
                 "type": ["integer", "null"],
                 "description": "Number of active encrypted tunnels.",
@@ -243,7 +234,7 @@ _APPLIANCE_LIST = HcxTypedOp(
                 "type": ["integer", "null"],
                 "description": "Number of encrypted tunnels.",
             },
-            "version": _string("Appliance version as major.minor.patch."),
+            "version": string_schema("Appliance version as major.minor.patch."),
             "build": {
                 "type": ["integer", "string", "null"],
                 "description": "Appliance build number.",
@@ -254,7 +245,7 @@ _APPLIANCE_LIST = HcxTypedOp(
             },
         },
     ),
-    group_key=_GROUP_SERVICE_MESH,
+    group_key=GROUP_SERVICE_MESH,
     tags=("read-only", "hcx", "appliance", "tunnel"),
     safety_level="safe",
     requires_approval=False,
@@ -282,7 +273,7 @@ _SERVICE_MESH_DIAGNOSE = HcxTypedOp(
     summary="Start the diagnostics of one HCX service mesh and return the started task.",
     description=(
         "Starts the HCX diagnostics run of one service mesh. It changes no configuration. "
-        "Returns the task id; the run's status shows as the mesh's last task."
+        "Returns the task id. Read the run and its findings with the diagnostics reads."
     ),
     parameter_schema={
         "type": "object",
@@ -301,13 +292,13 @@ _SERVICE_MESH_DIAGNOSE = HcxTypedOp(
         "type": "object",
         "properties": {
             "service_mesh_id": {"type": "string", "description": "Id of the service mesh."},
-            "interconnect_task_id": _string("Id of the started diagnostics task."),
+            "interconnect_task_id": string_schema("Id of the started diagnostics task."),
             "warnings": {
                 "type": "array",
                 "description": "Warnings the Manager returned.",
                 "items": {
                     "type": "object",
-                    "properties": {"message": _string("Warning text.")},
+                    "properties": {"message": string_schema("Warning text.")},
                 },
             },
             "errors": {
@@ -316,14 +307,14 @@ _SERVICE_MESH_DIAGNOSE = HcxTypedOp(
                 "items": {
                     "type": "object",
                     "properties": {
-                        "code": _string("Vendor error code."),
-                        "message": _string("Error text."),
+                        "code": string_schema("Vendor error code."),
+                        "message": string_schema("Error text."),
                     },
                 },
             },
         },
     },
-    group_key=_GROUP_SERVICE_MESH,
+    group_key=GROUP_SERVICE_MESH,
     tags=("read-only", "hcx", "service-mesh", "diagnostics"),
     safety_level="safe",
     requires_approval=False,
@@ -334,9 +325,10 @@ _SERVICE_MESH_DIAGNOSE = HcxTypedOp(
         ),
         "output_shape": "{service_mesh_id, interconnect_task_id, warnings, errors}.",
         "next_step": (
-            "Wait a moment, then call hcx.service_mesh.list: the mesh's last_task_id "
-            "equals interconnect_task_id and last_task_status shows the result. If "
-            "errors is not empty, report the messages."
+            "Wait a moment, then call hcx.service_mesh.diagnostics.list with the same "
+            "service_mesh_id: the newest run (highest startTime) is this one; its status "
+            "says whether it is done. Then call hcx.service_mesh.diagnostics.get with its "
+            "diagId for the findings. If errors is not empty, report the messages."
         ),
     },
 )
@@ -365,8 +357,8 @@ _JOB_GET = HcxTypedOp(
     response_schema={
         "type": "object",
         "properties": {
-            "jobId": _string("Id of the job."),
-            "username": _string("User who started the job."),
+            "jobId": string_schema("Id of the job."),
+            "username": string_schema("User who started the job."),
             "isQueued": {"type": ["boolean", "null"], "description": "True while the job waits."},
             "isDone": {"type": ["boolean", "null"], "description": "True when the job ended."},
             "didFail": {"type": ["boolean", "null"], "description": "True when the job failed."},
@@ -392,7 +384,7 @@ _JOB_GET = HcxTypedOp(
             },
         },
     },
-    group_key=_GROUP_JOBS_ALERTS,
+    group_key=GROUP_JOBS_ALERTS,
     tags=("read-only", "hcx", "job"),
     safety_level="safe",
     requires_approval=False,
@@ -437,17 +429,17 @@ _ALERT_LIST = HcxTypedOp(
         "additionalProperties": False,
         "examples": [{}, {"severity": ["<severity>"], "entity_id": "<object-id>"}],
     },
-    response_schema=_list_response(
+    response_schema=list_response_schema(
         "One row per alert.",
         {
-            "alarm_id": _string("Id of the alert."),
-            "severity": _string("Severity of the alert."),
-            "state": _string("State of the alert."),
-            "module": _string("HCX module that raised the alert."),
-            "category": _string("Category of the alert."),
-            "message": _string("Alert text."),
-            "eventCode": _string("Vendor event code."),
-            "creation_date": _string("When the alert was raised."),
+            "alarm_id": string_schema("Id of the alert."),
+            "severity": string_schema("Severity of the alert."),
+            "state": string_schema("State of the alert."),
+            "module": string_schema("HCX module that raised the alert."),
+            "category": string_schema("Category of the alert."),
+            "message": string_schema("Alert text."),
+            "eventCode": string_schema("Vendor event code."),
+            "creation_date": string_schema("When the alert was raised."),
             "isAlertAcknowledged": {
                 "type": ["boolean", "null"],
                 "description": "True when someone acknowledged the alert.",
@@ -458,7 +450,7 @@ _ALERT_LIST = HcxTypedOp(
             },
         },
     ),
-    group_key=_GROUP_JOBS_ALERTS,
+    group_key=GROUP_JOBS_ALERTS,
     tags=("read-only", "hcx", "alert"),
     safety_level="safe",
     requires_approval=False,
@@ -503,24 +495,24 @@ _INVENTORY_LIST = HcxTypedOp(
         "additionalProperties": False,
         "examples": [{}, {"site": "remote"}],
     },
-    response_schema=_list_response(
+    response_schema=list_response_schema(
         "One row per resource container.",
         {
-            "resourceId": _string("Id of the resource container."),
-            "resourceName": _string("Name of the resource container."),
-            "resourceType": _string("Vendor type of the resource container."),
-            "name": _string("Name as HCX shows it."),
-            "version": _string("Version of the resource container, for example of vCenter."),
-            "vcuuid": _string("Id of the vCenter instance."),
-            "endpointId": _string("Id of the site the container belongs to."),
-            "endpointName": _string("Name of that site."),
+            "resourceId": string_schema("Id of the resource container."),
+            "resourceName": string_schema("Name of the resource container."),
+            "resourceType": string_schema("Vendor type of the resource container."),
+            "name": string_schema("Name as HCX shows it."),
+            "version": string_schema("Version of the resource container, for example of vCenter."),
+            "vcuuid": string_schema("Id of the vCenter instance."),
+            "endpointId": string_schema("Id of the site the container belongs to."),
+            "endpointName": string_schema("Name of that site."),
             "isLocal": {
                 "type": ["boolean", "null"],
                 "description": "True when the container belongs to the local site.",
             },
         },
     ),
-    group_key=_GROUP_INVENTORY,
+    group_key=GROUP_INVENTORY,
     tags=("read-only", "hcx", "inventory", "migration"),
     safety_level="safe",
     requires_approval=False,

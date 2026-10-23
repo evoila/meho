@@ -73,9 +73,14 @@ def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/hybridity/api/interconnect/serviceMesh",
         "GET:/hybridity/api/interconnect/appliances",
         "POST:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnose",
+        "POST:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/query",
+        "GET:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/{serviceMeshDiagId}",
         "GET:/hybridity/api/jobs/{jobid}",
         "POST:/hybridity/api/alerts",
         "POST:/hybridity/api/service/inventory/resourcecontainer/list",
+        "POST:/hybridity/api/service/inventory/vc/list",
+        "POST:/hybridity/api/service/inventory/vc/datastores/query",
+        "POST:/hybridity/api/service/inventory/networks",
     }
     assert {"GET:/hybridity/docs"} == _DOCUMENTATION_OP_IDS
 

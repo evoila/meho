@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The eight HCX reads: manager, site pairings, service mesh, jobs, alerts, inventory.
+"""The HCX reads: manager, site pairings, service mesh and its diagnostics, jobs, alerts, inventory.
 
 Each function is the body of a thin shim method on
 :class:`~meho_backplane.connectors.hcx.connector.HcxConnector`; the op
-metadata lives in :mod:`meho_backplane.connectors.hcx.read_ops`.
+metadata lives in :mod:`meho_backplane.connectors.hcx.read_ops`,
+:mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
+:mod:`meho_backplane.connectors.hcx.inventory_ops`.
 
 Every call goes through the connector's own login (the
 ``x-hm-authorization`` token). A ``401`` is raised as
@@ -17,12 +19,16 @@ taken out of the vendor envelope (``items`` or ``data.items``). MEHO then
 stores a long list behind a result handle. Rows keep the vendor fields;
 any field whose name says password, secret, token, private key or licence
 key is replaced with :data:`REDACTED` before the row leaves the connector.
+The connector masks the same fields before the flight recorder records a
+vendor answer (:meth:`HcxConnector.trace_response_body`), so a stored
+trace never holds them either.
 
 The paths come from the vendor reference "HCX Workload Migration APIs"
-(Broadcom developer portal, no version named) and, for
-``POST /hybridity/api/service/inventory/cloud/list``, from VMware's own
-Terraform provider for HCX. No HCX API file is pinned yet; the reconcile
-lane checks every path in :data:`VENDOR_CALLS` once the files are pinned.
+(Broadcom developer portal, no version named) and, for the calls under
+``/hybridity/api/service/inventory/`` other than ``resourcecontainer/list``,
+from VMware's own Terraform provider for HCX. No HCX API file is pinned
+yet; the reconcile lane checks every path in :data:`VENDOR_CALLS` once the
+files are pinned.
 """
 
 from __future__ import annotations
@@ -45,12 +51,18 @@ if TYPE_CHECKING:
 __all__ = [
     "REDACTED",
     "VENDOR_CALLS",
+    "flatten_inventory_tree",
     "hcx_about_impl",
     "hcx_alert_list_impl",
     "hcx_appliance_list_impl",
+    "hcx_inventory_compute_list_impl",
+    "hcx_inventory_datastore_list_impl",
     "hcx_inventory_list_impl",
+    "hcx_inventory_network_list_impl",
     "hcx_job_get_impl",
     "hcx_service_mesh_diagnose_impl",
+    "hcx_service_mesh_diagnostics_get_impl",
+    "hcx_service_mesh_diagnostics_list_impl",
     "hcx_service_mesh_list_impl",
     "hcx_site_pairing_list_impl",
     "manager_role",
@@ -63,11 +75,20 @@ _CLOUD_CONFIGS_PATH: Final = "/hybridity/api/cloudConfigs"
 _SERVICE_MESH_PATH: Final = "/hybridity/api/interconnect/serviceMesh"
 _INTERCONNECT_APPLIANCES_PATH: Final = "/hybridity/api/interconnect/appliances"
 _DIAGNOSE_PATH: Final = "/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnose"
+_DIAGNOSTICS_QUERY_PATH: Final = (
+    "/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/query"
+)
+_DIAGNOSTICS_DETAILS_PATH: Final = (
+    "/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/{serviceMeshDiagId}"
+)
 _JOB_PATH: Final = "/hybridity/api/jobs/{jobid}"
 _ALERTS_PATH: Final = "/hybridity/api/alerts"
 _RESOURCE_CONTAINER_LIST_PATH: Final = "/hybridity/api/service/inventory/resourcecontainer/list"
+_VC_INVENTORY_PATH: Final = "/hybridity/api/service/inventory/vc/list"
+_VC_DATASTORES_PATH: Final = "/hybridity/api/service/inventory/vc/datastores/query"
+_NETWORKS_PATH: Final = "/hybridity/api/service/inventory/networks"
 
-#: Every vendor call the eight reads make, as ``(method, path template)``.
+#: Every vendor call the reads make, as ``(method, path template)``.
 #: The reconcile lane checks each one against the pinned HCX API files.
 VENDOR_CALLS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
@@ -77,11 +98,19 @@ VENDOR_CALLS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("GET", _SERVICE_MESH_PATH),
         ("GET", _INTERCONNECT_APPLIANCES_PATH),
         ("POST", _DIAGNOSE_PATH),
+        ("POST", _DIAGNOSTICS_QUERY_PATH),
+        ("GET", _DIAGNOSTICS_DETAILS_PATH),
         ("GET", _JOB_PATH),
         ("POST", _ALERTS_PATH),
         ("POST", _RESOURCE_CONTAINER_LIST_PATH),
+        ("POST", _VC_INVENTORY_PATH),
+        ("POST", _VC_DATASTORES_PATH),
+        ("POST", _NETWORKS_PATH),
     }
 )
+
+#: The vendor compute type of a cluster in the datastore query.
+_CLUSTER_COMPUTE_TYPE: Final = "ClusterComputeResource"
 
 #: Written in place of a secret value; the key stays, so the shape is stable.
 REDACTED: Final = "***REDACTED***"
@@ -336,23 +365,73 @@ async def hcx_service_mesh_diagnose_impl(
 
     ``POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnose``
     answers ``202`` with ``data.interconnectTaskId``. The run changes no
-    configuration; its progress shows as the mesh's last task in
-    ``hcx.service_mesh.list``.
+    configuration. ``hcx.service_mesh.diagnostics.list`` shows the run and
+    ``hcx.service_mesh.diagnostics.get`` its findings.
     """
     mesh_id = params["service_mesh_id"]
     path = _DIAGNOSE_PATH.format(serviceMeshId=_segment("service mesh", mesh_id))
     payload = await connector._post_json(target, path, operator=operator, json={})
     data = payload.get("data") if isinstance(payload, dict) else None
     data = data if isinstance(data, dict) else {}
-    body = payload if isinstance(payload, dict) else {}
     return _redact_object(
         {
             "service_mesh_id": data.get("serviceMeshId") or mesh_id,
             "interconnect_task_id": data.get("interconnectTaskId"),
-            "warnings": body.get("warnings") or [],
-            "errors": body.get("errors") or [],
+            **_envelope_notes(payload),
         }
     )
+
+
+def _envelope_notes(payload: Any) -> dict[str, list[Any]]:
+    """The ``warnings`` and ``errors`` lists of a vendor envelope, always present."""
+    body = payload if isinstance(payload, dict) else {}
+    return {"warnings": body.get("warnings") or [], "errors": body.get("errors") or []}
+
+
+async def hcx_service_mesh_diagnostics_list_impl(
+    connector: HcxConnector,
+    operator: Operator,
+    target: HcxTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``hcx.service_mesh.diagnostics.list`` -- the diagnostics runs of one service mesh.
+
+    ``POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/query``
+    with ``{"filter": {}}``, or ``{"filter": {"status": [...]}}`` when
+    ``status`` is set. The Manager answers ``{"items": [...], "paging": ...}``.
+    """
+    mesh_id = _segment("service mesh", params["service_mesh_id"])
+    path = _DIAGNOSTICS_QUERY_PATH.format(serviceMeshId=mesh_id)
+    run_filter: dict[str, Any] = {}
+    if params.get("status"):
+        run_filter["status"] = list(params["status"])
+    payload = await connector._post_json(
+        target, path, operator=operator, json={"filter": run_filter}
+    )
+    return {"items": redact_secrets(rows_of(payload))}
+
+
+async def hcx_service_mesh_diagnostics_get_impl(
+    connector: HcxConnector,
+    operator: Operator,
+    target: HcxTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``hcx.service_mesh.diagnostics.get`` -- the findings of one diagnostics run.
+
+    ``GET /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnostics/{serviceMeshDiagId}``
+    answers ``{"data": {run fields, details}, "warnings", "errors"}``. The
+    read returns the run fields flat, with ``warnings`` and ``errors``.
+    """
+    path = _DIAGNOSTICS_DETAILS_PATH.format(
+        serviceMeshId=_segment("service mesh", params["service_mesh_id"]),
+        serviceMeshDiagId=_segment("diagnostics run", params["diag_id"]),
+    )
+    payload = await connector._get_json(target, path, operator=operator)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    run = dict(data) if isinstance(data, dict) else {}
+    run.setdefault("details", None)
+    return _redact_object({**run, **_envelope_notes(payload)})
 
 
 async def hcx_job_get_impl(
@@ -403,4 +482,86 @@ async def hcx_inventory_list_impl(
     payload = await connector._post_json(
         target, _RESOURCE_CONTAINER_LIST_PATH, operator=operator, json=body
     )
+    return {"items": redact_secrets(rows_of(payload))}
+
+
+def flatten_inventory_tree(roots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten the vendor inventory tree: one row per node, parents before children.
+
+    Each row keeps the node's fields except ``children`` and gains
+    ``parent_id`` (the parent's ``entity_id``, ``None`` for a root) and
+    ``depth`` (0 for a root). Iterative, so a deep tree cannot overflow the
+    stack.
+    """
+    rows: list[dict[str, Any]] = []
+    stack: list[tuple[dict[str, Any], Any, int]] = [(root, None, 0) for root in reversed(roots)]
+    while stack:
+        node, parent_id, depth = stack.pop()
+        flat = {key: value for key, value in node.items() if key != "children"}
+        flat["parent_id"] = parent_id
+        flat["depth"] = depth
+        rows.append(flat)
+        children = node.get("children")
+        if isinstance(children, list):
+            stack.extend(
+                (child, node.get("entity_id"), depth + 1)
+                for child in reversed(children)
+                if isinstance(child, dict)
+            )
+    return rows
+
+
+async def hcx_inventory_compute_list_impl(
+    connector: HcxConnector,
+    operator: Operator,
+    target: HcxTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``hcx.inventory.compute.list`` -- the vCenter instances, datacenters and clusters.
+
+    ``POST /hybridity/api/service/inventory/vc/list`` with ``{}`` answers a
+    tree under ``data.items``: one vCenter instance per item, its
+    datacenters as ``children`` and their clusters as ``children`` again.
+    """
+    del params
+    payload = await connector._post_json(target, _VC_INVENTORY_PATH, operator=operator, json={})
+    return {"items": redact_secrets(flatten_inventory_tree(rows_of(payload)))}
+
+
+async def hcx_inventory_datastore_list_impl(
+    connector: HcxConnector,
+    operator: Operator,
+    target: HcxTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``hcx.inventory.datastore.list`` -- the datastores of clusters of one vCenter instance.
+
+    ``POST /hybridity/api/service/inventory/vc/datastores/query`` with
+    ``{"filter": {"vcenter_instanceId", "computeType": "ClusterComputeResource",
+    "computeIds": [...]}}``.
+    """
+    body = {
+        "filter": {
+            "vcenter_instanceId": params["vcenter_id"],
+            "computeType": _CLUSTER_COMPUTE_TYPE,
+            "computeIds": list(params["cluster_ids"]),
+        }
+    }
+    payload = await connector._post_json(target, _VC_DATASTORES_PATH, operator=operator, json=body)
+    return {"items": redact_secrets(rows_of(payload))}
+
+
+async def hcx_inventory_network_list_impl(
+    connector: HcxConnector,
+    operator: Operator,
+    target: HcxTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``hcx.inventory.network.list`` -- the networks of one site.
+
+    ``POST /hybridity/api/service/inventory/networks`` with
+    ``{"filter": {"cloud": {"endpointId": ...}}}``.
+    """
+    body = {"filter": {"cloud": {"endpointId": params["endpoint_id"]}}}
+    payload = await connector._post_json(target, _NETWORKS_PATH, operator=operator, json=body)
     return {"items": redact_secrets(rows_of(payload))}

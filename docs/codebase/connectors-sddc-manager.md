@@ -216,6 +216,18 @@ credentials) get the same guards through the catalog row's `safety_overlay`
 and the same `_CREDENTIAL_READ_OPS` entry (#4617); see
 [spec-ingestion.md](spec-ingestion.md), "Catalog safety overlay".
 
+**License keys are masked (`sddc.license.list`).** The rows of
+`GET /v1/license-keys` hold each license key in its `key` field. The handler
+replaces that field by `key_masked` before it returns; every other field of a
+row stays. Only the last 5 characters of the key stay visible, for example
+`*****-*****-*****-*****-AB12C`, and a key of 10 characters or fewer is hidden
+in full. The rule is `mask_license_key` in
+`connectors/_shared/license_key.py`, the same one `vrops.license.info` uses.
+The op also carries the tag `license-key`. Its `key` token is a secret tag
+token of the flight recorder, so the trace stores no body of the vendor call:
+the flight recorder records the raw answer before the handler masks it. Tests:
+[`backend/tests/test_connectors_sddc_manager_license.py`](../../backend/tests/test_connectors_sddc_manager_license.py).
+
 **Operation contracts.** The 20 typed ops meet the VMware operation-contract
 check (`backend/tests/test_operation_contracts.py`), with one exception (last item):
 

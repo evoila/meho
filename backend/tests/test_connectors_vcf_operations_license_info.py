@@ -34,12 +34,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vcf_operations import (
     VcfOperationsConnector,
     register_vcf_operations_typed_operations,
 )
-from meho_backplane.connectors.vcf_operations.connector import _mask_license_key
 from meho_backplane.connectors.vcf_operations.typed_ops import (
     VROPS_9_ONLY_TYPED_OPS,
     VROPS_LICENSE_INFO_OP,
@@ -185,7 +185,7 @@ async def test_license_info_dispatches_and_masks_the_key(
         "licensed": True,
         "expirationDate": 1744473856630,
         "licenseName": "license-name",
-        "licenseKey": "************************EEEEE",
+        "licenseKey": "*****-*****-*****-*****-EEEEE",
     }
     assert _LICENSE_KEY not in json.dumps(result.result)
     for route in (edition_route, info_route):
@@ -209,16 +209,22 @@ async def test_license_info_without_a_key_passes_through(monkeypatch: pytest.Mon
 @pytest.mark.parametrize(
     ("value", "masked"),
     [
-        (_LICENSE_KEY, "************************EEEEE"),
+        (_LICENSE_KEY, "*****-*****-*****-*****-EEEEE"),
+        ("ABCDEFGHIJK", "******GHIJK"),
         ("short-key", "*********"),
         ("0123456789", "**********"),
-        ("", ""),
+        ("", None),
         (None, None),
+        (12345, None),
     ],
 )
 def test_mask_license_key(value: Any, masked: Any) -> None:
-    """A key shows at most its last 5 characters; a short key is hidden in full."""
-    assert _mask_license_key(value) == masked
+    """A key shows at most its last 5 characters; a short key is hidden in full.
+
+    Dashes stay, so a key keeps its five-group shape. A value that is not a
+    non-empty string gives ``None``.
+    """
+    assert mask_license_key(value) == masked
 
 
 @pytest.mark.asyncio

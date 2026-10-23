@@ -602,3 +602,85 @@ def test_query_string_secret_is_replaced_also_with_an_encoded_name() -> None:
 def test_query_string_without_a_secret_comes_back_as_written() -> None:
     assert scrub_query_string("/x?group=a%20b&apiVersion=2") == ("/x?group=a%20b&apiVersion=2", 0)
     assert scrub_query_string("/x") == ("/x", 0)
+
+
+# ---------------------------------------------------------------------------
+# The caller's text rule
+# ---------------------------------------------------------------------------
+
+
+def _mark_rule(value: str) -> tuple[str, int]:
+    """A text rule for the tests: a value that holds ``TOKEN`` becomes ``[MARK]``."""
+    if "TOKEN" not in value:
+        return value, 0
+    return value.replace("TOKEN", "[MARK]"), value.count("TOKEN")
+
+
+def test_text_rule_runs_on_parsed_values_and_the_yaml_keeps_its_types() -> None:
+    document = (
+        "info:\n"
+        "  note: Bearer TOKEN\n"
+        '  description: "line one\\nAuthorization: TOKEN"\n'
+        "  count: 3\n"
+        "  flag: true\n"
+        "responses:\n"
+        "  200:\n"
+        "    description: TOKEN ok\n"
+    )
+    checked = check_api_file(document, content_type=_YAML, path="/x", text_rule=_mark_rule)
+    assert checked.secrets_replaced == 3
+    assert "TOKEN" not in checked.text
+    assert yaml.safe_load(checked.text) == {
+        "info": {
+            "note": "Bearer [MARK]",
+            "description": "line one\nAuthorization: [MARK]",
+            "count": 3,
+            "flag": True,
+        },
+        "responses": {200: {"description": "[MARK] ok"}},
+    }
+
+
+def test_text_rule_does_not_run_on_a_value_replaced_whole() -> None:
+    document = f"password: TOKEN\nkey: |\n  {_pem(indent='  ')}\n  TOKEN\nnote: TOKEN\n"
+    checked = check_api_file(document, content_type=_YAML, path="/x", text_rule=_mark_rule)
+    assert yaml.safe_load(checked.text) == {
+        "password": REDACTED,
+        "key": REDACTED,
+        "note": "[MARK]",
+    }
+    assert checked.secrets_replaced == 3
+
+
+def test_text_rule_runs_inside_json_held_in_a_text_value() -> None:
+    document = json.dumps({"example": '{"header": "Bearer TOKEN", "n": 1}', "plain": "TOKEN"})
+    checked = check_api_file(document, content_type=_JSON, path="/x", text_rule=_mark_rule)
+    assert json.loads(checked.text) == {
+        "example": '{"header":"Bearer [MARK]","n":1}',
+        "plain": "[MARK]",
+    }
+    assert checked.secrets_replaced == 2
+
+
+def test_text_rule_runs_on_xml_and_html_text_and_attributes() -> None:
+    xml = check_api_file(
+        '<a note="TOKEN &amp; more"><b>Bearer TOKEN</b></a>',
+        content_type=_XML,
+        path="/x",
+        text_rule=_mark_rule,
+    )
+    assert xml.text == '<a note="[MARK] &amp; more"><b>Bearer [MARK]</b></a>'
+    assert xml.secrets_replaced == 2
+    html = check_api_file(
+        '<p title="TOKEN">Bearer TOKEN &lt; 1</p>',
+        content_type=_HTML,
+        path="/x",
+        text_rule=_mark_rule,
+    )
+    assert html.text == '<p title="[MARK]">Bearer [MARK] &lt; 1</p>'
+    assert html.secrets_replaced == 2
+
+
+def test_without_a_text_rule_text_values_come_back_as_they_are() -> None:
+    text, count = _check("note: Bearer TOKEN\n", _YAML)
+    assert (text, count) == ("note: Bearer TOKEN\n", 0)

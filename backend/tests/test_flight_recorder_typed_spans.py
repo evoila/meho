@@ -485,6 +485,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "sddc-rest",
         "sddc-vcf5",
         "secret-broker",
+        "srm-rest",
         "targets-registry",
         "tempo-api",
         "topology-graph",

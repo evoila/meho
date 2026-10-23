@@ -11,8 +11,9 @@ payload through as it is.
 Field names come from the pinned VCF Operations 9.0 Suite API file
 (``vcf-operations-openapi.ingestable.json``, ``components.schemas``:
 ``version``, ``alerts`` / ``alert``, ``resources`` / ``resource``,
-``stats-of-resources`` / ``stats``). The 8.x connector shares these
-operations; no 8.x Suite API file is on the spec shelf.
+``stats-of-resources`` / ``stats``, ``product-licensing``, ``LicenseInfo``).
+The 8.x connector shares these operations, except the licence read, which is
+9.x only; no 8.x Suite API file is on the spec shelf.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any
 
 __all__ = [
     "VROPS_ALERT_LIST_RESPONSE",
+    "VROPS_LICENSE_INFO_RESPONSE",
     "VROPS_LIVENESS_RESPONSE",
     "VROPS_RESOURCE_QUERY_RESPONSE",
     "VROPS_RESOURCE_STATS_RESPONSE",
@@ -206,6 +208,25 @@ VROPS_RESOURCE_STATS_RESPONSE: dict[str, Any] = _object(
                     },
                 ),
             },
+        ),
+    },
+)
+
+VROPS_LICENSE_INFO_RESPONSE: dict[str, Any] = _object(
+    "The edition and the licence of this instance (vendor product-licensing and "
+    "LicenseInfo objects in one object).",
+    {
+        "productLicensingEdition": _field(
+            "string",
+            "The licensed edition: NOT_LICENSED, CORE, STANDARD, ADVANCED, ENTERPRISE or UNKNOWN.",
+        ),
+        "licensed": _field("boolean", "True when the instance has a valid licence."),
+        "licenseName": _field("string", "The licence name."),
+        "expirationDate": _field("integer", "When the licence expires, in epoch milliseconds."),
+        "licenseKey": _field(
+            "string",
+            "The licence key, masked by MEHO: only the last 5 characters show. For VCF "
+            "licences the vendor puts the licence name here.",
         ),
     },
 )

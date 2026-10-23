@@ -489,7 +489,7 @@ An unknown run, a run of another tenant, or a run of a different
 `connector_id` / `op_id` gives the same `-32602` error with
 `data.reason="unknown_run"`. Sending `async: true` and `run_id` together
 gives `data.reason="async_with_run_id"`. No tool is added: the working
-surface stays at 25 tools, and the `outputSchema` status enum gains
+surface stays at 26 tools, and the `outputSchema` status enum gains
 `pending` and `running`. Code: `mcp/tools/_call_operation_async.py`. Tests:
 `tests/test_mcp_call_operation_async.py`.
 
@@ -684,7 +684,10 @@ table can never silently drift from the code:
 
 Counts: **26 working + 54 operator + 1 pairing-gated automation =
 81 registered tools**, plus the **3 human-only verbs** (below) that
-carry no MCP registration under any claim set. The 26 working and 54
+carry no MCP registration under any claim set. Four of the 26 working
+tools (`ask_docs`, `search_docs`, `read_docs`, `list_doc_collections`)
+appear only when the tenant has the `meho-docs` capability; a session
+without it lists 22. The 26 working and 54
 operator counts are the **unpaired baseline** — a session with every
 capability provisioned but no add-on paired — so they stay byte-identical
 to a build that never carried the automation family; the single

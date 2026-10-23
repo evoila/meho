@@ -745,7 +745,7 @@ _API_TOKEN_CREATE = VcfaTypedOp(
         parameter_hints={
             "vault_target": (
                 "Target NAME of a Vault target that has its own extras.vault_role with "
-                "create and update on the path; the write runs under that role. A Vault "
+                "read, create and update on the path; the write runs under that role. A Vault "
                 "target WITHOUT a vault_role uses your own identity's role, which "
                 "usually cannot write the path."
             ),

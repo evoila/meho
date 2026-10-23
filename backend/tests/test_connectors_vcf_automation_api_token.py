@@ -774,7 +774,7 @@ async def test_revoke_unknown_token_is_unchanged(vcfa: VcfAutomationConnector) -
 async def test_unapproved_dispatch_parks_without_touching_the_appliance(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _capabilities(monkeypatch, ["create", "update"])
+    _capabilities(monkeypatch, ["read", "update"])
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock)
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
@@ -874,7 +874,7 @@ async def test_park_refused_when_the_target_role_may_not_write(
     assert not any(route.called for route in routes.values())
     extras = await _assert_park_refused(result)
     assert extras["path"] == "secret/data/example/vcfa-target"
-    assert extras["required"] == ["create", "update"]
+    assert extras["required"] == ["read", "update"]
     assert extras["granted"] == ["read"]
     # Probed under the named Vault target (its role), not the caller's identity.
     assert [(t.name, paths) for t, paths in probes] == [
@@ -921,7 +921,7 @@ async def test_park_refused_when_the_probe_fails(
 async def test_park_refused_for_a_non_vault_target(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    probes = _capabilities(monkeypatch, ["create", "update"])
+    probes = _capabilities(monkeypatch, ["read", "update"])
     result = await run(
         "vcfa.provider.api_token.create",
         {**_CREATE_PARAMS, "vault_target": TARGET_NAME},

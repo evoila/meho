@@ -23,6 +23,17 @@ handler returns ``status="unchanged"`` with the existing repository's
 facts and a clear message, and writes nothing. Only a 404 on that read
 leads to the create call. Any other error on the read propagates.
 
+Names in the request path
+-------------------------
+
+``org`` and ``name`` become parts of the request path. The parameter
+schema already limits both to letters, digits, ``.``, ``-`` and ``_``.
+The handler checks them again before the first request and refuses
+``.`` and ``..``, which the character rule allows but which would point
+at another API path. A bad name raises :class:`ValueError` and no
+request is sent. Both values are then percent-encoded, so a value can
+only ever name one path part.
+
 Governance posture
 ------------------
 
@@ -35,7 +46,9 @@ performs is fully governed.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import re
+from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote
 
 import httpx
 
@@ -43,13 +56,41 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.github.connector import GitHubRestConnector
 
-__all__ = ["repo_create_composite"]
+__all__ = ["check_github_name", "repo_create_composite"]
 
 # REST wire paths, keyed with ``str.format`` placeholders. Mounted under
 # ``https://api.github.com`` by the connector's ``_base_url``;
-# ``mount_op_path`` is identity for github.com.
-_ORG_REPOS_PATH = "/orgs/{org}/repos"
-_REPO_PATH = "/repos/{org}/{name}"
+# ``mount_op_path`` is identity for github.com. Every placeholder value
+# is checked and percent-encoded before it is formatted in.
+_ORG_REPOS_PATH: Final = "/orgs/{org}/repos"
+_REPO_PATH: Final = "/repos/{org}/{name}"
+
+# What GitHub allows in a user, organisation or repository name.
+_GITHUB_NAME: Final = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def check_github_name(value: object) -> str | None:
+    """Return why ``value`` is not a safe owner or repository name, or ``None``.
+
+    GitHub names hold letters, digits, ``.``, ``-`` and ``_`` only. The
+    names ``.`` and ``..`` are refused because the URL encoding keeps dots,
+    so they would point at another API path. ``.github`` is a valid name.
+    """
+    if not isinstance(value, str) or not value:
+        return "name is empty"
+    if value in (".", ".."):
+        return f"name {value!r} is not allowed"
+    if not _GITHUB_NAME.fullmatch(value):
+        return f"name {value!r} may hold only letters, digits, '.', '-' and '_'"
+    return None
+
+
+def _checked_path_part(field: str, value: object) -> str:
+    """Return ``value`` as a safe, percent-encoded path part, or raise ``ValueError``."""
+    problem = check_github_name(value)
+    if problem is not None:
+        raise ValueError(f"repo_create: {field}: {problem}")
+    return quote(str(value), safe="")
 
 
 def _project_created_repo(payload: dict[str, Any]) -> dict[str, Any]:
@@ -121,9 +162,12 @@ async def repo_create_composite(
         the dispatcher's outer branch to map to a structured result.
     RuntimeError
         A payload was not a JSON object.
+    ValueError
+        ``org`` or ``name`` is not a safe GitHub name. Raised before any
+        request is sent.
     """
-    org = params["org"]
-    name = params["name"]
+    org = _checked_path_part("org", params["org"])
+    name = _checked_path_part("name", params["name"])
     visibility = params.get("visibility", "private")
     with_readme = bool(params.get("with_readme", False))
     description = params.get("description")

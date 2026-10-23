@@ -583,6 +583,11 @@ REPO_VIEW_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+# One GitHub owner or repository name. The lookahead after ``$`` matters:
+# the validator is Python ``re``, where ``$`` also matches before a final
+# newline, so without it ``"name\n"`` would pass.
+_GITHUB_NAME_PATTERN = "^[A-Za-z0-9._-]+$(?!\\n)"
+
 REPO_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -592,12 +597,20 @@ REPO_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         "org": {
             "type": "string",
             "minLength": 1,
-            "description": "Login of the GitHub organisation that will own the repository.",
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "Login of the GitHub organisation that will own the repository. "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
         },
         "name": {
             "type": "string",
             "minLength": 1,
-            "description": "Name of the new repository (without the organisation prefix).",
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "Name of the new repository (without the organisation prefix). "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
         },
         "description": {
             "type": "string",
@@ -619,7 +632,7 @@ REPO_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "examples": [{"org": "<org>", "name": "<repo>", "visibility": "private"}],
+    "examples": [{"org": "example-org", "name": "example-repo", "visibility": "private"}],
     "description": (
         "Parameters for gh.composite.repo_create. Creates one repository in an "
         "organisation (POST /orgs/{org}/repos). Private unless visibility is 'public'."

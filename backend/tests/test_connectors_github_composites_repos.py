@@ -17,6 +17,11 @@ Coverage:
   ``status="unchanged"`` with the existing repository's facts.
 * A read error other than 404, a POST error, and a non-object payload all
   propagate for the dispatcher's outer branch to classify.
+* Names in the request path -- ``org`` and ``name`` are checked before
+  the first request. A value with a path separator, ``.`` or ``..``, or
+  any other character GitHub does not allow, raises and sends nothing.
+  The parameter schema refuses the same values, so the dispatcher stops
+  them as ``invalid_params`` before the handler runs.
 """
 
 from __future__ import annotations
@@ -30,7 +35,14 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.github.composites._repos import repo_create_composite
+from meho_backplane.connectors.github.composites._repos import (
+    check_github_name,
+    repo_create_composite,
+)
+from meho_backplane.connectors.github.composites.schemas import (
+    REPO_CREATE_PARAMETER_SCHEMA,
+)
+from meho_backplane.operations._validate import validate_params
 
 _CREATE_RESPONSE = Path(__file__).parent / "data" / "github_repo_create_response.json"
 _VIEW_RESPONSE = Path(__file__).parent / "data" / "github_repo_view_response.json"
@@ -224,3 +236,90 @@ async def test_repo_create_rejects_a_payload_that_is_not_an_object() -> None:
         await _run(_RecordingConnector(["not", "an", "object"]))
     with pytest.raises(RuntimeError, match="repo_create"):
         await _run(_RecordingConnector(_http_error(404), ["not", "an", "object"]))
+
+
+# ---------------------------------------------------------------------------
+# Names in the request path
+# ---------------------------------------------------------------------------
+
+_UNSAFE_NAMES = (
+    "../user",
+    "..",
+    ".",
+    "example-org/../../user",
+    "example-org/repos",
+    "a b",
+    "a#b",
+    "a?x=1",
+    "a%2F..",
+    "a\n",
+    "",
+)
+
+
+@pytest.mark.parametrize("org", _UNSAFE_NAMES)
+@pytest.mark.asyncio
+async def test_repo_create_sends_nothing_when_the_org_is_not_a_safe_name(org: str) -> None:
+    """A bad ``org`` raises before the first request; no path is built from it."""
+    connector = _RecordingConnector(_http_error(404), _saved(_CREATE_RESPONSE))
+
+    with pytest.raises(ValueError, match="repo_create: org"):
+        await _run(connector, org=org)
+
+    assert connector.get_paths == []
+    assert connector.post_calls == []
+
+
+@pytest.mark.parametrize("name", _UNSAFE_NAMES)
+@pytest.mark.asyncio
+async def test_repo_create_sends_nothing_when_the_name_is_not_a_safe_name(name: str) -> None:
+    """A bad ``name`` raises before the first request; no path is built from it."""
+    connector = _RecordingConnector(_http_error(404), _saved(_CREATE_RESPONSE))
+
+    with pytest.raises(ValueError, match="repo_create: name"):
+        await _run(connector, name=name)
+
+    assert connector.get_paths == []
+    assert connector.post_calls == []
+
+
+@pytest.mark.asyncio
+async def test_repo_create_request_paths_hold_exactly_the_checked_names() -> None:
+    """``.github`` is a valid name; both request paths carry it as one path part."""
+    connector = _RecordingConnector(_http_error(404), _saved(_CREATE_RESPONSE))
+
+    await _run(connector, org="My.Org_1", name=".github")
+
+    assert connector.get_paths == ["/repos/My.Org_1/.github"]
+    assert [call["path"] for call in connector.post_calls] == ["/orgs/My.Org_1/repos"]
+    assert connector.post_calls[0]["json"]["name"] == ".github"
+
+
+@pytest.mark.parametrize("value", _UNSAFE_NAMES)
+def test_check_github_name_refuses_a_value_that_could_change_the_path(value: str) -> None:
+    assert check_github_name(value) is not None
+
+
+@pytest.mark.parametrize("value", ["a", ".github", "my-repo_1.0", "Org"])
+def test_check_github_name_accepts_a_plain_github_name(value: str) -> None:
+    assert check_github_name(value) is None
+
+
+@pytest.mark.parametrize("field", ["org", "name"])
+@pytest.mark.parametrize("value", [v for v in _UNSAFE_NAMES if v not in (".", "..")])
+def test_repo_create_schema_refuses_a_name_that_could_change_the_path(
+    field: str, value: str
+) -> None:
+    """The dispatcher stops these as ``invalid_params`` before the handler runs."""
+    params = {"org": "example-org", "name": "new-repo", field: value}
+
+    errors = validate_params(REPO_CREATE_PARAMETER_SCHEMA, params)
+
+    assert errors, f"{field}={value!r} passed the schema"
+    assert all(error["path"].endswith(field) for error in errors), errors
+
+
+def test_repo_create_schema_accepts_a_plain_github_name() -> None:
+    params = {"org": "My.Org_1", "name": ".github", "visibility": "private"}
+
+    assert validate_params(REPO_CREATE_PARAMETER_SCHEMA, params) == []

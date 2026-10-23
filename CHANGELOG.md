@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+#### Install and Helm chart
+
+- The host command of install form 2, `meho-host` (#4737). `install.sh`
+  puts it at `/usr/local/sbin/meho-host`, and the download ships it.
+  `meho-host check` prints a red/green list of the built-in Kubernetes:
+  the node, the pods, the free disk space and RKE2's certificates, with
+  a fix on every line that is not ok; `--json` prints the list for
+  `meho doctor`. `meho-host support-bundle` writes one file for evoila
+  support: the check list, the logs of MEHO and of Traefik, the state of
+  the built-in Kubernetes, RKE2's log of the last 24 hours and facts
+  about the operating system. Passwords, tokens and keys are removed
+  from it, and Secrets are listed by name only. Tested against a fake
+  machine; not yet run on a real server.
+
 ## [0.36.0] - 2026-10-23
 
 MEHO 0.36.0 makes risky work wait for a second person more often: a VM

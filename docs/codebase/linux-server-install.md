@@ -16,7 +16,9 @@ This first version runs steps 1 to 3 of the design:
 2. **Prepare the machine.** It creates `/var/lib/meho` and `/etc/meho`
    (both mode 0700), writes RKE2's settings, copies the join token when
    the join options are given, and copies the MEHO image archive and the
-   storage manifest to the folders where RKE2 reads them.
+   storage manifest to the folders where RKE2 reads them. It also installs
+   the host command `meho-host`
+   ([linux-server-meho-host.md](linux-server-meho-host.md)).
 3. **Install and start RKE2.** It runs RKE2's own installer in offline
    mode, starts `rke2-server`, and waits until the node is Ready, until
    `local-path` is the default storage class, and until the storage
@@ -35,7 +37,6 @@ Later Tasks add their steps to `main()` in `install.sh`:
 - #4636 adds the CIS host steps between installing and starting RKE2, and
   `profile: cis` with the storage exception in RKE2's settings.
 - #4735 installs the core after step 3.
-- #4737 adds `meho-host`, which `install.sh` installs.
 
 ## Key files
 
@@ -47,6 +48,7 @@ Later Tasks add their steps to `main()` in `install.sh`:
 | `lib/checks.sh` | Step 1: one function per check. |
 | `lib/prepare.sh` | Step 2: folders, `config.yaml`, join token, image archive, storage manifest. |
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. |
+| `meho-host` | The host command, `check` and `support-bundle`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
 | `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with three changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
@@ -91,6 +93,7 @@ service.
 | `/etc/meho/join-token` | 0600 | a copy of `--join-token-file`, only with the join options |
 | `/var/lib/rancher/rke2/agent/images/meho-images.linux-amd64.tar.zst` | 0600 | the MEHO image archive |
 | `/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml` | 0600 | the storage manifest |
+| `/usr/local/sbin/meho-host` | 0755 | the host command, a copy of `meho-host` from the download |
 
 The join token goes from file to file with `install`. It is never on a
 command line, in the output or in `config.yaml`.

@@ -182,6 +182,7 @@ prepare_machine() {
     copy_join_token "$JOIN_TOKEN_FILE"
     copy_images "$DOWNLOAD_DIR"
     copy_storage_manifest "$DOWNLOAD_DIR"
+    install_meho_host "$DOWNLOAD_DIR"
 }
 
 main() {

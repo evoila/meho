@@ -3328,6 +3328,23 @@ class VmwareRestConnector(HttpConnector):
 
         return await sso_admin_api_file_get_impl(self, operator, target, params)
 
+    async def vm_hardware_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.hardware.show`` -- one VM's CPU, memory, CD drives and controllers.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware.vm_hardware_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
+            vm_hardware_show_impl,
+        )
+
+        return await vm_hardware_show_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

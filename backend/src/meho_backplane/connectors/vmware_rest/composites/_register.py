@@ -164,6 +164,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
     vm_resource_allocation_show_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
+    VM_CDROM_TOOLS_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
@@ -1904,6 +1907,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.content_library.item.delete"
         ],
     ),
+    # Add a CD drive and unmount the VMware Tools installer; the rows live in
+    # their own module.
+    *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),
 )
 
 

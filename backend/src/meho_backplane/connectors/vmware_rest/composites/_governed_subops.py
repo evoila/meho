@@ -42,6 +42,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _teardown,
     _teardown_network,
     _vm_allocation,
+    _vm_cdrom_tools,
     _write,
 )
 
@@ -105,6 +106,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.resize": _write._SUB_OPS_VM_RESIZE,
     "vmware.composite.vm.nic.repoint": _write._SUB_OPS_VM_NIC_REPOINT,
     "vmware.composite.vm.device.cdrom": _write._SUB_OPS_VM_DEVICE_CDROM,
+    "vmware.composite.vm.cdrom.add": _vm_cdrom_tools.SUB_OPS_VM_CDROM_ADD,
+    "vmware.composite.vm.tools.installer.unmount": (
+        _vm_cdrom_tools.SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT
+    ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE
     ),

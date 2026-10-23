@@ -84,6 +84,7 @@ __all__ = [
     "VMWARE_TASKS_RECENT_OP",
     "VMWARE_TYPED_OPS",
     "VMWARE_TYPED_WHEN_TO_USE_BY_GROUP",
+    "VMWARE_VM_HARDWARE_SHOW_OP",
     "VMWARE_VM_INFO_OP",
     "VmwareTypedOp",
     "host_usage_impl",
@@ -408,6 +409,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (  # no
     TASKS_RECENT_WHEN_TO_USE,
     VMWARE_TASKS_RECENT_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (  # noqa: E402
+    VM_HARDWARE_GROUP_KEY,
+    VM_HARDWARE_WHEN_TO_USE,
+    VMWARE_VM_HARDWARE_SHOW_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (  # noqa: E402
     VM_INFO_GROUP_KEY,
     VM_INFO_WHEN_TO_USE,
@@ -433,6 +439,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE,
     HOST_STORAGE_DEVICES_GROUP_KEY: HOST_STORAGE_DEVICES_WHEN_TO_USE,
     VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE,
+    VM_HARDWARE_GROUP_KEY: VM_HARDWARE_WHEN_TO_USE,
     OBJECT_COLLECT_GROUP_KEY: OBJECT_COLLECT_WHEN_TO_USE,
     TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
     TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE,
@@ -509,6 +516,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_VSAN_HEALTH_OP,
     VMWARE_HOST_STORAGE_DEVICES_OP,
     VMWARE_VM_INFO_OP,
+    VMWARE_VM_HARDWARE_SHOW_OP,
     VMWARE_OBJECT_COLLECT_OP,
     VMWARE_TASKS_RECENT_OP,
     VMWARE_TASKS_HISTORY_OP,

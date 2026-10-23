@@ -5,17 +5,21 @@
 The tests run the real install.sh without root, without RKE2 and without a
 network, and they change nothing on the machine that runs them:
 
-- install.sh, lib/ and storage/ are copied into a temporary download folder,
-  next to fake RKE2 files and a fake MEHO image archive.
+- install.sh, lib/, storage/ and chart/values-single-node.yaml are copied
+  into a temporary download folder, next to fake RKE2 files, a fake MEHO
+  image archive, a fake chart, a fake meho CLI, a VERSION file and a stub
+  bin/helm.
 - MEHO_TEST_ROOT points install.sh to a temporary root folder. It holds the
   host files the script reads (/etc/os-release, /proc/meminfo,
-  /run/systemd/system) and receives every file the script writes.
+  /run/systemd/system, /proc/sys/kernel/random/uuid) and receives every file
+  the script writes.
 - PATH holds only stub commands and links to the few real tools the script
   needs. Each stub answers from one file in the "fake" folder and writes its
   arguments to calls.log, so a test changes one answer and reads the calls.
 
 The default answers describe a healthy Ubuntu 24.04 machine on which RKE2
-gets ready at once.
+gets ready at once, Helm installs the core at once, and both Secrets of the
+core exist.
 """
 
 from __future__ import annotations
@@ -32,6 +36,14 @@ LINUX_SERVER = Path(__file__).resolve().parents[1]
 INSTALL_SH = LINUX_SERVER / "install.sh"
 FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 
+# The fake values the stubs answer with. A test greps for them.
+TENANT_ID = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
+INSTALL_DATE = "2026-10-23T12:00:00Z"
+ADMIN_PASSWORD = "Fake-Admin-Password-7f3a"
+APPROVER_PASSWORD = "Fake-Approver-Password-9c1d"
+UNSEAL_KEY = "fake-unseal-key-5e2b8a4c"
+SECRET_VALUES = (ADMIN_PASSWORD, APPROVER_PASSWORD, UNSEAL_KEY)
+
 REAL_TOOLS = (
     "bash",
     "sh",
@@ -41,6 +53,7 @@ REAL_TOOLS = (
     "chmod",
     "install",
     "mv",
+    "rm",
     "mktemp",
     "dirname",
     "awk",
@@ -78,13 +91,22 @@ STUBS = {
         esac
         """),
     "sleep": ":",
+    "date": f"echo {INSTALL_DATE}",
 }
 
+# The Secret answers are what kubectl prints for the script's templates:
+# the decoded values.
 KUBECTL_STUB = textwrap.dedent("""\
     case "$*" in
       *"get nodes"*) cat "$MEHO_FAKE/kube_nodes" ;;
       *"get storageclass"*) cat "$MEHO_FAKE/kube_storageclass" ;;
       *"get deployment"*) cat "$MEHO_FAKE/kube_deployment" ;;
+      *"get secret meho-core-first-login "*)
+        cat "$MEHO_FAKE/kube_secret_first_login"
+        exit "$(cat "$MEHO_FAKE/kube_secret_first_login_rc")" ;;
+      *"get secret meho-core-vault-unseal "*)
+        cat "$MEHO_FAKE/kube_secret_unseal"
+        exit "$(cat "$MEHO_FAKE/kube_secret_unseal_rc")" ;;
       *) exit 1 ;;
     esac
     """)
@@ -93,6 +115,12 @@ RKE2_INSTALLER_STUB = textwrap.dedent("""\
     printf 'rke2-installer INSTALL_RKE2_ARTIFACT_PATH=%s\\n' "$INSTALL_RKE2_ARTIFACT_PATH" \\
         >> "$MEHO_FAKE/calls.log"
     exit "$(cat "$MEHO_FAKE/rke2_installer_rc")"
+    """)
+
+HELM_STUB = textwrap.dedent("""\
+    cat "$MEHO_FAKE/helm_stdout"
+    cat "$MEHO_FAKE/helm_stderr" >&2
+    exit "$(cat "$MEHO_FAKE/helm_rc")"
     """)
 
 UBUNTU_2404 = textwrap.dedent("""\
@@ -132,8 +160,22 @@ DEFAULT_ANSWERS = {
     "kube_nodes": "True",
     "kube_storageclass": "true",
     "kube_deployment": "1",
+    "kube_secret_first_login": (
+        f"admin_password={ADMIN_PASSWORD}\n"
+        "admin_username=admin\n"
+        f"approver_password={APPROVER_PASSWORD}\n"
+        "approver_username=approver\n"
+    ),
+    "kube_secret_first_login_rc": "0",
+    "kube_secret_unseal": f"{UNSEAL_KEY}\n",
+    "kube_secret_unseal_rc": "0",
     "rke2_installer_rc": "0",
     "systemctl_enable_rc": "0",
+    "helm_stdout": (
+        'Release "meho" has been installed.\nNOTES:\nRead it with: kubectl -n meho get secret\n'
+    ),
+    "helm_stderr": "",
+    "helm_rc": "0",
 }
 
 DOWNLOAD_PAYLOAD = {
@@ -141,6 +183,16 @@ DOWNLOAD_PAYLOAD = {
     "rke2/rke2-images.linux-amd64.tar.zst": "fake RKE2 images\n",
     "rke2/sha256sum-amd64.txt": "fake checksums\n",
     "images/meho-images.linux-amd64.tar.zst": "fake MEHO images\n",
+    "chart/meho-0.36.0.tgz": "fake chart\n",
+    "bin/meho": "fake meho CLI\n",
+    "VERSION": (
+        "MEHO_VERSION=0.36.0\n"
+        "MEHO_IMAGE_TAG=v0.36.0\n"
+        "CHART_VERSION=0.36.0\n"
+        "RKE2_VERSION=v1.37.1+rke2r1\n"
+        "HELM_VERSION=v3.16.4\n"
+        "BUILD_DATE=2026-10-23T00:00:00Z\n"
+    ),
 }
 
 
@@ -175,6 +227,7 @@ class FakeMachine:
         (self.fake / "calls.log").write_text("")
         self.host_file("/etc/os-release", UBUNTU_2404)
         self.host_file("/proc/meminfo", "MemTotal:       16303756 kB\nMemFree:  1000 kB\n")
+        self.host_file("/proc/sys/kernel/random/uuid", TENANT_ID + "\n")
         self.host_path("/run/systemd/system").mkdir(parents=True)
 
     def close(self) -> None:
@@ -185,7 +238,13 @@ class FakeMachine:
         shutil.copy2(INSTALL_SH, self.download / "install.sh")
         shutil.copytree(LINUX_SERVER / "lib", self.download / "lib")
         shutil.copytree(LINUX_SERVER / "storage", self.download / "storage")
+        (self.download / "chart").mkdir()
+        shutil.copy2(
+            LINUX_SERVER / "values-single-node.yaml",
+            self.download / "chart" / "values-single-node.yaml",
+        )
         _write_script(self.download / "rke2" / "install.sh", RKE2_INSTALLER_STUB)
+        _write_script(self.download / "bin" / "helm", HELM_STUB)
         for name, content in DOWNLOAD_PAYLOAD.items():
             path = self.download / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,7 +334,13 @@ class InstallTestCase(unittest.TestCase):
 
     def written_files(self) -> list[str]:
         """Files the script wrote below the fake root: everything but the inputs."""
-        inputs = {"etc/os-release", "etc/hosts", "proc/meminfo", "var/lib/rancher/rke2/bin/kubectl"}
+        inputs = {
+            "etc/os-release",
+            "etc/hosts",
+            "proc/meminfo",
+            "proc/sys/kernel/random/uuid",
+            "var/lib/rancher/rke2/bin/kubectl",
+        }
         found = []
         for path in self.machine.root.rglob("*"):
             relative = path.relative_to(self.machine.root).as_posix()

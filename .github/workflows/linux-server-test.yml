@@ -13,9 +13,11 @@
 # no root, no RKE2 and no network. One step checks that the upstream
 # local-path manifest the tests compare against is the real v0.0.37 file.
 #
-# The chart's values files are a trigger too: a test checks that every
-# image repository of the chart has a licence line for the download
-# (deploy/linux-server/packaging/image-sources.txt).
+# The chart is a trigger too: a test checks that every image repository of
+# the chart has a licence line for the download
+# (deploy/linux-server/packaging/image-sources.txt), and a test renders the
+# chart with values-single-node.yaml and the place values install.sh
+# writes, with the Helm version the download ships (#4735).
 #
 # Advisory (non-required) and path-scoped, like plugin-test.yml: a required
 # check would need the `changes`-job + job-`if:` shape ci.yml uses.
@@ -27,8 +29,7 @@ on:
     branches: [main]
     paths:
       - 'deploy/linux-server/**'
-      - 'deploy/charts/meho/values.yaml'
-      - 'deploy/charts/meho/charts/*/values.yaml'
+      - 'deploy/charts/meho/**'
       - '.github/workflows/linux-server-test.yml'
   workflow_dispatch:
 
@@ -77,6 +78,20 @@ jobs:
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           "${HOME}/.local/bin/shellcheck" --version
 
+      - name: Install helm
+        # The Helm the download ships. deploy/linux-server/packaging/common.sh
+        # pins the same version and checksum for bin/helm.
+        run: |
+          set -euo pipefail
+          HELM_VER=v3.16.4
+          HELM_SHA=fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
+          HELM_TAR="${RUNNER_TEMP}/helm.tar.gz"
+          curl -fsSL -o "${HELM_TAR}" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+          echo "${HELM_SHA}  ${HELM_TAR}" | sha256sum -c -
+          tar -xzf "${HELM_TAR}" -C "${RUNNER_TEMP}" linux-amd64/helm
+          install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" "${HOME}/.local/bin/helm"
+          "${HOME}/.local/bin/helm" version --short
+
       - name: Run shellcheck on every script
         run: |
           set -euo pipefail
@@ -97,4 +112,7 @@ jobs:
             | cmp - deploy/linux-server/tests/fixtures/local-path-storage-v0.0.37.yaml
 
       - name: Run the unit tests
+        env:
+          # The chart render test must run here, not skip.
+          MEHO_REQUIRE_HELM: "1"
         run: python -m unittest discover -s deploy/linux-server/tests -v

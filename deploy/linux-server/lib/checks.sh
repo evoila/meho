@@ -58,9 +58,12 @@ check_os() {
     fi
 }
 
+# check_download <download dir> <file>...: every listed file is next to
+# install.sh.
 check_download() {
     local download_dir=$1 file missing=()
-    for file in "${DOWNLOAD_FILES[@]}"; do
+    shift
+    for file in "$@"; do
         [[ -f $download_dir/$file ]] || missing+=("$file")
     done
     if ((${#missing[@]} > 0)); then

@@ -250,7 +250,9 @@ approval preview in `_images.py`, all on the tenant plane, in the group
   from the read to the write: an `asyncio.Lock` for calls in this
   process and a PG advisory lock (`db/advisory.py`, keyed by tenant,
   target and profile id) for calls in other workers. A second call waits
-  up to 30 seconds, then fails without writing.
+  up to 30 seconds for the lock, then fails without writing. The wait
+  covers only taking the lock. A call that holds the lock runs its reads
+  and its write to the end, however long they take.
 - **Approval card.** The preview builder reads the profile and the fabric
   image at park time and shows the old and the new template plus the
   other names. Without a connector (`preview_operation`) it only echoes

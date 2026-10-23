@@ -557,6 +557,70 @@ async def test_mapping_update_serializes_two_changes_to_one_profile(
     assert images_module._profile_locks == {}
 
 
+class _SlowAppliance(_Appliance):
+    """An appliance that applies a ``PATCH`` at once but answers it late."""
+
+    def __init__(self, profile: dict[str, Any], *, patch_seconds: float) -> None:
+        super().__init__(profile)
+        self.patch_seconds = patch_seconds
+
+    async def slow_patch(self, request: httpx.Request) -> httpx.Response:
+        response = self.patch(request)
+        await asyncio.sleep(self.patch_seconds)
+        return response
+
+
+def _add_name(image_name: str, fabric_image_id: str) -> Any:
+    return run(
+        "vcfa.tenant.image_profile.mapping.update",
+        {"profile_id": "ip-1", "image_name": image_name, "fabric_image_id": fabric_image_id},
+    )
+
+
+def _mount_slow_appliance(mock: Any, appliance: _SlowAppliance) -> None:
+    mount_logins(mock)
+    mock.get(_PROFILE).mock(side_effect=appliance.get)
+    mock.get("/iaas/api/fabric-images/fi-rhel").respond(200, json=_RHEL)
+    mock.get("/iaas/api/fabric-images/fi-rocky").respond(
+        200, json={"id": "fi-rocky", "externalRegionId": "region-a"}
+    )
+    mock.patch(_PROFILE).mock(side_effect=appliance.slow_patch)
+
+
+async def test_mapping_update_waits_for_a_slow_write_after_taking_the_lock(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: the lock-wait timer must not cancel a write that is
+    # already running; the appliance applies it, so "nothing was written"
+    # would be wrong.
+    monkeypatch.setattr(images_module, "PROFILE_LOCK_WAIT_SECONDS", 0.05)
+    appliance = _SlowAppliance(_profile(**{"RHEL 9": _UBUNTU}), patch_seconds=0.2)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_slow_appliance(mock, appliance)
+        result = await _add_name("Rocky 9", "fi-rocky")
+    assert result["result"]["status"] == "updated", result
+    assert appliance.names == {"RHEL 9", "Rocky 9"}
+    assert images_module._profile_locks == {}
+
+
+async def test_mapping_update_that_takes_the_lock_near_the_deadline_still_writes(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The second call gets the lock when most of the wait has passed. Its
+    # own reads and write take longer than what is left of the wait, and
+    # must still run to the end.
+    monkeypatch.setattr(images_module, "PROFILE_LOCK_WAIT_SECONDS", 0.3)
+    appliance = _SlowAppliance(_profile(**{"RHEL 9": _UBUNTU}), patch_seconds=0.2)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_slow_appliance(mock, appliance)
+        results = await asyncio.gather(
+            _add_name("Rocky 9", "fi-rocky"), _add_name("Debian 12", "fi-rhel")
+        )
+    assert [r["result"]["status"] for r in results] == ["updated", "updated"], results
+    assert appliance.names == {"RHEL 9", "Rocky 9", "Debian 12"}
+    assert images_module._profile_locks == {}
+
+
 def _record_advisory_lock(
     monkeypatch: pytest.MonkeyPatch, *, locked: bool
 ) -> list[tuple[int, dict[str, Any]]]:

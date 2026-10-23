@@ -34,7 +34,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
@@ -376,26 +376,36 @@ def _lock_key(target: VcfAutomationTargetLike, profile_id: str) -> int:
 
 @asynccontextmanager
 async def _profile_lock(target: VcfAutomationTargetLike, profile_id: str) -> AsyncIterator[None]:
-    """Hold the profile's lock in this process and across workers, or fail after the wait."""
+    """Hold the profile's lock in this process and across workers, or fail after the wait.
+
+    Only taking the locks is bounded by :data:`PROFILE_LOCK_WAIT_SECONDS`.
+    Once held, the locks stay for the whole block, however long the reads
+    and the write take: a timer over the write could cancel it while the
+    appliance still applies it, and then say that nothing was written.
+    """
     key = _lock_key(target, profile_id)
     held = _profile_locks.setdefault(key, _ProfileLock(asyncio.Lock()))
     held.users += 1
     try:
-        async with (
-            asyncio.timeout(PROFILE_LOCK_WAIT_SECONDS),
-            held.lock,
-            advisory_lock(
-                key, subsystem="vcfa_image_profile", wait_seconds=PROFILE_LOCK_WAIT_SECONDS
-            ) as locked,
-        ):
-            if not locked:
-                raise TimeoutError
+        async with AsyncExitStack() as locks:
+            try:
+                async with asyncio.timeout(PROFILE_LOCK_WAIT_SECONDS):
+                    await locks.enter_async_context(held.lock)
+                    locked = await locks.enter_async_context(
+                        advisory_lock(
+                            key,
+                            subsystem="vcfa_image_profile",
+                            wait_seconds=PROFILE_LOCK_WAIT_SECONDS,
+                        )
+                    )
+                    if not locked:
+                        raise TimeoutError
+            except TimeoutError:
+                raise RuntimeError(
+                    f"another change to image profile {profile_id!r} is still running; "
+                    "nothing was written, run this op again in a minute"
+                ) from None
             yield
-    except TimeoutError:
-        raise RuntimeError(
-            f"another change to image profile {profile_id!r} is still running; "
-            "nothing was written, run this op again in a minute"
-        ) from None
     finally:
         held.users -= 1
         if held.users == 0:

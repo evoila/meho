@@ -457,6 +457,7 @@ async def test_ssh_span_capture_off_is_noop() -> None:
 _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
     {
         "argocd-api",
+        "audit-integrity",
         "bind9-ssh",
         "fleet-lcm",
         "fleet-rest",

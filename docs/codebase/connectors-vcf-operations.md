@@ -9,7 +9,8 @@ that dispatches VMware Aria Operations (formerly vRealize Operations Manager;
 G3.6-T1 (#829) shipped the skeleton; #2395 rebuilt its auth on an
 acquired-token session (`OpsToken`) after live VCF Operations 9.0.2 rejected
 the original stateless HTTP Basic. The audited read set ships as typed ops
-(#2303); the remaining `/suite-api` breadth is ingested/curated.
+(#2303), and so does VCF 9 licence management (#4089); the remaining
+`/suite-api` breadth is ingested/curated.
 
 Source: `backend/src/meho_backplane/connectors/vcf_operations/`.
 
@@ -271,6 +272,49 @@ them, a semantic no-op — recipe + sha256 in the shelf's `MANIFEST.md`). An
 operator ingesting the core spec needs the same remediation. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
+### Licence management (VCF 9 licences)
+
+VCF 9 licences are managed in VCF Operations 9.x. Six typed operations read
+and change them. They live in `licensing_ops.py` (the op metadata) and
+`licensing_handlers.py` (the handlers, on the `VropsLicensingHandlers` mixin
+that `VcfOperationsConnector` inherits). They share one group,
+`vrops-licensing`.
+
+| op_id | Call | What it does |
+|---|---|---|
+| `vrops.licensing.registration.status` | `GET …/vcf-license-cloud-integration/registration/status` | Is VCF Operations registered (connected or disconnected mode), its ids, the next usage-report date |
+| `vrops.licensing.server.list` | `GET …/vcf-license-cloud-integration/license-servers` | The licence servers, with registration and connection state |
+| `vrops.licensing.entitlement.query` | `POST …/vcf-entitlement/entitlements/query` | The licences that can be assigned |
+| `vrops.licensing.vcenter.query` | `POST …/vcf-entitlement/vcenter-systems/query` | The licence state of each vCenter (evaluation or licensed, end date); `page` / `pageSize` |
+| `vrops.licensing.server.query` | `POST …/vcf-entitlement/license-servers/query` | The licence servers as the licence store sees them |
+| `vrops.licensing.assign` | `POST …/vcf-entitlement/assign` | Assign licences to one vCenter (a change) |
+
+All paths start with `/suite-api/internal/extension/`.
+
+- **Not published by the vendor.** These are the calls the VCF Operations UI
+  uses. They are not in the pinned Suite API file, so the spec-reconcile lane
+  does not cover them. VCF Operations answers `403` to them unless the request
+  carries `X-vRealizeOps-API-use-unsupported: true`; every handler sends it.
+- **Request shapes.** The query calls send an empty JSON object. The assign
+  call sends a JSON array with one entry:
+  `{vcenter: {id, adapterName, host}, allocationIds: [...]}`. The handler sends
+  the vCenter address as both `adapterName` and `host`, like the UI. Source:
+  the community PowerShell module `lamw/Broadcom.Community.VCFLicensing` and
+  live reads against VCF Operations 9.1.
+- **Answers.** `entitlement.query` and `vcenter.query` return the vendor answer
+  as it is; their response schemas name the known fields. The other four calls
+  have no known answer shape, so the handler returns
+  `{"payload": <vendor answer>}`.
+- **Safety.** The five reads are `safe` and read-only. `vrops.licensing.assign`
+  is `dangerous` with `requires_approval=True`: it waits until a person
+  approves it.
+- **9.x only.** VCF 9 licensing does not exist on Aria Operations 8.x. The ops
+  are kept out of `VROPS_TYPED_OPS` (which the 8.x connector reuses); only the
+  9.x registrar adds them.
+- **Checking a licence change.** The UI can say a licence was imported while
+  the licence store is empty. Check with `entitlement.query` (`totalCount`) and
+  `vcenter.query` (each vCenter `state: LICENSED`, `unlicensedUsage: 0`).
+
 ### Shutdown
 
 `aclose()` clears the in-memory session-token cache and the shared
@@ -322,6 +366,7 @@ NSX / vRLI take).
 - **Task (skeleton)**: <https://github.com/evoila/meho/issues/829>
 - **Task (OpsToken auth rebuild)**: <https://github.com/evoila/meho/issues/2395>
 - **Task (stat/metric read for sizing)**: <https://github.com/evoila/meho/issues/2838>
+- **Task (VCF 9 licence management)**: <https://github.com/evoila/meho/issues/4089>
 - **Parent initiative**: <https://github.com/evoila/meho/issues/369>
 - **Parent goal**: <https://github.com/evoila/meho/issues/214>
 - **Sibling skeletons (same Initiative wave)**:

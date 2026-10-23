@@ -16,11 +16,14 @@ by hand (and often got wrong, because a raw ref call needs the exact
   new commit on top of ``base_sha``, the commit the caller read with
   ``git_ref_view`` and the approver saw: check the branch is still at
   ``base_sha``, read that commit for the base tree, create a tree on top of
-  it, create the commit, check the branch again, move it with
-  ``force=false``. If the branch is not at ``base_sha`` at any of these
-  points, the call stops with ``status="precondition_failed"`` and changes
-  nothing visible (a tree or commit object that was already created is
-  unreachable and harmless).
+  it, create the commit, then move the branch with GitHub's ``updateRefs``
+  GraphQL mutation, which checks on the server that the branch is still at
+  ``base_sha`` (``beforeOid``) in the same step that moves it, and never
+  forces. A push or reset that lands between MEHO's read and the move is
+  caught by GitHub, not by a second read that could be stale. If the
+  branch is not at ``base_sha``, the call stops with
+  ``status="precondition_failed"`` and changes nothing visible (a tree or
+  commit object that was already created is unreachable and harmless).
 
 Names in the URL path
 ---------------------
@@ -53,6 +56,10 @@ from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.connectors.github.composites._graphql import (
+    GitHubGraphQlError,
+    github_graphql,
+)
 from meho_backplane.connectors.github.composites.schemas_git import (
     MAX_FILE_BYTES,
     MAX_FILES,
@@ -84,8 +91,8 @@ STATUS_INVALID_REQUEST: Final = "invalid_request"
 # connector mounts them under ``https://api.github.com``; ``mount_op_path``
 # is identity for github.com. Every placeholder value is checked and
 # percent-encoded before it is formatted in (see ``GitRepo``).
+_REPO_PATH: Final = "/repos/{owner}/{repo}"
 _REF_PATH: Final = "/repos/{owner}/{repo}/git/ref/{ref}"
-_REFS_PATH: Final = "/repos/{owner}/{repo}/git/refs/{ref}"
 _TREE_PATH: Final = "/repos/{owner}/{repo}/git/trees/{tree}"
 _TREES_PATH: Final = "/repos/{owner}/{repo}/git/trees"
 _COMMIT_PATH: Final = "/repos/{owner}/{repo}/git/commits/{sha}"
@@ -102,9 +109,31 @@ _FORBIDDEN_CHARS: Final = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 # What GitHub allows in a user, organisation or repository name.
 _GITHUB_NAME: Final = re.compile(r"[A-Za-z0-9._-]+")
 
-# Status codes GitHub uses to refuse a branch update that is not a fast
-# forward (``force=false``). The exact wording is GitHub's; MEHO quotes it.
-_REFUSED_UPDATE_STATUSES: Final = frozenset({409, 422})
+# GitHub's atomic branch update. ``beforeOid`` is the commit the branch must
+# still be at; GitHub checks it in the same step that moves the branch, so
+# there is no window between a read and the move. ``force: false`` keeps the
+# fast-forward rule as well.
+_UPDATE_REFS_MUTATION: Final = """
+mutation MehoBranchCommitFiles(
+  $repositoryId: ID!, $name: GitRefname!, $beforeOid: GitObjectID!, $afterOid: GitObjectID!
+) {
+  updateRefs(
+    input: {
+      repositoryId: $repositoryId
+      refUpdates: [{name: $name, beforeOid: $beforeOid, afterOid: $afterOid, force: false}]
+    }
+  ) {
+    clientMutationId
+  }
+}
+"""
+
+# The GraphQL error ``type`` values GitHub uses when it refuses a ref update
+# and leaves the branch alone: a stale ``beforeOid`` comes back as a generic
+# error with no ``type`` at all; a branch rule or a non-fast-forward move as
+# ``UNPROCESSABLE``. Any other type (auth, not found, ...) is unexpected and
+# raised. The wording is GitHub's; MEHO quotes it.
+_REFUSED_UPDATE_TYPES: Final = frozenset({None, "UNPROCESSABLE"})
 
 
 def check_github_name(value: object) -> str | None:
@@ -220,23 +249,19 @@ class GitRepo:
         payload = await self.read_ref(ref)
         return _object_sha(payload)
 
+    async def node_id(self) -> str:
+        """Return the repository's GraphQL node id (``GET /repos/{owner}/{repo}``)."""
+        payload = await self.get(_REPO_PATH)
+        node_id = payload.get("node_id")
+        if not isinstance(node_id, str) or not node_id:
+            raise RuntimeError(f"GitHub returned no node_id for {self.owner}/{self.repo}")
+        return node_id
+
 
 def _object_sha(payload: dict[str, Any] | None) -> str | None:
     obj = payload.get("object") if isinstance(payload, dict) else None
     sha = obj.get("sha") if isinstance(obj, dict) else None
     return sha if isinstance(sha, str) and sha else None
-
-
-def _github_message(exc: httpx.HTTPStatusError) -> str:
-    """Return GitHub's ``message`` from an error response, or the status text."""
-    try:
-        payload = exc.response.json()
-    except ValueError:
-        payload = None
-    message = payload.get("message") if isinstance(payload, dict) else None
-    if isinstance(message, str) and message:
-        return message
-    return f"HTTP {exc.response.status_code}"
 
 
 def _repo(
@@ -441,23 +466,44 @@ def _moved(base_sha: str, sha_now: str | None) -> str:
     return f"branch is at {sha_now}, not at base_sha {base_sha}; nothing changed"
 
 
-async def _move_branch(repo: GitRepo, *, ref: str, base_sha: str, commit_sha: str) -> str | None:
-    """Move ``ref`` from ``base_sha`` to ``commit_sha`` without force.
+def _is_refusal(exc: GitHubGraphQlError) -> bool:
+    """True when every error is one GitHub uses to refuse a ref update."""
+    return bool(exc.errors) and all(
+        isinstance(err, dict) and err.get("type") in _REFUSED_UPDATE_TYPES for err in exc.errors
+    )
 
-    Returns ``None`` on success, else the reason the branch was not moved.
+
+async def _move_branch(
+    repo: GitRepo, *, repository_id: str, branch: str, base_sha: str, commit_sha: str
+) -> str | None:
+    """Move the branch from ``base_sha`` to ``commit_sha`` in one checked update.
+
+    GitHub checks ``beforeOid`` (``base_sha``) and moves the branch in the
+    same step, so the branch is never moved when it is not at ``base_sha``,
+    even if it moved after MEHO's last read. Returns ``None`` on success,
+    else the reason the branch was not moved. When GitHub refuses, the
+    branch is read once more so the reason names where it is now.
     """
-    sha_now = await repo.ref_sha(ref)
-    if sha_now != base_sha:
-        return _moved(base_sha, sha_now)
     try:
-        await repo.send("PATCH", _REFS_PATH, json={"sha": commit_sha, "force": False}, ref=ref)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code not in _REFUSED_UPDATE_STATUSES:
-            raise
-        return (
-            f"GitHub refused to move the branch without force: {_github_message(exc)}; "
-            "nothing changed"
+        await github_graphql(
+            repo.connector,
+            repo.target,
+            repo.operator,
+            query=_UPDATE_REFS_MUTATION,
+            variables={
+                "repositoryId": repository_id,
+                "name": f"refs/heads/{branch}",
+                "beforeOid": base_sha,
+                "afterOid": commit_sha,
+            },
         )
+    except GitHubGraphQlError as exc:
+        if not _is_refusal(exc):
+            raise
+        sha_now = await repo.ref_sha(f"heads/{branch}")
+        if sha_now != base_sha:
+            return _moved(base_sha, sha_now)
+        return f"GitHub refused to move the branch: {exc}; nothing changed"
     return None
 
 
@@ -472,13 +518,15 @@ async def branch_commit_files_composite(
 
     Steps: check names, ``base_sha`` and files (``invalid_request`` on a
     problem, nothing called); read the branch and stop with
-    ``precondition_failed`` unless it is at ``base_sha``; read that commit
-    for the base tree; create a tree on top of it with the files; create
-    the commit with ``base_sha`` as parent; read the branch again and move
-    it with ``force=false``. Any step that finds the branch gone or moved
-    returns ``status="precondition_failed"`` and the branch is not touched.
-    A transport error or an unexpected status raises, so the dispatcher
-    records the call as failed.
+    ``precondition_failed`` unless it is at ``base_sha``; read the
+    repository's node id; read the base commit for its tree; create a tree
+    on top of it with the files; create the commit with ``base_sha`` as
+    parent; move the branch with one ``updateRefs`` mutation that GitHub
+    only applies when the branch is still at ``base_sha`` (``beforeOid``)
+    and never forces. Any step that finds the branch gone or moved returns
+    ``status="precondition_failed"`` and the branch is not touched. A
+    transport error or an unexpected GraphQL error raises, so the
+    dispatcher records the call as failed.
     """
     branch = str(params.get("branch", ""))
     files, problems = check_commit_request(params)
@@ -498,10 +546,17 @@ async def branch_commit_files_composite(
             base_sha=base_sha,
             files=files,
         )
+    repository_id = await repo.node_id()
     commit = await _create_commit(
         repo, base_sha=base_sha, message=params["message"], files=params["files"]
     )
-    reason = await _move_branch(repo, ref=ref, base_sha=base_sha, commit_sha=commit["sha"])
+    reason = await _move_branch(
+        repo,
+        repository_id=repository_id,
+        branch=branch,
+        base_sha=base_sha,
+        commit_sha=commit["sha"],
+    )
     if reason is not None:
         return _stopped(
             STATUS_PRECONDITION_FAILED,

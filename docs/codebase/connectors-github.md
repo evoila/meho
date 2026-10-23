@@ -223,20 +223,25 @@ response schemas, agent guidance and one example each) live in
 |---|---|---|---|
 | `gh.composite.git_ref_view` | The commit a branch or tag points to. Takes `owner`, `repo`, `name` and `kind` (`branch`, the default, or `tag`). MEHO builds the ref (`heads/<name>` or `tags/<name>`) itself. A missing branch or tag answers `found: false`, not an error. | `GET /repos/{owner}/{repo}/git/ref/{ref}` | `safe`, runs at once |
 | `gh.composite.git_tree_view` | The files and folders of a tree: path, type, mode, SHA-1 and size. One level by default; every file with its full path when `recursive` is true. `tree` takes a branch name, a tag name, a commit SHA or a tree SHA. A long list comes back behind a result handle; the agent reads it with `result_query`. `truncated: true` means GitHub cut the list. | `GET /repos/{owner}/{repo}/git/trees/{tree_sha}` (`recursive=1` when asked) | `safe`, runs at once |
-| `gh.composite.branch_commit_files` | Write one or more text files to an existing branch as one new commit on top of `base_sha`. Takes `owner`, `repo`, `branch`, `base_sha` (the sha `git_ref_view` returned), `message` and `files` (`path` + full `content`). | `GET .../git/ref/heads/{branch}`, `GET .../git/commits/{sha}`, `POST .../git/trees`, `POST .../git/commits`, `GET .../git/ref/heads/{branch}` again, `PATCH .../git/refs/heads/{branch}` with `force: false` | `dangerous`, `requires_approval: true`: every call waits for approval |
+| `gh.composite.branch_commit_files` | Write one or more text files to an existing branch as one new commit on top of `base_sha`. Takes `owner`, `repo`, `branch`, `base_sha` (the sha `git_ref_view` returned), `message` and `files` (`path` + full `content`). | `GET .../git/ref/heads/{branch}`, `GET /repos/{owner}/{repo}` (node id), `GET .../git/commits/{sha}`, `POST .../git/trees`, `POST .../git/commits`, then the GraphQL `updateRefs` mutation with `beforeOid: base_sha` and `force: false` | `dangerous`, `requires_approval: true`: every call waits for approval |
 
 **How the write stays safe.**
 
 - It builds on `base_sha`, the commit the caller read with `git_ref_view`
   and the approver saw. It never forces. It reads the branch and stops
   unless the branch is at `base_sha`; builds the tree and the commit on
-  top of `base_sha`; reads the branch again; and only then moves the
-  branch with `force: false`. If the branch is not at `base_sha` at any
-  of these points (someone pushed while the call waited for approval), or
-  GitHub refuses the update (status 409 or 422), the call returns
-  `status: precondition_failed` with the reason and the branch is not
-  touched. A tree or commit object that was already created is unreachable
-  and harmless.
+  top of `base_sha`; then moves the branch with GitHub's `updateRefs`
+  GraphQL mutation, passing `base_sha` as `beforeOid`. GitHub checks that
+  the branch is still at `base_sha` in the same step that moves it, so a
+  push or a reset that lands after MEHO's read (for example while the
+  call waited for approval) is caught on the server, not by a second read
+  that could already be stale. A reset to an older commit is caught too:
+  a plain fast-forward check would let the new commit through and put the
+  removed commits back. If GitHub rejects the update (stale `beforeOid`,
+  or a branch rule), the call reads the branch once more to name where it
+  is now and returns `status: precondition_failed` with the reason; the
+  branch is not touched. A tree or commit object that was already created
+  is unreachable and harmless.
 - It checks the request before any call: `owner` and `repo` must be
   GitHub names (letters, digits, `.`, `-` and `_`; not `.` or `..`, so
   `.github` is fine), `branch` must be a safe git ref name (git's
@@ -271,8 +276,8 @@ the file list goes behind a result handle.
 
 **Tests.** `backend/tests/test_connectors_github_composites_git.py` drives
 the handlers and the preview with saved responses (no live GitHub),
-including the branch-not-at-base_sha, branch-moved, refused-update and
-unsafe-name cases.
+including the branch-not-at-base_sha, branch-moved, branch-reset-to-an-
+older-commit, refused-update and unsafe-name cases.
 `backend/tests/test_connectors_github_composites_git_register.py` checks the
 risk level and approval flag of each operation, the `git` group, the
 preview builder, and that each operation passes the operation contract

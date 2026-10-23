@@ -10,11 +10,12 @@ no live GitHub. Coverage:
   answers ``found=false`` on 404.
 * ``git_tree_view`` passes ``recursive=1`` only when asked and projects
   each entry to path / type / mode / sha / size.
-* ``branch_commit_files`` chains read-ref, read-commit, create-tree,
-  create-commit, re-read-ref, update-ref (``force=false``); stops without
-  touching the branch when the branch is missing, when it moved after the
-  read, or when GitHub refuses the update; refuses bad paths and
-  over-size files before any call.
+* ``branch_commit_files`` chains read-ref, read-repo, read-commit,
+  create-tree, create-commit, and one ``updateRefs`` mutation with
+  ``beforeOid=base_sha`` and ``force=false``; stops without touching the
+  branch when the branch is missing, when it moved or was reset after the
+  read (GitHub rejects the stale ``beforeOid``), or when GitHub refuses
+  the update; refuses bad paths and over-size files before any call.
 * The park-time preview carries the branch, its current commit and each
   file's path / size / SHA-256, never the content.
 """
@@ -45,6 +46,7 @@ from meho_backplane.connectors.github.composites._git_preview import (
     BRANCH_COMMIT_FILES_OP_ID,
     branch_commit_files_preview,
 )
+from meho_backplane.connectors.github.composites._graphql import GitHubGraphQlError
 from meho_backplane.connectors.github.composites.schemas_git import (
     MAX_FILE_BYTES,
     MAX_TOTAL_BYTES,
@@ -56,12 +58,21 @@ _OTHER_SHA = "b" * 40
 _BASE_TREE_SHA = "c" * 40
 _NEW_TREE_SHA = "d" * 40
 _NEW_COMMIT_SHA = "e" * 40
+_PARENT_SHA = "f" * 40
+_REPO_NODE_ID = "R_kgDOtest"
 
 _REF_PATH = "/repos/acme/widgets/git/ref/heads/main"
 _COMMIT_PATH = f"/repos/acme/widgets/git/commits/{_BASE_SHA}"
 _TREES_PATH = "/repos/acme/widgets/git/trees"
 _COMMITS_PATH = "/repos/acme/widgets/git/commits"
-_REFS_PATH = "/repos/acme/widgets/git/refs/heads/main"
+_REPO_PATH = "/repos/acme/widgets"
+_GRAPHQL_PATH = "/graphql"
+
+_UPDATE_OK = {"data": {"updateRefs": {"clientMutationId": None}}}
+# What GitHub answers (HTTP 200) when ``beforeOid`` is not where the branch is.
+_UPDATE_STALE = {
+    "errors": [{"message": "Something went wrong while executing your query. Please include `X`."}]
+}
 
 
 def _make_operator() -> Operator:
@@ -157,13 +168,22 @@ class _RecordingConnector:
 
 def _happy_connector(
     *,
-    second_ref: dict[str, Any] | None = None,
-    patch_response: Any = None,
+    ref_after_refusal: dict[str, Any] | None = None,
+    update_response: Any = None,
 ) -> _RecordingConnector:
-    first_ref = _ref_payload()
+    """A session where the branch is at ``base_sha`` and every call answers.
+
+    ``ref_after_refusal`` is what the second ref read (only made after
+    GitHub refuses the update) returns; ``update_response`` is the body
+    (or exception) of the ``updateRefs`` call.
+    """
+    refs = [_ref_payload()]
+    if ref_after_refusal is not None:
+        refs.append(ref_after_refusal)
     return _RecordingConnector(
         get={
-            _REF_PATH: [first_ref, second_ref if second_ref is not None else _ref_payload()],
+            _REF_PATH: refs,
+            _REPO_PATH: {"node_id": _REPO_NODE_ID},
             _COMMIT_PATH: {"sha": _BASE_SHA, "tree": {"sha": _BASE_TREE_SHA}},
         },
         post={
@@ -173,11 +193,19 @@ def _happy_connector(
                 "html_url": f"https://github.com/acme/widgets/commit/{_NEW_COMMIT_SHA}",
                 "tree": {"sha": _NEW_TREE_SHA},
             },
-            ("PATCH", _REFS_PATH): patch_response
-            if patch_response is not None
-            else _ref_payload(_NEW_COMMIT_SHA),
+            ("POST", _GRAPHQL_PATH): update_response
+            if update_response is not None
+            else dict(_UPDATE_OK),
         },
     )
+
+
+def _update_variables(connector: _RecordingConnector) -> dict[str, Any]:
+    """The variables of the one ``updateRefs`` call the connector recorded."""
+    calls = [call for call in connector.post_calls if call["path"] == _GRAPHQL_PATH]
+    assert len(calls) == 1, calls
+    assert "updateRefs(" in calls[0]["json"]["query"]
+    return calls[0]["json"]["variables"]
 
 
 def _commit_params(**overrides: Any) -> dict[str, Any]:
@@ -347,9 +375,9 @@ async def test_branch_commit_files_chains_the_git_calls_and_never_forces() -> No
         },
         {"path": "README.md", "size": 6, "sha256": hashlib.sha256(b"hello\n").hexdigest()},
     ]
-    # Two ref reads (before the tree, before the update) and one commit read.
-    assert [path for path, _ in connector.get_calls] == [_REF_PATH, _COMMIT_PATH, _REF_PATH]
-    tree_call, commit_call, ref_call = connector.post_calls
+    # One ref read (the precondition), the repo node id, the base commit.
+    assert [path for path, _ in connector.get_calls] == [_REF_PATH, _REPO_PATH, _COMMIT_PATH]
+    tree_call, commit_call, update_call = connector.post_calls
     assert tree_call["verb"] == "POST"
     assert tree_call["json"] == {
         "base_tree": _BASE_TREE_SHA,
@@ -363,14 +391,23 @@ async def test_branch_commit_files_chains_the_git_calls_and_never_forces() -> No
         "tree": _NEW_TREE_SHA,
         "parents": [_BASE_SHA],
     }
-    assert ref_call["verb"] == "PATCH"
-    assert ref_call["path"] == _REFS_PATH
-    assert ref_call["json"] == {"sha": _NEW_COMMIT_SHA, "force": False}
+    assert update_call["verb"] == "POST"
+    assert update_call["path"] == _GRAPHQL_PATH
+    assert "force: false" in update_call["json"]["query"]
+    assert update_call["json"]["variables"] == {
+        "repositoryId": _REPO_NODE_ID,
+        "name": "refs/heads/main",
+        "beforeOid": _BASE_SHA,
+        "afterOid": _NEW_COMMIT_SHA,
+    }
 
 
 @pytest.mark.asyncio
 async def test_branch_commit_files_stops_when_the_branch_moved_after_the_read() -> None:
-    connector = _happy_connector(second_ref=_ref_payload(_OTHER_SHA))
+    """Someone pushed after MEHO's read: GitHub rejects the stale beforeOid."""
+    connector = _happy_connector(
+        ref_after_refusal=_ref_payload(_OTHER_SHA), update_response=dict(_UPDATE_STALE)
+    )
     result = await branch_commit_files_composite(
         operator=_make_operator(),
         target=object(),
@@ -382,15 +419,23 @@ async def test_branch_commit_files_stops_when_the_branch_moved_after_the_read() 
     assert _BASE_SHA in result["reason"] and _OTHER_SHA in result["reason"]
     assert result["commit_sha"] is None
     assert result["base_sha"] == _BASE_SHA
-    assert all(call["verb"] != "PATCH" for call in connector.post_calls), (
-        "the branch must not be updated when it moved"
-    )
+    assert _update_variables(connector)["beforeOid"] == _BASE_SHA
+    # The branch is read again only after the refusal, to name where it is now.
+    assert [path for path, _ in connector.get_calls][-1] == _REF_PATH
 
 
 @pytest.mark.asyncio
-async def test_branch_commit_files_stops_when_github_refuses_the_update() -> None:
-    refusal = _http_error(422, {"message": "Update is not a fast forward"})
-    connector = _happy_connector(patch_response=refusal)
+async def test_branch_commit_files_stops_when_the_branch_was_reset_to_an_older_commit() -> None:
+    """A reset to an ancestor of base_sha between the read and the move.
+
+    The new commit would still be a fast-forward from that ancestor, so a
+    plain ``force=false`` update would put the removed commits back. The
+    server-side ``beforeOid`` check is what stops it: the update is sent
+    with ``beforeOid=base_sha`` and GitHub rejects it.
+    """
+    connector = _happy_connector(
+        ref_after_refusal=_ref_payload(_PARENT_SHA), update_response=dict(_UPDATE_STALE)
+    )
     result = await branch_commit_files_composite(
         operator=_make_operator(),
         target=object(),
@@ -398,13 +443,56 @@ async def test_branch_commit_files_stops_when_github_refuses_the_update() -> Non
         connector=connector,  # type: ignore[arg-type]
     )
     assert result["status"] == STATUS_PRECONDITION_FAILED
-    assert "Update is not a fast forward" in result["reason"]
+    assert result["reason"] == (
+        f"branch 'main': branch is at {_PARENT_SHA}, not at base_sha {_BASE_SHA}; nothing changed"
+    )
+    assert result["commit_sha"] is None
+    variables = _update_variables(connector)
+    assert variables["beforeOid"] == _BASE_SHA, "the expected head rides in the update itself"
+    assert variables["afterOid"] == _NEW_COMMIT_SHA
+    assert all(call["verb"] == "POST" for call in connector.post_calls), "no force, no PATCH"
+
+
+@pytest.mark.asyncio
+async def test_branch_commit_files_stops_when_github_refuses_the_update() -> None:
+    """A branch rule (type UNPROCESSABLE) stops the call; the branch stays put."""
+    refusal = {
+        "errors": [
+            {"type": "UNPROCESSABLE", "message": "Changes must be made through a pull request."}
+        ]
+    }
+    connector = _happy_connector(ref_after_refusal=_ref_payload(), update_response=refusal)
+    result = await branch_commit_files_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_commit_params(),
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["status"] == STATUS_PRECONDITION_FAILED
+    assert result["reason"].startswith("branch 'main': GitHub refused to move the branch: ")
+    assert "Changes must be made through a pull request." in result["reason"]
+    assert result["reason"].endswith("; nothing changed")
     assert result["commit_sha"] is None
 
 
 @pytest.mark.asyncio
 async def test_branch_commit_files_raises_on_an_unexpected_update_error() -> None:
-    connector = _happy_connector(patch_response=_http_error(500))
+    """A typed GraphQL error that is not a refusal (here: no access) raises."""
+    forbidden = {"errors": [{"type": "FORBIDDEN", "message": "Resource not accessible"}]}
+    connector = _happy_connector(update_response=forbidden)
+    with pytest.raises(GitHubGraphQlError, match="Resource not accessible"):
+        await branch_commit_files_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=_commit_params(),
+            connector=connector,  # type: ignore[arg-type]
+        )
+    assert [path for path, _ in connector.get_calls] == [_REF_PATH, _REPO_PATH, _COMMIT_PATH]
+
+
+@pytest.mark.asyncio
+async def test_branch_commit_files_raises_on_a_transport_error_during_the_update() -> None:
+    connector = _happy_connector(update_response=_http_error(500))
     with pytest.raises(httpx.HTTPStatusError):
         await branch_commit_files_composite(
             operator=_make_operator(),
@@ -610,18 +698,22 @@ async def test_branch_commit_files_refuses_unsafe_names_before_any_call(
 
 @pytest.mark.asyncio
 async def test_branch_commit_files_percent_encodes_the_branch_name() -> None:
-    """A branch like ``fix#1`` reaches GitHub as ``heads/fix%231``, not ``heads/fix``."""
+    """A branch like ``fix#1`` reaches GitHub as ``heads/fix%231`` in the URL.
+
+    The ``updateRefs`` variable carries the plain name: it is JSON, not a
+    URL path part.
+    """
     ref_path = "/repos/acme/widgets/git/ref/heads/fix%231"
-    refs_path = "/repos/acme/widgets/git/refs/heads/fix%231"
     connector = _RecordingConnector(
         get={
-            ref_path: [_ref_payload(), _ref_payload()],
+            ref_path: [_ref_payload()],
+            _REPO_PATH: {"node_id": _REPO_NODE_ID},
             _COMMIT_PATH: {"sha": _BASE_SHA, "tree": {"sha": _BASE_TREE_SHA}},
         },
         post={
             ("POST", _TREES_PATH): {"sha": _NEW_TREE_SHA},
             ("POST", _COMMITS_PATH): {"sha": _NEW_COMMIT_SHA, "tree": {"sha": _NEW_TREE_SHA}},
-            ("PATCH", refs_path): _ref_payload(_NEW_COMMIT_SHA),
+            ("POST", _GRAPHQL_PATH): dict(_UPDATE_OK),
         },
     )
     result = await branch_commit_files_composite(
@@ -632,7 +724,7 @@ async def test_branch_commit_files_percent_encodes_the_branch_name() -> None:
     )
     assert result["status"] == STATUS_COMMITTED
     assert result["branch"] == "fix#1"
-    assert connector.post_calls[-1]["path"] == refs_path
+    assert _update_variables(connector)["name"] == "refs/heads/fix#1"
 
 
 @pytest.mark.asyncio

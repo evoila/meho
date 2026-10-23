@@ -386,11 +386,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=branch_commit_files_composite,
         summary="Write text files to a branch as one new commit (waits for approval).",
         description=(
-            "Reads the branch, creates a tree on top of its commit with the "
-            "files, creates the commit, and moves the branch to it without "
-            "force. If the branch moved after the read, the call stops with "
-            "precondition_failed and changes nothing. Every call waits for "
-            "approval."
+            "Reads the branch, creates a tree with the files on top of its "
+            "commit, creates the commit, and moves the branch in one update that "
+            "GitHub applies only while the branch is still at base_sha, never "
+            "with force. Otherwise the call stops with precondition_failed. "
+            "Every call waits for approval."
         ),
         parameter_schema=BRANCH_COMMIT_FILES_PARAMETER_SCHEMA,
         response_schema=BRANCH_COMMIT_FILES_RESPONSE_SCHEMA,

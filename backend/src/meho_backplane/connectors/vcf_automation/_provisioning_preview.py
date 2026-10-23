@@ -42,6 +42,7 @@ from meho_backplane.connectors.vcf_automation._lookups import (
     password_ref,
     quote_segment,
 )
+from meho_backplane.connectors.vcf_automation._paths import TENANT_IAAS_API_VERSION
 from meho_backplane.connectors.vcf_automation.typed_ops import TENANT_DEPLOYMENT_DETAIL_PATH
 from meho_backplane.operations._preview import (
     PreviewContext,
@@ -232,7 +233,13 @@ async def _deployment_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
         return preview
     path = TENANT_DEPLOYMENT_DETAIL_PATH.format(id=quote_segment(deployment_id))
     try:
-        row = await connector._request_json(ctx.target, "GET", path, operator=ctx.operator)
+        row = await connector._request_json(
+            ctx.target,
+            "GET",
+            path,
+            operator=ctx.operator,
+            params={"apiVersion": TENANT_IAAS_API_VERSION},
+        )
     except (httpx.HTTPError, RuntimeError, ValueError):
         return preview
     return {**preview, "name": row.get("name"), "project_id": row.get("projectId")}

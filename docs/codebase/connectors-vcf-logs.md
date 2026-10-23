@@ -367,23 +367,27 @@ places. Redaction stays on; the read just never claims an exact file it
 cannot return.
 
 The shared rules see `password=value` and `password: value`, but not
-every form a secret takes in an API file. So the read has checks of its
-own, run on the whole text (a secret whose label ends one part and whose
-value starts the next is found too). It stops, with an error that names
-the form and the number of places but never the value, when the text
-holds:
+every form a secret takes in an API file: not a quoted field name, and
+not a value that holds a quote or a space or runs past 4096 characters.
+So the read has checks of its own, run on the whole text (a secret whose
+label ends one part and whose value starts the next is found too). It
+stops, with an error that names the form and the number of places but
+never the value, when the text holds:
 
 - a quoted field named like a secret with a value of 8 or more
   characters, for example `"password": "..."`, `"sessionToken": "..."`,
   `"sessionId": "..."` (the login token the session API returns) or
   `"licenseKey": "..."` (the JSON form an API reference shows in a
-  request example). The value ends at the same quote that opened it, so
-  it may hold spaces, the other quote (`"it's-secret"`) and escaped
-  characters. A schema entry such as `"password": {"type": "string"}`
-  is not a value and passes; so does a short placeholder like `"string"`;
-- a licence-key field without quotes (`licenseKey: ...`);
-- a session-id field without quotes (`sessionId: ...` or
-  `session_id=...`);
+  request example). A quoted value runs to the same quote that opened it
+  or to the end of the line, with no upper length, so it may hold
+  spaces, the other quote (`"it's-secret"`) and escaped characters. A
+  schema entry such as `"password": {"type": "string"}` is not a value
+  and passes; so does a short placeholder like `"string"`;
+- the same field names without quotes, as in YAML, a header line or a
+  query string (`password: "it's-secret"`, `X-Api-Key: ...`,
+  `sessionId: ...`, `session_id=...`, `licenseKey: ...`), with the same
+  value shape. A bare value runs to the next space, so a plain YAML
+  value with a quote inside (`password: it's-secret`) counts too;
 - a bare VMware licence key, five groups of five letters and digits
   mixed (`AB12C-3D4EF-...`), under any field name, because the Logs
   licence API names it `key`. A placeholder of only one kind of character

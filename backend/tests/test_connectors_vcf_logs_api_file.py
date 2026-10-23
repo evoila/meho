@@ -29,10 +29,12 @@ What is covered, with a respx-mocked Logs system and no ingested catalog:
 * a page the secret-redaction rules would change stops with an error, also
   when the secret's label ends one part and its value starts the next;
 * the secret-bearing forms the shared rules leave unchanged (a quoted
-  JSON password or token field, a private-key block, a licence key as a
-  field or as a bare value) stop with an error that never shows the
-  value, also when the form crosses a part boundary; a schema entry or a
-  placeholder named like a secret still passes;
+  JSON password or token field, an unquoted YAML or header field whose
+  value holds the other quote, a quoted value longer than the shared
+  rules match, a private-key block, a licence key as a field or as a
+  bare value) stop with an error that never shows the value, also when
+  the form crosses a part boundary, and are withheld from a 401 or 440
+  body; a schema entry or a placeholder named like a secret still passes;
 * content that is not text is refused with its content type;
 * the version read fails (HTTP 500, no connection, an answer with no
   version) and the file still comes back with the reason;
@@ -472,54 +474,6 @@ async def test_session_expiry_on_the_read_drops_the_session_and_asks_once_more(
     assert docs.call_count == 2
     assert login.call_count == 2
     assert loader.calls == 1
-
-
-@pytest.mark.parametrize("status", [401, 440])
-@pytest.mark.parametrize(
-    ("body", "secret"),
-    [
-        (
-            '{"errorMessage": "session expired", "password": "example-secret-value-0123456789"}',
-            "example-secret-value-0123456789",
-        ),
-        (
-            '{"errorMessage": "session expired", "sessionId": "example-session-id-0123456789"}',
-            "example-session-id-0123456789",
-        ),
-        (
-            '{"errorMessage": "session expired", "password": "it\'s-a-secret-0123456789"}',
-            "it's-a-secret-0123456789",
-        ),
-    ],
-)
-@pytest.mark.asyncio
-async def test_session_expiry_body_with_a_secret_is_withheld_and_the_retry_still_runs(
-    _stub_embedding: AsyncMock, session: AsyncSession, status: int, body: str, secret: str
-) -> None:
-    """The dispatcher copies the 401 or 440 body into the error result; no secret may go with it."""
-    _, loader = await _register_and_resolve(_stub_embedding)
-    shared = apply_connector_boundary_redaction(
-        {"text": body}, connector_id=VRLI_CONNECTOR_ID, tenant=None, op="vrli.api_file.get"
-    )
-    assert shared.redacted == shared.raw, "the shared rules must not see this form; the gap is real"
-    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
-        login = _mock_login(mock)
-        mock.get(_VERSION).respond(200, json=_VERSION_PAYLOAD)
-        docs = mock.get(_REFERENCE).respond(
-            status, content=body.encode(), headers={"Content-Type": "application/json"}
-        )
-        result = await _dispatch(_REFERENCE)
-
-    assert result.status == "error"
-    assert str(status) in (result.error or "")
-    assert docs.call_count == 2
-    assert login.call_count == 2
-    assert loader.calls == 1
-    rendered = (
-        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
-    )
-    assert secret not in rendered
-    assert "session expired" not in rendered, "the whole body is withheld, not only the secret"
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +956,10 @@ def _private_key_block(kind: str, body: str) -> str:
     return f"-----{header}-----\n{body}\n-----{footer}-----\n"
 
 
-_SECRET_FORM_PAGES: list[tuple[str, str, str]] = [
+#: Longer than the 4096 characters the shared rules match in one value.
+_LONG_SECRET = "example-secret-value-" + "0123456789" * 420
+
+_SECRET_FORM_PAGES: list[Any] = [
     (
         "quoted-secret-field",
         "<pre>POST /api/v2/sessions\n"
@@ -1035,14 +992,35 @@ _SECRET_FORM_PAGES: list[tuple[str, str, str]] = [
         "example-session-id-0123456789",
     ),
     (
-        "session-id-field",
+        "unquoted-secret-field",
         "sessionId: example-session-id-0123456789\n",
         "example-session-id-0123456789",
     ),
     (
-        "session-id-field",
+        "unquoted-secret-field",
         "GET /api/v2/events?session_id=example-session-id-0123456789 HTTP/1.1",
         "example-session-id-0123456789",
+    ),
+    (
+        "unquoted-secret-field",
+        'username: admin\npassword: "it\'s-a-secret-0123456789"\n',
+        "it's-a-secret-0123456789",
+    ),
+    (
+        "unquoted-secret-field",
+        "username: admin\npassword: it's-a-secret-0123456789\n",
+        "it's-a-secret-0123456789",
+    ),
+    (
+        "unquoted-secret-field",
+        'GET /api/v2/events HTTP/1.1\r\nX-Api-Key: "it\'s-a-key-value-0123456789"\r\n',
+        "it's-a-key-value-0123456789",
+    ),
+    pytest.param(
+        "quoted-secret-field",
+        '{"username": "admin", "password": "' + _LONG_SECRET + '"}',
+        _LONG_SECRET,
+        id="quoted-value-longer-than-the-shared-rules-match",
     ),
     (
         "quoted-secret-field",
@@ -1055,7 +1033,7 @@ _SECRET_FORM_PAGES: list[tuple[str, str, str]] = [
         "example-licence-key-value-0123456789",
     ),
     (
-        "licence-key-field",
+        "unquoted-secret-field",
         "license_key: example-licence-key-value-0123456789\n",
         "example-licence-key-value-0123456789",
     ),
@@ -1105,6 +1083,44 @@ async def test_secret_form_the_shared_rules_leave_unchanged_stops_with_an_error(
     assert secret not in json.dumps(result.result) + json.dumps(result.extras, default=str)
 
 
+@pytest.mark.parametrize("status", [401, 440])
+@pytest.mark.parametrize(("form", "page", "secret"), _SECRET_FORM_PAGES)
+@pytest.mark.asyncio
+async def test_session_expiry_body_with_a_secret_is_withheld_and_the_retry_still_runs(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    form: str,
+    page: str,
+    secret: str,
+) -> None:
+    """The dispatcher copies the 401 or 440 body into the error result; no secret may go with it."""
+    _, loader = await _register_and_resolve(_stub_embedding)
+    body = '{"errorMessage": "session expired"}\n' + page
+    shared = apply_connector_boundary_redaction(
+        {"text": body}, connector_id=VRLI_CONNECTOR_ID, tenant=None, op="vrli.api_file.get"
+    )
+    assert shared.redacted == shared.raw, "the shared rules must not see this form; the gap is real"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = _mock_login(mock)
+        mock.get(_VERSION).respond(200, json=_VERSION_PAYLOAD)
+        docs = mock.get(_REFERENCE).respond(
+            status, content=body.encode(), headers={"Content-Type": "text/plain"}
+        )
+        result = await _dispatch(_REFERENCE)
+
+    assert result.status == "error"
+    assert str(status) in (result.error or "")
+    assert docs.call_count == 2
+    assert login.call_count == 2
+    assert loader.calls == 1
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert secret not in rendered
+    assert "session expired" not in rendered, "the whole body is withheld, not only the secret"
+
+
 @pytest.mark.asyncio
 async def test_quoted_secret_field_that_crosses_a_part_boundary_stops_with_an_error(
     _stub_embedding: AsyncMock, session: AsyncSession
@@ -1147,6 +1163,8 @@ async def test_quoted_secret_field_that_crosses_a_part_boundary_stops_with_an_er
         '{"userId": "string", "sessionId": "string", "ttl": 0}',
         '{"info": {"license": {"name": "Apache 2.0"}}}',
         "licenseKey:\n  type: string\n  description: The licence key of the system\n",
+        "password:\n  type: string\n  format: password\n  description: The login password\n",
+        'username: "string"\npassword: "string"\n',
         '{"key": "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"}',
         '{"required": ["password", "token"], "token": null}',
         "-----BEGIN CERTIFICATE-----\nMIIEexample\n-----END CERTIFICATE-----\n",

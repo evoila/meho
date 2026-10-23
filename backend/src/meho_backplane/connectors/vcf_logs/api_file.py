@@ -44,13 +44,15 @@ result handle stops with an error that names its size -- the read never
 returns a cut file. A file that the secret-redaction rules would change
 stops too, so the read never claims an exact file it cannot return. The
 read also refuses, on its own, the secret-bearing forms the shared rules
-do not see: a quoted field named like a secret (``"password": "..."``,
-the JSON form an API reference shows in its examples), the system's own
-login token (``sessionId``), a private-key block, and a licence key,
-labelled or bare. The check runs on the whole text, so a secret that
-crosses a part boundary is found too. The body of a ``401`` or ``440``
-answer goes through the same check before the read raises it for the
-login retry; a body that holds a secret form is withheld.
+do not see: a field named like a secret, quoted (``"password": "..."``,
+the JSON form an API reference shows in its examples) or not
+(``password: "..."``, the YAML form), with a value of any length that
+may hold spaces and quotes; the system's own login token (``sessionId``);
+a private-key block; and a licence key, labelled or bare. The check runs
+on the whole text, so a secret that crosses a part boundary is found too.
+The body of a ``401`` or ``440`` answer goes through the same check before
+the read raises it for the login retry; a body that holds a secret form is
+withheld.
 
 Version and build come from the connector's own version detection
 (``GET /api/v2/version``, which needs no login). If that read fails, the
@@ -162,7 +164,9 @@ _OP_ID = "vrli.api_file.get"
 #: redaction rule plus the two this system uses that the rule lacks: the
 #: licence key and ``sessionId``, the login token the session API returns.
 #: The shared rule sees ``password=`` and ``password:`` but not a quoted
-#: key, so the read checks that form here.
+#: key, and its value stops at the first quote or space and after 4096
+#: characters, so ``password: "it's-secret"`` and a long value pass it.
+#: The read checks both forms here, with a wider value.
 _SECRET_LABELS = (
     r"api[_-]?key"
     r"|access[_-]?token"
@@ -177,15 +181,17 @@ _SECRET_LABELS = (
     r"|token"
     r"|licen[cs]e[_-]?key"
 )
-#: A value of at least 8 characters, as the shared rule asks: quoted or
-#: bare (up to the next space or quote). A quoted value ends at the same
-#: quote that opened it, so it may hold spaces, the other quote
-#: (``"it's-secret"``) and escaped characters (``"a\\"b"``). An object or
+#: A value of at least 8 characters, as the shared rule asks, with no
+#: upper limit: quoted or bare. A quoted value runs to the same quote
+#: that opened it or to the end of the line, so it may hold spaces, the
+#: other quote (``"it's-secret"``) and escaped characters (``"a\\"b"``).
+#: A bare value runs to the next space, so it may hold a quote after its
+#: first character (``it's-secret``, a plain YAML value). An object or
 #: list after the label (``"password": {"type": ...}``, a schema, not a
 #: value) does not match: the first character is a brace.
 _SECRET_VALUE = (
-    r"(?:(?P<quote>['\"])(?:\\.|(?!(?P=quote))[^\\\n]){8,4096}(?P=quote)"
-    r"|[^\s'\"{\[]{8,4096})"
+    r"(?:(?P<quote>['\"])(?:\\.|(?!(?P=quote))[^\\\n]){8,}"
+    r"|[^\s'\"{\[]\S{7,})"
 )
 
 #: The secret-bearing forms this read refuses on its own. Each name says what
@@ -195,13 +201,12 @@ _SECRET_FORMS: dict[str, re.Pattern[str]] = {
     "quoted-secret-field": re.compile(
         r"['\"](?:" + _SECRET_LABELS + r")['\"]\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
     ),
-    # ``licenseKey: ...`` -- the shared rule has no licence label.
-    "licence-key-field": re.compile(
-        r"(?<![\w-])licen[cs]e[_-]?key\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
-    ),
-    # ``sessionId: ...`` -- the login token, under a label the shared rule lacks.
-    "session-id-field": re.compile(
-        r"(?<![\w-])session[_-]?id\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
+    # ``password: "..."``, ``X-Api-Key: ...``, ``sessionId: ...`` -- a field
+    # name without quotes, as in YAML, a header line or a query string. The
+    # label starts at a word boundary, as in the shared rule, so
+    # ``X-Api-Key`` and ``?session_id=`` count and ``user_password`` does not.
+    "unquoted-secret-field": re.compile(
+        r"\b(?:" + _SECRET_LABELS + r")\s*[=:]\s*" + _SECRET_VALUE, re.IGNORECASE
     ),
     # ``XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`` with letters and digits mixed -- the
     # shape of a VMware licence key under any field name (the Logs licence

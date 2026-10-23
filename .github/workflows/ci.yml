@@ -960,14 +960,38 @@ jobs:
           # unit tests (the Alembic upgrade/downgrade round-trips, ~55 s on
           # a loaded 3-worker box); raise it only with a --durations
           # measurement showing a legitimate test near it.
+          # --junitxml (#4809): the per-test times of this shard, uploaded
+          # by the step below. They are the input for refreshing
+          # tests/_unit_shard_durations.json (see tests/_unit_shard_split.py).
+          # xunit1, not the default xunit2, because only xunit1 writes the
+          # test file name on every test case.
           uv run pytest -n 3 --dist loadscope --maxfail=1 \
-            --timeout=180 --timeout-method=signal "${SHARD_FILES[@]}"
+            --timeout=180 --timeout-method=signal \
+            -o junit_family=xunit1 --junitxml=pytest-unit-shard.xml "${SHARD_FILES[@]}"
           dur=$(( $(date +%s) - start ))
           echo "::notice title=Unit pytest wall (shard ${SHARD}/${TOTAL})::${dur}s (budget ${budget_s}s per shard; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then
             echo "::error title=Unit perf budget exceeded (shard ${SHARD}/${TOTAL})::shard pytest ${dur}s > per-shard budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s (MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py — #793/#827). Amortize the cost or rebalance the shards; do not just bump the budget."
             exit 1
           fi
+
+      - name: Upload per-test times (input for the shard split)
+        # #4809: tests/_unit_shard_split.py balances the shards with the
+        # seconds in tests/_unit_shard_durations.json. Refresh that file
+        # from these artifacts (one per shard) of a green run; the module
+        # docstring has the commands. Uploaded whenever the file exists, so
+        # a shard that ran over the budget still shows where the time went.
+        # continue-on-error + timeout-minutes: a failed or hung upload must
+        # never fail or hold the shard.
+        if: always() && hashFiles('backend/pytest-unit-shard.xml') != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: python-unit-shard-junit-${{ matrix.shard }}
+          path: backend/pytest-unit-shard.xml
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Print peak memory
         # Prints how much memory this job's runner container used and how many

@@ -63,7 +63,17 @@ def test_file_without_measurement_counts_as_the_median() -> None:
     durations = {"tests/test_a.py": 10.0, "tests/test_b.py": 20.0, "tests/test_c.py": 30.0}
     shards = [["tests/test_new.py"], ["tests/test_b.py"]]
 
-    assert splitter.predicted_seconds(shards, durations) == [20.0, 20.0]
+    assert splitter.predicted_seconds(shards, durations) == [20.1, 20.1]
+
+
+def test_files_measured_at_zero_spread_over_all_shards() -> None:
+    files = [f"tests/test_skipped_{i}.py" for i in range(8)] + ["tests/test_a.py"]
+    durations = dict.fromkeys(files, 0.0)
+    durations["tests/test_a.py"] = 5.0
+
+    shards = splitter.split(files, durations, 4)
+
+    assert [len(shard) for shard in shards] == [1, 3, 3, 2]
 
 
 def test_split_rejects_zero_shards() -> None:
@@ -93,7 +103,14 @@ def test_measure_sums_seconds_per_file(tmp_path: Path) -> None:
         "</testsuite></testsuites>"
     )
 
-    assert splitter.measure(junit) == {"tests/test_a.py": 3.5, "tests/test_b.py": 0.25}
+    second = tmp_path / "unit-2.xml"
+    second.write_text(
+        '<testsuites><testsuite name="pytest">'
+        '<testcase classname="tests.test_b" file="tests/test_b.py" name="t2" time="0.75"/>'
+        "</testsuite></testsuites>"
+    )
+
+    assert splitter.measure([junit, second]) == {"tests/test_a.py": 3.5, "tests/test_b.py": 1.0}
 
 
 def test_measure_requires_xunit1_file_attribute(tmp_path: Path) -> None:
@@ -105,7 +122,7 @@ def test_measure_requires_xunit1_file_attribute(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="xunit1"):
-        splitter.measure(junit)
+        splitter.measure([junit])
 
 
 def test_cli_prints_one_shard_from_stdin(

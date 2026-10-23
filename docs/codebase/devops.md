@@ -1678,15 +1678,22 @@ shape (deterministic file-level matrix + fan-in):
   measured seconds per test file from `tests/_unit_shard_durations.json`,
   sorts the files slowest first, and gives each file to the shard with
   the least time so far (a file without a measurement counts as the
-  median). The same list always gives the same split, and the four shards
-  partition the file set **exactly** (union == full, pairwise disjoint;
+  median; every file also carries a small fixed cost for import and
+  collection, so files whose tests all skip still spread out). The same
+  list always gives the same split, and the four shards partition the
+  file set **exactly** (union == full, pairwise disjoint;
   `tests/test_unit_shard_split.py` pins both). The splitter prints the
   file count and the predicted seconds per shard on stderr, so the shard
-  log shows when the measurements drift from the real wall. To refresh
-  the measurements, run the unit file set once with `-o
-  junit_family=xunit1 --junitxml=<file>` and feed that file to
-  `tests/_unit_shard_split.py --measure`; the module docstring has the
-  exact commands. #3251 started with 3 shards and gave every N-th file of
+  log shows when the measurements drift from the real wall. Each shard
+  writes its per-test times with `-o junit_family=xunit1 --junitxml` and
+  uploads them as the artifact `python-unit-shard-junit-<N>`. To refresh
+  the measurements, download the four artifacts of one green run and
+  pass them to `tests/_unit_shard_split.py --measure`; the module
+  docstring has the exact commands. Take the numbers from CI, not from a
+  laptop: tests that need Docker or the spec shelf skip locally but run
+  in CI, and a local measurement put all of them into one shard (584 s
+  against 443 s for the lightest). #3251 started with 3 shards and gave
+  every N-th file of
   the sorted list to one shard. #4655 raised the count to 4 when the
   slowest shard reached the 660 s per-shard budget (579 s as a middle
   value and up to 605 s on `main`; 663 s on a pull request). #4809

@@ -4761,6 +4761,21 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "values."
             ),
         },
+        "deployment_option": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional OVF deployment option key, for example the size profile "
+                "of an appliance. Sent as ``selected_key`` of a "
+                "``DeploymentOptionParams`` entry in "
+                "``ResourcePoolDeploymentSpec.additional_parameters``. MEHO first "
+                "reads the OVF summary (``?action=filter``) and checks the key "
+                "against the ``deployment_options`` it lists. A key the item does "
+                "not offer is refused with ``status='invalid_reference'`` before "
+                "any deploy, and ``candidates`` lists the offered keys. Omit it to "
+                "deploy the OVF's default option."
+            ),
+        },
         "accept_all_eula": {
             "type": "boolean",
             "description": (
@@ -4832,7 +4847,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "structured message with the vCenter status carried in ``issues`` "
                 "rather than a raw vendor error. ``'resolve_error'`` and "
                 "``'invalid_reference'`` also cover the OVF summary read that "
-                "supplies the default VM name when ``name`` is omitted. "
+                "supplies the default VM name when ``name`` is omitted or checks "
+                "``deployment_option``; ``'invalid_reference'`` also means the "
+                "``deployment_option`` key is not one the OVF item offers. "
                 "Every non-``deployed`` status is reached before or without a "
                 "successful mutation: when a failed deploy leaves a partial VM "
                 "or vApp behind, the composite tries to remove it and reports the "
@@ -4892,7 +4909,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Candidate ids on ``ambiguous_item`` (library-item ids) or "
-                "``ambiguous_library`` (library ids); ``null`` otherwise."
+                "``ambiguous_library`` (library ids); on ``invalid_reference`` for "
+                "a ``deployment_option`` the item does not offer, the keys it does "
+                "offer; ``null`` otherwise."
             ),
         },
     },

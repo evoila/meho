@@ -447,12 +447,13 @@ async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any]
 
     Param-echo: the params name the blast radius — which library item (id or
     name, plus scoping library), where it lands (resource pool / host / folder
-    / datastore), the OVF-network→portgroup map, provisioning, and whether it
-    powers on. ``ovf_properties`` may carry secret values (appliance
-    passwords), so only its **keys** (property ids) are echoed, never the
-    values (#1503 secret-hygiene). No live read is issued, so the preview
-    cannot drift from the approved dispatch. Declines (``None``) when neither
-    library reference nor the required ``resource_pool`` is a string.
+    / datastore), the OVF-network→portgroup map, provisioning, the OVF
+    deployment option, and whether it powers on. ``ovf_properties`` may
+    carry secret values (appliance passwords), so only its **keys**
+    (property ids) are echoed, never the values (#1503 secret-hygiene). No
+    live read is issued, so the preview cannot drift from the approved
+    dispatch. Declines (``None``) when neither library reference nor the
+    required ``resource_pool`` is a string.
     """
     library_item = ctx.params.get("library_item")
     library_item_name = ctx.params.get("library_item_name")
@@ -489,6 +490,11 @@ async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any]
         ),
         "ovf_property_keys": (
             sorted(str(k) for k in ovf_properties) if isinstance(ovf_properties, dict) else []
+        ),
+        "deployment_option": (
+            ctx.params.get("deployment_option")
+            if isinstance(ctx.params.get("deployment_option"), str)
+            else None
         ),
         "power_on": bool(ctx.params.get("power_on", False)),
     }

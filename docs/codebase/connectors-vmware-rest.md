@@ -2385,7 +2385,15 @@ body never carried the single-`spec` envelope the single-parameter `find` /
 portgroup-moid **map** `network_mappings` (a map in the pinned 9.0 spec,
 not an array), `storage_provisioning` / `storage_profile_id` /
 `default_datastore_id`, and any `ovf_properties` folded into a single
-`PropertyParams` entry in `additional_parameters`. The EULA-accept wire
+`PropertyParams` entry in `additional_parameters`. An optional
+`deployment_option` (the OVF deployment option key, for example the size
+profile of an appliance) goes into the same list as a
+`DeploymentOptionParams` entry with `selected_key` (#4035). Before the
+deploy, MEHO reads the OVF summary (`?action=filter`) and checks the key
+against `additional_params[type=DeploymentOptionParams].deployment_options[].key`.
+A key the item does not offer is refused with `invalid_reference`, and
+`candidates` lists the offered keys. One summary read serves both this
+check and the default VM name. The EULA-accept wire
 key is **version-aware** (#3074): the pinned 9.0 spec keys it
 `accept_all_eula` (lowercase), but vCenter 8.0.x — and every pre-9.0
 release — rejects that key (`HTTP 400 UNEXPECTED_INPUT`) and expects the
@@ -3221,7 +3229,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
-| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |
+| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, `deployment_option`, power-on) | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |

@@ -303,16 +303,6 @@ def test_keycloak_read_ops_all_safe_no_approval_read_only_tag() -> None:
         assert "read-only" in op.tags, f"{op.op_id} should carry the read-only tag"
 
 
-def test_keycloak_no_write_op_registered() -> None:
-    """No op_id implies a mutating verb (create/update/delete/add/remove/set)."""
-    write_verbs = ("create", "update", "delete", "add", "remove", "set", "apply", "reset")
-    for op in READ_OPS:
-        suffix = op.op_id.rsplit(".", 1)[-1]
-        assert not any(suffix.startswith(v) for v in write_verbs), (
-            f"{op.op_id} looks like a write op — T2 ships read-only"
-        )
-
-
 # ---------------------------------------------------------------------------
 # Full dispatch path (acceptance criteria a, b, c)
 # ---------------------------------------------------------------------------

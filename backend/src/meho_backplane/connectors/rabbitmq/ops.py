@@ -78,8 +78,8 @@ class RabbitMqOp:
     group_key: str
     tags: tuple[str, ...]
     llm_instructions: dict[str, Any]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "safe"
-    requires_approval: bool = False
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
+    requires_approval: bool
 
 
 #: Curated ``when_to_use`` blurbs per group. ``register_typed_operation``
@@ -240,6 +240,8 @@ def _op(
         group_key=group_key,
         tags=("read-only", "rabbitmq", user_tag, *extra_tags),
         llm_instructions={"when_to_use": when_to_use, "output_shape": output_shape},
+        safety_level="safe",
+        requires_approval=False,
     )
 
 

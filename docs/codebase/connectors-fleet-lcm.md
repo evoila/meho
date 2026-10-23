@@ -188,7 +188,7 @@ So the read core needs no operator review — it is live the moment the connecto
 loads.
 
 **Operation contracts.** The 13 typed ops meet the VMware operation-contract
-check (`backend/tests/test_vmware_operation_contracts.py`): each response schema
+check (`backend/tests/test_operation_contracts.py`): each response schema
 names its main fields, each parameter schema carries one example call under
 `examples` (`{}` for the no-argument reads, a placeholder such as
 `<component-id>` for the by-id reads), and each `llm_instructions` blob has

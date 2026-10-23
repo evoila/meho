@@ -217,7 +217,7 @@ and the same `_CREDENTIAL_READ_OPS` entry (#4617); see
 [spec-ingestion.md](spec-ingestion.md), "Catalog safety overlay".
 
 **Operation contracts.** The 20 typed ops meet the VMware operation-contract
-check (`backend/tests/test_vmware_operation_contracts.py`), with one exception (last item):
+check (`backend/tests/test_operation_contracts.py`), with one exception (last item):
 
 - Each `response_schema` names the main fields of the vendor answer
   (`PageOf<X>` → `elements[]` + `pageMetadata`, or the single object), taken

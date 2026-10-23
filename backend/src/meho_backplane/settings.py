@@ -40,6 +40,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
 
+from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.retrieval.embedding import (
     BAKED_MODEL_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
@@ -111,17 +112,10 @@ def parse_bool_env(value: str | None) -> bool:
 
 
 #: Default delete-shaped op-id patterns a service-principal standing grant
-#: may never cover (#3151). Case-sensitive ``fnmatchcase`` globs over the
-#: exact op id: raw HTTP DELETE ops (``DELETE:*``) plus the dotted typed
-#: delete/destroy/remove/purge families. Overridable via
-#: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
-_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
-    "DELETE:*",
-    "*.delete",
-    "*.destroy",
-    "*.remove",
-    "*.purge",
-)
+#: may never cover (#3151). The list lives in :mod:`meho_backplane.delete_names`
+#: so the contract check and the grant check read the same signs.
+#: Overridable via ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
+_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = DELETE_SHAPED_OP_ID_PATTERNS
 
 
 def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:

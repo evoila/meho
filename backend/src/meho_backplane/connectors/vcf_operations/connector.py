@@ -134,6 +134,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_operations.licensing_handlers import VropsLicensingHandlers
 from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsCredentialsLoader,
     VcfOperationsTargetLike,
@@ -227,7 +228,7 @@ def _extract_ops_token(resp: httpx.Response) -> str | None:
     return value
 
 
-class VcfOperationsConnector(HttpConnector):
+class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
     """vROps 9.0 REST connector with acquired-token (``OpsToken``) auth.
 
     Per-target session token cached in :attr:`_session_tokens`; per-target

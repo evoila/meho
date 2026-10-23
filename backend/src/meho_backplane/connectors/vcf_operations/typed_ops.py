@@ -637,7 +637,8 @@ async def register_vcf_operations_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert every op in :data:`VROPS_TYPED_OPS` and :data:`VROPS_9_ONLY_TYPED_OPS`.
+    """Upsert every op in :data:`VROPS_TYPED_OPS`, :data:`VROPS_9_ONLY_TYPED_OPS`
+    and the licence ops into ``endpoint_descriptor``.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -662,9 +663,19 @@ async def register_vcf_operations_typed_operations(
     # (ONNX runtime + model), which pure connector/handler unit tests
     # should not pay. Lifespan callers have it warmed by the time this runs.
     from meho_backplane.connectors.vcf_operations.connector import VcfOperationsConnector
+    from meho_backplane.connectors.vcf_operations.licensing_ops import (
+        VROPS_LICENSING_OPS,
+        VROPS_LICENSING_WHEN_TO_USE_BY_GROUP,
+    )
     from meho_backplane.operations.typed_register import register_typed_operation
 
-    ops = (*VROPS_TYPED_OPS, *VROPS_9_ONLY_TYPED_OPS)
+    # The licence ops are 9.x only, so they join here and not in
+    # VROPS_TYPED_OPS (which the 8.x connector reuses).
+    ops = (*VROPS_TYPED_OPS, *VROPS_9_ONLY_TYPED_OPS, *VROPS_LICENSING_OPS)
+    when_to_use_by_group = {
+        **VROPS_TYPED_WHEN_TO_USE_BY_GROUP,
+        **VROPS_LICENSING_WHEN_TO_USE_BY_GROUP,
+    }
     for op in ops:
         handler = getattr(VcfOperationsConnector, op.handler_attr, None)
         if handler is None:
@@ -672,9 +683,7 @@ async def register_vcf_operations_typed_operations(
                 f"VcfOperationsConnector typed op {op.op_id!r} declares "
                 f"handler_attr={op.handler_attr!r} but the class has no such attribute"
             )
-        when_to_use = (
-            None if op.group_key is None else VROPS_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key)
-        )
+        when_to_use = None if op.group_key is None else when_to_use_by_group.get(op.group_key)
         if op.group_key is not None and when_to_use is None:
             raise ValueError(
                 f"VcfOperationsConnector typed op {op.op_id!r} declares "

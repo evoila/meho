@@ -575,6 +575,18 @@ OpenBao; all three are off by default.
 
 #### Install and Helm chart
 
+- Every release now has the download of install form 2 (a plain Linux
+  server with no internet), `meho-linux-X.Y.Z-amd64.tar` (#4734 /
+  #4777). It holds the install script, RKE2, the chart, every container
+  image, `helm`, the `meho` CLI and the licence texts. It comes with
+  `SHA256SUMS-linux` and its cosign signature
+  `SHA256SUMS-linux.cosign.bundle`; `docs/RELEASING.md` has the commands
+  that check both. The images are stored as an OCI image layout, so each
+  one keeps the digest the chart pins, and RKE2 finds them with no
+  internet. The new workflow `linux-download.yml` builds the file;
+  `cli-release.yml` calls it on every `v*` tag. A manual run on `main`
+  builds the download of the main commit as a workflow artifact. The
+  v0.36.0 tag is the first run of this new signed download job.
 - The install now makes the passwords and keys for the built-in parts
   of the core (#4041 / #4599). When `corePostgres.enabled` or
   `coreKeycloak.enabled` is on, a Job named `<release>-core-secrets`

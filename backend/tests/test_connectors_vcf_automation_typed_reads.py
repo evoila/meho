@@ -246,7 +246,7 @@ async def _stub_credentials_loader(_target: object, _operator: Operator) -> dict
     return {"username": "svc-meho", "password": "vcfa-typed-password"}
 
 
-async def _seed_target(*, host: str, fqdn: str | None) -> Target:
+async def _seed_target(*, host: str, fqdn: str | None, version: str = "9.0") -> Target:
     """Insert the typed-reads Target row and return it (expunged)."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -262,7 +262,7 @@ async def _seed_target(*, host: str, fqdn: str | None) -> Target:
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},
-            fingerprint=_FINGERPRINT,
+            fingerprint={**_FINGERPRINT, "version": version},
             notes="seeded by test_connectors_vcf_automation_typed_reads._seed_target",
         )
         session.add(target)
@@ -645,6 +645,54 @@ async def test_provider_op_query_params_forward_pagination() -> None:
 
     assert result["status"] == "ok", result
     assert "page=2" in captured["query"] and "pageSize=50" in captured["query"], captured
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_path"),
+    [
+        ("9.0", "/cloudapi/vcf/regions"),
+        ("9.1", "/cloudapi/v1/regions"),
+        ("9.1.1", "/cloudapi/v1/regions"),
+        # A fingerprint label that is not a product version keeps the 9.0 path.
+        ("2021-07-15", "/cloudapi/vcf/regions"),
+    ],
+)
+async def test_provider_region_list_path_follows_target_version(
+    version: str, expected_path: str
+) -> None:
+    """``vcfa.provider.region.list`` calls the region path of the target's version (#4604)."""
+    await VcfAutomationConnector.register_typed_operations()
+    await _seed_target(host=_HOST, fqdn=_FQDN, version=version)
+    instance = _resolve_connector()
+
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            m.post("/cloudapi/1.0.0/sessions/provider").respond(
+                200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _PROVIDER_JWT}
+            )
+            legacy = m.get("/cloudapi/vcf/regions").respond(200, json=_PROVIDER_REGIONS)
+            v1 = m.get("/cloudapi/v1/regions").respond(200, json=_PROVIDER_REGIONS)
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.provider.region.list",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {},
+                },
+            )
+    finally:
+        await instance.aclose()
+        reset_dispatcher_caches()
+
+    assert result["status"] == "ok", result
+    called = legacy if expected_path == "/cloudapi/vcf/regions" else v1
+    other = v1 if called is legacy else legacy
+    assert called.call_count == 1
+    assert other.call_count == 0
+    assert called.calls[0].request.headers["Accept"] == PROVIDER_CLOUDAPI_ACCEPT
 
 
 async def test_tenant_deployment_list_forwards_odata_and_returns_content() -> None:

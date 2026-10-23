@@ -39,6 +39,13 @@ lane splits by plane:
   Evidenced-exclusions section. The manifest pin below still sweeps
   the provider op_ids so the enumeration stays complete and a future
   spec activates against the full set.
+* **Provider region path — armed per version (#4604).** The shelf pins
+  one reference list per VCFA version, made from Broadcom's public
+  reference pages (``<dir>/<version>-provider-infrastructure-apis-
+  reference-operations.tsv`` in ``vcf-automation-9.0-reference/``,
+  ``vcf-automation-9.1/`` and ``vcf-automation-9.1.1/``). The path
+  :func:`~meho_backplane.connectors.vcf_automation.typed_ops.provider_regions_path`
+  picks for each version must be a ``GET`` line in that version's list.
 
 The declared set is introspected from the connector's live constants
 (the #2944 pattern — never a hardcoded mirror), across the two modules
@@ -74,6 +81,7 @@ docs/decisions/spec-reconcile-guards-standard.md.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -83,7 +91,10 @@ from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
-from meho_backplane.connectors.vcf_automation.typed_ops import VCFA_TYPED_OPS
+from meho_backplane.connectors.vcf_automation.typed_ops import (
+    VCFA_TYPED_OPS,
+    provider_regions_path,
+)
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
 
 if TYPE_CHECKING:
@@ -196,6 +207,7 @@ def test_path_constant_names_are_pinned() -> None:
     assert sorted(_path_constants(_typed_ops_module)) == [
         "PROVIDER_ORGS_PATH",
         "PROVIDER_REGIONS_PATH",
+        "PROVIDER_REGIONS_V1_PATH",
         "TENANT_ABOUT_PATH",
         "TENANT_DEPLOYMENTS_PATH",
         "TENANT_DEPLOYMENT_DETAIL_PATH",
@@ -248,6 +260,7 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
     assert _declared_op_ids() == {
         "GET:/api/versions",
         "GET:/cloudapi/1.0.0/orgs",
+        "GET:/cloudapi/v1/regions",
         "GET:/cloudapi/vcf/regions",
         "GET:/iaas/api/about",
         "GET:/iaas/api/deployments",
@@ -332,3 +345,61 @@ def test_tenant_hand_coded_paths_are_served_by_the_pinned_iaas_spec() -> None:
         op_id for op_id in _declared_op_ids() if plane_for_path(op_id.partition(":")[2]) == "tenant"
     }
     assert_op_ids_served(declared, served, spec_label=_TENANT_SPEC_LABEL)
+
+
+#: Per-version provider reference lists on the shelf (#4604): the shelf
+#: directory, the TSV file, and the product version a target carries.
+_PROVIDER_REFERENCE_LISTS = (
+    (
+        "vcf-automation-9.0-reference",
+        "vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv",
+        "9.0",
+    ),
+    (
+        "vcf-automation-9.1",
+        "vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv",
+        "9.1",
+    ),
+    (
+        "vcf-automation-9.1.1",
+        "vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv",
+        "9.1.1",
+    ),
+)
+
+
+def _reference_list_op_ids(list_path: Path, label: str) -> set[str]:
+    """Read the ``METHOD:/path`` set from a shelf reference list (TSV).
+
+    The list has one header line (``method``, ``path``, ...) and one line
+    per operation. A header that moved fails loudly rather than turning
+    the compare into a vacuous pass.
+    """
+    lines = list_path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].split("\t")[:2] != ["method", "path"]:
+        pytest.fail(f"{label}: expected a TSV header starting with 'method<TAB>path'.")
+    served = {
+        f"{cols[0].upper()}:{cols[1]}"
+        for cols in (line.split("\t") for line in lines[1:])
+        if len(cols) >= 2
+    }
+    if not served:
+        pytest.fail(f"{label}: read zero operations; the list layout moved.")
+    return served
+
+
+@pytest.mark.parametrize(
+    ("spec_dir", "list_file", "version"),
+    _PROVIDER_REFERENCE_LISTS,
+    ids=[version for _, _, version in _PROVIDER_REFERENCE_LISTS],
+)
+def test_region_path_is_in_the_reference_list_of_each_version(
+    spec_dir: str, list_file: str, version: str
+) -> None:
+    """The region path picked for a version is in that version's reference list."""
+    list_path = require_shelf_spec(spec_dir, list_file)
+    label = f"{spec_dir}/{list_file}"
+    served = _reference_list_op_ids(list_path, label)
+    target = SimpleNamespace(fingerprint={"version": version}, version=None)
+    declared = {f"GET:{provider_regions_path(target)}"}
+    assert_op_ids_served(declared, served, spec_label=label)

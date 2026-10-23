@@ -309,7 +309,11 @@ async def _prepare_destination(
 async def _open_source(
     client: httpx.AsyncClient, src: SourceFile, headers: Mapping[str, str]
 ) -> httpx.Response:
-    request = client.build_request("GET", src.url, headers=dict(headers), timeout=_TIMEOUT)
+    # Ask for the raw bytes: with gzip, Content-Length is the compressed size
+    # while the copy counts and sends the unpacked bytes.
+    request_headers = httpx.Headers(headers)
+    request_headers["Accept-Encoding"] = "identity"
+    request = client.build_request("GET", src.url, headers=request_headers, timeout=_TIMEOUT)
     resp = await client.send(request, stream=True, follow_redirects=False)
     try:
         _refuse_redirect(resp, f"{src.name}: the vCenter download")

@@ -172,6 +172,29 @@ async def test_good_copy_of_two_files(respx_mock: respx.MockRouter) -> None:
 
 
 @respx.mock(assert_all_called=False)
+async def test_source_download_asks_for_raw_bytes(respx_mock: respx.MockRouter) -> None:
+    # A gzip answer would make Content-Length the packed size, not the copied size.
+    source = _source(respx_mock, "vm.ovf", b"c" * 10)
+    _destination(respx_mock, "vm.ovf")
+
+    async with httpx.AsyncClient() as source_client:
+        await copy_files(
+            [_file("vm.ovf")],
+            Destination(base_url=DEST, token_ref="tenants/t1/backup-store"),
+            operator=object(),  # type: ignore[arg-type]
+            target=_Target(),
+            source_client=source_client,
+            source_headers={"vmware-api-session-id": SESSION, "accept-encoding": "gzip"},
+            keep_alive=_Calls().on_keep_alive,
+            cleanup=_Calls().on_cleanup,
+        )
+
+    request = source.calls.last.request
+    assert request.headers.get_list("accept-encoding") == ["identity"]
+    assert request.headers["vmware-api-session-id"] == SESSION
+
+
+@respx.mock(assert_all_called=False)
 async def test_source_breaks_in_the_middle(respx_mock: respx.MockRouter) -> None:
     _source(respx_mock, "disk-1.vmdk", b"x" * 100, fail=True)
     routes = _destination(respx_mock, "disk-1.vmdk")

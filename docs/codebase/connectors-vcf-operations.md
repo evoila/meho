@@ -231,8 +231,10 @@ registrar is queued via `register_typed_op_registrar` in the package
   `productLicensingEdition`, `licensed`, `licenseName`, `expirationDate`
   (epoch milliseconds) and `licenseKey`. The handler masks `licenseKey`
   before it returns: only the last 5 characters show, and a key of 10
-  characters or fewer is hidden in full. So no licence key reaches the
-  agent, the audit row or a stored result in clear text. The vendor API
+  characters or fewer is hidden in full. The op also carries the tag
+  `license-key`, so the flight recorder leaves the raw vendor bodies of
+  both calls out of the trace. So no licence key reaches the agent, the
+  audit row, a stored result or the trace in clear text. The vendor API
   shows no licence use on these two calls. This op is **9.x only**: it sits
   in `VROPS_9_ONLY_TYPED_OPS`, not in `VROPS_TYPED_OPS`, because the 8.x
   connector reuses `VROPS_TYPED_OPS`. The licence management calls

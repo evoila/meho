@@ -49,6 +49,8 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import reset_handler_cache
+from meho_backplane.redaction.flight_recorder import SECRET_FAMILY_OMITTED_MARKER
+from meho_backplane.redaction.flight_recorder.span import redact_span
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -247,3 +249,22 @@ def test_license_info_is_9x_only() -> None:
     """The 8.x connector reuses VROPS_TYPED_OPS, so the licence read is not in it."""
     assert VROPS_LICENSE_INFO_OP in VROPS_9_ONLY_TYPED_OPS
     assert VROPS_LICENSE_INFO_OP not in VROPS_TYPED_OPS
+
+
+def test_license_info_bodies_stay_out_of_the_trace() -> None:
+    """The flight recorder records no body for the licence read.
+
+    The HTTP seam records the raw vendor answer before the handler masks
+    the key, so the op's tags must make the recorder leave the body out.
+    """
+    span = redact_span(
+        op_id=_OP_ID,
+        connector_id=_CONNECTOR_ID,
+        method="GET",
+        tags=VROPS_LICENSE_INFO_OP.tags,
+        response_body=json.dumps(_INFO_RESPONSE),
+        response_content_type="application/json",
+    )
+    assert span.body_recorded is False
+    assert span.response_body == SECRET_FAMILY_OMITTED_MARKER
+    assert _LICENSE_KEY not in json.dumps(span.model_dump())

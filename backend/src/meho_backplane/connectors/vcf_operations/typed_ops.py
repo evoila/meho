@@ -590,7 +590,11 @@ VROPS_LICENSE_INFO_OP = VropsTypedOp(
     },
     response_schema=VROPS_LICENSE_INFO_RESPONSE,
     group_key=_LICENSE_GROUP_KEY,
-    tags=("read-only", "vrops", "vmware", "license", "licensing"),
+    # "license-key" marks this op as secret-bearing (its "key" token is in
+    # SECRET_FAMILY_TAGS), so the flight recorder leaves the raw vendor
+    # bodies of both calls out of the trace. The handler masks the key only
+    # in its own return value.
+    tags=("read-only", "vrops", "vmware", "license", "licensing", "license-key"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={

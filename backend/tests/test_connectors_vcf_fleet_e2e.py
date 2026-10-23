@@ -139,12 +139,12 @@ def _reset_module_state() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-# Under the "modern default" dual-impl split (#3033 / #3037), a fleet target
-# fingerprinted at 9.0 resolves to the modern ``fleet-lcm`` impl by
-# most-specific-version. This E2E exercises the legacy ``fleet-rest`` ``/lcm/*``
-# dispatch surface with the full connector registry present (fleet-lcm is
-# eagerly imported), so it seeds an **8.x** fingerprint — ``fleet-rest``'s
-# domain (``>=8.0,<10.0``) — so the dispatcher's target-fingerprint resolution
+# Under the dual-impl split (#3033 / #4442), a fleet target fingerprinted at
+# 9.1 or newer resolves to the modern ``fleet-lcm`` impl. This E2E exercises
+# the legacy ``fleet-rest`` ``/lcm/*`` dispatch surface with the full
+# connector registry present (fleet-lcm is eagerly imported), so it seeds
+# an **8.x** fingerprint — ``fleet-rest``'s
+# domain (``>=8.0,<9.1``) — so the dispatcher's target-fingerprint resolution
 # (``dispatcher.py`` ``_resolve_executing_connector``) binds ``fleet-rest``
 # (whose stub credentials loader is injected in ``_resolve_connector``), not
 # ``fleet-lcm`` (whose default loader would hit Vault → ``VaultUnreachableError``).

@@ -10,22 +10,25 @@ This is the first real two-impl case in the codebase; the two are
 resolved per target by fingerprint (see
 :func:`~meho_backplane.connectors.resolver.resolve_connector`):
 
-* ``fleet-lcm`` (this class) advertises ``supported_version_range=">=9.0,<10.0"``
-  — the narrower band, so a VCF Fleet 9.0 target resolves here by the
-  resolver's most-specific-version tie-break.
-* ``fleet-rest`` advertises ``">=8.0,<10.0"`` (re-banded from ``">=9.0,<10.0"``
-  in this same initiative, #3037) — Aria Suite Lifecycle 8.x plus the VCF
-  Fleet 9.0 ``/lcm/*`` back-compat surface. An 8.x target resolves there
-  as the only in-range candidate.
+* ``fleet-lcm`` (this class) advertises ``supported_version_range=">=9.1,<10.0"``
+  — the ``/fleet-lcm/v1`` API first ships with VCF 9.1 (the spec file is in
+  the ``9.1.0.0`` tag of ``vmware/vcf-api-specs``), so a 9.1 or newer
+  target resolves here.
+* ``fleet-rest`` advertises ``">=8.0,<9.1"`` — Aria Suite Lifecycle 8.x and
+  VCF Fleet 9.0, which serve the legacy ``/lcm/*`` API. An 8.x or 9.0
+  target resolves there.
+
+The two ranges do not overlap (#4442), so each version has exactly one
+versioned candidate.
 
 The two impls target **distinct API surfaces** on the same product family:
 ``fleet-lcm`` dispatches the new ``https://vcf.broadcom.com/fleet-lcm`` →
 ``/v1/*`` service (health, config, components, sddc-lcms, upgrade-plans,
 tasks, system); ``fleet-rest`` dispatches the legacy vRSLCM-derived
-``/lcm/lcops/api/v2/*`` surface. The modern surface is the VCF 9
-successor to vRealize Suite Lifecycle Manager (vRSLCM) 8.x; the legacy
-``/lcm/*`` surface still answers on 9.0 appliances for back-compat, which
-is why both bands overlap at 9.0 and the resolver — not the connector —
+``/lcm/lcops/api/v2/*`` surface. The modern surface is the VCF 9.1
+successor to vRealize Suite Lifecycle Manager (vRSLCM) 8.x; a VCF 9.0
+fleet appliance serves only the legacy ``/lcm/*`` API, which is why 9.0
+sits in the ``fleet-rest`` range and the resolver — not the connector —
 picks the surface per target.
 
 Skeleton-only — auth + fingerprint + probe + the G0.6 dispatch shim, the
@@ -112,11 +115,10 @@ config, SDDC-LCM list/detail, component list/detail/status, task
 list/detail, and upgrade-plan list/detail + release-versions. They are
 registered as ``source_kind="typed"`` (:mod:`.typed_ops` /
 :mod:`.typed_reads`, per-op ``llm_instructions`` in
-:mod:`._llm_instructions`), enabled at register time, so a VCF Fleet 9.x
-target — which resolves to this impl by most-specific-version — dispatches
-a modern read op on a **fresh boot with zero catalog ingest**. This is what
-restores 9.0 fleet dispatch after the "modern default now" resolver
-decision (initiative #3033); the two typed ops the legacy ``fleet-rest``
+:mod:`._llm_instructions`), enabled at register time, so a VCF Fleet 9.1
+or newer target — which resolves to this impl by version range —
+dispatches a modern read op on a **fresh boot with zero catalog ingest**
+(initiative #3033); the two typed ops the legacy ``fleet-rest``
 impl carries are its ``/lcm/*`` back-compat surface, distinct from these
 ``/v1/*`` reads.
 
@@ -191,11 +193,10 @@ class FleetLcmConnector(HttpConnector):
     username/password pair (the spec's ``basicAuth`` alternative).
 
     :attr:`priority` is ``1`` — equal to the legacy ``fleet-rest`` impl by
-    design: the two impls are split by **version-specificity**, not
-    priority (``fleet-lcm``'s narrower ``>=9.0,<10.0`` wins a 9.0 target at
-    the resolver's most-specific-version step, before priority is ever
-    consulted). A higher priority would be redundant and would mask the
-    specificity split; ``1`` also keeps a stray ``GenericRestConnector``
+    design: the two impls are split by **version range**, not priority
+    (``fleet-lcm`` covers ``>=9.1,<10.0`` and ``fleet-rest`` covers
+    ``>=8.0,<9.1``, so only one is in range for any version). A higher
+    priority would be redundant; ``1`` also keeps a stray ``GenericRestConnector``
     auto-shim from out-ranking this hand-coded class on the shared
     registry.
     """
@@ -206,7 +207,7 @@ class FleetLcmConnector(HttpConnector):
     product = "fleet"
     version = "9.0"
     impl_id = "fleet-lcm"
-    supported_version_range = ">=9.0,<10.0"
+    supported_version_range = ">=9.1,<10.0"
     priority = 1
 
     def __init__(

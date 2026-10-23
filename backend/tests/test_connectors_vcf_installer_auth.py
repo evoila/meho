@@ -95,7 +95,7 @@ def test_installer_connector_subclasses_http_connector() -> None:
     assert InstallerConnector.product == "installer"
     assert InstallerConnector.version == "9.1"
     assert InstallerConnector.impl_id == "installer-rest"
-    assert InstallerConnector.supported_version_range == ">=9.1,<10.0"
+    assert InstallerConnector.supported_version_range == ">=9.0,<10.0"
     assert InstallerConnector.priority == 1
 
 

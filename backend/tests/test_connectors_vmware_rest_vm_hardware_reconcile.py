@@ -41,13 +41,11 @@ _EXPECTED_READ = {
     "GET:/vcenter/vm/{vm}/tools/installer",
 }
 _EXPECTED_CDROM_ADD = {
-    "GET:/vcenter/vm",
     "GET:/vcenter/vm/{vm}/hardware/cdrom",
     "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
     "POST:/vcenter/vm/{vm}/hardware/cdrom",
 }
 _EXPECTED_INSTALLER_UNMOUNT = {
-    "GET:/vcenter/vm",
     "GET:/vcenter/vm/{vm}/tools/installer",
     "POST:/vcenter/vm/{vm}/tools/installer?action=disconnect",
 }

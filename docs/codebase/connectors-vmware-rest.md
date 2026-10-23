@@ -1834,9 +1834,13 @@ in `composites/_vm_allocation.py` and ride the `/sdk/vim25` seam:
 Three operations replace raw vCenter calls that people used often for VM
 hardware. All three call vSphere REST on the connector session, so they need
 no catalog ingest. Every path exists on vCenter 8.0 and 9.0, and all three are
-on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`). The VM is named by
-id (`vm`, such as `vm-42`) or by `name`, like `vmware.vm.info`: an unknown name
-gives `not_found`, a name that fits two VMs is an error.
+on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`). The read names the
+VM by id (`vm`, such as `vm-42`) or by `name`, like `vmware.vm.info`: an
+unknown name gives `not_found`, a name that fits two VMs is an error. The two
+changes take the VM id (`vm`) only, and no name. A change waits for approval,
+and it must then run on the VM the approver saw. A name looked up again after
+approval could point to another VM (for example after a rename). So get the
+id from the read first.
 
 - **`vmware.vm.hardware.show`** (typed read, `safe`, no approval;
   `typed_ops_vm_hardware.py`, handler `vm_hardware_show`, group

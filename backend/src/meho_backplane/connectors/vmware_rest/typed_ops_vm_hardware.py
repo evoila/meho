@@ -349,7 +349,7 @@ async def vm_hardware_show_impl(
 # Op metadata + schemas
 # ---------------------------------------------------------------------------
 
-#: The ``vm`` / ``name`` selector the read and both changes share.
+#: The ``vm`` / ``name`` selector of the read. The two changes take ``vm`` only.
 VM_SELECTOR_PROPERTIES: Final[dict[str, Any]] = {
     "vm": {
         "type": "string",

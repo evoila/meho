@@ -11,9 +11,10 @@
   ``GET /vcenter/vm/{vm}/tools/installer`` first: when the installer is not
   mounted, nothing is sent (``not_mounted``). Then it reads the state again.
 
-Both wait for approval (``requires_approval=True``). The VM is named by id
-(``vm``) or by name, like ``vmware.vm.info``. Both call vSphere REST on the
-connector session through the shared write seam
+Both wait for approval (``requires_approval=True``). The VM is named only by
+its id (``vm``), not by name: after approval the change must run on the VM the
+approver saw, and a name looked up again could point to another VM. Both call
+vSphere REST on the connector session through the shared write seam
 (:func:`._write._write_sub_op`), so they need no catalog ingest and work on
 vCenter 8 and 9. vCenter refuses some requests with HTTP 400 (for example an
 IDE drive on a running VM, or the installer of a VM that is off). The answer
@@ -37,10 +38,10 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
     CDROM_ROW_SCHEMA,
-    VM_SELECTOR_PROPERTIES,
+    VM_MOID_PATTERN,
+    check_vm_moid,
     read_cdrom_rows,
     read_tools_installer_mounted,
-    resolve_vm,
 )
 from meho_backplane.operations._preview import (
     PreviewContext,
@@ -62,7 +63,6 @@ __all__ = [
 OP_ID_VM_CDROM_ADD: Final = "vmware.composite.vm.cdrom.add"
 OP_ID_VM_TOOLS_INSTALLER_UNMOUNT: Final = "vmware.composite.vm.tools.installer.unmount"
 
-_OP_LIST_VMS: Final = "GET:/vcenter/vm"
 _OP_LIST_VM_CDROMS: Final = "GET:/vcenter/vm/{vm}/hardware/cdrom"
 _OP_GET_VM_CDROM: Final = "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_CREATE_VM_CDROM: Final = "POST:/vcenter/vm/{vm}/hardware/cdrom"
@@ -73,13 +73,11 @@ _OP_DISCONNECT_TOOLS_INSTALLER: Final = "POST:/vcenter/vm/{vm}/tools/installer?a
 #: test checks them against the pinned vCenter 8.0 and 9.0 API files, and
 #: ``_governed_subops`` lists them for the grant set.
 SUB_OPS_VM_CDROM_ADD: Final[tuple[str, ...]] = (
-    _OP_LIST_VMS,
     _OP_LIST_VM_CDROMS,
     _OP_GET_VM_CDROM,
     _OP_CREATE_VM_CDROM,
 )
 SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT: Final[tuple[str, ...]] = (
-    _OP_LIST_VMS,
     _OP_GET_TOOLS_INSTALLER,
     _OP_DISCONNECT_TOOLS_INSTALLER,
 )
@@ -128,11 +126,10 @@ async def vm_cdrom_add_composite(
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
     """Add one CD drive to a VM. Op-id: ``vmware.composite.vm.cdrom.add``."""
-    vm = await resolve_vm(connector, operator, target, params)
+    vm = check_vm_moid(params["vm"])
     spec = _cdrom_create_spec(params)
     envelope: dict[str, Any] = {
         "vm": vm,
-        "name": params.get("name"),
         "requested": spec,
         "cdrom": None,
         "cdrom_info": None,
@@ -185,7 +182,7 @@ async def _vm_cdrom_add_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
     spec = _cdrom_create_spec(ctx.params)
     try:
-        vm = await resolve_vm(connector, ctx.operator, ctx.target, ctx.params)
+        vm = check_vm_moid(ctx.params["vm"])
         current = await read_cdrom_rows(connector, ctx.operator, ctx.target, vm)
     except Exception as exc:
         return {
@@ -196,7 +193,6 @@ async def _vm_cdrom_add_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "summary": f"Add a CD drive to {vm} ({len(current)} drive(s) now).",
         "vm": vm,
-        "name": ctx.params.get("name"),
         "requested": spec,
         "current_cdroms": current,
     }
@@ -215,11 +211,10 @@ async def vm_tools_installer_unmount_composite(
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
     """Unmount the VMware Tools installer. Op-id: ``vm.tools.installer.unmount``."""
-    vm = await resolve_vm(connector, operator, target, params)
+    vm = check_vm_moid(params["vm"])
     before = await read_tools_installer_mounted(connector, operator, target, vm)
     envelope: dict[str, Any] = {
         "vm": vm,
-        "name": params.get("name"),
         "mounted_before": before,
         "mounted_after": before,
         "error_type": None,
@@ -265,7 +260,7 @@ async def _vm_tools_installer_unmount_preview(ctx: PreviewContext) -> dict[str, 
         return None
     connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
     try:
-        vm = await resolve_vm(connector, ctx.operator, ctx.target, ctx.params)
+        vm = check_vm_moid(ctx.params["vm"])
         mounted = await read_tools_installer_mounted(connector, ctx.operator, ctx.target, vm)
     except Exception as exc:
         return {
@@ -280,7 +275,6 @@ async def _vm_tools_installer_unmount_preview(ctx: PreviewContext) -> dict[str, 
     return {
         "summary": summary,
         "vm": vm,
-        "name": ctx.params.get("name"),
         "installer_mounted": mounted,
     }
 
@@ -293,12 +287,21 @@ register_preview_builder(OP_ID_VM_TOOLS_INSTALLER_UNMOUNT, _vm_tools_installer_u
 # Schemas, AI guidance and registration rows
 # ---------------------------------------------------------------------------
 
-_SELECTOR_ONE_OF: Final = [{"required": ["vm"]}, {"required": ["name"]}]
+_VM_ID_PROPERTY: Final[dict[str, Any]] = {
+    "vm": {
+        "type": "string",
+        "pattern": VM_MOID_PATTERN,
+        "description": (
+            "VM id, such as 'vm-42'. Get it from vmware.vm.hardware.show or vmware.vm.list. "
+            "A change takes no VM name, so after approval it runs on the VM the approver saw."
+        ),
+    },
+}
 
 VM_CDROM_ADD_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
-        **VM_SELECTOR_PROPERTIES,
+        **_VM_ID_PROPERTY,
         "iso_file": {
             "type": "string",
             "minLength": 1,
@@ -328,10 +331,10 @@ VM_CDROM_ADD_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
             "description": "Let the guest connect and disconnect the drive. Default false.",
         },
     },
-    "oneOf": _SELECTOR_ONE_OF,
+    "required": ["vm"],
     "additionalProperties": False,
     "examples": [
-        {"name": "<vm-name>", "iso_file": "[<datastore-name>] iso/<file-name>.iso"},
+        {"vm": "vm-42", "iso_file": "[<datastore-name>] iso/<file-name>.iso"},
         {"vm": "vm-42", "type": "SATA"},
     ],
 }
@@ -347,7 +350,6 @@ VM_CDROM_ADD_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
             "description": "added: the drive exists; refused: vCenter said no, nothing changed.",
         },
         "vm": {"type": "string", "description": "VM id."},
-        "name": {**_NULLABLE_STR, "description": "VM name when the call named the VM."},
         "requested": {"type": "object", "description": "The CreateSpec MEHO sent."},
         "cdrom": {**_NULLABLE_STR, "description": "Id of the new drive."},
         "cdrom_info": {
@@ -363,10 +365,10 @@ VM_CDROM_ADD_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
 
 VM_TOOLS_INSTALLER_UNMOUNT_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
-    "properties": VM_SELECTOR_PROPERTIES,
-    "oneOf": _SELECTOR_ONE_OF,
+    "properties": _VM_ID_PROPERTY,
+    "required": ["vm"],
     "additionalProperties": False,
-    "examples": [{"name": "<vm-name>"}],
+    "examples": [{"vm": "vm-42"}],
 }
 
 _NULLABLE_BOOL: Final = {"type": ["boolean", "null"]}
@@ -384,7 +386,6 @@ VM_TOOLS_INSTALLER_UNMOUNT_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
             ),
         },
         "vm": {"type": "string", "description": "VM id."},
-        "name": {**_NULLABLE_STR, "description": "VM name when the call named the VM."},
         "mounted_before": {**_NULLABLE_BOOL, "description": "Installer mounted before."},
         "mounted_after": {**_NULLABLE_BOOL, "description": "Installer mounted after."},
         "error_type": {**_NULLABLE_STR, "description": "vCenter error type on refused."},
@@ -400,7 +401,8 @@ VM_CDROM_ADD_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "with action update instead."
     ),
     "preconditions": (
-        "Read the VM first with vmware.vm.hardware.show to see the drives it has. An IDE "
+        "Read the VM first with vmware.vm.hardware.show to get its id (vm) and see the "
+        "drives it has. The change takes the VM id, not a name. An IDE "
         "drive needs the VM powered off; a suspended VM takes no new drive. The ISO file "
         "must exist on a datastore the VM's host can see. The change waits for approval."
     ),
@@ -409,7 +411,7 @@ VM_CDROM_ADD_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "type": "IDE or SATA; omit for the guest OS default.",
     },
     "output_shape": (
-        "{status: added|refused, vm, name, requested, cdrom, cdrom_info: {cdrom, label, "
+        "{status: added|refused, vm, requested, cdrom, cdrom_info: {cdrom, label, "
         "type, backing_type, iso_file, state, connected, start_connected, ...}, "
         "error_type, guidance}."
     ),
@@ -427,11 +429,12 @@ VM_TOOLS_INSTALLER_UNMOUNT_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
     "preconditions": (
         "The VM must be powered on; vCenter refuses the call for a VM that is off. "
-        "vmware.vm.hardware.show tells whether the installer is mounted "
-        "(tools_installer_mounted). The change waits for approval."
+        "Read the VM first with vmware.vm.hardware.show: it gives the VM id (vm) and "
+        "whether the installer is mounted (tools_installer_mounted). The change takes "
+        "the VM id, not a name. The change waits for approval."
     ),
     "output_shape": (
-        "{status: unmounted|not_mounted|still_mounted|refused, vm, name, mounted_before, "
+        "{status: unmounted|not_mounted|still_mounted|refused, vm, mounted_before, "
         "mounted_after, error_type, guidance}."
     ),
     "next_step": (
@@ -447,7 +450,7 @@ VM_CDROM_TOOLS_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "handler": vm_cdrom_add_composite,
         "summary": "Add a CD drive to a VM, empty or with an ISO file from a datastore.",
         "description": (
-            "Adds one CD drive to a VM, found by id or name: empty (client device) or with "
+            "Adds one CD drive to a VM, named by its VM id: empty (client device) or with "
             "an ISO file from a datastore, on IDE or SATA. Reads the new drive back. vCenter "
             "refuses an IDE drive on a running VM. Waits for approval."
         ),
@@ -464,7 +467,7 @@ VM_CDROM_TOOLS_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "handler": vm_tools_installer_unmount_composite,
         "summary": "Unmount the VMware Tools installer from a VM's CD drive.",
         "description": (
-            "Takes the VMware Tools installer out of a VM's CD drive, found by id or name. "
+            "Takes the VMware Tools installer out of a VM's CD drive, named by its VM id. "
             "Reads the installer state first and sends nothing when it is not mounted. The "
             "VM must be powered on. Waits for approval."
         ),

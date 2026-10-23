@@ -402,7 +402,7 @@ async def test_add_with_iso_sends_a_create_spec_and_reads_the_drive_back(
 
 async def test_add_without_iso_adds_an_empty_client_device_drive(gate: _GateRecorder) -> None:
     conn = _RestFake()
-    await _add(conn, name="web-01")
+    await _add(conn, vm=_VM)
     ((_, path, body),) = conn.posts
     assert path == f"{_BASE}/hardware/cdrom"
     assert body == {"backing": {"type": "CLIENT_DEVICE"}, "start_connected": False}
@@ -450,15 +450,53 @@ async def test_add_held_by_policy_sends_nothing(monkeypatch: pytest.MonkeyPatch)
     ("params", "valid"),
     [
         ({"vm": "vm-42"}, True),
-        ({"name": "web-01", "iso_file": "[datastore1] iso/a.iso"}, True),
+        ({"vm": "vm-42", "iso_file": "[datastore1] iso/a.iso"}, True),
         ({"vm": "vm-42", "iso_file": "iso/a.iso"}, False),
         ({"vm": "vm-42", "type": "NVME"}, False),
+        ({"name": "web-01", "iso_file": "[datastore1] iso/a.iso"}, False),
         ({"vm": "vm-42", "name": "web-01"}, False),
+        ({}, False),
     ],
 )
 def test_add_parameter_schema(params: dict[str, Any], valid: bool) -> None:
     errors = validate_params(tools.VM_CDROM_ADD_PARAMETER_SCHEMA, params)
     assert (errors == []) is valid, errors
+
+
+@pytest.mark.parametrize(
+    ("params", "valid"),
+    [
+        ({"vm": "vm-42"}, True),
+        ({"name": "web-01"}, False),
+        ({"vm": "vm-42", "name": "web-01"}, False),
+        ({}, False),
+    ],
+)
+def test_unmount_parameter_schema(params: dict[str, Any], valid: bool) -> None:
+    errors = validate_params(tools.VM_TOOLS_INSTALLER_UNMOUNT_PARAMETER_SCHEMA, params)
+    assert (errors == []) is valid, errors
+
+
+async def test_changes_never_look_up_a_vm_by_name(gate: _GateRecorder) -> None:
+    """The stored call keeps the VM id the approver saw; nothing maps a name again."""
+    conn = _RestFake()
+    conn.post_result = {}
+    await _add(conn, vm=_VM)
+    await _unmount(conn, vm=_VM)
+    assert all(path != "/api/vcenter/vm" for path, _ in conn.gets)
+    assert all(call["params"]["vm"] == _VM for call in gate.calls)
+    assert len(gate.calls) == 2
+
+
+@pytest.mark.parametrize("bad", ["vm-42/../../session", "web-01"])
+async def test_changes_refuse_a_vm_id_that_is_not_a_moid(gate: _GateRecorder, bad: str) -> None:
+    conn = _RestFake()
+    with pytest.raises(ValueError, match="not a vCenter VM id"):
+        await _add(conn, vm=bad)
+    with pytest.raises(ValueError, match="not a vCenter VM id"):
+        await _unmount(conn, vm=bad)
+    assert conn.posts == []
+    assert gate.calls == []
 
 
 async def test_add_preview_shows_the_drives_the_vm_has_now() -> None:
@@ -467,7 +505,7 @@ async def test_add_preview_shows_the_drives_the_vm_has_now() -> None:
         connector_instance=_RestFake(),  # type: ignore[arg-type]
         operator=_operator(),
         target=_Target(),
-        params={"name": "web-01", "iso_file": "[datastore1] iso/a.iso"},
+        params={"vm": _VM, "iso_file": "[datastore1] iso/a.iso"},
     )
     preview = await _PREVIEW_BUILDERS["vmware.composite.vm.cdrom.add"](ctx)
     assert preview is not None
@@ -511,7 +549,7 @@ async def test_unmount_sends_disconnect_and_reads_again(gate: _GateRecorder) -> 
 async def test_unmount_when_not_mounted_sends_nothing(gate: _GateRecorder) -> None:
     conn = _RestFake()
     _installer_out(conn)
-    out = await _unmount(conn, name="web-01")
+    out = await _unmount(conn, vm=_VM)
     _assert_schema(tools.VM_TOOLS_INSTALLER_UNMOUNT_RESPONSE_SCHEMA, out)
     assert out["status"] == "not_mounted"
     assert conn.posts == []

@@ -22,8 +22,10 @@ provisioning is deferred — see the connector doc).
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -58,6 +60,12 @@ from meho_backplane.connectors.msad.ops_ou import (
     msad_ou_create,
     msad_ou_list,
     msad_ou_move,
+)
+from meho_backplane.connectors.msad.ops_password import (
+    NEVER_EXPIRES_FILETIME,
+    PASSWORD_OPS,
+    msad_user_password_expiry,
+    password_expiry_fields,
 )
 from meho_backplane.connectors.msad.ops_users import (
     msad_user_create,
@@ -152,7 +160,7 @@ def test_connector_id_triple_round_trips() -> None:
 
 def test_op_surface_ids_and_safety_tiers() -> None:
     by_id = {op.op_id: op for op in MSAD_OPS}
-    assert len(by_id) == 27
+    assert len(by_id) == 28
     dangerous = {k for k, v in by_id.items() if v.safety_level == "dangerous"}
     assert dangerous == {
         "msad.user.delete",
@@ -175,8 +183,9 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "msad.ou.move",
     }
     safe = {k for k, v in by_id.items() if v.safety_level == "safe"}
-    assert len(safe) == 14
+    assert len(safe) == 15
     assert {"msad.about", "msad.domain.info", "msad.user.list"} <= safe
+    assert "msad.user.password-expiry" in safe
 
 
 def test_every_group_has_a_curated_when_to_use() -> None:
@@ -211,10 +220,13 @@ def test_no_op_exposes_a_secret_value_field() -> None:
 
 
 def test_no_op_id_is_password_reset() -> None:
-    """Password-reset is deferred by design (secret-hygiene contract)."""
+    """Password-reset / password-set is deferred by design (secret-hygiene
+    contract). The only op id that mentions a password is the read that
+    reports when it was last set and when it expires."""
     ids = {op.op_id for op in MSAD_OPS}
     assert "msad.user.password-reset" not in ids
-    assert not any("password" in op_id for op_id in ids)
+    assert not any(op_id.endswith(("password-reset", "password-set")) for op_id in ids)
+    assert {op_id for op_id in ids if "password" in op_id} == {"msad.user.password-expiry"}
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +438,147 @@ async def test_user_account_actions(handler: Any, cmdlet: str, action: str, conf
     assert f"{cmdlet} -Identity 'svc-sql'" in script
     assert ("-Confirm:$false" in script) is confirm
     assert result == {"identity": "svc-sql", "action": action, "op_class": "write"}
+
+
+# ---------------------------------------------------------------------------
+# users group — password age / expiry read
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 10, 23, 8, 0, tzinfo=UTC)
+_EXPIRY_FIELDS = {
+    "identity",
+    "sam_account_name",
+    "enabled",
+    "password_last_set",
+    "password_age_days",
+    "password_never_expires",
+    "password_expired",
+    "password_expires_at",
+    "days_to_expiry",
+}
+
+
+def _filetime(moment: datetime) -> int:
+    """100-nanosecond intervals since 1601-01-01 UTC (the AD timestamp unit)."""
+    return (moment - datetime(1601, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1) * 10
+
+
+async def test_user_password_expiry_builds_read_and_returns_no_secret() -> None:
+    connector = MsadConnector()
+    payload = {
+        "SamAccountName": "o'db",
+        "Enabled": True,
+        "PwdLastSet": _filetime(_NOW - timedelta(days=10)),
+        "PasswordNeverExpires": False,
+        "PasswordExpired": False,
+        "ExpiryComputed": _filetime(_NOW + timedelta(days=32)),
+    }
+    run_mock = _run(json.dumps(payload))
+    with patch.object(connector, "_run_command", run_mock):
+        result = await msad_user_password_expiry(connector, _TARGET, {"identity": "o'db"})
+    script = _script_from_call(run_mock)
+    assert (
+        "Get-ADUser -Identity 'o''db' -Properties 'pwdLastSet','PasswordNeverExpires',"
+        "'PasswordExpired','msDS-UserPasswordExpiryTimeComputed'"
+    ) in script
+    assert "$u.'msDS-UserPasswordExpiryTimeComputed'" in script
+    assert "-AccountPassword" not in script
+    assert "unicodePwd" not in script
+    assert result["identity"] == "o'db"
+    assert result["sam_account_name"] == "o'db"
+    assert set(result) == _EXPIRY_FIELDS
+    assert result["password_last_set"] is not None
+    assert result["password_expires_at"] is not None
+
+
+def test_password_expiry_fields_normal_account() -> None:
+    data = {
+        "SamAccountName": "svc-sql",
+        "Enabled": True,
+        "PwdLastSet": _filetime(_NOW - timedelta(days=22, hours=12)),
+        "PasswordNeverExpires": False,
+        "PasswordExpired": False,
+        "ExpiryComputed": _filetime(_NOW + timedelta(days=19, hours=14)),
+    }
+    out = password_expiry_fields(data, now=_NOW)
+    assert out["password_last_set"] == "2026-09-30T20:00:00Z"
+    assert out["password_age_days"] == 22
+    assert out["password_expires_at"] == "2026-11-11T22:00:00Z"
+    assert out["days_to_expiry"] == 19
+    assert out["password_never_expires"] is False
+    assert out["password_expired"] is False
+    assert out["enabled"] is True
+
+
+def test_password_expiry_fields_never_expires_sentinel_is_not_an_error() -> None:
+    data = {
+        "SamAccountName": "svc-never",
+        "Enabled": True,
+        "PwdLastSet": _filetime(_NOW - timedelta(days=400)),
+        "PasswordNeverExpires": True,
+        "PasswordExpired": False,
+        "ExpiryComputed": NEVER_EXPIRES_FILETIME,
+    }
+    out = password_expiry_fields(data, now=_NOW)
+    assert out["password_never_expires"] is True
+    assert out["password_expires_at"] is None
+    assert out["days_to_expiry"] is None
+    assert out["password_age_days"] == 400
+
+
+def test_password_expiry_fields_must_change_at_next_logon() -> None:
+    data = {
+        "SamAccountName": "new-hire",
+        "Enabled": True,
+        "PwdLastSet": 0,
+        "PasswordNeverExpires": False,
+        "PasswordExpired": True,
+        "ExpiryComputed": 0,
+    }
+    out = password_expiry_fields(data, now=_NOW)
+    assert out["password_last_set"] is None
+    assert out["password_age_days"] is None
+    assert out["password_expires_at"] is None
+    assert out["days_to_expiry"] == 0
+    assert out["password_expired"] is True
+
+
+def test_password_expiry_fields_expired_counts_down_below_zero() -> None:
+    data = {
+        "SamAccountName": "svc-old",
+        "Enabled": True,
+        "PwdLastSet": _filetime(_NOW - timedelta(days=43)),
+        "PasswordNeverExpires": False,
+        "PasswordExpired": True,
+        "ExpiryComputed": _filetime(_NOW - timedelta(hours=12)),
+    }
+    out = password_expiry_fields(data, now=_NOW)
+    assert out["days_to_expiry"] == -1
+    assert out["password_expired"] is True
+
+
+def test_password_expiry_fields_tolerates_missing_values() -> None:
+    out = password_expiry_fields({"SamAccountName": "x", "PwdLastSet": "bad"}, now=_NOW)
+    assert out["password_last_set"] is None
+    assert out["password_age_days"] is None
+    assert out["password_expires_at"] is None
+    assert out["days_to_expiry"] is None
+    assert out["enabled"] is False
+    assert out["password_never_expires"] is False
+
+
+def test_password_expiry_op_is_a_safe_users_read_without_secrets() -> None:
+    (op,) = PASSWORD_OPS
+    assert op.op_id == "msad.user.password-expiry"
+    assert op.group_key == "users"
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    assert "read-only" in op.tags
+    assert set(op.parameter_schema["properties"]) == {"identity"}
+    assert op.response_schema is not None
+    assert set(op.response_schema["required"]) == _EXPIRY_FIELDS
+    assert not {"password", "password_hash", "hash"} & set(op.response_schema["properties"])
+    assert "password-expiry" in MSAD_WHEN_TO_USE_BY_GROUP["users"]
 
 
 # ---------------------------------------------------------------------------

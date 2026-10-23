@@ -5,7 +5,8 @@
 
 A REST fake stands in for the connector session. It answers with saved
 vSphere REST responses (the shapes of ``Cpu.Info``, ``Memory.Info``,
-``Cdrom.Info``, the adapter ``Info`` objects and ``Installer.Info``). No live
+``Cdrom.Info``, ``Disk.Info``, the adapter ``Info`` objects and
+``Installer.Info``). No live
 vCenter. The policy check of the write seam is replaced by a recorder, so the
 tests show what is checked and that a held write never reaches vCenter.
 """
@@ -54,7 +55,7 @@ class _Target:
 
 
 def _saved_responses() -> dict[str, Any]:
-    """Saved vSphere REST answers for one VM with two CD drives and three controllers."""
+    """Saved answers for one VM with two CD drives, two disks and two controllers."""
     return {
         f"{_BASE}/hardware/cpu": {
             "count": 4,
@@ -86,6 +87,21 @@ def _saved_responses() -> dict[str, Any]:
             "state": "NOT_CONNECTED",
             "start_connected": False,
             "allow_guest_control": True,
+        },
+        f"{_BASE}/hardware/disk": [{"disk": "2000"}, {"disk": "2001"}],
+        f"{_BASE}/hardware/disk/2000": {
+            "label": "Hard disk 1",
+            "type": "SCSI",
+            "scsi": {"bus": 0, "unit": 0},
+            "capacity": 42949672960,
+            "backing": {"type": "VMDK_FILE", "vmdk_file": "[datastore1] web-01/web-01.vmdk"},
+        },
+        f"{_BASE}/hardware/disk/2001": {
+            "label": "Hard disk 2",
+            "type": "SATA",
+            "sata": {"bus": 0, "unit": 1},
+            "capacity": 10737418240,
+            "backing": {"type": "VMDK_FILE", "vmdk_file": "[datastore1] web-01/web-01_1.vmdk"},
         },
         f"{_BASE}/hardware/adapter/scsi": [{"adapter": "1000"}],
         f"{_BASE}/hardware/adapter/scsi/1000": {
@@ -219,8 +235,71 @@ async def test_show_reads_cpu_memory_cdroms_controllers_and_installer() -> None:
     ]
     assert out["disk_controllers"][0]["type"] == "PVSCSI"
     assert out["disk_controllers"][0]["unit"] == 7
+    assert [(d["disk"], d["type"], d["capacity_bytes"]) for d in out["disks"]] == [
+        ("2000", "SCSI", 42949672960),
+        ("2001", "SATA", 10737418240),
+    ]
+    assert out["disks"][0]["scsi"] == {"bus": 0, "unit": 0}
+    assert out["disks"][0]["vmdk_file"] == "[datastore1] web-01/web-01.vmdk"
     assert out["tools_installer_mounted"] is True
     assert out["read_notes"] == []
+
+
+async def test_show_lists_the_devices_on_each_controller() -> None:
+    """A disk or CD drive sits on the controller of the same kind and bus number."""
+    out = await _show(_RestFake(), vm=_VM)
+    scsi, sata = out["disk_controllers"]
+    assert scsi["devices"] == [
+        {
+            "device_kind": "disk",
+            "id": "2000",
+            "label": "Hard disk 1",
+            "unit": 0,
+            "capacity_bytes": 42949672960,
+            "vmdk_file": "[datastore1] web-01/web-01.vmdk",
+        }
+    ]
+    assert [(d["device_kind"], d["id"], d["unit"]) for d in sata["devices"]] == [
+        ("cdrom", "16000", 0),
+        ("disk", "2001", 1),
+    ]
+    assert sata["devices"][0]["label"] == "CD/DVD drive 1"
+    assert "capacity_bytes" not in sata["devices"][0]
+
+
+async def test_show_device_on_another_bus_or_kind_is_not_attached() -> None:
+    conn = _RestFake()
+    conn.responses[f"{_BASE}/hardware/adapter/scsi"] = [{"adapter": "1000"}, {"adapter": "1001"}]
+    conn.responses[f"{_BASE}/hardware/adapter/scsi/1001"] = {
+        "label": "SCSI controller 1",
+        "type": "LSILOGIC",
+        "scsi": {"bus": 1, "unit": 7},
+        "sharing": "NONE",
+    }
+    conn.responses[f"{_BASE}/hardware/disk"].append({"disk": "2002"})
+    conn.responses[f"{_BASE}/hardware/disk/2002"] = {
+        "label": "Hard disk 3",
+        "type": "IDE",
+        "ide": {"primary": True, "master": False},
+        "backing": {"type": "VMDK_FILE"},
+    }
+    out = await _show(conn, vm=_VM)
+    by_adapter = {c["adapter"]: [d["id"] for d in c["devices"]] for c in out["disk_controllers"]}
+    assert by_adapter == {"1000": ["2000"], "15000": ["16000", "2001"], "1001": []}
+    assert [d["disk"] for d in out["disks"]] == ["2000", "2001", "2002"]
+    assert out["disks"][2]["ide"] == {"primary": True, "master": False}
+
+
+async def test_show_controllers_keep_an_empty_device_list_when_the_lists_failed() -> None:
+    conn = _RestFake()
+    conn.get_errors[f"{_BASE}/hardware/cdrom"] = 500
+    conn.get_errors[f"{_BASE}/hardware/disk"] = 500
+    out = await _show(conn, vm=_VM)
+    _assert_schema(hw.VMWARE_VM_HARDWARE_SHOW_OP.response_schema or {}, out)
+    assert out["cdroms"] is None
+    assert out["disks"] is None
+    assert all(c["devices"] == [] for c in out["disk_controllers"])
+    assert len(out["read_notes"]) == 2
 
 
 async def test_show_resolves_a_name() -> None:
@@ -255,16 +334,65 @@ async def test_show_cpu_error_other_than_404_raises() -> None:
 async def test_show_best_effort_parts_become_null_with_a_note() -> None:
     conn = _RestFake()
     conn.get_errors[f"{_BASE}/hardware/cdrom"] = 500
+    conn.get_errors[f"{_BASE}/hardware/disk"] = 500
     conn.get_errors[f"{_BASE}/tools/installer"] = 500
     for kind in ("scsi", "sata", "nvme"):
         conn.get_errors[f"{_BASE}/hardware/adapter/{kind}"] = 500
     out = await _show(conn, vm=_VM)
     _assert_schema(hw.VMWARE_VM_HARDWARE_SHOW_OP.response_schema or {}, out)
     assert out["cdroms"] is None
+    assert out["disks"] is None
     assert out["disk_controllers"] is None
     assert out["tools_installer_mounted"] is None
-    assert len(out["read_notes"]) == 5
+    assert len(out["read_notes"]) == 6
     assert out["cpu"]["count"] == 4
+
+
+async def test_show_one_failed_drive_read_keeps_the_list_and_says_why() -> None:
+    """The list works, but one drive's own read fails: null fields plus a note."""
+    conn = _RestFake()
+    conn.get_errors[f"{_BASE}/hardware/cdrom/16001"] = 500
+    out = await _show(conn, vm=_VM)
+    _assert_schema(hw.VMWARE_VM_HARDWARE_SHOW_OP.response_schema or {}, out)
+    iso, failed = out["cdroms"]
+    assert iso["iso_file"] == "[datastore1] iso/ubuntu.iso"
+    assert failed["cdrom"] == "16001"
+    assert failed["backing_type"] is None
+    assert failed["connected"] is None
+    (note,) = out["read_notes"]
+    assert note.startswith("CD drive 16001 skipped: HTTPStatusError")
+
+
+async def test_show_one_failed_disk_read_keeps_the_list_and_says_why() -> None:
+    conn = _RestFake()
+    conn.get_errors[f"{_BASE}/hardware/disk/2001"] = 503
+    out = await _show(conn, vm=_VM)
+    good, failed = out["disks"]
+    assert good["capacity_bytes"] == 42949672960
+    assert failed == {
+        "disk": "2001",
+        "label": None,
+        "type": None,
+        "ide": None,
+        "scsi": None,
+        "sata": None,
+        "nvme": None,
+        "capacity_bytes": None,
+        "backing_type": None,
+        "vmdk_file": None,
+    }
+    assert [d["id"] for d in out["disk_controllers"][1]["devices"]] == ["16000"]
+    (note,) = out["read_notes"]
+    assert note.startswith("disk 2001 skipped: HTTPStatusError")
+
+
+async def test_read_cdrom_rows_without_a_notes_list_still_swallows_a_drive_error() -> None:
+    """The two changes read the drives back without a notes list; a failed drive is null."""
+    conn = _RestFake()
+    conn.get_errors[f"{_BASE}/hardware/cdrom/16001"] = 500
+    rows = await hw.read_cdrom_rows(conn, _operator(), _Target(), _VM)  # type: ignore[arg-type]
+    assert [r["cdrom"] for r in rows] == ["16000", "16001"]
+    assert rows[1]["label"] is None
 
 
 async def test_show_one_failed_controller_list_keeps_the_others() -> None:
@@ -290,6 +418,7 @@ async def test_show_skips_a_device_id_with_odd_characters() -> None:
     assert out["cdroms"][0]["cdrom"] == "16000/../x"
     assert out["cdroms"][0]["backing_type"] is None
     assert all("../x" not in path for path, _ in conn.gets)
+    assert out["read_notes"] == ["CD drive '16000/../x' skipped: id has unexpected characters"]
 
 
 @pytest.mark.parametrize(
@@ -313,6 +442,8 @@ def test_every_rest_call_of_the_read_is_declared() -> None:
         "GET:/vcenter/vm/{vm}/hardware/memory",
         "GET:/vcenter/vm/{vm}/hardware/cdrom",
         "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+        "GET:/vcenter/vm/{vm}/hardware/disk",
+        "GET:/vcenter/vm/{vm}/hardware/disk/{disk}",
         "GET:/vcenter/vm/{vm}/hardware/adapter/scsi",
         "GET:/vcenter/vm/{vm}/hardware/adapter/sata",
         "GET:/vcenter/vm/{vm}/hardware/adapter/nvme",

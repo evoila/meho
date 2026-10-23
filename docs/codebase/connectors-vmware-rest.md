@@ -1843,18 +1843,26 @@ approval could point to another VM (for example after a rename). So get the
 id from the read first.
 
 - **`vmware.vm.hardware.show`** (typed read, `safe`, no approval;
-  `typed_ops_vm_hardware.py`, handler `vm_hardware_show`, group
-  `vmware-vm-hardware`). Reads, all `GET` under `/vcenter/vm/{vm}`:
+  `typed_ops_vm_hardware.py` with its schemas in `_vm_hardware_schemas.py`,
+  handler `vm_hardware_show`, group `vmware-vm-hardware`). Reads, all `GET`
+  under `/vcenter/vm/{vm}`:
   `hardware/cpu` and `hardware/memory` (must work; a 404 gives `not_found`),
-  `hardware/cdrom` and `hardware/cdrom/{cdrom}`, `hardware/adapter/scsi`,
-  `/sata` and `/nvme` with `.../{adapter}` for the bus, and `tools/installer`.
+  `hardware/cdrom` and `hardware/cdrom/{cdrom}`, `hardware/disk` and
+  `hardware/disk/{disk}`, `hardware/adapter/scsi`, `/sata` and `/nvme` with
+  `.../{adapter}` for the bus, and `tools/installer`.
   Answer: `cpu` (count, cores per socket, hot add / remove), `memory`
   (`size_mib`, hot add, step and limit), `cdroms` (backing type, ISO file,
-  host device, state, `connected`, `start_connected`), `disk_controllers`
-  (kind, adapter, type, bus, sharing) and `tools_installer_mounted`. The CD
-  drive, controller and installer reads are best effort: a failed part is
-  `null` and `read_notes` says why. The vSphere REST controller resources do
-  not list the disks on each controller, so the answer has no disk list.
+  host device, state, `connected`, `start_connected`), `disks` (type, address,
+  `capacity_bytes`, `vmdk_file`), `disk_controllers` (kind, adapter, type,
+  bus, sharing, `devices`) and `tools_installer_mounted`. The vSphere REST
+  controller resources do not list their devices, so the read joins them
+  itself: a disk or CD drive sits on the controller of the same kind and bus
+  number (`Disk.Info.scsi.bus`, `Cdrom.Info.sata.bus`, and so on). Each
+  controller's `devices` lists them by unit, with id, label, and for a disk
+  its size and VMDK file. The CD drive, disk, controller and installer reads
+  are best effort: a failed part is `null` and `read_notes` says why. When a
+  list works but one drive or disk cannot be read, that row keeps its id
+  with `null` fields and `read_notes` names it.
 - **`vmware.composite.vm.cdrom.add`** (`dangerous`, waits for approval;
   `composites/_vm_cdrom_tools.py`). One `POST /vcenter/vm/{vm}/hardware/cdrom`
   with a top-level `Cdrom.CreateSpec`: an ISO file backing when `iso_file` is

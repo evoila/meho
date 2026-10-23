@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``vmware.vm.hardware.show`` -- one VM's CPU, memory, CD drives and disk controllers.
+"""``vmware.vm.hardware.show`` -- one VM's CPU, memory, CD drives, disks and controllers.
 
 A typed read (``source_kind="typed"``). It calls the vSphere Automation REST
 API on the connector session, so it needs no catalog ingest. It works on
@@ -12,12 +12,21 @@ Calls, all ``GET`` under ``/vcenter/vm/{vm}``:
 * ``hardware/cpu`` and ``hardware/memory`` -- must work. A 404 means the VM
   does not exist, and the read returns ``not_found``.
 * ``hardware/cdrom`` (the list) and ``hardware/cdrom/{cdrom}`` (each drive).
+* ``hardware/disk`` (the list) and ``hardware/disk/{disk}`` (each disk, for
+  its controller address and size).
 * ``hardware/adapter/scsi``, ``.../sata``, ``.../nvme`` (the lists) and
   ``.../{adapter}`` (each controller, for its bus).
 * ``tools/installer`` -- whether the VMware Tools installer is mounted.
 
-The CD drive, controller and installer reads are best effort. When one
-fails, its part of the answer is ``null`` and ``read_notes`` says why.
+The controller resources do not list their devices. So the read joins them
+itself: a disk or a CD drive sits on the controller of the same kind and bus
+number (``Disk.Info.scsi.bus``, ``Cdrom.Info.sata.bus`` and so on). Each
+controller row carries that list as ``devices``.
+
+The CD drive, disk, controller and installer reads are best effort. When one
+fails, its part of the answer is ``null`` and ``read_notes`` says why. When
+the list of drives or disks works but one item does not, the item keeps its
+id with ``null`` fields, and ``read_notes`` says why.
 
 The CD drive and installer readers are shared with the two changes
 ``vmware.composite.vm.cdrom.add`` and ``vmware.composite.vm.tools.installer.unmount``
@@ -27,6 +36,7 @@ The CD drive and installer readers are shared with the two changes
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
@@ -35,6 +45,14 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.vmware_rest._vm_hardware_schemas import (
+    CDROM_ROW_SCHEMA,
+    DISK_ROW_SCHEMA,
+    VM_HARDWARE_PARAMETER_SCHEMA,
+    VM_HARDWARE_RESPONSE_SCHEMA,
+    VM_MOID_PATTERN,
+    VM_SELECTOR_PROPERTIES,
+)
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import _resolve_vm_moid_by_name
@@ -43,12 +61,17 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
+    "CDROM_ROW_SCHEMA",
+    "DISK_ROW_SCHEMA",
     "HARDWARE_REST_CALLS",
     "VMWARE_VM_HARDWARE_SHOW_OP",
     "VM_HARDWARE_GROUP_KEY",
+    "VM_HARDWARE_PARAMETER_SCHEMA",
+    "VM_HARDWARE_RESPONSE_SCHEMA",
     "VM_HARDWARE_WHEN_TO_USE",
     "VM_MOID_PATTERN",
     "VM_SELECTOR_PROPERTIES",
+    "cdrom_view",
     "check_vm_moid",
     "read_cdrom_rows",
     "read_tools_installer_mounted",
@@ -60,9 +83,6 @@ _log = structlog.get_logger(__name__)
 
 VM_HARDWARE_GROUP_KEY: Final = "vmware-vm-hardware"
 
-#: A vCenter VM id such as ``vm-42``. It goes into the URL path, so anything
-#: else is refused. ``(?!\n)`` stops ``$`` from accepting a trailing newline.
-VM_MOID_PATTERN: Final = r"^vm-[0-9]+$(?!\n)"
 _VM_MOID_RE: Final = re.compile(r"vm-[0-9]+")
 #: A device or controller id vCenter returns (``3000``, ``16000``).
 _DEVICE_ID_RE: Final = re.compile(r"[A-Za-z0-9-]+")
@@ -79,6 +99,8 @@ HARDWARE_REST_CALLS: Final[tuple[str, ...]] = (
     "GET:/vcenter/vm/{vm}/hardware/memory",
     "GET:/vcenter/vm/{vm}/hardware/cdrom",
     "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+    "GET:/vcenter/vm/{vm}/hardware/disk",
+    "GET:/vcenter/vm/{vm}/hardware/disk/{disk}",
     "GET:/vcenter/vm/{vm}/hardware/adapter/scsi",
     "GET:/vcenter/vm/{vm}/hardware/adapter/scsi/{adapter}",
     "GET:/vcenter/vm/{vm}/hardware/adapter/sata",
@@ -200,27 +222,96 @@ def cdrom_view(cdrom_id: str, raw: Any) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class _Listing:
+    """One ``hardware/<suffix>`` list whose items are read one by one."""
+
+    suffix: str
+    key: str
+    what: str
+
+
+_CDROM_LISTING: Final = _Listing("hardware/cdrom", "cdrom", "CD drive")
+_DISK_LISTING: Final = _Listing("hardware/disk", "disk", "disk")
+
+
+async def _read_listed_items(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    vm: str,
+    listing: _Listing,
+) -> tuple[list[tuple[str, Any]], list[str]]:
+    """List ``hardware/<suffix>`` and read each item; the list raises, an item does not.
+
+    Returns ``(items, notes)``. An item that cannot be read gets ``None`` and
+    one line in *notes*. An item id with odd characters is never put into a URL.
+    """
+    raw = await _get(connector, operator, target, _vm_path(vm, listing.suffix))
+    items: list[tuple[str, Any]] = []
+    notes: list[str] = []
+    for item_id in _ids(raw, listing.key):
+        segment = _device_segment(item_id)
+        info: Any = None
+        if segment is None:
+            notes.append(f"{listing.what} {item_id!r} skipped: id has unexpected characters")
+        else:
+            try:
+                info = await _get(
+                    connector, operator, target, _vm_path(vm, f"{listing.suffix}/{segment}")
+                )
+            except httpx.HTTPError as exc:
+                notes.append(_note(f"{listing.what} {item_id}", exc))
+        items.append((item_id, info))
+    return items, notes
+
+
 async def read_cdrom_rows(
     connector: VmwareRestConnector,
     operator: Operator,
     target: VsphereTargetLike,
     vm: str,
+    notes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Read every CD drive of *vm*. The list read raises on failure; a drive read does not."""
-    listing = await _get(connector, operator, target, _vm_path(vm, "hardware/cdrom"))
-    rows: list[dict[str, Any]] = []
-    for cdrom_id in _ids(listing, "cdrom"):
-        segment = _device_segment(cdrom_id)
-        info: Any = None
-        if segment is not None:
-            try:
-                info = await _get(
-                    connector, operator, target, _vm_path(vm, f"hardware/cdrom/{segment}")
-                )
-            except httpx.HTTPError:
-                info = None
-        rows.append(cdrom_view(cdrom_id, info))
-    return rows
+    """Read every CD drive of *vm*. The list read raises on failure; a drive read does not.
+
+    A drive that cannot be read keeps its id with ``null`` fields, and one
+    line goes into *notes* when the caller gives a list.
+    """
+    items, item_notes = await _read_listed_items(connector, operator, target, vm, _CDROM_LISTING)
+    if notes is not None:
+        notes.extend(item_notes)
+    return [cdrom_view(cdrom_id, info) for cdrom_id, info in items]
+
+
+def _disk_view(disk_id: str, raw: Any) -> dict[str, Any]:
+    info = raw if isinstance(raw, dict) else {}
+    raw_backing = info.get("backing")
+    backing: dict[str, Any] = raw_backing if isinstance(raw_backing, dict) else {}
+    return {
+        "disk": disk_id,
+        "label": _str(info.get("label")),
+        "type": _str(info.get("type")),
+        "ide": _address(info.get("ide"), ("primary", "master")),
+        "scsi": _address(info.get("scsi"), ("bus", "unit")),
+        "sata": _address(info.get("sata"), ("bus", "unit")),
+        "nvme": _address(info.get("nvme"), ("bus", "unit")),
+        "capacity_bytes": _int(info.get("capacity")),
+        "backing_type": _str(backing.get("type")),
+        "vmdk_file": _str(backing.get("vmdk_file")),
+    }
+
+
+async def _read_disk_rows(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    vm: str,
+    notes: list[str],
+) -> list[dict[str, Any]]:
+    items, item_notes = await _read_listed_items(connector, operator, target, vm, _DISK_LISTING)
+    notes.extend(item_notes)
+    return [_disk_view(disk_id, info) for disk_id, info in items]
 
 
 async def read_tools_installer_mounted(
@@ -247,7 +338,42 @@ def _controller_view(kind: str, adapter: str, raw: Any) -> dict[str, Any]:
         "unit": _int(scsi.get("unit")) if kind == "scsi" else None,
         "sharing": _str(info.get("sharing")),
         "pci_slot_number": _int(info.get("pci_slot_number")),
+        "devices": [],
     }
+
+
+def _device_on(row: dict[str, Any], kind: str, bus: int | None) -> dict[str, Any] | None:
+    """Return the device row for *row* when it sits on a *kind* controller with *bus*."""
+    if bus is None or _str(row.get("type")) != kind.upper():
+        return None
+    address = row.get(kind)
+    if not isinstance(address, dict) or _int(address.get("bus")) != bus:
+        return None
+    device = {
+        "device_kind": "disk" if "disk" in row else "cdrom",
+        "id": row.get("disk", row.get("cdrom")),
+        "label": row.get("label"),
+        "unit": _int(address.get("unit")),
+    }
+    if "disk" in row:
+        device["capacity_bytes"] = row.get("capacity_bytes")
+        device["vmdk_file"] = row.get("vmdk_file")
+    return device
+
+
+def _attach_devices(
+    controllers: list[dict[str, Any]],
+    disks: list[dict[str, Any]] | None,
+    cdroms: list[dict[str, Any]] | None,
+) -> None:
+    """Fill ``devices`` of each controller with the disks and CD drives on its bus."""
+    for controller in controllers:
+        kind, bus = controller["kind"], controller["bus"]
+        for row in [*(disks or []), *(cdroms or [])]:
+            device = _device_on(row, kind, bus)
+            if device is not None:
+                controller["devices"].append(device)
+        controller["devices"].sort(key=lambda d: (d["unit"] is None, d["unit"] or 0))
 
 
 async def _read_controllers(
@@ -315,11 +441,19 @@ async def vm_hardware_show_impl(
     notes: list[str] = []
     cdroms: list[dict[str, Any]] | None
     try:
-        cdroms = await read_cdrom_rows(connector, operator, target, vm)
+        cdroms = await read_cdrom_rows(connector, operator, target, vm, notes)
     except httpx.HTTPError as exc:
         cdroms = None
         notes.append(_note("CD drive list", exc))
+    disks: list[dict[str, Any]] | None
+    try:
+        disks = await _read_disk_rows(connector, operator, target, vm, notes)
+    except httpx.HTTPError as exc:
+        disks = None
+        notes.append(_note("disk list", exc))
     controllers = await _read_controllers(connector, operator, target, vm, notes)
+    if controllers is not None:
+        _attach_devices(controllers, disks, cdroms)
     installer: bool | None
     try:
         installer = await read_tools_installer_mounted(connector, operator, target, vm)
@@ -331,6 +465,7 @@ async def vm_hardware_show_impl(
         target=target.name,
         vm=vm,
         cdroms=None if cdroms is None else len(cdroms),
+        disks=None if disks is None else len(disks),
         notes=len(notes),
     )
     return {
@@ -339,6 +474,7 @@ async def vm_hardware_show_impl(
         "cpu": _cpu_view(cpu),
         "memory": _memory_view(memory),
         "cdroms": cdroms,
+        "disks": disks,
         "disk_controllers": controllers,
         "tools_installer_mounted": installer,
         "read_notes": notes,
@@ -346,163 +482,30 @@ async def vm_hardware_show_impl(
 
 
 # ---------------------------------------------------------------------------
-# Op metadata + schemas
+# Op metadata (schemas live in ``_vm_hardware_schemas.py``)
 # ---------------------------------------------------------------------------
-
-#: The ``vm`` / ``name`` selector of the read. The two changes take ``vm`` only.
-VM_SELECTOR_PROPERTIES: Final[dict[str, Any]] = {
-    "vm": {
-        "type": "string",
-        "pattern": VM_MOID_PATTERN,
-        "description": "VM id, such as 'vm-42'. Give exactly one of 'vm' or 'name'.",
-    },
-    "name": {
-        "type": "string",
-        "minLength": 1,
-        "description": (
-            "VM name. MEHO looks up the VM id. An unknown name gives not_found; a name "
-            "that fits two VMs is an error. Give exactly one of 'vm' or 'name'."
-        ),
-    },
-}
-
-_NULLABLE_BOOL: Final = {"type": ["boolean", "null"]}
-_NULLABLE_INT: Final = {"type": ["integer", "null"]}
-_NULLABLE_STR: Final = {"type": ["string", "null"]}
-
-
-def _field(base: dict[str, Any], description: str) -> dict[str, Any]:
-    return {**base, "description": description}
-
-
-#: One CD drive row. Shared with the cdrom change's answer.
-CDROM_ROW_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "cdrom": {"type": "string", "description": "CD drive id, such as '16000'."},
-        "label": _field(_NULLABLE_STR, "Device label, such as 'CD/DVD drive 1'."),
-        "type": _field(_NULLABLE_STR, "Controller kind the drive sits on: IDE or SATA."),
-        "ide": {
-            "type": ["object", "null"],
-            "description": "IDE address ({primary, master}) when type is IDE.",
-        },
-        "sata": {
-            "type": ["object", "null"],
-            "description": "SATA address ({bus, unit}) when type is SATA.",
-        },
-        "backing_type": _field(_NULLABLE_STR, "ISO_FILE, HOST_DEVICE or CLIENT_DEVICE."),
-        "iso_file": _field(_NULLABLE_STR, "Datastore path of the ISO file, for ISO_FILE."),
-        "host_device": _field(_NULLABLE_STR, "Host device name, for HOST_DEVICE."),
-        "device_access_type": _field(
-            _NULLABLE_STR, "EMULATION, PASSTHRU or PASSTHRU_EXCLUSIVE (device backings)."
-        ),
-        "state": _field(
-            _NULLABLE_STR,
-            "CONNECTED, NOT_CONNECTED, RECOVERABLE_ERROR, UNRECOVERABLE_ERROR or UNKNOWN.",
-        ),
-        "connected": _field(_NULLABLE_BOOL, "True when state is CONNECTED."),
-        "start_connected": _field(_NULLABLE_BOOL, "Connects when the VM powers on."),
-        "allow_guest_control": _field(
-            _NULLABLE_BOOL, "The guest can connect and disconnect the drive."
-        ),
-    },
-    "required": ["cdrom"],
-}
-
-_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": VM_SELECTOR_PROPERTIES,
-    "oneOf": [{"required": ["vm"]}, {"required": ["name"]}],
-    "additionalProperties": False,
-    "examples": [{"name": "<vm-name>"}, {"vm": "vm-42"}],
-}
-
-_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "vm": {"type": "string", "description": "VM id that was read."},
-        "name": _field(_NULLABLE_STR, "VM name when the call named the VM, else null."),
-        "cpu": {
-            "type": "object",
-            "description": "CPU settings.",
-            "properties": {
-                "count": _field(_NULLABLE_INT, "Number of virtual CPU cores."),
-                "cores_per_socket": _field(_NULLABLE_INT, "Cores per socket."),
-                "hot_add_enabled": _field(_NULLABLE_BOOL, "CPUs can be added while on."),
-                "hot_remove_enabled": _field(_NULLABLE_BOOL, "CPUs can be removed while on."),
-            },
-        },
-        "memory": {
-            "type": "object",
-            "description": "Memory settings.",
-            "properties": {
-                "size_mib": _field(_NULLABLE_INT, "Memory size in MiB."),
-                "hot_add_enabled": _field(_NULLABLE_BOOL, "Memory can be added while on."),
-                "hot_add_increment_size_mib": _field(
-                    _NULLABLE_INT, "Step for adding memory while on, in MiB."
-                ),
-                "hot_add_limit_mib": _field(
-                    _NULLABLE_INT, "Most memory the VM can have after a hot add, in MiB."
-                ),
-            },
-        },
-        "cdroms": {
-            "type": ["array", "null"],
-            "description": "Every CD drive; null when the list read failed.",
-            "items": CDROM_ROW_SCHEMA,
-        },
-        "disk_controllers": {
-            "type": ["array", "null"],
-            "description": "Every SCSI, SATA and NVMe controller; null when all reads failed.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "description": "scsi, sata or nvme."},
-                    "adapter": {"type": "string", "description": "Controller id."},
-                    "label": _field(_NULLABLE_STR, "Device label."),
-                    "type": _field(
-                        _NULLABLE_STR, "Model: PVSCSI, LSILOGIC, LSILOGICSAS, BUSLOGIC, AHCI."
-                    ),
-                    "bus": _field(_NULLABLE_INT, "Bus number."),
-                    "unit": _field(_NULLABLE_INT, "SCSI unit number of the controller."),
-                    "sharing": _field(_NULLABLE_STR, "SCSI bus sharing: NONE, VIRTUAL, PHYSICAL."),
-                    "pci_slot_number": _field(_NULLABLE_INT, "PCI slot; null before power on."),
-                },
-                "required": ["kind", "adapter"],
-            },
-        },
-        "tools_installer_mounted": _field(
-            _NULLABLE_BOOL, "True when the VMware Tools installer is in a CD drive."
-        ),
-        "read_notes": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "One line per part that could not be read.",
-        },
-    },
-    "required": ["vm", "cpu", "memory", "read_notes"],
-}
 
 VM_HARDWARE_WHEN_TO_USE: Final = (
     "Use to read the virtual hardware of one VM: CPU count and cores per socket, "
     "memory size, whether CPU and memory hot add is on, each CD drive (ISO file, host "
-    "device or client device; connected or not), each SCSI, SATA and NVMe disk "
-    "controller, and whether the VMware Tools installer is mounted. Read-only. For "
+    "device or client device; connected or not), each disk (size, VMDK file), each SCSI, "
+    "SATA and NVMe disk controller with the devices on it, and whether the VMware Tools "
+    "installer is mounted. Read-only. For "
     "power state, guest IP and Tools status use vmware.vm.info instead."
 )
 
 VMWARE_VM_HARDWARE_SHOW_OP = VmwareTypedOp(
     op_id="vmware.vm.hardware.show",
     handler_attr="vm_hardware_show",
-    summary="One VM's CPU, memory, CD drives, disk controllers and Tools installer state.",
+    summary="One VM's CPU, memory, CD drives, disks, controllers and Tools installer state.",
     description=(
         "Returns one VM's hardware, by id (vm) or name: CPU count, cores per socket and "
-        "hot add, memory size and hot add, each CD drive with its backing and state, each "
-        "SCSI, SATA and NVMe controller with its bus, and whether the VMware Tools "
-        "installer is mounted. Read-only."
+        "hot add, memory size and hot add, each CD drive (backing, state), each disk (size, "
+        "VMDK file), each SCSI, SATA and NVMe controller with its bus and devices, and "
+        "whether the VMware Tools installer is mounted. Read-only."
     ),
-    parameter_schema=_PARAMETER_SCHEMA,
-    response_schema=_RESPONSE_SCHEMA,
+    parameter_schema=VM_HARDWARE_PARAMETER_SCHEMA,
+    response_schema=VM_HARDWARE_RESPONSE_SCHEMA,
     group_key=VM_HARDWARE_GROUP_KEY,
     tags=("read-only", "vmware", "vcenter", "vm", "hardware", "cdrom"),
     safety_level="safe",
@@ -510,8 +513,9 @@ VMWARE_VM_HARDWARE_SHOW_OP = VmwareTypedOp(
     llm_instructions={
         "when_to_call": (
             "Call to see how many CPUs and how much memory a VM has, whether hot add is "
-            "on, which ISO is in a CD drive and whether the drive is connected, which disk "
-            "controllers the VM has, or whether the VMware Tools installer is mounted. Call "
+            "on, which ISO is in a CD drive and whether the drive is connected, which disks "
+            "and disk controllers the VM has and which devices sit on each controller, or "
+            "whether the VMware Tools installer is mounted. Call "
             "it before adding a CD drive or unmounting the Tools installer."
         ),
         "parameter_hints": {
@@ -523,9 +527,12 @@ VMWARE_VM_HARDWARE_SHOW_OP = VmwareTypedOp(
             "memory: {size_mib, hot_add_enabled, hot_add_increment_size_mib, "
             "hot_add_limit_mib}, cdroms: [{cdrom, label, type, ide, sata, backing_type, "
             "iso_file, host_device, device_access_type, state, connected, start_connected, "
-            "allow_guest_control}], disk_controllers: [{kind, adapter, label, type, bus, "
-            "unit, sharing, pci_slot_number}], tools_installer_mounted, read_notes}. A part "
-            "that could not be read is null and read_notes says why."
+            "allow_guest_control}], disks: [{disk, label, type, ide, scsi, sata, nvme, "
+            "capacity_bytes, backing_type, vmdk_file}], disk_controllers: [{kind, adapter, "
+            "label, type, bus, unit, sharing, pci_slot_number, devices: [{device_kind, id, "
+            "label, unit, capacity_bytes, vmdk_file}]}], tools_installer_mounted, "
+            "read_notes}. A part that could not be read is null and read_notes says why; a "
+            "single drive or disk that could not be read keeps its id with null fields."
         ),
         "next_step": (
             "To add a CD drive, call vmware.composite.vm.cdrom.add. To change, disconnect or "

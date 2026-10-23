@@ -32,6 +32,8 @@ _EXPECTED_READ = {
     "GET:/vcenter/vm/{vm}/hardware/memory",
     "GET:/vcenter/vm/{vm}/hardware/cdrom",
     "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+    "GET:/vcenter/vm/{vm}/hardware/disk",
+    "GET:/vcenter/vm/{vm}/hardware/disk/{disk}",
     "GET:/vcenter/vm/{vm}/hardware/adapter/scsi",
     "GET:/vcenter/vm/{vm}/hardware/adapter/scsi/{adapter}",
     "GET:/vcenter/vm/{vm}/hardware/adapter/sata",

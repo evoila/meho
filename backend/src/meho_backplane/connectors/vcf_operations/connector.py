@@ -166,6 +166,25 @@ _RESOURCES_STATS_LATEST_PATH = "/suite-api/api/resources/stats/latest"
 _RESOURCE_KIND_PROPERTIES_PATH = (
     "/suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/{resourceKindKey}/properties"
 )
+_LICENSING_EDITION_PATH = "/suite-api/api/product/licensing/edition"
+_LICENSING_INFO_PATH = "/suite-api/api/product/licensing/info"
+
+#: How many characters of a licence key stay visible after masking.
+_LICENSE_KEY_VISIBLE_CHARS = 5
+
+
+def _mask_license_key(value: Any) -> Any:
+    """Hide a licence key except its last few characters.
+
+    A short value is hidden in full, so a masked key never shows more than
+    a small tail. A value that is not a non-empty string is returned as is.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if len(value) <= 2 * _LICENSE_KEY_VISIBLE_CHARS:
+        return "*" * len(value)
+    tail = value[-_LICENSE_KEY_VISIBLE_CHARS:]
+    return "*" * (len(value) - _LICENSE_KEY_VISIBLE_CHARS) + tail
 
 
 def _vrops_acquire_payload_builder(
@@ -645,6 +664,28 @@ class VcfOperationsConnector(HttpConnector):
                 )
             ]
         return payload
+
+    async def license_info(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.license.info`` — the edition and the licence of this instance.
+
+        Reads ``GET /suite-api/api/product/licensing/edition`` and
+        ``GET /suite-api/api/product/licensing/info`` and returns one object
+        with the fields of both answers. ``licenseKey`` is masked before the
+        result leaves the handler, so no licence key reaches the agent, the
+        audit row or a stored result in clear text.
+        """
+        del params  # schema declares the param object empty
+        edition = await self._get_json(target, _LICENSING_EDITION_PATH, operator=operator)
+        info = await self._get_json(target, _LICENSING_INFO_PATH, operator=operator)
+        result = {**info, **edition}
+        if "licenseKey" in result:
+            result["licenseKey"] = _mask_license_key(result["licenseKey"])
+        return result
 
     async def invalidate_credentials(self, target: VcfOperationsTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396).

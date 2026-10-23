@@ -73,6 +73,7 @@ var typedOpCLICoverage = map[string]string{
 	"vrops.resource.query":           "", // agent surface only (POST query; `resource list` is the plain GET list)
 	"vrops.resource.stats":           "", // agent surface only
 	"vrops.resource_kind.properties": "", // no verb; use `operation call vrops.resource_kind.properties`
+	"vrops.license.info":             "", // no verb; use `operation call vrops.license.info`
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed vROps

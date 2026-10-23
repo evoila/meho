@@ -53,13 +53,18 @@ thin bound-method handlers on the connector, a module-level registrar
 queued onto :func:`register_typed_op_registrar`) and
 :mod:`meho_backplane.connectors.vmware_rest.typed_ops`.
 
-One more typed read is 9.x only, so the 8.x connector does not register it:
+Two typed reads are 9.x only, so the 8.x connector does not register them:
 
 * ``vrops.resource_kind.properties`` — the properties one resource kind of
   one adapter kind has (key, name, description, data type, unit). Reads
   ``GET /suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/{resourceKindKey}/properties``.
-  It lives in :data:`VROPS_9_ONLY_TYPED_OPS`, not in
-  :data:`VROPS_TYPED_OPS`, because the 8.x registrar reuses that tuple.
+* ``vrops.license.info`` — the edition and the licence of this VCF
+  Operations instance. Reads ``GET /suite-api/api/product/licensing/edition``
+  and ``GET /suite-api/api/product/licensing/info`` and masks the licence
+  key.
+
+Both live in :data:`VROPS_9_ONLY_TYPED_OPS`, not in :data:`VROPS_TYPED_OPS`,
+because the 8.x registrar reuses that tuple.
 
 Unconverted ops (resource list/get, alert definitions, symptoms,
 recommendations, super metrics) are **declined** from typed conversion —
@@ -78,6 +83,7 @@ import structlog
 
 from meho_backplane.connectors.vcf_operations._response_schemas import (
     VROPS_ALERT_LIST_RESPONSE,
+    VROPS_LICENSE_INFO_RESPONSE,
     VROPS_LIVENESS_RESPONSE,
     VROPS_RESOURCE_KIND_PROPERTIES_RESPONSE,
     VROPS_RESOURCE_QUERY_RESPONSE,
@@ -90,6 +96,7 @@ if TYPE_CHECKING:
 __all__ = [
     "VROPS_9_ONLY_TYPED_OPS",
     "VROPS_ALERT_LIST_OP",
+    "VROPS_LICENSE_INFO_OP",
     "VROPS_LIVENESS_OP",
     "VROPS_RESOURCE_KIND_PROPERTIES_OP",
     "VROPS_RESOURCE_QUERY_BODY_FIELDS",
@@ -113,6 +120,7 @@ _ALERT_TRIAGE_GROUP_KEY = "vrops-alert-triage"
 _RESOURCE_QUERY_GROUP_KEY = "vrops-resource-query"
 _RESOURCE_STATS_GROUP_KEY = "vrops-resource-stats"
 _RESOURCE_KIND_GROUP_KEY = "vrops-resource-kinds"
+_LICENSE_GROUP_KEY = "vrops-license"
 
 #: Top-level ``ResourceQuerySpec`` body fields ``vrops.resource.query``
 #: forwards (a curated subset of the full spec). ``page`` / ``pageSize``
@@ -237,6 +245,13 @@ VROPS_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "type and unit. The right group when the question is 'which property "
         "holds X?' and you need the exact key before you read its value. "
         "Read-only."
+    ),
+    _LICENSE_GROUP_KEY: (
+        "Use to read the edition and the licence of this VCF Operations "
+        "instance: which edition it runs, whether it is licensed, the licence "
+        "name and when the licence expires. The right group when the question "
+        "is 'is VCF Operations licensed?' or 'when does its licence expire?'. "
+        "Licence keys are masked. Read-only."
     ),
 }
 
@@ -652,6 +667,51 @@ VROPS_RESOURCE_KIND_PROPERTIES_OP = VropsTypedOp(
 )
 
 
+VROPS_LICENSE_INFO_OP = VropsTypedOp(
+    op_id="vrops.license.info",
+    handler_attr="license_info",
+    summary="Read the edition and the licence of this VCF Operations instance.",
+    description=(
+        "Reads GET /suite-api/api/product/licensing/edition and GET "
+        "/suite-api/api/product/licensing/info, and returns one object: edition, "
+        "licensed, licence name and expiry date. MEHO masks the licence key. The "
+        "vendor API shows no licence use on these calls. Read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+        "examples": [{}],
+    },
+    response_schema=VROPS_LICENSE_INFO_RESPONSE,
+    group_key=_LICENSE_GROUP_KEY,
+    # "license-key" marks this op as secret-bearing (its "key" token is in
+    # SECRET_FAMILY_TAGS), so the flight recorder leaves the raw vendor
+    # bodies of both calls out of the trace. The handler masks the key only
+    # in its own return value.
+    tags=("read-only", "vrops", "vmware", "license", "licensing", "license-key"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_call": (
+            "Call when the operator asks which edition VCF Operations runs, whether "
+            "it is licensed, or when its licence expires."
+        ),
+        "parameter_hints": {},
+        "output_shape": (
+            "{productLicensingEdition, licensed, licenseName, expirationDate, "
+            "licenseKey}. expirationDate is in epoch milliseconds. licenseKey is "
+            "masked: only the last 5 characters show."
+        ),
+        "next_step": (
+            "Report the edition, the licence state and the expiry date. If licensed "
+            "is false or the expiry date is near, tell the operator to check the "
+            "licence in VCF Operations."
+        ),
+    },
+)
+
+
 #: The typed ops :class:`VcfOperationsConnector` registers at lifespan
 #: startup — the audited vROps read set (#2303) plus the sizing stat-value
 #: read (#2838). The tuple shape lets a future typed read join without
@@ -665,7 +725,10 @@ VROPS_TYPED_OPS: tuple[VropsTypedOp, ...] = (
 
 #: Typed ops only the 9.x connector registers. The 8.x registrar reuses
 #: :data:`VROPS_TYPED_OPS`, so a 9.x-only read goes here instead.
-VROPS_9_ONLY_TYPED_OPS: tuple[VropsTypedOp, ...] = (VROPS_RESOURCE_KIND_PROPERTIES_OP,)
+VROPS_9_ONLY_TYPED_OPS: tuple[VropsTypedOp, ...] = (
+    VROPS_RESOURCE_KIND_PROPERTIES_OP,
+    VROPS_LICENSE_INFO_OP,
+)
 
 
 async def register_vcf_operations_typed_operations(

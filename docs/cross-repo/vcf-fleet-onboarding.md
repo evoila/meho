@@ -161,7 +161,7 @@ meho targets probe rdc-fleet --json | jq '{product, version, reachable, extras}'
 #            "extras": {"lcm_api_version": "8.0", "datacenter_count": N, ...}}
 # Note: `version` carries the LCM API version (the only working version source
 # in 9.0), not the product version. The connector's class-level
-# `supported_version_range=">=9.0,<10.0"` is matched against the persisted
+# `supported_version_range=">=8.0,<9.1"` is matched against the persisted
 # `Target.fingerprint.version` written by the canary fixture; in production
 # the fingerprint is what `probe` writes back.
 ```

@@ -28,6 +28,7 @@ lane checks every path in :data:`VENDOR_CALLS` once the files are pinned.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.hcx.connector import (
@@ -36,6 +37,7 @@ from meho_backplane.connectors.hcx.connector import (
     parse_manager_version,
 )
 from meho_backplane.connectors.hcx.session import HcxTargetLike
+from meho_backplane.operations._rfc6570 import has_dot_segment
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.hcx.connector import HcxConnector
@@ -122,10 +124,23 @@ _SITE_FILTERS: Final[dict[str, dict[str, bool]]] = {
 }
 
 
+#: A key that ends with one of these (``vcPassword``, ``adminPassword``) is secret too.
+_SECRET_SUFFIXES: Final[tuple[str, ...]] = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "privatekey",
+    "licensekey",
+    "licencekey",
+)
+
+
 def _is_secret_key(key: object) -> bool:
     if not isinstance(key, str):
         return False
-    return key.lower().replace("_", "").replace("-", "") in _SECRET_KEYS
+    name = key.lower().replace("_", "").replace("-", "")
+    return name in _SECRET_KEYS or name.endswith(_SECRET_SUFFIXES)
 
 
 def redact_secrets(value: Any) -> Any:
@@ -143,6 +158,20 @@ def _redact_object(value: dict[str, Any]) -> dict[str, Any]:
         key: REDACTED if _is_secret_key(key) else redact_secrets(item)
         for key, item in value.items()
     }
+
+
+def _segment(kind: str, value: Any) -> str:
+    """Return *value* as one URL path segment, or raise ``ValueError``.
+
+    An id must stay one path segment. A ``.`` or ``..`` id is refused, and
+    every reserved character (``/``, ``?``, ``#``, ...) is percent-encoded,
+    so the request always goes to the path the op names.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"the {kind} id must be a non-empty string, got {value!r}")
+    if value == "." or has_dot_segment(value):
+        raise ValueError(f"the {kind} id {value!r} must not be '.' or contain a '..' segment")
+    return quote(value, safe="")
 
 
 def rows_of(payload: Any) -> list[dict[str, Any]]:
@@ -311,7 +340,7 @@ async def hcx_service_mesh_diagnose_impl(
     ``hcx.service_mesh.list``.
     """
     mesh_id = params["service_mesh_id"]
-    path = _DIAGNOSE_PATH.format(serviceMeshId=mesh_id)
+    path = _DIAGNOSE_PATH.format(serviceMeshId=_segment("service mesh", mesh_id))
     payload = await connector._post_json(target, path, operator=operator, json={})
     data = payload.get("data") if isinstance(payload, dict) else None
     data = data if isinstance(data, dict) else {}
@@ -333,7 +362,7 @@ async def hcx_job_get_impl(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """``hcx.job.get`` -- ``GET /hybridity/api/jobs/{jobid}``, the vendor job object."""
-    path = _JOB_PATH.format(jobid=params["job_id"])
+    path = _JOB_PATH.format(jobid=_segment("job", params["job_id"]))
     payload = await connector._get_json(target, path, operator=operator)
     return _redact_object(payload) if isinstance(payload, dict) else {"job": payload}
 

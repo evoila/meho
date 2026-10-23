@@ -41,7 +41,12 @@ from meho_backplane.connectors.hcx import (
 )
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS
 from meho_backplane.connectors.hcx.typed_ops import HCX_TYPED_WHEN_TO_USE_BY_GROUP
-from meho_backplane.connectors.hcx.typed_reads import REDACTED, manager_role, rows_of
+from meho_backplane.connectors.hcx.typed_reads import (
+    REDACTED,
+    manager_role,
+    redact_secrets,
+    rows_of,
+)
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -275,6 +280,25 @@ async def test_site_pairing_list_returns_rows_without_the_password(
     assert _PASSWORD not in json.dumps(result.result)
 
 
+def test_redact_secrets_masks_names_that_end_with_a_secret_word() -> None:
+    row = {
+        "vcPassword": "a",
+        "admin_password": "b",
+        "sessionToken": "c",
+        "sslPrivateKey": "d",
+        "tokenExpiry": 5,
+        "name": "site-a",
+    }
+    assert redact_secrets(row) == {
+        "vcPassword": REDACTED,
+        "admin_password": REDACTED,
+        "sessionToken": REDACTED,
+        "sslPrivateKey": REDACTED,
+        "tokenExpiry": 5,
+        "name": "site-a",
+    }
+
+
 @pytest.mark.asyncio
 async def test_service_mesh_list_adds_the_last_task_fields(
     _stub_embedding: AsyncMock, session: AsyncSession
@@ -429,6 +453,62 @@ async def test_job_get_vendor_error_reaches_the_answer(
     assert result.status == "error"
     assert result.extras["http_status"] == 404
     assert "Job not found" in result.extras["upstream_message"]
+
+
+_PATH_IDS = [
+    ("a/b", "a%2Fb"),
+    ("a?action=query", "a%3Faction%3Dquery"),
+    ("a#b", "a%23b"),
+    ("a/../../x", None),
+    ("..", None),
+    (".", None),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("raw_id", "encoded"), _PATH_IDS)
+async def test_service_mesh_diagnose_keeps_the_mesh_id_one_path_segment(
+    _stub_embedding: AsyncMock, session: AsyncSession, raw_id: str, encoded: str | None
+) -> None:
+    await _register(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        other = mock.route().respond(202, json={"data": {}})
+        result = await _dispatch("hcx.service_mesh.diagnose", {"service_mesh_id": raw_id})
+
+    if encoded is None:
+        assert result.status == "error"
+        assert other.call_count == 0
+        return
+    assert result.status == "ok", result.error
+    assert other.call_count == 1
+    request = other.calls[0].request
+    assert request.method == "POST"
+    assert request.url.raw_path == (
+        f"/hybridity/api/interconnect/serviceMesh/{encoded}/diagnose".encode()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("raw_id", "encoded"), _PATH_IDS)
+async def test_job_get_keeps_the_job_id_one_path_segment(
+    _stub_embedding: AsyncMock, session: AsyncSession, raw_id: str, encoded: str | None
+) -> None:
+    await _register(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        other = mock.route().respond(200, json={"jobId": "x"})
+        result = await _dispatch("hcx.job.get", {"job_id": raw_id})
+
+    if encoded is None:
+        assert result.status == "error"
+        assert other.call_count == 0
+        return
+    assert result.status == "ok", result.error
+    assert other.call_count == 1
+    request = other.calls[0].request
+    assert request.method == "GET"
+    assert request.url.raw_path == f"/hybridity/api/jobs/{encoded}".encode()
 
 
 @pytest.mark.asyncio

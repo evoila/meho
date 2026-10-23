@@ -248,7 +248,8 @@ What each read sends and returns:
 
 Secrets: every read replaces a field whose name says password, secret,
 token, authorization, private key or licence key (any case, with or
-without `_` or `-`) with `***REDACTED***`, at any depth. The key stays,
+without `_` or `-`) with `***REDACTED***`, at any depth. A name that ends
+with one of these words (for example `vcPassword`) counts too. The key stays,
 so the shape does not change. The dispatcher's own redaction runs after
 that.
 

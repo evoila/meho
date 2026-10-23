@@ -176,6 +176,10 @@ customer's security team. `render_firewall_rules` writes it.
   replies of DHCP servers (UDP 67 to 68, and 547 to 546). The last rule
   is a `counter` of the packets that the policy drops.
 - **Outgoing traffic** is not filtered. The table has no output chain.
+- **The customer's own rules.** The header of the file says where they
+  go: accept rules in the chain `prerouting`, before its last rule
+  (`counter`), then a reload. The form-2 design (section 8) tells the
+  customer to add rules to this file, not to replace it.
 
 ### The boot unit and RKE2
 

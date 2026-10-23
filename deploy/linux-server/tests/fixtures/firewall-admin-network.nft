@@ -16,6 +16,10 @@
 # The file changes only the table inet meho. It never runs "flush ruleset",
 # because RKE2's network layer (Canal) and kube-proxy keep their own rules
 # in other tables.
+#
+# To let more traffic in, add your own accept rules to the chain
+# prerouting, before its last rule (counter). Then load the file again.
+# Never add "flush ruleset" to this file.
 
 # Replace the table in one step: create it when it is missing, delete it,
 # and define it again. nft applies the whole file as one transaction.

@@ -6,11 +6,11 @@
 The modern VCF 9 Fleet LCM Service ``/v1/*`` read core is registered as
 typed ops (``source_kind="typed"``) so it dispatches on a fresh boot with
 **zero catalog ingest** — the read core is live the moment the connector
-loads. This is what restores 9.0 fleet dispatch (initiative
-`evoila/meho#3033 <https://github.com/evoila/meho/issues/3033>`_): under
-the "modern default now" resolver decision a VCF Fleet 9.x target resolves
-to ``fleet-lcm`` by most-specific-version, and until this read core landed
-that impl was a skeleton with no dispatchable ops.
+loads (initiative
+`evoila/meho#3033 <https://github.com/evoila/meho/issues/3033>`_). A VCF
+Fleet 9.1 or newer target resolves to ``fleet-lcm`` (``>=9.1,<10.0``), and
+until this read core landed that impl was a skeleton with no dispatchable
+ops.
 
 The op bodies live in
 :mod:`meho_backplane.connectors.fleet_lcm.typed_reads`; the per-op

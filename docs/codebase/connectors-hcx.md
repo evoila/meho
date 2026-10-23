@@ -125,16 +125,29 @@ Only UTF-8 text comes back. A content type that is not text (anything
 other than `text/*`, JSON, YAML, XML or JavaScript) or a body that is not
 valid UTF-8 is refused, and the error names the content type.
 
+Before the text is cut into parts, the read checks the whole file with
+the shared API file secret check
+(`connectors/_shared/api_file_secrets.py`, see
+`connectors-shared-api-file-secrets.md`). The file is parsed (JSON, YAML,
+XML or HTML; the content type decides, or the file ending when the type
+is `text/plain` or missing), every value under a secret name is replaced
+with `[REDACTED:param_name]`, and the file is written back from the
+parsed copy. A file that does not parse, or whose format is unknown
+(JavaScript, CSS, plain text), is refused with the reason. The answer
+carries the count in `secrets_replaced`; `size` and `sha256` describe the
+checked copy. A redirect path gets the same check on its query string.
+
 The dispatcher runs the shared secret-redaction rules on every answer
-before the caller sees it. A documentation page can hold an example that
-looks like a secret (for example an `Authorization` header line). Such a
-page would come back changed while `sha256` still names the original.
-The read runs the same rules first, on the whole text and then on its
-answer, and stops with an error that names the rules and the number of
-places. The whole text is checked because a secret whose label ends one
-part and whose value starts the next is not seen in either part alone.
-Redaction stays on; the read just never claims an exact file it cannot
-return.
+before the caller sees it. A documentation page can still hold free text
+that looks like a secret (for example an `Authorization` header line in
+a text block). Such a page would come back changed while `sha256` names
+the copy as checked. The read runs the same rules first, on the whole
+text and then on its answer, and stops with an error that names the
+rules and the number of places. The whole text is checked because a
+secret whose label ends one part and whose value starts the next is not
+seen in either part alone. The rules skip the placeholder, so a replaced
+value does not set them off. Redaction stays on; the read just never
+claims a file it cannot return.
 
 The answer:
 
@@ -143,8 +156,9 @@ The answer:
 | `path` | The path that was read, with its query string. |
 | `status` | The HTTP status. |
 | `content_type` | The `Content-Type` header. |
-| `size` | Size of the file in bytes. |
-| `sha256` | SHA-256 of the file, hex. |
+| `size` | Size of the checked copy in bytes. |
+| `sha256` | SHA-256 of the checked copy, hex. |
+| `secrets_replaced` | How many values under a secret name were replaced in the copy. |
 | `version`, `build` | The Manager version and build from the version helper. |
 | `version_error` | Why the version read failed; `null` when it worked. The file still comes back. |
 | `redirect_to` | Path of a redirect answer; `null` otherwise. |
@@ -153,9 +167,9 @@ The answer:
 
 ### Rebuilding a file from the parts
 
-The file is split on UTF-8 character boundaries into parts of at most
-64 KiB, so each part decodes on its own. Joining the `text` of every part
-in `index` order gives the exact file; the SHA-256 of the joined bytes
+The checked copy is split on UTF-8 character boundaries into parts of at
+most 64 KiB, so each part decodes on its own. Joining the `text` of every
+part in `index` order gives the copy; the SHA-256 of the joined bytes
 equals `sha256`.
 
 A short page (under about 4 KB and 50 parts) comes back inline. A longer

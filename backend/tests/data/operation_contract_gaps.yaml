@@ -817,6 +817,12 @@ msad-ssh:
   msad.user.list:
     - llm_instructions
     - examples
+  # msad.user.password-expiry landed on main after this list was first written.
+  # Its gaps go on the list once, like every other gap that was already on main.
+  msad.user.password-expiry:
+    - summary
+    - llm_instructions
+    - examples
   msad.user.search:
     - llm_instructions
     - examples
@@ -1507,7 +1513,10 @@ winsrv-ssh:
   winsrv.localuser.delete:
     - llm_instructions
     - examples
+  # The longer summary of winsrv.localuser.list landed on main after this list
+  # was first written, together with msad.user.password-expiry.
   winsrv.localuser.list:
+    - summary
     - llm_instructions
     - examples
   # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.

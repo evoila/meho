@@ -1020,6 +1020,13 @@ OpenBao; all three are off by default.
   over MCP (#4030 / #4187). Before, MEHO refused this filter. It returns
   the direct children of one row, for example the decision and run rows
   of one approval request.
+- The principal filter of the audit search now matches part of the user
+  id or part of the stored name, and case does not matter (#4668 /
+  #4800). Before, `meho audit query --principal`, the MCP tool
+  `query_audit` and the console audit page matched only the user id, but
+  the PRINCIPAL column shows the name, so a search by name found
+  nothing. The console's quick view of your own recent rows (my-recent)
+  still shows only your rows.
 - An operation called over MCP now has the MCP session id on its audit
   row (#4672 / #4681). Before, only the MCP tool row had it, so
   `meho audit replay` and the console session view showed the tool calls

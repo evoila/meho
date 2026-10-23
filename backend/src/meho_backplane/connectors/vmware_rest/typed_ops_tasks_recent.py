@@ -242,6 +242,7 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"max_tasks": 20}],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -271,6 +272,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                     },
                     "state": {
                         "type": ["string", "null"],
+                        "enum": ["queued", "running", "success", "error", None],
                         "description": "Task state: queued / running / success / error.",
                     },
                     "progress": {
@@ -321,19 +323,11 @@ TASKS_RECENT_WHEN_TO_USE = (
 VMWARE_TASKS_RECENT_OP = VmwareTypedOp(
     op_id="vmware.tasks.recent",
     handler_attr="tasks_recent",
-    summary="Recent vCenter tasks with entity, state, progress, and timing.",
+    summary="Recent vCenter tasks: what ran, on which object, state, progress and times.",
     description=(
-        "Returns the recent vCenter Task objects (from TaskManager."
-        "recentTask, capped at max_tasks) with each task's operation "
-        "(descriptionId), target entity + type + name, state (queued / "
-        "running / success / error), progress, cancelled flag, and the "
-        "queue / start / complete timestamps -- plus the localized error "
-        "message when a task faulted. The change-window monitoring read: "
-        "'what changed here, and did it finish?', distinct from event.tail "
-        "which reads the event log rather than the Task list. Reads "
-        "TaskManager.recentTask then Task.info via PropertyCollector "
-        "directly on the connector session, so it works with zero catalog "
-        "ingest. safety_level=safe, read-only."
+        "Returns the recent vCenter tasks (TaskManager.recentTask), at most max_tasks: "
+        "operation, object (moid, type, name), state, progress, cancelled flag, queue, start "
+        "and end times, and the error text of a failed task. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -342,21 +336,25 @@ VMWARE_TASKS_RECENT_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call when the operator asks what recently changed on a vCenter, "
-            "whether an operation finished / failed, or wants the recent task "
-            "history. For the event log (logins, alarms, config-change "
-            "events) use event.tail instead."
+        "when_to_call": (
+            "Call to see what changed on a vCenter lately and whether a task finished or "
+            "failed, for example after a multi-step operation timed out. For the event "
+            "log (logins, alarms, config events), use vmware.composite.event.tail."
         ),
         "parameter_hints": {
             "max_tasks": (
-                f"Cap on tasks returned (1-{_MAX_TASKS_CAP}; default {_DEFAULT_MAX_TASKS})."
+                f"Most tasks to return (1-{_MAX_TASKS_CAP}; default {_DEFAULT_MAX_TASKS})."
             ),
         },
         "output_shape": (
-            "{tasks: [{task, operation, entity, entity_type, entity_name, "
-            "state, progress, cancelled, queue_time, start_time, "
-            "complete_time, error_message}, ...]}."
+            "{tasks: [{task, operation, entity, entity_type, entity_name, state: "
+            "queued|running|success|error, progress, cancelled, queue_time, start_time, "
+            "complete_time, error_message}]}. vCenter keeps only recent tasks; an old "
+            "task may be gone."
+        ),
+        "next_step": (
+            "Find the task by its moid or by entity and operation. On running or queued, "
+            "call again later. On error, report error_message."
         ),
     },
 )

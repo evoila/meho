@@ -72,14 +72,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
-- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
-  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
-  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+- **Missing managed objects on typed PropertyCollector reads (`#3481`, `#4776`)** — vCenter reports
+  an addressed, deleted vim object as a `ManagedObjectNotFound` fault inside
+  an HTTP 500. On the vCenter VI-JSON transport the fault body is JSON
+  (`{"_typeName": "ManagedObjectNotFound", "obj": {...}}`, the shape the
+  pinned `vi-json.yaml` documents and vCenter 9.1 sends); a standalone ESXi
+  host sends the SOAP-shaped XML fault. The addressed read operations `vmware.vm.info`,
   `vmware.host.usage`, `vmware.host.storage_devices`,
   `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
   into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
-  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
-  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  reads the fault in either form (JSON first, then XML) and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). A JSON fault
+  names the missing object in `obj`; it maps to `not_found` only when that
+  object is one the read asked for (a missing property collector is not a
+  missing VM), and a JSON fault without `obj` reports every addressed
+  object, as the XML form does. The dispatcher
   returns `status="not_found"` with `extras.error_code="not_found"`,
   `extras.resource_ids`, and the singular `extras.resource_id` when one object
   was addressed. A different fault, a non-PropertyCollector vmomi method, or
@@ -127,12 +134,15 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   best-effort (a failed read nulls the network detail with a
   `read_note` rather than sinking the op).
   `vmware.host.vsan_health` (`#2135`) queries the vSAN
-  health-service vmomi method `VsanQueryVcClusterHealthSummary` on the
-  `vsan-cluster-health-system` singleton, scoped to the target
+  health-service method `VsanQueryVcClusterHealthSummary` on the
+  `vsan-cluster-health-system` object, scoped to the target
   cluster's MoRef — the `govc vsan.health.*` equivalent, returning the
   cluster-wide `overall_health` colour plus the health-test `groups`
-  list. It is likewise best-effort (a failed health-service read nulls
-  `groups` / `overall_health` with a `read_note`).
+  list. It is **not** best-effort (`#4441`): when the vSAN call fails,
+  the operation returns an error with vCenter's fault type and text, and
+  a cluster id that does not exist gives `not_found`. It never returns
+  empty health fields that look like a healthy cluster. How the call is
+  sent: see "vSAN calls" below.
 - **Write composites** (`composites/_write.py`) — the module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
@@ -724,8 +734,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     same-origin redirect by itself). A `3xx` returns `redirect_path`; a
     `401`, `403`, `404` or `5xx` returns its `status` with no text.
   - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-    `size` (bytes), `sha256` (of the file bytes), `imports`, `parts`,
-    `text_parts`, `version`, `build`, `version_error`. `imports` lists the
+    `size` (bytes of the checked copy), `sha256` (of the checked copy),
+    `secrets_replaced`, `imports`, `parts`, `text_parts`, `version`,
+    `build`, `version_error`. `imports` lists the
     `location` / `schemaLocation` values of `wsdl:import`, `xsd:import` and
     `xsd:include`, as written, parsed with `defusedxml`; a file that is not
     XML gives `[]`. Only UTF-8 text comes back; other content is refused and
@@ -737,10 +748,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     failures that happen before any request goes out: no credentials for
     the target, access denied, or a credential store that cannot be reached
     (`CredentialsReadError`, `VaultClientError`).
+  - **The file is checked before it is cut.** The read runs the shared
+    API file secret check (`connectors/_shared/api_file_secrets.py`, see
+    `connectors-shared-api-file-secrets.md`) on the whole file: the file
+    is parsed (XML for a WSDL or XSD file), every value under a secret
+    name is replaced with `[REDACTED:param_name]`, and the file is
+    written back from the parsed copy with its namespace prefixes as
+    declared. A file that does not parse is refused with the reason.
+    `secrets_replaced` counts the replaced values; `size` and `sha256`
+    describe the checked copy. A redirect path gets the same check on its
+    query string.
   - **How to rebuild the file.** `text_parts` is a list of
     `{index, text}`, each at most 64 KiB of UTF-8, cut only between
     characters. Join the `text` of all parts in `index` order and encode as
-    UTF-8; the SHA-256 of the result equals `sha256`. A part is a fixed byte
+    UTF-8; the SHA-256 of the result equals `sha256` and the result is the
+    checked copy. A part is a fixed byte
     size, not a line, because a served file can be one long line. The answer
     has two lists (`imports` and `text_parts`), so JSONFlux keeps a large
     answer whole as a document record behind a result handle; the inline
@@ -751,18 +773,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
     stored JSON) stops with an error that names its size; the read never
     returns a cut file.
-  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+  - **Redaction keeps the copy whole.** MEHO redacts secret-shaped text in
     every stored result (the dispatcher runs
     `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
-    that fires on the file text would rewrite a part, and the joined parts
+    that fires on the text would rewrite a part, and the joined parts
     would no longer match `sha256`. So the read runs the same middleware, with
     the same connector, tenant and operation labels, on the text parts and on
-    the whole file text before it returns. The whole-file pass matters: a
+    the whole copy before it returns. The whole-file pass matters: a
     secret that the part cut splits in two matches in no single part, so the
     dispatcher's own redaction would store it in clear text. When the text
     would change, the read stops with an error that names the rule and the
     place (a part, or `file_text` for the whole file), and returns no file.
-    Redaction itself stays on. The default policy's `strip-api-key` rule fires
+    Redaction itself stays on; its `api_key` rule skips the placeholder the
+    file check writes. The default policy's `strip-api-key` rule fires
     on text such as
     `type="token:SecurityToken"`; a redaction policy registered for this
     operation changes what the check accepts, because both use the same
@@ -860,9 +883,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    method the connector calls (from the source) and checks it against the
    vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
    version gate or an entry with the reason in the lane's exclusion list.
-   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
-   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
-   `vmware.host.vsan_health` calls it best-effort. See
+   The list is empty today. No 8.0 VI/JSON file has vSAN paths, so on
+   vCenter 8.0 the vSAN methods go as SOAP (`#4441`, see "vSAN calls"
+   below); the same lane checks them against the vendor's vSAN SDK of
+   8.0 U1 and U2 instead. See
    [vcf-api-compatibility.md](vcf-api-compatibility.md).
    **Operation summaries (#4329).** Search and the operation-group step
    read each operation's one-line `summary`. The full vendor specs fall
@@ -2361,7 +2385,15 @@ body never carried the single-`spec` envelope the single-parameter `find` /
 portgroup-moid **map** `network_mappings` (a map in the pinned 9.0 spec,
 not an array), `storage_provisioning` / `storage_profile_id` /
 `default_datastore_id`, and any `ovf_properties` folded into a single
-`PropertyParams` entry in `additional_parameters`. The EULA-accept wire
+`PropertyParams` entry in `additional_parameters`. An optional
+`deployment_option` (the OVF deployment option key, for example the size
+profile of an appliance) goes into the same list as a
+`DeploymentOptionParams` entry with `selected_key` (#4035). Before the
+deploy, MEHO reads the OVF summary (`?action=filter`) and checks the key
+against `additional_params[type=DeploymentOptionParams].deployment_options[].key`.
+A key the item does not offer is refused with `invalid_reference`, and
+`candidates` lists the offered keys. One summary read serves both this
+check and the default VM name. The EULA-accept wire
 key is **version-aware** (#3074): the pinned 9.0 spec keys it
 `accept_all_eula` (lowercase), but vCenter 8.0.x — and every pre-9.0
 release — rejects that key (`HTTP 400 UNEXPECTED_INPUT`) and expects the
@@ -2758,9 +2790,10 @@ static portgroup), optional `numPorts`, and a `VMwareDVSPortSetting.vlan`
 that is **either** a VLAN trunk
 (`VmwareDistributedVirtualSwitchTrunkVlanSpec` with a `NumericRange[]`
 `vlanId`, e.g. `0..4094` at bootstrap — the nested-ESXi case) **or** a single
-access VLAN (`VmwareDistributedVirtualSwitchVlanIdSpec`). Passing both
-refuses with `status='invalid_vlan_spec'` before any write; passing neither
-inherits the switch default. The returned Task's `TaskInfo.result` MoRef is
+access VLAN (`VmwareDistributedVirtualSwitchVlanIdSpec`). The parameter
+schema refuses both (a `not` clause), so MEHO stops such a call before the
+handler runs; the handler still answers `status='invalid_vlan_spec'` if it is
+called with both. Passing neither inherits the switch default. The returned Task's `TaskInfo.result` MoRef is
 the new portgroup; its `config` (`name` + `defaultPortConfig.vlan`) is read
 back into the response's `observed` verification rows.
 
@@ -2801,12 +2834,30 @@ merged-adjacent, so `[{0,0},{1,4094}]` and `[{0,4094}]` compare equal) and a
 request that already matches returns `status='unchanged'` with no
 `ReconfigureDVPortgroup_Task`; otherwise the reconfigure is polled to terminal
 and the applied VLAN is read back into the `before` / `after` normalised views.
-Both/neither VLAN mode refuses `status='invalid_vlan_spec'` before any write.
+The parameter schema takes exactly one VLAN mode (a `oneOf`), so MEHO refuses
+both or neither before the handler runs; the handler still answers
+`status='invalid_vlan_spec'` for both, neither or `replace=false`.
 
 None of the three composites registers a park-time preview builder (matching
 `vm.import_from_library`); the read-back rows in each response
 (`observed` for `create`, `previous` / `observed` for `security.set`,
 `before` / `after` for `vlan.set`) are the verification surface.
+
+### AI guidance of the storage and network operations
+
+The thirteen storage and network multi-step operations (`datastore.usage`,
+`datastore.refresh`, `datastore.dir.create`, `datastore.file.delete`, the three
+`storage_policy.*` operations, `network.portgroup.audit` / `.create` /
+`.security.set` / `.vlan.set` / `.delete` and `host.standard_portgroup.delete`)
+keep their AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
+`output_shape`, `next_step`) in `composites/_storage_network_llm_instructions.py`,
+one entry per op id. Their descriptions in `_register.py` stay short. Each
+parameter schema has one example call under `examples`, and
+`test_connectors_vmware_rest_storage_network_composite_contracts.py` checks that
+every example validates and that the two VLAN rules above hold. The response
+schemas name the nested fields: the `object` and `blockers` of the four teardown
+operations, the `observed` VLAN of `portgroup.create`, the security values of
+`portgroup.security.set` and the VLAN views of `portgroup.vlan.set`.
 
 ### Supervisor (WCP) namespace-management composites (`supervisor.enable` / `supervisor.disable` / `supervisor.status`, #3281)
 
@@ -2945,6 +2996,37 @@ op_ids (`POST .../instances/v2`, `DELETE .../instances/{namespace}`, `GET
 lane `tests/test_connectors_vmware_rest_namespace_reconcile.py` (always-on shape
 test + spec-backed path-existence).
 
+### AI guidance of the Supervisor, namespace, content library and guest customization operations
+
+Fourteen multi-step operations keep their AI guidance (`llm_instructions`:
+`when_to_call`, `preconditions`, `output_shape`, `next_step`) in
+`composites/_supervisor_library_llm_instructions.py`, one entry per op id:
+`supervisor.enable` / `.disable` / `.status`, `namespace.create` / `.delete` /
+`.status`, `content_library.delete`, `content_library.item.delete`, the four
+`content_library.subscribed.*` operations, `guest.customization_spec.create` and
+`vm.customize`. Their descriptions in `_register.py` stay short. Each parameter
+schema has one example call under `examples`, and
+`test_connectors_vmware_rest_supervisor_library_composite_contracts.py` checks
+that every example validates.
+
+Enums come from the vCenter REST spec (`vcenter.yaml` 9.1.1.0 in
+`vmware/vcf-api-specs`): `control_plane.size` of `supervisor.enable`
+(`Supervisors.ControlPlane.size`, TINY / SMALL / MEDIUM / LARGE) and
+`access_list[].subject_type` / `.role` of `namespace.create`
+(`Namespaces.Access.SubjectType`, `Namespaces.Access.Role`), and
+`workloads.edge.provider` of `supervisor.enable` (`Networks.Edges.EdgeProvider`,
+VSPHERE_FOUNDATION / NSX / NSX_VPC / NSX_ADVANCED / HAPROXY, the same set as the
+handler's `_ALLOWED_EDGE_PROVIDERS`). The `content_library.subscribed.sync`,
+`.status` and `.items.list` schemas have the same `anyOf` as
+`content_library.delete`: give `library_id` or `library_name`. A call with
+neither is refused before it runs (the handler would answer
+`invalid_reference` without calling vCenter); a call with both still passes,
+and `library_id` wins. `workloads.network.network_type` stays a free string;
+the handler answers an unknown value with status `unknown_network_provider`.
+The `windows_*` fields of
+`guest.customization_spec.create` are ignored for a Linux spec; a schema rule
+there would refuse calls that work today, so the field texts say it instead.
+
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 
 Read composites distinguish **load-bearing** sub-ops from **optional
@@ -3039,6 +3121,31 @@ carries it in the `<_this type="Datastore">` self-reference over SOAP. The
 two POST legs are reconciled against `vi-json.yaml` by
 `test_connectors_vmware_rest_composites_read_reconcile.py`.
 
+### AI guidance of the guest, event, performance and typed reads
+
+The six guest operations (`vm.guest.*`), `event.tail`,
+`performance.summary` and the seven typed reads (`vmware.host.usage`,
+`.host.network_uplinks`, `.host.storage_devices`, `.host.vsan_health`,
+`vmware.object.collect`, `vmware.tasks.recent`, `vmware.vm.info`) each
+carry `llm_instructions` with `when_to_call`, `output_shape` and
+`next_step`, plus `preconditions` for the guest file read and the two guest
+writes. The guidance of the eight multi-step operations lives in
+`composites/_guest_event_perf_llm_instructions.py`; the typed reads keep
+theirs on their `VmwareTypedOp` row. Descriptions stay short. Each
+parameter schema has one example call under `examples`.
+
+The guest and performance reads pass vSphere data objects through as
+vCenter sends them, so their nested response fields use the VI-JSON names
+(`GuestProcessInfo`, `GuestNicInfo`, `GuestStackInfo`,
+`GuestFileAttributes`, `PerfMetricId`, `PerfEntityMetric`). Those parts live
+in `composites/_guest_perf_response_schemas.py`. `host.usage` reshapes its
+answer, so its schema (`_typed_response_schemas.py`) follows the handler.
+`test_connectors_vmware_rest_guest_event_typed_read_contracts.py` checks
+that every example validates and every list names its fields.
+`vm.guest.file.read` stays `caution` without `requires_approval`: an agent's
+call waits for approval, a person's call runs at once. That is the one
+listed exception for these operations in the contract check's gap list.
+
 ### Per-entity capacity sensing (`filter_names`, #2758)
 
 `datastore.usage` takes an exact-match `filter_names` param (array of
@@ -3122,7 +3229,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
-| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |
+| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, `deployment_option`, power-on) | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
@@ -3178,6 +3285,92 @@ every reviewer surface that renders `proposed_effect` verbatim (REST
 `GET /api/v1/approvals`, `meho_approvals_list` / `.get`, `meho
 approvals show`), so "blast-radius unknown" is distinguishable from a
 genuinely small action. The read composites register no builder.
+
+### VM moves that copy disks wait for approval and show the copy size (#4749)
+
+A VM move that names a datastore copies the VM's disks to that datastore.
+(A datastore is the storage volume that holds a VM's files and disks.) In a
+cold move the VM is off for the whole copy, and the copy fills the target
+datastore. So every call that can copy disks waits for approval, the same
+way the typed `vmware.composite.vm.migrate` waits, and the approver sees the
+copy size first.
+
+**Which calls copy disks.** Three operations, on `vmware-rest-8.0` and
+`vmware-rest-9.0`:
+
+- the generic relocate `POST:/vcenter/vm/{vm}?action=relocate`, also the
+  task form `POST:/vcenter/vm/{vm}?action=relocate&vmw-task=true`;
+- the older-API method `POST:/VirtualMachine/{moId}/RelocateVM_Task`
+  (VI-JSON), where `vi-json.yaml` is ingested;
+- the typed `vmware.composite.vm.migrate` (a host move; it stays
+  `dangerous` with `requires_approval: true`, pinned by a test).
+
+**The rule.** `ingest_safety.py` (`is_vmware_vm_relocate`, used by
+`_requires_vmware_safety_floor`) puts the generic relocate and
+`RelocateVM_Task` in the `dangerous` risk level with `requires_approval:
+true`, next to the VM power and hardware writes. The rule is on the
+operation, not on the request body: the call waits for approval with or
+without a datastore in it. A floor only raises a level; a row that is
+already `destructive` stays `destructive`. The rule covers the `/api`
+mount and any spelling of the path parameter.
+
+**Running installs.** Rows already in the database change only on the
+next ingest. To get the new level, run the catalog ingest again for
+`vmware/8.0` and `vmware/9.0` (the same `--spec` ingest of `vcenter.yaml`
+and `vi-json.yaml` the install used before). The level is part of the
+row's body hash, so only the changed rows are updated.
+
+**The copy-size preview.** `vm_relocate_preview.py` registers one builder
+(`vm_relocate_preview`) under every op_id spelling of the generic relocate
+and of `RelocateVM_Task`: with and without the `/api` mount, and with each
+spelling of the VM id parameter (`{vm}` or `{vm_id}` on the REST relocate,
+`{moId}` or `{mo_id}` on the older-API method). A test checks that every
+spelling the rule accepts has the builder, so no parked call lacks the copy
+size. It reads the REST body (`placement.datastore`,
+`disks.{disk}.datastore`) and the older-API body (`spec.datastore`,
+`spec.disk[].datastore`), then:
+
+- **No datastore in the call:** the preview says that no disks are copied.
+  Nothing is read.
+- **A datastore for the VM or for a disk:** two read-only VI-JSON
+  `RetrievePropertiesEx` reads, on the connector session like
+  `vmware.vm.info` (no catalog ingest needed). The VM read gives the name,
+  `runtime.powerState`, the datastores the VM's files are on, and
+  `summary.storage` (`committed` = the data copied now; `committed +
+  uncommitted` = the most the disks can grow to, for thin disks). The
+  datastore read gives the name, capacity and free space of the source
+  and target datastores.
+
+The preview is a dict with a plain-language `summary` sentence first,
+then `vm`, `name`, `power_state`, `copies_disks`, `copy_scope`
+(`whole_vm` / `some_disks` / `none`), `copy_size_is_upper_bound`,
+`copied_now_bytes`, `copy_max_bytes`, `source_datastores` (`[{id, name}]`)
+and `target_datastores` (`[{id, name, capacity_bytes, free_space_bytes,
+free_space_after_copy_bytes, free_space_after_max_copy_bytes}]`). When
+only some disks move, or the disks go to more than one datastore, the
+copy is *at most* this size and the summary says so. A failed VM or
+datastore read never blocks the approval: the preview keeps what it has,
+adds `size_unavailable_reason` (redacted like a `preview_error`), and the
+summary says why the size is missing. The same holds when the call
+succeeds but vCenter could not read one property (a `missingSet` entry,
+for example no permission on the storage data): the preview keeps the
+rest (name, power state, source datastores, the other datastores) and
+`size_unavailable_reason` names the property and the fault type, never
+the fault text. The approval row carries the preview under
+`proposed_effect.preview`.
+
+`read_vm_copy_size` and `read_datastore_space` are the shared size reads,
+so the typed datastore move (#4346) can show the same numbers. Both keep a
+successful answer with an unreadable property and list it in
+`unreadable_properties`; only `read_vm_copy_size` raises, when the VM is
+not in the answer at all.
+
+Tests: `test_connectors_vmware_rest_vm_relocate_approval.py` (the floor on
+a hand-made spec for 8.0 and 9.0, the `vm.migrate` pin, the preview; the
+shelf-gated lane checks each rule against the pinned 8.0 and 9.0
+`vcenter.yaml` and the 9.0 `vi-json.yaml`) and
+`test_connectors_vmware_rest_vm_relocate_dispatch.py` (a person's call
+waits for approval with the copy size on the row).
 
 ### Version check for typed operations (`_version_gate.py`, #4316)
 
@@ -3312,10 +3505,10 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   maxSample}]`, the shape the pinned `vi-json.yaml` declares.
 - **VI-JSON mount for vmomi reads *and writes* — `/sdk/vim25/{release}`
   (#2466, mutating writes #2893)** —
-  vmomi (VI-JSON) methods (`RetrievePropertiesEx`,
-  `VsanQueryVcClusterHealthSummary`, `QueryEvents`,
+  vmomi (VI-JSON) methods (`RetrievePropertiesEx`, `QueryEvents`,
   `QueryAvailablePerfMetric`, `QueryPerf`, and now the mutating
-  `ReconfigVM_Task`) are served under the
+  `ReconfigVM_Task`; the vSAN methods have their own path, see "vSAN
+  calls" below) are served under the
   documented release-versioned base
   `/sdk/vim25/{release}/{MoType}/{moId}/{method}` (Broadcom Web Services
   SDK guide, "Building JSON Request URLs"; available since vCenter 8.0U1,
@@ -3345,7 +3538,13 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   `POST:/PropertyCollector/{moId}/RetrievePropertiesEx`, ...) reach the
   wire through `mount_op_path`. It tells them apart from Automation paths
   by the PascalCase managed-object type in the first segment
-  (`_mount.is_vmomi_path`). On a modern vCenter session they mount on
+  (`_mount.is_vmomi_path`). The type may sit behind one of the five
+  service parts the vendor file uses, listed in
+  `_mount.VI_JSON_SERVICE_PREFIXES`: `/vsan` (vSAN management), `/sms`
+  (storage providers), `/pbm` (storage policies), `/eam` (ESX Agent
+  Manager) and `/vslm` (First Class Disks). Before #4775 those paths
+  went to `/api` and answered 404, because their first segment is lower
+  case. On a modern vCenter session they mount on
   `/sdk/vim25/{release}` (release from the same cached `_about_version`).
   Before #3534 they mounted on `/api` and answered a bare 404 on vCenter
   8.0.x. Limits: there is no `/api` 404 fallback on this path (the hook
@@ -3353,6 +3552,42 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   `/api` form; legacy `/rest` (vcsim) and ESXi sessions are unchanged.
   For managed-object property reads, `vmware.object.collect` stays the
   preferred op: it builds the PropertyCollector body for the caller.
+- **vSAN calls — `VmwareRestConnector._post_vsan` (#4441)** — every vSAN
+  operation sends its vSAN method through this one method. The method
+  is a `VsanMethod` constant (`_mount.py`): the vSAN object type, its
+  fixed id on vCenter (for example `vsan-cluster-health-system`), and
+  the method name. How the call is sent depends on the vCenter version
+  the connector detected (the same version that gives `{release}`):
+  - **vCenter 9.x: VI-JSON.** `POST /sdk/vim25/{release}/vsan/{MoType}/{moId}/{method}`,
+    through `_post_vmomi_json`. `_mount.vsan_method_path` builds the
+    `/vsan/...` part; it is the path of the vendor VI/JSON files of 9.0,
+    9.1.0 and 9.1.1. Before #4441 the vSAN health read left out `/vsan`,
+    and vCenter 9.1 answered HTTP 500 `ManagedObjectNotFound` for the
+    vSAN health object.
+  - **vCenter 8.0: SOAP.** The vendor VI/JSON files of 8.0 U1, U2 and U3
+    have no vSAN paths. So the method goes as SOAP to `/vsanHealth`
+    (namespace `urn:vsan`, codec in `soap_vsan.py`). It is authenticated
+    by the `vmware_soap_session` cookie of a vCenter SOAP login on `/sdk`
+    (`_vcenter_soap_login`, the same login the PBM calls use), sent as
+    the HTTP `Cookie`. The `SOAPAction` is `urn:vsan/<version>`, with the
+    version from `/sdk/vsanServiceVersions.xml`. Source: the vendor
+    sample `vsanapiutils.py` of the vSAN Management SDK for Python 8.0.
+    The cookie is kept per target; a `NotAuthenticated` fault (vCenter
+    dropped the idle session) makes the call log in again and retry once.
+    SOAP has no list marker, so a list with one entry comes back as a
+    single dict; the operation turns its list fields back into lists.
+  - An unknown version stays on VI-JSON. A legacy `/rest` session
+    (vcsim) mounts the same `/vsan/...` path on `/rest`.
+
+  Errors are not swallowed. A vSAN fault raises with vCenter's fault
+  type and text (`extras.upstream_fault` in the error answer). When the
+  fault is `ManagedObjectNotFound` for an object the caller sent (such as
+  the `cluster`), the call raises `ConnectorResourceNotFoundError`, so the
+  answer is MEHO's normal `not_found`. A `ManagedObjectNotFound` for the
+  vSAN object itself stays a normal error. The reconcile lanes collect
+  every `VsanMethod` constant: the read lane checks each against the
+  pinned 9.0 `vi-json.yaml`, and the 8.0 lane checks each against the
+  method lists of the vendor's vSAN SDK of 8.0 U1 and U2.
 - **All hand-authored composites shipped** — T5 (#508) ships 5 read;
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6

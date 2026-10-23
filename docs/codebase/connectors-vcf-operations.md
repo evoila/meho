@@ -9,7 +9,8 @@ that dispatches VMware Aria Operations (formerly vRealize Operations Manager;
 G3.6-T1 (#829) shipped the skeleton; #2395 rebuilt its auth on an
 acquired-token session (`OpsToken`) after live VCF Operations 9.0.2 rejected
 the original stateless HTTP Basic. The audited read set ships as typed ops
-(#2303); the remaining `/suite-api` breadth is ingested/curated.
+(#2303), and so does VCF 9 licence management (#4089); the remaining
+`/suite-api` breadth is ingested/curated.
 
 Source: `backend/src/meho_backplane/connectors/vcf_operations/`.
 
@@ -225,6 +226,33 @@ registrar is queued via `register_typed_op_registrar` in the package
   (which filters resources by *whether* they report a stat), this op returns
   the stat's **value**; the handler passes the payload through unparsed so
   the vendor's `stats-of-resources` field names stay out of executable code.
+- **`vrops.resource_kind.properties`** —
+  `GET /suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/{resourceKindKey}/properties`.
+  Lists which properties one resource kind of one adapter kind has (for
+  example `VirtualMachine` of `VMWARE`): one row per property under
+  `resourceTypeAttributes`, with `key`, `name`, `description`, `dataType2`
+  and `unit`. An agent uses it to find the exact property key before it
+  reads the value. Both keys are required and are percent-encoded into the
+  path. The optional `keyContains` text keeps only the rows whose `key` or
+  `name` contains it (not case-sensitive); MEHO filters the rows after the
+  call, because the vendor's own `properties` filter takes exact names only.
+  This op is **9.x only**: it sits in `VROPS_9_ONLY_TYPED_OPS`, not in
+  `VROPS_TYPED_OPS`, because the 8.x connector reuses `VROPS_TYPED_OPS`. The
+  metric keys of a resource kind (`.../statkeys`) are not covered.
+- **`vrops.license.info`** — `GET /suite-api/api/product/licensing/edition`
+  and `GET /suite-api/api/product/licensing/info`. The edition and the
+  licence of this VCF Operations instance in one object:
+  `productLicensingEdition`, `licensed`, `licenseName`, `expirationDate`
+  (epoch milliseconds) and `licenseKey`. The handler masks `licenseKey`
+  before it returns: only the last 5 characters show, and a key of 10
+  characters or fewer is hidden in full. The op also carries the tag
+  `license-key`, so the flight recorder leaves the raw vendor bodies of
+  both calls out of the trace. So no licence key reaches the agent, the
+  audit row, a stored result or the trace in clear text. The vendor API
+  shows no licence use on these two calls. This op is **9.x only**: it sits
+  in `VROPS_9_ONLY_TYPED_OPS`, not in `VROPS_TYPED_OPS`, because the 8.x
+  connector reuses `VROPS_TYPED_OPS`. The licence management calls
+  (licence servers, assigning licences) are a separate piece of work.
 
 - **`vrops.api_file.get`** (`typed_ops_api_file.py`, handler `api_file_get`)
   — reads one documentation page or API description file that the
@@ -260,21 +288,22 @@ registrar is queued via `register_typed_op_registrar` in the package
     `httpx.AsyncClient.send(..., follow_redirects=False)`, so a redirect
     is not followed (the pooled client class would follow a same-origin
     redirect by itself). A `3xx` returns `redirect_path`, with the value
-    of a secret-named query setting in it (`?licenseKey=...`) replaced by
-    `[REDACTED:param_name]`; the same replacement runs on `content_type`.
+    of a secret-named query setting in it (`?licenseKey=...`, also with an
+    encoded name such as `license%4Bey`) replaced by
+    `[REDACTED:param_name]` (`scrub_query_string` of the shared check).
     A `401`, `403`, `404` or `5xx` returns its `status` with no text. A login failure
     (no credentials, a rejected login) stops the read before the request.
   - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-    `size` (bytes), `sha256` (of the file bytes), `parts`, `text_parts`,
-    `version`, `build`, `version_error`. Only UTF-8 text comes back (HTML,
-    JSON, YAML, XML, script); other content is refused and the error names
-    its content type.
+    `size` (bytes of the checked copy), `sha256` (of the checked copy),
+    `secrets_replaced`, `parts`, `text_parts`, `version`, `build`,
+    `version_error`. Only UTF-8 text comes back; other content is refused
+    and the error names its content type.
   - **Version and build** come from `GET /suite-api/api/versions/current`
     (`releaseName`, `buildNumber`) on the same login, the call the
     connector's version detection makes. If that read fails, the file still
     comes back, `version` and `build` are `null`, and `version_error` says
     why.
-  - **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
+  - **How to rebuild the checked copy.** `text_parts` is a list of `{index, text}`,
     each at most 64 KiB, cut only between characters. The size is measured
     as JSON text (a quote, a backslash or a control character counts as
     its escaped form), so a part always fits one `result_query` answer,
@@ -291,51 +320,24 @@ registrar is queued via `register_typed_op_registrar` in the package
     `result_handle_max_record_bytes`, 16 MiB, measured as stored JSON)
     stops with an error that names its size; the read never returns a cut
     file.
-  - **No secret comes back.** The read runs the shared whole-file secret
-    scan, `backend/src/meho_backplane/connectors/_shared/api_file_secrets.py`,
-    on the whole file text and refuses the file when the scan would
-    replace a value. The scan does not parse the file, so the format does
-    not matter: it finds the value of every secret-named key (the names
-    MEHO's broadcast scrub uses, `is_secret_param_name`, plus a licence
-    key, a product key and `Authorization`) written as a JSON key, a YAML
-    key, a key in a script object, an XML or HTML attribute or a query
-    setting; the content of a secret-named XML element
-    (`<password>...</password>`, comments, CDATA and child elements
-    included); the value attribute of an element named by its attributes
-    (`<property name="password" value="..."/>`, the attribute values quoted
-    or bare); and a PEM private key.
-    The value may sit on the same line or on the next line that is not
-    empty and not a comment; a quoted value runs to its closing quote,
-    also over a line break; a bare value runs to the end of its line and
-    on over deeper-indented lines; a YAML block scalar (`|`, `>`), a tag
-    (`!!str`) or an anchor (`&name`) is read through; an alias (`*name`)
-    is a value, and so is what its anchor marks anywhere in the file. A
-    schema stub stays accepted: an empty value, a type word such as
-    `string` or `null`, a placeholder such as `<password>`, `${TOKEN}` or
-    `{{ token }}`, or a row of `*`. When a secret-named key holds an
-    object or a list, every scalar inside it counts, at any depth, except
-    the values of the words a schema uses (`type`, `format`,
-    `description`, `$ref`, `example`, `enum`, `tags`, `scopes`, ...: the
-    fixed fields of OpenAPI 3.1, Swagger 2 and JSON Schema 2020-12), and a
-    bare number, `true`, `false` or `null`. So `"password": {"type":
-    "string"}` and a path item named `/reset-password` stay accepted,
-    while `"credentials": {"value": "..."}` and `"licenseKey": ["..."]`
-    are found. The scan lives in three modules next to each other:
-    `api_file_secrets.py` (the entry points, elements, attributes and PEM
-    blocks), `api_file_collections.py` (objects and lists under a
-    secret-named key) and `api_file_text.py` (keys, values, lines and
-    names). A bare
-    secret-named word in running text (`Use password: ...`) counts only
-    before a dense value of at least 8 characters without spaces, the
-    stored-result redaction's own bound, so a sentence about passwords is
-    not refused. The error names how many values the scan would replace
-    and the first field, element or attribute and where it starts, never
-    a value. The same helper replaces the values with
-    `[REDACTED:param_name]` and counts them, for a read that returns the
-    cleaned text instead; it is built for every API file read, not only
-    this one.
-  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
-    every stored result. A rule that fires on the file text would rewrite a
+  - **No secret comes back.** The read runs the shared check,
+    `check_api_file` in
+    `backend/src/meho_backplane/connectors/_shared/api_file_secrets.py`
+    ([`connectors-shared-api-file-secrets.md`](connectors-shared-api-file-secrets.md)),
+    on the whole file before it cuts the file into parts, so a part cut
+    cannot hide a secret. The check parses the file with a real parser for
+    its format (JSON, YAML, XML or HTML; the content type decides, or the
+    file ending) and replaces every value under a secret name with
+    `[REDACTED:param_name]`, at any depth and however it is written. It
+    then writes the file back from the parsed copy; `size`, `sha256` and
+    the parts describe that copy, and `secrets_replaced` counts the
+    replaced values (redirect query included). The copy loses comments,
+    and JSON comes back compact. An inline script that is not JSON comes
+    back as the placeholder, so the Swagger page keeps its markup but not
+    its script. A file that does not parse, or a JavaScript, CSS or plain
+    text file, is refused with the reason, never with the text.
+  - **Redaction keeps the copy whole.** MEHO redacts secret-shaped text in
+    every stored result. A rule that fires on the copy would rewrite a
     part, and the joined parts would no longer match `sha256`. So the read
     runs the same middleware, with the same connector, tenant and operation
     labels, on the text parts and on the whole file text before it returns,
@@ -344,34 +346,34 @@ registrar is queued via `register_typed_op_registrar` in the package
     splits in two. Redaction itself stays on.
   - **Tests.** `tests/test_connectors_vcf_operations_typed_api_file.py`
     (respx: accepted and refused paths with no request, the login header on
-    both connectors, status and redirect cases, large files, version
-    failures, a login failure, a redirect with a secret-named query value,
-    a file that a redaction rule would change, a file with a secret value
-    in JSON, YAML, XML or HTML (attributes quoted or bare, a value inside
-    an object or a list under a secret-named key) or a PEM private key,
-    schema text that stays accepted, a secret split across the part cut
-    in both forms, parts bounded by their JSON size,
-    the result-handle round trip for a one-line file and for a file of
-    control characters, and the operation-contract rules),
-    `tests/test_connectors_shared_api_file_secrets.py` (every secret
-    shape the scan finds and every schema text it leaves alone) and the
-    reconcile lane below.
+    both connectors, status and redirect cases, a redirect with a
+    secret-named query value (plain and encoded name), large files, version
+    failures, a login failure, a copy that a redaction rule would change, a
+    secret value in JSON, YAML, XML or HTML that comes back replaced (also
+    the examples the code reviews found), a file with no secret name that
+    comes back with nothing replaced, a file that cannot be parsed, a
+    secret split across the part cut in both forms, parts bounded by their
+    JSON size, the result-handle round trip for a one-line file and for a
+    file of control characters, and the operation-contract rules),
+    `tests/test_connectors_shared_api_file_secrets.py` (the shared check)
+    and the reconcile lane below.
 
-All five are `safety_level="safe"`, `requires_approval=False`,
+All seven are `safety_level="safe"`, `requires_approval=False`,
 read-only. Each rides the connector's `OpsToken` session; `authSource`
 federation lives in the acquire body, not on the reads. `vrops.resource.query`
 encodes its `page`/`pageSize` pagination onto the request path (the base
 `_post_json` takes no `params` mapping); `vrops.resource.stats` threads its
 `resourceId` / `statKey` / `currentOnly` through the base `_get_json`
 `params` mapping (httpx serialises a list value to repeated pairs). Large
-stat / alert / resource sets reduce to a JSONFlux handle at the dispatch
+stat / alert / resource / property sets reduce to a JSONFlux handle at the dispatch
 layer.
 
-**Operation contracts.** The four ops meet the VMware operation-contract check
-(`backend/tests/test_vmware_operation_contracts.py`). Their response schemas
+**Operation contracts.** The six ops meet the VMware operation-contract check
+(`backend/tests/test_operation_contracts.py`). Their response schemas
 live in `_response_schemas.py` and use the field names of the pinned
 `vcf-operations-9.0` Suite API file (`version`, `alerts`, `resources`,
-`stats-of-resources`; note the stats rows sit under `stat-list.stat[]`). Each
+`stats-of-resources`, `resource-kind-attributes`, `product-licensing`,
+`LicenseInfo`; note the stats rows sit under `stat-list.stat[]`). Each
 parameter schema has one example call under `examples`, and each
 `llm_instructions` blob has `when_to_call`, `output_shape` and `next_step`. The
 `resourceState`, `resourceStatus` and `resourceHealth` filters of
@@ -388,7 +390,7 @@ symptoms, recommendations, super metrics) stay browsable until Initiative
 #2266 T7 retires the apparatus.
 
 **Spec-reconcile lane (#2984).** Every hand-coded `METHOD:/path` above — the
-four API typed-read paths plus the session mint
+seven typed-read paths (the licence read uses two of them) plus the session mint
 (`POST /suite-api/api/auth/token/acquire`) — is asserted against the pinned
 `vcf-operations-9.0` shelf spec by
 [`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_operations_spec_reconcile.py)
@@ -405,6 +407,57 @@ documentation path, not in the API file: an API file never lists the path
 that serves it, so the served-path check skips it with that reason and pins
 instead that the spec serves nothing under that folder. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
+
+### Licence management (VCF 9 licences)
+
+VCF 9 licences are managed in VCF Operations 9.x. Six typed operations read
+and change them. They live in `licensing_ops.py` (the op metadata) and
+`licensing_handlers.py` (the handlers, on the `VropsLicensingHandlers` mixin
+that `VcfOperationsConnector` inherits). They share one group,
+`vrops-licensing`.
+
+| op_id | Call | What it does |
+|---|---|---|
+| `vrops.licensing.registration.status` | `GET …/vcf-license-cloud-integration/registration/status` | Is VCF Operations registered (connected or disconnected mode), its ids, the next usage-report date |
+| `vrops.licensing.server.list` | `GET …/vcf-license-cloud-integration/license-servers` | The licence servers, with registration and connection state |
+| `vrops.licensing.entitlement.query` | `POST …/vcf-entitlement/entitlements/query` | The licences that can be assigned |
+| `vrops.licensing.vcenter.query` | `POST …/vcf-entitlement/vcenter-systems/query` | The licence state of each vCenter (evaluation or licensed, end date); `page` / `pageSize` |
+| `vrops.licensing.server.query` | `POST …/vcf-entitlement/license-servers/query` | The licence servers as the licence store sees them |
+| `vrops.licensing.assign` | `POST …/vcf-entitlement/assign` | Assign licences to one vCenter (a change) |
+
+All paths start with `/suite-api/internal/extension/`.
+
+- **Not published by the vendor.** These are the calls the VCF Operations UI
+  uses. They are not in the pinned Suite API file, so the spec-reconcile lane
+  does not cover them. VCF Operations answers `403` to them unless the request
+  carries `X-vRealizeOps-API-use-unsupported: true`; every handler sends it.
+- **Request shapes.** The query calls send an empty JSON object. The assign
+  call sends a JSON array with one entry:
+  `{vcenter: {id, adapterName, host}, allocationIds: [...]}`. The handler sends
+  the vCenter address as both `adapterName` and `host`, like the UI. Source:
+  the community PowerShell module `lamw/Broadcom.Community.VCFLicensing` and
+  live reads against VCF Operations 9.1.
+- **Answers.** `entitlement.query` and `vcenter.query` return the vendor answer
+  as it is; their response schemas name the known fields. The other four calls
+  have no known answer shape, so the handler returns
+  `{"payload": <vendor answer>}`. The `vcenter.query` answer has two shapes.
+  Newer builds put `id`, `host` and `vcfAdapterName` at the top of each
+  `vcenterSystems` entry. Older builds put them under `vcenterInfo`
+  (`vcenterInfo.id`, `vcenterInfo.host`). The schema and the agent hints name
+  both, so the agent can find the values for `assign`.
+- **Paging.** `vcenter.query` sends `pageSize=1000` when the caller gives
+  none, so one call returns all vCenters of a normal install. No total count
+  is known for this answer. To read more, ask for the next `page` until a page has fewer
+  than `pageSize` entries.
+- **Safety.** The five reads are `safe` and read-only. `vrops.licensing.assign`
+  is `dangerous` with `requires_approval=True`: it waits until a person
+  approves it.
+- **9.x only.** VCF 9 licensing does not exist on Aria Operations 8.x. The ops
+  are kept out of `VROPS_TYPED_OPS` (which the 8.x connector reuses); only the
+  9.x registrar adds them.
+- **Checking a licence change.** The UI can say a licence was imported while
+  the licence store is empty. Check with `entitlement.query` (`totalCount`) and
+  `vcenter.query` (each vCenter `state: LICENSED`, `unlicensedUsage: 0`).
 
 ### Shutdown
 
@@ -457,6 +510,7 @@ NSX / vRLI take).
 - **Task (skeleton)**: <https://github.com/evoila/meho/issues/829>
 - **Task (OpsToken auth rebuild)**: <https://github.com/evoila/meho/issues/2395>
 - **Task (stat/metric read for sizing)**: <https://github.com/evoila/meho/issues/2838>
+- **Task (VCF 9 licence management)**: <https://github.com/evoila/meho/issues/4089>
 - **Task (API description read)**: <https://github.com/evoila/meho/issues/4605>
 - **Parent initiative**: <https://github.com/evoila/meho/issues/369>
 - **Parent goal**: <https://github.com/evoila/meho/issues/214>

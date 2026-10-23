@@ -19,20 +19,20 @@ Source: `backend/src/meho_backplane/connectors/fleet_lcm/`.
 The Fleet LCM Service (`https://vcf.broadcom.com/fleet-lcm` → `/v1/*`) is the
 VCF 9 successor to vRealize Suite Lifecycle Manager (vRSLCM) 8.x. It is a
 **distinct API surface** from the legacy `/lcm/lcops/api/v2/*` the `fleet-rest`
-impl dispatches; the legacy surface still answers on 9.0 appliances for
-back-compat, which is why both bands overlap at 9.0 and the resolver — not the
-connector — picks the surface per target.
+impl dispatches. The `/fleet-lcm/v1` API first ships with VCF 9.1 (its spec
+file is in the `9.1.0.0` tag of `vmware/vcf-api-specs`). A VCF 9.0 fleet
+appliance serves only the legacy `/lcm/*` API. So `fleet-lcm` covers
+`>=9.1,<10.0` and `fleet-rest` covers `>=8.0,<9.1`; the ranges do not overlap
+(#4442), and the resolver — not the connector — picks the surface per target.
 
 ## Scope: typed read core (#3047)
 
 The connector ships a curated **13-op typed read core** — the modern successor
 to the legacy `fleet-rest` read surface — registered as `source_kind="typed"`
-and **enabled at register time**, so a VCF Fleet 9.x target (which resolves
-here by most-specific-version) dispatches a modern `/v1/*` read op on a **fresh
-boot with zero catalog ingest**. This is what **restores 9.0 fleet dispatch**
-after the "modern default now" resolver decision (#3033): the #3036 skeleton
-left `fleet-lcm` registered but with no dispatchable ops, so a 9.0 target
-resolved to an impl that could not serve a call; the read core closes that gap.
+and **enabled at register time**, so a VCF Fleet 9.1 or newer target (which
+resolves here by version range) dispatches a modern `/v1/*` read op on a
+**fresh boot with zero catalog ingest**. The #3036 skeleton left `fleet-lcm`
+registered but with no dispatchable ops; the read core closes that gap.
 
 The read core covers the operator's "is it up, what's deployed, what's
 happening, what can we upgrade to" drill path across five groups:
@@ -48,8 +48,8 @@ happening, what can we upgrade to" drill path across five groups:
 **Why typed, not ingested.** The connector *is* the modern generic impl and its
 51-op spec is pinnable, but the read core is hand-coded typed (the harbor / nsx
 #2358 pattern) precisely so it is live on a fresh boot with **no** operational
-`meho connector ingest` + `enable_reads` step — merging the read core *is* the
-9.0-restoration, not a runbook the operator must still run. The wider surface
+`meho connector ingest` + `enable_reads` step — merging the read core makes it
+work, with no runbook the operator must still run. The wider surface
 (the full 51-op spec as `source_kind="ingested"` breadth + the component /
 upgrade / task **writes**) remains a follow-up, enabled operationally through
 the generic review flow (`ReviewService.enable_reads` over an ingest of the same
@@ -68,10 +68,10 @@ real hardware is the #3047 follow-up (see "Auth" below).
 
 - **`FleetLcmConnector`** (`connector.py`) — `HttpConnector` subclass.
   Class attributes: `product="fleet"`, `version="9.0"`, `impl_id="fleet-lcm"`,
-  `supported_version_range=">=9.0,<10.0"`, `priority=1`. The range is the
-  **narrower** of the two impls, so a 9.0 target resolves here by the
-  resolver's most-specific-version tie-break; `priority=1` equals the legacy
-  impl by design (the split is by version-specificity, not priority).
+  `supported_version_range=">=9.1,<10.0"`, `priority=1`. The range starts at
+  9.1, where the `/fleet-lcm/v1` API first ships, so a 9.0 target resolves to
+  the legacy `fleet-rest` instead (#4442); `priority=1` equals the legacy impl
+  by design (the split is by version range, not priority).
 - **`FleetLcmTargetLike`** / **`FleetLcmCredentialsLoader`** (`session.py`) —
   aliases of the shared `VcfTargetLike` Protocol and `VcfCredentialsLoader`
   type (the modern impl reads the same target fields as the legacy). The
@@ -188,7 +188,7 @@ So the read core needs no operator review — it is live the moment the connecto
 loads.
 
 **Operation contracts.** The 13 typed ops meet the VMware operation-contract
-check (`backend/tests/test_vmware_operation_contracts.py`): each response schema
+check (`backend/tests/test_operation_contracts.py`): each response schema
 names its main fields, each parameter schema carries one example call under
 `examples` (`{}` for the no-argument reads, a placeholder such as
 `<component-id>` for the by-id reads), and each `llm_instructions` blob has

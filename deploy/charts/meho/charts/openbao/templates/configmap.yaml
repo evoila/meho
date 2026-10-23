@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "coreVault.fullname" . }}-config
+  labels:
+    {{- include "coreVault.labels" . | nindent 4 }}
+data:
+  # The server's addresses come from the environment (the StatefulSet sets
+  # `<prefix>_API_ADDR` and `<prefix>_CLUSTER_ADDR` from the pod's DNS name).
+  server.hcl: |
+    ui = false
+
+    storage "raft" {
+      path = "{{ include "coreVault.home" . }}/data"
+    }
+
+    # Plain HTTP inside the namespace. TLS on this port is #4050's.
+    listener "tcp" {
+      address         = "0.0.0.0:8200"
+      cluster_address = "0.0.0.0:8201"
+      tls_disable     = 1
+    }
+    {{- if eq .Values.binary "bao" }}
+
+    # Audit lines go to the container log. OpenBao refuses audit devices
+    # made through the API, so it is declared here.
+    audit "file" "stdout" {
+      options {
+        file_path = "stdout"
+      }
+    }
+    {{- else }}
+
+    # Vault image only: OpenBao has no mlock and no such key.
+    disable_mlock = true
+    {{- end }}

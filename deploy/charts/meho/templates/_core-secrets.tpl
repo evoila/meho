@@ -6,12 +6,10 @@ format (backend/src/meho_backplane/core/secrets.py).
 */}}
 
 {{/*
-"true" when any built-in part is on, else empty. `coreVault` is read through
-`default dict` because its values block arrives with the OpenBao subchart.
+"true" when any built-in part is on, else empty.
 */}}
 {{- define "meho.core.enabled" -}}
-{{- $vault := .Values.coreVault | default dict -}}
-{{- if or .Values.corePostgres.enabled .Values.coreKeycloak.enabled $vault.enabled -}}
+{{- if or .Values.corePostgres.enabled .Values.coreKeycloak.enabled .Values.coreVault.enabled -}}
 true
 {{- end -}}
 {{- end }}

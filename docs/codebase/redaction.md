@@ -128,6 +128,15 @@ production traffic cannot reach that branch.
 | `ipv6` | Full + compressed RFC 5952 forms |
 | `fqdn` | ≥2 labels with non-numeric TLD start |
 
+The `api_key` rule skips a value that already is a complete
+`[REDACTED:...]` placeholder (`password: [REDACTED:param_name]`), so an
+earlier pass (the engine itself, or the shared API file check of
+`connectors-shared-api-file-secrets.md`) is not redacted a second time
+and loses its label. Only a complete placeholder is skipped: a name
+between `[REDACTED:` and `]`, and the value ends there. A value that
+only starts like one (`[REDACTED:made-up`) or goes on after the `]`
+(`[REDACTED:x]made-up`) is redacted whole.
+
 The secret-*value* part of `authorization_header`, `bearer_token`,
 and `api_key` consumes any non-whitespace, non-quote byte
 (`patterns.py::_VALUE_CHARS`, bounded by `_VALUE_MAX`): the value is
@@ -434,7 +443,7 @@ as "the gate is broken" -- the meta-tests rule out the second case.
 **Where the gate runs.** The harness is a standard pytest file
 under `backend/tests/`, so it is picked up by the required unit
 sweep in `.github/workflows/ci.yml` — since #3251 the
-`python-unit-shard` matrix (whichever stride slice its file lands
+`python-unit-shard` matrix (whichever shard its file lands
 in), reported through the `python-unit-lane` fan-in that carries
 the branch-protection required context. That check is in the
 required-status-checks set, so a round-trip mismatch blocks merge
@@ -817,6 +826,17 @@ properties: [{id, value}]}`) is redacted — those are OVF property inputs
 which commonly carry appliance credentials under a vendor-specific `id` no
 key-name heuristic or shape net can place — keeping the `id` and every
 non-secret field (network mappings, name, placement) intact.
+
+A connector can also mask a body itself before the span is recorded.
+`HttpConnector.trace_response_body(response)` returns the body the trace
+records in place of the raw bytes, or `None` for the raw bytes (the
+default). The shared engine still runs on what it returns. This is for a
+vendor answer that carries a secret in a field the shape net cannot place
+and the op family does not exclude: the HCX connector masks every
+secret-named field (`password`, `vcPassword`, `token`, ...) of every
+answer this way, so a stored pairing password never reaches the trace
+(`docs/codebase/connectors-hcx.md`). The hook runs only while a trace is
+being captured.
 
 **F2.3 — hard-excluded op families** (`families.py`). Some op families
 carry secrets *as their body* — credential reads, session mints, token

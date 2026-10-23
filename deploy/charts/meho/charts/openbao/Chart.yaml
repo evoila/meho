@@ -1,0 +1,29 @@
+apiVersion: v2
+name: openbao
+description: |
+  The built-in password safe of the MEHO core: OpenBao (ADR 0008) on the
+  official UBI image, one server with raft storage on its own disk. The
+  parent chart maps its `coreVault:` values here through a dependency
+  `alias`. The Service (`<release>-vault`, port 8200) is the address every
+  pod uses. A Vault image also fits (`binary: vault`), for tests.
+
+# Subchart version is independent of the parent chart's calver. Bump on
+# breaking subchart-values changes; rev the patch level on image bumps.
+type: application
+version: 0.1.0
+appVersion: "2.7.1"
+
+kubeVersion: ">=1.28.0-0"
+
+sources:
+  - https://github.com/evoila/meho
+  - https://github.com/openbao/openbao
+
+maintainers:
+  - name: evoila Group
+    url: https://github.com/evoila
+
+keywords:
+  - openbao
+  - vault
+  - secrets

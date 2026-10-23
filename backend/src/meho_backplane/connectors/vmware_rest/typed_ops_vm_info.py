@@ -344,6 +344,7 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
         {"required": ["name"]},
     ],
     "additionalProperties": False,
+    "examples": [{"name": "<vm-name>"}],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -353,6 +354,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "name": {"type": ["string", "null"], "description": "VM name (``name`` property)."},
         "power_state": {
             "type": ["string", "null"],
+            "enum": ["poweredOn", "poweredOff", "suspended", None],
             "description": (
                 "Raw vim ``runtime.powerState`` enum: 'poweredOn' / 'poweredOff' / 'suspended'."
             ),
@@ -370,14 +372,22 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "tools_status": {
             "type": ["string", "null"],
+            "enum": ["toolsNotInstalled", "toolsNotRunning", "toolsOld", "toolsOk", None],
             "description": "VMware Tools status from ``guest.toolsStatus``.",
         },
         "tools_running_status": {
             "type": ["string", "null"],
+            "enum": [
+                "guestToolsNotRunning",
+                "guestToolsRunning",
+                "guestToolsExecutingScripts",
+                None,
+            ],
             "description": "VMware Tools running status from ``guest.toolsRunningStatus``.",
         },
         "heartbeat_status": {
             "type": ["string", "null"],
+            "enum": ["gray", "green", "yellow", "red", None],
             "description": (
                 "Guest heartbeat colour from ``guestHeartbeatStatus`` "
                 "(gray / red / yellow / green)."
@@ -430,20 +440,12 @@ VM_INFO_WHEN_TO_USE = (
 VMWARE_VM_INFO_OP = VmwareTypedOp(
     op_id="vmware.vm.info",
     handler_attr="vm_info",
-    summary="Single VM: power, guest IP, Tools status, heartbeat, per-datastore usage.",
+    summary="One VM's power state, guest IP, VMware Tools status, heartbeat and datastore use.",
     description=(
-        "Returns one VM's live incident-triage signals addressed by moid "
-        "('vm') or 'name': power_state (raw vim runtime.powerState enum), "
-        "guest_ip (guest.ipAddress), guest_hostname, tools_status + "
-        "tools_running_status, heartbeat_status (guestHeartbeatStatus "
-        "colour), and per_datastore_usage (committed / uncommitted / "
-        "unshared bytes per datastore). The #1 hung-appliance tell: a VM "
-        "'poweredOn' with no guest_ip is representable in one call. Reads "
-        "the VirtualMachine managed object via PropertyCollector directly "
-        "on the connector session, so it works with zero catalog ingest -- "
-        "the plain vCenter REST VM detail reports configuration, not these "
-        "live guest signals. An unknown 'name' returns a not_found result; an "
-        "ambiguous 'name' is an error. safety_level=safe, read-only."
+        "Returns one VM's live state, by moid (vm) or name: power state, guest IP and host "
+        "name, VMware Tools status, heartbeat colour and the space it uses per datastore. An "
+        "unknown name gives a not_found result; a name that fits two VMs is an error. "
+        "Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -452,11 +454,10 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call when the operator asks whether a VM is up, has an IP, has "
-            "VMware Tools running, has a healthy heartbeat, or how much "
-            "datastore space it uses -- especially to diagnose a hung / "
-            "unreachable appliance. Address the VM by 'vm' moid or 'name'."
+        "when_to_call": (
+            "Call to check whether a VM is on, has an IP, runs VMware Tools and has a "
+            "healthy heartbeat, or how much datastore space it uses. It is the first read "
+            "for a VM that does not answer. It also checks whether a VM of that name exists."
         ),
         "parameter_hints": {
             "vm": "VM moid (e.g. 'vm-42'); supply exactly one of vm / name.",
@@ -467,9 +468,15 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
             ),
         },
         "output_shape": (
-            "{vm, name, power_state, guest_ip, guest_hostname, tools_status, "
-            "tools_running_status, heartbeat_status, per_datastore_usage: "
-            "[{datastore, committed_bytes, uncommitted_bytes, unshared_bytes}]}."
+            "{vm, name, power_state: poweredOn|poweredOff|suspended, guest_ip, "
+            "guest_hostname, tools_status, tools_running_status, heartbeat_status: "
+            "gray|green|yellow|red, per_datastore_usage: [{datastore, committed_bytes, "
+            "uncommitted_bytes, unshared_bytes}]}."
+        ),
+        "next_step": (
+            "A VM that is poweredOn with no guest_ip and a red or gray heartbeat is "
+            "probably hung: check the console or call vmware.composite.vm.guest.net.show. "
+            "For a power change, call vmware.composite.vm.power."
         ),
     },
 )

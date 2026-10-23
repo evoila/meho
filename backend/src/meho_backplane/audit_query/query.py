@@ -24,11 +24,14 @@ Filter coverage
 ===============
 
 * Column-mapped filters are SQL-side: ``audit_id`` (exact), ``principal``
-  (``operator_sub ILIKE`` partial match — LIKE metacharacters escaped so
-  ``%`` / ``_`` in the operator-supplied value match literally),
-  ``since`` / ``until`` (range on ``occurred_at``), ``target`` (name match
-  against ``targets`` in the same tenant — alias resolution is the T2
-  router's job).
+  (partial match on the user id **or** the name: ``operator_sub ILIKE``
+  OR ``payload['principal_name'] ILIKE`` — LIKE metacharacters escaped so
+  ``%`` / ``_`` in the operator-supplied value match literally; #4668),
+  ``principal_sub`` (exact match on ``operator_sub`` only — the "my
+  recent" views use it so a caller sees their own rows and nobody
+  else's), ``since`` / ``until`` (range on ``occurred_at``), ``target``
+  (name match against ``targets`` in the same tenant — alias resolution
+  is the T2 router's job).
 * ``op_id`` (glob with ``*`` ↔ ``%``) and ``op_class`` (exact) match either
   the value stored in ``payload`` JSON (MCP-written rows carry ``op_id`` /
   ``op_class`` in ``payload`` per ``mcp/handlers.py:214-221``) **OR** the
@@ -260,10 +263,17 @@ def _apply_filters(
         stmt = stmt.where(AuditLog.event_class == filters.event_class.value)
 
     if filters.principal is not None:
-        escaped = _escape_like_literal(filters.principal)
+        pattern = f"%{_escape_like_literal(filters.principal)}%"
+        payload_principal_name = AuditLog.payload["principal_name"].as_string()
         stmt = stmt.where(
-            AuditLog.operator_sub.ilike(f"%{escaped}%", escape=_LIKE_ESCAPE),
+            sa.or_(
+                AuditLog.operator_sub.ilike(pattern, escape=_LIKE_ESCAPE),
+                payload_principal_name.ilike(pattern, escape=_LIKE_ESCAPE),
+            ),
         )
+
+    if filters.principal_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == filters.principal_sub)
 
     if filters.since is not None:
         stmt = stmt.where(AuditLog.occurred_at >= filters.since)

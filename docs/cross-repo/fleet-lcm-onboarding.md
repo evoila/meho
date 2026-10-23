@@ -28,10 +28,10 @@ Suite Lifecycle Manager (vRSLCM) 8.x — at
 
 It is the **first real two-implementation case** in the codebase: it coexists
 with the legacy typed `fleet-rest` impl, and the two are resolved **per
-target by fingerprint** (not by the operator). A VCF Fleet **9.0** target
-resolves here by most-specific-version (`fleet-lcm`'s narrower `>=9.0,<10.0`
-band wins over `fleet-rest`'s `>=8.0,<10.0`); an 8.x target resolves to
-`fleet-rest`. See the "Dual implementation" section of
+target by fingerprint** (not by the operator). A VCF Fleet **9.1** or newer
+target resolves here (`fleet-lcm` covers `>=9.1,<10.0`); an 8.x or 9.0 target
+resolves to `fleet-rest` (`>=8.0,<9.1`), because a 9.0 appliance serves only
+the legacy `/lcm/*` API. See the "Dual implementation" section of
 [`connectors-vcf-fleet.md`](../codebase/connectors-vcf-fleet.md) for the
 resolution matrix.
 

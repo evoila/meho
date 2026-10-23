@@ -580,10 +580,13 @@ and Vault authorizes it with `update` on that **`/delete/`** path — not the
 data path (#3274; probing `/data/` for a delete gave a false pass).
 `vault.kv.metadata.delete` renders `<mount>/metadata/<path>` (#3424). It
 compares the granted capabilities against the per-op requirement in
-`VAULT_KV_WRITE_CAPABILITIES` (`put`/`patch` need `create`+`update` on the
-data path; `delete` needs `update` on the delete path; `metadata.delete`
-needs `read`+`delete` on the metadata path, because it reads the path before
-and after the delete) and returns a redaction-safe summary:
+`VAULT_KV_WRITE_CAPABILITIES` (`put` needs `create`+`update` on the data
+path; `patch` needs `read`+`update` there, because hvac reads the current
+version first and then writes to a secret that already exists, so it never
+needs `create` (#4831, #3897); `delete` needs `update` on the delete path;
+`metadata.delete` needs `read`+`delete` on the metadata path, because it
+reads the path before and after the delete) and returns a redaction-safe
+summary:
 
 ```python
 {"check": "vault.capabilities-self", "path": "secret/data/...",

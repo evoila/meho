@@ -31,6 +31,12 @@ Exports:
   (#3297). Emits the exception type name plus a classified reason, never
   the raw driver message (which echoes the Vault-sourced username on an
   auth failure).
+* :mod:`meho_backplane.connectors._shared.api_file_secrets` — the one
+  check every API file read runs before it returns a file an appliance
+  serves (#4780): the file is parsed (JSON, YAML, XML or HTML), every
+  value under a secret name is replaced with a placeholder, and the
+  checked copy is written back. The three reads on main and every new
+  API file read use it.
 * :mod:`meho_backplane.connectors._shared.wrapped_creds` — the per-work-item
   short-lived response-wrapped credential broker + runner unwrap backend
   (#3191, satellite write-path mechanism 3), registered under kind
@@ -38,15 +44,6 @@ Exports:
   ``register_credential_backend`` call runs eagerly (as ``gsm_creds`` does
   for ``gsm``) and the ``wrapped`` kind is present before any credential
   resolution.
-* :mod:`meho_backplane.connectors._shared.api_file_secrets` — the one
-  whole-file secret scan for the reads that return an API description
-  file or a documentation page an appliance serves. It finds the value
-  of every secret-named key, element and attribute, whatever the file
-  format, and replaces it with the placeholder the governed Vault read
-  uses, or reports where it is so the read can refuse the file. Its
-  pieces sit next to it: ``api_file_collections`` (objects and lists
-  under a secret-named key) and ``api_file_text`` (keys, values, lines
-  and names).
 
 New cross-connector shared modules land alongside these — keep each
 module focused on a single concern (auth, retries, pagination, etc.)
@@ -54,7 +51,6 @@ rather than growing this package into a god-module.
 """
 
 from meho_backplane.connectors._shared import (
-    api_file_secrets,
     cache_key,
     fingerprint,
     gsm_creds,
@@ -65,7 +61,6 @@ from meho_backplane.connectors._shared import (
 )
 
 __all__ = [
-    "api_file_secrets",
     "cache_key",
     "fingerprint",
     "gsm_creds",

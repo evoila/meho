@@ -56,6 +56,15 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._guest_perf_response_schemas import (
+    GUEST_FILE_ATTRIBUTES_SCHEMA,
+    GUEST_NIC_INFO_SCHEMA,
+    GUEST_PROCESS_INFO_SCHEMA,
+    GUEST_STACK_INFO_SCHEMA,
+    PERF_ENTITY_METRIC_SCHEMA,
+    PERF_METRIC_ID_SCHEMA,
+)
+
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
@@ -341,6 +350,14 @@ EVENT_TAIL_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [
+        {
+            "begin_time": "2026-10-19T08:00:00Z",
+            "event_type_ids": ["VmPoweredOnEvent"],
+            "entity": {"moId": "vm-42", "type": "VirtualMachine", "recursion": "self"},
+            "max_count": 50,
+        }
+    ],
 }
 
 
@@ -418,6 +435,7 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["entity_moid"],
     "additionalProperties": False,
+    "examples": [{"entity_moid": "host-21", "interval_seconds": 20, "max_samples": 15}],
 }
 
 
@@ -471,6 +489,7 @@ DATASTORE_REFRESH_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["datastore"],
     "additionalProperties": False,
+    "examples": [{"datastore": "datastore-17", "storage_info": False}],
 }
 
 
@@ -568,6 +587,7 @@ DATASTORE_USAGE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"filter_names": ["<datastore-name>"]}],
 }
 
 
@@ -602,6 +622,7 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"filter_dvs": "dvs-31"}],
 }
 
 
@@ -741,9 +762,18 @@ EVENT_TAIL_RESPONSE_SCHEMA: dict[str, Any] = {
                     "entity": {
                         "type": ["object", "null"],
                         "properties": {
-                            "type": {"type": ["string", "null"]},
-                            "moId": {"type": ["string", "null"]},
-                            "name": {"type": ["string", "null"]},
+                            "type": {
+                                "type": ["string", "null"],
+                                "description": "vim type, e.g. 'VirtualMachine'.",
+                            },
+                            "moId": {
+                                "type": ["string", "null"],
+                                "description": "Moid, e.g. 'vm-42'.",
+                            },
+                            "name": {
+                                "type": ["string", "null"],
+                                "description": "Name of the object when the event gives it.",
+                            },
                         },
                         "description": (
                             "The managed entity the event is about (the most "
@@ -792,17 +822,19 @@ PERFORMANCE_SUMMARY_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "available_counters": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": PERF_METRIC_ID_SCHEMA,
             "description": (
-                "Counters returned by ``QueryAvailablePerfMetric`` for the entity (vi-json)."
+                "Counters ``QueryAvailablePerfMetric`` lists for the entity "
+                "(``PerfMetricId``): counter number and instance."
             ),
         },
         "samples": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": PERF_ENTITY_METRIC_SCHEMA,
             "description": (
-                "Capped sample list from ``QueryPerf`` (vi-json). "
-                "Truncated client-side to ``max_samples``."
+                "The ``QueryPerf`` answer (``PerfEntityMetric``): one entry for the entity, "
+                "with the sample times and one value series per counter. vCenter applies "
+                "``max_samples`` to real-time data."
             ),
         },
         "interval_seconds": {
@@ -896,7 +928,7 @@ DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
                             "(status code + URL where the sub-op carried them); for "
                             "the identical-sets guard it records that the VM set was "
                             "identical across every datastore, so the upstream "
-                            "per-datastore filter was not applied (#2975)."
+                            "per-datastore filter was not applied."
                         ),
                     },
                 },
@@ -950,7 +982,11 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                     "vlan": {
                         "type": ["object", "null"],
                         "properties": {
-                            "mode": {"type": "string", "enum": ["access", "trunk"]},
+                            "mode": {
+                                "type": "string",
+                                "enum": ["access", "trunk"],
+                                "description": "One access VLAN, or a trunk of VLAN ranges.",
+                            },
                             "vlan_id": {
                                 "type": "integer",
                                 "minimum": 0,
@@ -962,8 +998,14 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "start": {"type": "integer"},
-                                        "end": {"type": "integer"},
+                                        "start": {
+                                            "type": "integer",
+                                            "description": "First VLAN id.",
+                                        },
+                                        "end": {
+                                            "type": "integer",
+                                            "description": "Last VLAN id (inclusive).",
+                                        },
                                     },
                                     "required": ["start", "end"],
                                 },
@@ -2307,7 +2349,8 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 #: portgroup/switch REST list exists to resolve a name against — the moid comes
 #: from the ``networking`` group's ``portgroup.audit`` read). Exactly one VLAN
 #: mode: ``vlan_trunk_ranges`` (trunk — the nested-ESXi substrate case) OR
-#: ``vlan_id`` (a single access VLAN); both set → ``status='invalid_vlan_spec'``.
+#: ``vlan_id`` (a single access VLAN), never both: the ``not`` clause makes MEHO
+#: refuse both before the call. Neither keeps the switch's default VLAN.
 NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -2331,8 +2374,18 @@ NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "start": {"type": "integer", "minimum": 0, "maximum": 4094},
-                    "end": {"type": "integer", "minimum": 0, "maximum": 4094},
+                    "start": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "First VLAN id of the range.",
+                    },
+                    "end": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "Last VLAN id of the range (inclusive).",
+                    },
                 },
                 "required": ["start", "end"],
                 "additionalProperties": False,
@@ -2376,7 +2429,15 @@ NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["vds", "name"],
+    "not": {"required": ["vlan_trunk_ranges", "vlan_id"]},
     "additionalProperties": False,
+    "examples": [
+        {
+            "vds": "dvs-31",
+            "name": "<portgroup-name>",
+            "vlan_trunk_ranges": [{"start": 0, "end": 4094}],
+        }
+    ],
 }
 
 
@@ -2426,6 +2487,14 @@ NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["portgroup"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "portgroup": "dvportgroup-42",
+            "allow_promiscuous": True,
+            "forged_transmits": True,
+            "mac_changes": True,
+        }
+    ],
 }
 
 
@@ -2436,7 +2505,8 @@ NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
 #: vcenter.yaml serves no VLAN write). ``portgroup`` is the moid (obtain it
 #: from the networking group's ``portgroup.audit`` read), and exactly one VLAN
 #: mode -- ``vlan_trunk_ranges`` (a NumericRange[] trunk) XOR ``vlan_id`` (a
-#: single access VLAN). The spec **REPLACES** the current VLAN config; there is
+#: single access VLAN); the ``oneOf`` makes MEHO refuse both or neither before
+#: the call. The spec **REPLACES** the current VLAN config; there is
 #: no merge, so to add the untagged/native VLAN 0 to an existing trunk band the
 #: operator passes the full desired range list (e.g.
 #: ``[{start:0,end:0},{start:3251,end:3271}]``). Idempotent -- a request that
@@ -2459,8 +2529,18 @@ NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "start": {"type": "integer", "minimum": 0, "maximum": 4094},
-                    "end": {"type": "integer", "minimum": 0, "maximum": 4094},
+                    "start": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "First VLAN id of the range.",
+                    },
+                    "end": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4094,
+                        "description": "Last VLAN id of the range (inclusive).",
+                    },
                 },
                 "required": ["start", "end"],
                 "additionalProperties": False,
@@ -2496,7 +2576,14 @@ NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["portgroup"],
+    "oneOf": [{"required": ["vlan_trunk_ranges"]}, {"required": ["vlan_id"]}],
     "additionalProperties": False,
+    "examples": [
+        {
+            "portgroup": "dvportgroup-42",
+            "vlan_trunk_ranges": [{"start": 0, "end": 0}, {"start": 100, "end": 200}],
+        }
+    ],
 }
 
 
@@ -3512,6 +3599,44 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+#: A security triple of ``network.portgroup.security.set``; ``null`` = not set.
+_PORTGROUP_SECURITY_FIELDS: dict[str, Any] = {
+    "allow_promiscuous": {
+        "type": ["boolean", "null"],
+        "description": "Promiscuous mode (``DVSSecurityPolicy.allowPromiscuous``).",
+    },
+    "forged_transmits": {
+        "type": ["boolean", "null"],
+        "description": "Forged transmits (``DVSSecurityPolicy.forgedTransmits``).",
+    },
+    "mac_changes": {
+        "type": ["boolean", "null"],
+        "description": "MAC address changes (``DVSSecurityPolicy.macChanges``).",
+    },
+}
+
+#: The normalised VLAN view of ``network.portgroup.vlan.set``.
+_PORTGROUP_VLAN_VIEW_FIELDS: dict[str, Any] = {
+    "mode": {
+        "type": "string",
+        "enum": ["trunk", "access"],
+        "description": "A trunk of VLAN ranges, or one access VLAN.",
+    },
+    "ranges": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "start": {"type": "integer", "description": "First VLAN id."},
+                "end": {"type": "integer", "description": "Last VLAN id (inclusive)."},
+            },
+        },
+        "description": "Trunk ranges (mode 'trunk'), sorted, touching ranges merged.",
+    },
+    "vlan_id": {"type": "integer", "description": "The access VLAN id (mode 'access')."},
+}
+
+
 NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -3543,6 +3668,33 @@ NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "observed": {
             "type": ["object", "null"],
+            "properties": {
+                "name": {"type": ["string", "null"], "description": "``config.name``."},
+                "vlan": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "_typeName": {
+                            "type": "string",
+                            "description": (
+                                "``VmwareDistributedVirtualSwitchTrunkVlanSpec`` or "
+                                "``VmwareDistributedVirtualSwitchVlanIdSpec``."
+                            ),
+                        },
+                        "inherited": {
+                            "type": "boolean",
+                            "description": "Whether the VLAN comes from the switch.",
+                        },
+                        "vlanId": {
+                            "type": ["integer", "array"],
+                            "items": {"type": "object"},
+                            "description": (
+                                "One VLAN id, or ``NumericRange`` entries ``{start, end}``."
+                            ),
+                        },
+                    },
+                    "description": "``config.defaultPortConfig.vlan`` as the switch reports it.",
+                },
+            },
             "description": (
                 "Read-back verification: the created portgroup's config.name and the "
                 "raw config.defaultPortConfig.vlan spec the switch reports. ``null`` "
@@ -3576,6 +3728,7 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         "portgroup": {"type": "string", "description": "The portgroup moid whose policy was set."},
         "requested": {
             "type": "object",
+            "properties": _PORTGROUP_SECURITY_FIELDS,
             "description": (
                 "The three security booleans as requested; a ``null`` field was not "
                 "changed (only supplied booleans are written)."
@@ -3583,6 +3736,7 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "previous": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_SECURITY_FIELDS,
             "description": (
                 "Read-back of the effective security triple BEFORE the change (the "
                 "four-eyes reviewer's before-state); ``null`` on a no-change refusal."
@@ -3590,6 +3744,7 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "observed": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_SECURITY_FIELDS,
             "description": (
                 "Read-back of the effective security triple AFTER the change; "
                 "``null`` on a refusal / timeout."
@@ -3628,6 +3783,7 @@ NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         "portgroup": {"type": "string", "description": "The portgroup moid whose VLAN was set."},
         "requested": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_VLAN_VIEW_FIELDS,
             "description": (
                 "The requested VLAN config as a normalised view "
                 "(``{mode:'trunk', ranges:[{start,end}]}`` or ``{mode:'access', vlan_id}``); "
@@ -3636,6 +3792,7 @@ NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "before": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_VLAN_VIEW_FIELDS,
             "description": (
                 "Read-back of the portgroup's VLAN config BEFORE the change (the "
                 "four-eyes reviewer's before-state), normalised; ``null`` on a refusal or "
@@ -3644,6 +3801,7 @@ NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "after": {
             "type": ["object", "null"],
+            "properties": _PORTGROUP_VLAN_VIEW_FIELDS,
             "description": (
                 "Read-back of the VLAN config AFTER the change, normalised; equals "
                 "``before`` on ``'unchanged'``; ``null`` on a refusal / timeout."
@@ -4161,9 +4319,10 @@ GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["linux", "windows"],
             "description": (
-                "Selects the guest OS branch: ``linux`` builds "
-                "``configuration_spec.linux_config``; ``windows`` builds "
-                "``configuration_spec.windows_config`` with a sysprep body."
+                "Guest OS: ``linux`` builds ``configuration_spec.linux_config`` and uses "
+                "``domain`` / ``time_zone``; ``windows`` builds a sysprep "
+                "``configuration_spec.windows_config`` and uses the ``windows_*`` fields. "
+                "Fields of the other OS are ignored."
             ),
         },
         "hostname": {
@@ -4179,13 +4338,16 @@ GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         "domain": {
             "type": "string",
             "default": "",
-            "description": "DNS domain for the guest (``linux_config.domain``).",
+            "description": (
+                "Linux only: DNS domain of the guest (``linux_config.domain``). "
+                "Ignored for windows."
+            ),
         },
         "time_zone": {
             "type": "string",
             "description": (
-                "Guest time zone (a tz-database name on Linux, e.g. "
-                "``Europe/Vienna``). Omitted from the body when absent."
+                "Linux only: guest time zone as a tz-database name, e.g. ``Europe/Vienna``. "
+                "Ignored for windows (use ``windows_time_zone``). Left out when absent."
             ),
         },
         "interfaces": {
@@ -4204,12 +4366,17 @@ GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 32,
-                        "description": "Subnet prefix length for the static IPv4 address.",
+                        "description": (
+                            "Subnet prefix length of the static address. Used only with "
+                            "``ip_address``."
+                        ),
                     },
                     "gateways": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Default gateway IPs for this NIC.",
+                        "description": (
+                            "Default gateway IPs of this NIC. Used only with ``ip_address``."
+                        ),
                     },
                 },
                 "additionalProperties": False,
@@ -4238,71 +4405,79 @@ GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         "windows_admin_password": {
             "type": "string",
             "description": (
-                "SECRET. Local Administrator password for the Windows "
-                "guest (``windows_config.sysprep.gui_unattended.password``). "
-                "Never serialized to any reviewer / preview / broadcast / "
-                "audit surface (#1503)."
+                "Windows only. Secret: password of the local Administrator "
+                "(``windows_config.sysprep.gui_unattended.password``). MEHO never shows it in a "
+                "preview, a broadcast or an audit row."
             ),
         },
         "windows_product_key": {
             "type": "string",
             "description": (
-                "SECRET. Windows product / license key "
-                "(``windows_config.sysprep.user_data.product_key``). Never "
-                "serialized to any reviewer-facing surface (#1503)."
+                "Windows only. Secret: Windows product key "
+                "(``windows_config.sysprep.user_data.product_key``). MEHO never shows it in a "
+                "preview, a broadcast or an audit row."
             ),
         },
         "windows_organization": {
             "type": "string",
-            "description": "Windows registered organization (``user_data.organization``).",
+            "description": "Windows only: registered organization (``user_data.organization``).",
         },
         "windows_full_name": {
             "type": "string",
-            "description": "Windows registered owner name (``user_data.full_name``).",
+            "description": "Windows only: registered owner name (``user_data.full_name``).",
         },
         "windows_join_domain": {
             "type": "string",
             "description": (
-                "Active Directory domain the Windows guest joins "
+                "Windows only: Active Directory domain the guest joins "
                 "(``sysprep.domain.domain`` with ``sysprep.domain.type = DOMAIN``)."
             ),
         },
         "windows_domain_admin_username": {
             "type": "string",
             "description": (
-                "Domain account used for the join (``sysprep.domain.domain_username``)."
+                "Windows only: domain account used for the join "
+                "(``sysprep.domain.domain_username``). Used only with ``windows_join_domain``."
             ),
         },
         "windows_domain_admin_password": {
             "type": "string",
             "description": (
-                "SECRET. Password for the domain-join account "
-                "(``sysprep.domain.domain_password``). Never serialized to any "
-                "reviewer-facing surface (#1503)."
+                "Windows only. Secret: password of the domain-join account "
+                "(``sysprep.domain.domain_password``). Used only with ``windows_join_domain``. "
+                "MEHO never shows it in a preview, a broadcast or an audit row."
             ),
         },
         "windows_auto_logon": {
             "type": "boolean",
             "default": False,
             "description": (
-                "Whether the Windows guest auto-logs-on after customization. "
-                "Also drives the required ``gui_unattended.auto_logon_count`` "
-                "(``1`` when true, else ``0``)."
+                "Windows only: whether the guest logs on by itself once after customization "
+                "(sets ``gui_unattended.auto_logon_count`` to 1, else 0)."
             ),
         },
         "windows_time_zone": {
             "type": "integer",
             "default": 85,
             "description": (
-                "Windows guest time zone as a Microsoft time-zone index "
-                "(``gui_unattended.time_zone``; a REQUIRED integer, distinct "
-                "from the Linux ``time_zone`` tz-name string). Defaults to "
+                "Windows only: guest time zone as a Microsoft time-zone index "
+                "(``gui_unattended.time_zone``), not the Linux ``time_zone`` name. Defaults to "
                 "``85`` (GMT). See https://support.microsoft.com/help/973627."
             ),
         },
     },
     "required": ["spec_name", "os_type", "hostname"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "spec_name": "<spec-name>",
+            "os_type": "linux",
+            "hostname": "<hostname>",
+            "domain": "example.com",
+            "interfaces": [{"ip_address": "192.0.2.10", "prefix": 24, "gateways": ["192.0.2.1"]}],
+            "dns_servers": ["192.0.2.53"],
+        }
+    ],
 }
 
 
@@ -4380,6 +4555,7 @@ VM_CUSTOMIZE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "spec_name"],
     "additionalProperties": False,
+    "examples": [{"name": "<vm-name>", "spec_name": "<spec-name>", "power_on": True}],
 }
 
 
@@ -4427,8 +4603,15 @@ VM_CUSTOMIZE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "candidates": {
             "type": "array",
-            "items": {"type": "object"},
-            "description": "Identity projections of the matched VMs when ``status='ambiguous'``.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string", "description": "VM moid."},
+                    "name": {"type": "string", "description": "VM display name."},
+                    "power_state": {"type": "string", "description": "VM power state."},
+                },
+            },
+            "description": "The VMs that matched the name when ``status='ambiguous'``.",
         },
         "guidance": {
             "type": ["string", "null"],
@@ -4578,6 +4761,21 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "values."
             ),
         },
+        "deployment_option": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional OVF deployment option key, for example the size profile "
+                "of an appliance. Sent as ``selected_key`` of a "
+                "``DeploymentOptionParams`` entry in "
+                "``ResourcePoolDeploymentSpec.additional_parameters``. MEHO first "
+                "reads the OVF summary (``?action=filter``) and checks the key "
+                "against the ``deployment_options`` it lists. A key the item does "
+                "not offer is refused with ``status='invalid_reference'`` before "
+                "any deploy, and ``candidates`` lists the offered keys. Omit it to "
+                "deploy the OVF's default option."
+            ),
+        },
         "accept_all_eula": {
             "type": "boolean",
             "description": (
@@ -4649,7 +4847,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "structured message with the vCenter status carried in ``issues`` "
                 "rather than a raw vendor error. ``'resolve_error'`` and "
                 "``'invalid_reference'`` also cover the OVF summary read that "
-                "supplies the default VM name when ``name`` is omitted. "
+                "supplies the default VM name when ``name`` is omitted or checks "
+                "``deployment_option``; ``'invalid_reference'`` also means the "
+                "``deployment_option`` key is not one the OVF item offers. "
                 "Every non-``deployed`` status is reached before or without a "
                 "successful mutation: when a failed deploy leaves a partial VM "
                 "or vApp behind, the composite tries to remove it and reports the "
@@ -4709,7 +4909,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Candidate ids on ``ambiguous_item`` (library-item ids) or "
-                "``ambiguous_library`` (library ids); ``null`` otherwise."
+                "``ambiguous_library`` (library ids); on ``invalid_reference`` for "
+                "a ``deployment_option`` the item does not offer, the keys it does "
+                "offer; ``null`` otherwise."
             ),
         },
     },
@@ -5380,6 +5582,26 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 # are the ``dangerous`` / ``requires_approval`` writes.
 
 
+#: Optional per-call guest credential reference shared by the five guest ops
+#: that log into the guest OS (#3364). A reference string only -- the value is
+#: read in-process under the operator's identity and never enters params.
+_GUEST_SECRET_REF_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": (
+        "Optional reference to the secret holding this VM's guest login "
+        "(guest_username / guest_password), in the same form as a target's "
+        "secret_ref (e.g. 'targets/app-vm-01', 'vault:targets/app-vm-01', "
+        "'gsm:<project>/<secret>'). Omit to use the vCenter target's own "
+        "secret. The reference must fall under the target's allowed "
+        "guest-secret prefix (by default the namespace of the target's "
+        "secret_ref, or extras.guest_secret_prefix); any other reference "
+        "is rejected before any secret is read. Only the reference travels "
+        "in params; the credential value never does."
+    ),
+}
+
+
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.
 GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -5412,9 +5634,11 @@ GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Override only if a deployment names the singleton differently."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "max_processes": 100}],
 }
 
 
@@ -5444,9 +5668,11 @@ GUEST_ENV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "names": ["PATH"]}],
 }
 
 
@@ -5468,6 +5694,7 @@ GUEST_NET_SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["vm"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42"}],
 }
 
 
@@ -5520,9 +5747,11 @@ GUEST_FILE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Ignored when fetch_content is false."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path"],
     "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "guest_path": "/etc/os-release", "fetch_content": True}],
 }
 
 
@@ -5568,9 +5797,18 @@ GUEST_FILE_WRITE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path", "content"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "vm": "vm-42",
+            "guest_path": "/etc/<app-name>/<file-name>.conf",
+            "content": "<file-content>",
+            "overwrite": False,
+        }
+    ],
 }
 
 
@@ -5587,7 +5825,7 @@ GUEST_PROCESS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "processes": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": GUEST_PROCESS_INFO_SCHEMA,
             "description": (
                 "GuestProcessInfo entries (name / pid / owner / cmdLine / "
                 "startTime / endTime / exitCode), capped to ``max_processes``. "
@@ -5645,7 +5883,7 @@ GUEST_NET_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
         "vm": {"type": "string", "description": "VM moid the guest network state was read for."},
         "nics": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": GUEST_NIC_INFO_SCHEMA,
             "description": (
                 "GuestNicInfo entries from ``guest.net`` -- per-NIC MAC, "
                 "connected state, and IP addresses as Tools reports them."
@@ -5653,7 +5891,7 @@ GUEST_NET_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "ip_stacks": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": GUEST_STACK_INFO_SCHEMA,
             "description": (
                 "GuestStackInfo entries from ``guest.ipStack`` -- routing table, "
                 "DNS config, and default gateways as Tools reports them."
@@ -5690,6 +5928,7 @@ GUEST_FILE_READ_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "File size in bytes as reported by the guest file manager.",
         },
         "attributes": {
+            **GUEST_FILE_ATTRIBUTES_SCHEMA,
             "description": (
                 "GuestFileAttributes for the file (POSIX / Windows metadata). "
                 "Present on a deferred read and on an inline read returned in "
@@ -5868,9 +6107,19 @@ GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "program_path"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "vm": "vm-42",
+            "program_path": "/usr/bin/systemctl",
+            "arguments": "restart <service-name>",
+            "wait": True,
+            "timeout_seconds": 120,
+        }
+    ],
 }
 
 
@@ -5950,10 +6199,12 @@ GUEST_PROGRAM_RUN_RESPONSE_SCHEMA: dict[str, Any] = {
 #: body verbatim, so they keep ``additionalProperties: True`` (the full vendor
 #: spec -- LB config, DNS/NTP, image sync, CIDRs -- flows through unmodified).
 #: The schema pins the *structural* essentials (management network + control-
-#: plane storage policy, workload network_type + edge provider); the handler
-#: enforces the network-stack enums with a loud structured refusal
-#: (``unknown_network_provider``), so a bad provider fails closed in the
-#: composite rather than as an opaque vCenter 400.
+#: plane storage policy, workload network_type + edge provider). The edge
+#: provider has an enum (``Networks.Edges.EdgeProvider``, the same set as the
+#: handler's ``_ALLOWED_EDGE_PROVIDERS``), so a wrong provider is refused before
+#: the call. The handler still answers an unknown ``network_type`` with a loud
+#: structured refusal (``unknown_network_provider``) rather than an opaque
+#: vCenter 400.
 SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -5996,9 +6247,11 @@ SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
                 },
                 "size": {
                     "type": "string",
+                    "enum": ["TINY", "SMALL", "MEDIUM", "LARGE"],
                     "description": (
-                        "Control-plane sizing hint (TINY/SMALL/MEDIUM/LARGE). Optional; "
-                        "defaults to SMALL. TINY = 8 GB per CP VM."
+                        "Control-plane size (vCenter ``Supervisors.ControlPlane.size``). "
+                        "Optional; vCenter uses SMALL when it is left out. TINY = 8 GB per "
+                        "control-plane VM."
                     ),
                 },
                 "count": {
@@ -6026,13 +6279,19 @@ SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
                             "description": (
                                 "Workload network stack (Supervisors.Networks.Workload."
                                 "NetworkType). One of VSPHERE (VDS + Foundation LB), "
-                                "NSX_VPC (NSX VPC), NSXT (classic NSX-T). An unknown "
-                                "value is refused loudly by the composite "
-                                "(status='unknown_network_provider')."
+                                "NSX_VPC (NSX VPC), NSXT (classic NSX-T). Any other "
+                                "value gets status='unknown_network_provider' and "
+                                "nothing changes."
                             ),
                         },
                     },
                     "additionalProperties": True,
+                    "description": (
+                        "Workload network (Supervisors.Networks.Workload.Network), passed "
+                        "to vCenter as given. Needs ``network_type``; the other vCenter "
+                        "fields (for example ``vsphere``, ``nsx_vpc``, ``ip_management``) "
+                        "are optional."
+                    ),
                 },
                 "edge": {
                     "type": "object",
@@ -6040,16 +6299,30 @@ SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
                     "properties": {
                         "provider": {
                             "type": "string",
+                            "enum": [
+                                "VSPHERE_FOUNDATION",
+                                "NSX",
+                                "NSX_VPC",
+                                "NSX_ADVANCED",
+                                "HAPROXY",
+                            ],
                             "description": (
                                 "Edge (load-balancer) provider (Networks.Edges."
                                 "EdgeProvider). One of VSPHERE_FOUNDATION (pairs with the "
                                 "VSPHERE stack -- no separate NSX edge cluster required), "
                                 "NSX / NSX_VPC / NSX_ADVANCED, or the deprecated HAPROXY. "
-                                "An unknown value is refused loudly by the composite."
+                                "Any other value is refused before the call and nothing "
+                                "changes."
                             ),
                         },
                     },
                     "additionalProperties": True,
+                    "description": (
+                        "Edge (load balancer) settings (Networks.Edges.Edge), passed to "
+                        "vCenter as given. Needs ``provider``; the provider's own block "
+                        "(for example ``foundation``) and ``load_balancer_address_ranges`` "
+                        "are optional here."
+                    ),
                 },
             },
             "additionalProperties": True,
@@ -6071,6 +6344,22 @@ SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster", "name", "control_plane", "workloads"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "cluster": "domain-c7",
+            "name": "<supervisor-name>",
+            "control_plane": {
+                "network": {"backing": {"backing": "NETWORK", "network": "dvportgroup-30"}},
+                "storage_policy": "<storage-policy-id>",
+                "size": "SMALL",
+                "count": 3,
+            },
+            "workloads": {
+                "network": {"network_type": "VSPHERE"},
+                "edge": {"provider": "VSPHERE_FOUNDATION"},
+            },
+        }
+    ],
 }
 
 
@@ -6105,7 +6394,10 @@ SUPERVISOR_ENABLE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Echoed edge provider on success.",
         },
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next: poll supervisor.status, or why it was refused.",
+        },
     },
     "required": ["status", "cluster", "supervisor"],
 }
@@ -6127,6 +6419,7 @@ SUPERVISOR_DISABLE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7"}],
 }
 
 
@@ -6144,7 +6437,10 @@ SUPERVISOR_DISABLE_RESPONSE_SCHEMA: dict[str, Any] = {
             ),
         },
         "cluster": {"type": "string", "description": "Input cluster moid."},
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next (poll supervisor.status).",
+        },
     },
     "required": ["status", "cluster"],
 }
@@ -6174,6 +6470,7 @@ SUPERVISOR_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7", "messages_limit": 10}],
 }
 
 
@@ -6205,13 +6502,51 @@ SUPERVISOR_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "messages": {
             "type": "array",
-            "items": {"type": "object"},
-            "description": "Capped Clusters.Message rows (severity + details).",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "description": "INFO, WARNING or ERROR.",
+                    },
+                    "details": {
+                        "type": "object",
+                        "description": "The message text (vCenter localizable message).",
+                    },
+                    "kb_article_link": {
+                        "type": "string",
+                        "description": "Link to a knowledge base article, if any.",
+                    },
+                    "id": {"type": "string", "description": "Message id, if any."},
+                },
+            },
+            "description": "Capped Clusters.Message rows, as vCenter returns them.",
         },
         "conditions": {
             "type": "array",
-            "items": {"type": "object"},
-            "description": "Capped Clusters.Condition rows (type / status / severity).",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "description": "What the condition is about."},
+                    "status": {"type": "string", "description": "Condition status."},
+                    "severity": {"type": "string", "description": "Condition severity."},
+                    "reason": {"type": "string", "description": "Short reason code."},
+                    "description": {
+                        "type": "object",
+                        "description": "Condition text (vCenter localizable message).",
+                    },
+                    "last_transition_time": {
+                        "type": "string",
+                        "description": "When the status last changed.",
+                    },
+                    "messages": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Messages of this condition.",
+                    },
+                },
+            },
+            "description": "Capped Clusters.Condition rows, as vCenter returns them.",
         },
         "message_count": {"type": "integer", "description": "Uncapped message count."},
         "condition_count": {"type": "integer", "description": "Uncapped condition count."},
@@ -6242,6 +6577,7 @@ STORAGE_POLICY_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"policy_ids": ["<policy-id>"]}],
 }
 
 #: ``vmware.composite.storage_policy.list`` response schema.
@@ -6322,6 +6658,14 @@ STORAGE_POLICY_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["policy_name", "category_name", "tag_name", "datastore_names"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "policy_name": "<policy-name>",
+            "category_name": "<category-name>",
+            "tag_name": "<tag-name>",
+            "datastore_names": ["<datastore-name>"],
+        }
+    ],
 }
 
 #: ``vmware.composite.storage_policy.create`` response schema.
@@ -6358,7 +6702,7 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "The created or adopted PBM policy id (the vCenter StoragePolicy identifier)."
             ),
         },
-        "policy_name": {"type": "string"},
+        "policy_name": {"type": "string", "description": "The requested policy name."},
         "category_id": {
             "type": ["string", "null"],
             "description": "The created or adopted tag category id.",
@@ -6367,15 +6711,15 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "The created or adopted tag id.",
         },
-        "tag_name": {"type": "string"},
+        "tag_name": {"type": "string", "description": "The requested tag name."},
         "datastores": {
             "type": "array",
             "description": "Resolved datastores the tag was attached to.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "moid": {"type": "string"},
+                    "name": {"type": "string", "description": "Datastore name."},
+                    "moid": {"type": "string", "description": "Datastore moid."},
                 },
                 "required": ["name", "moid"],
                 "additionalProperties": False,
@@ -6389,12 +6733,12 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": (
                 "Per sub-step, whether an existing object was reused rather than "
-                "created (the #3826 resolve-before-create idempotency)."
+                "created (so a second run after a partial run goes on)."
             ),
             "properties": {
-                "category": {"type": "boolean"},
-                "tag": {"type": "boolean"},
-                "policy": {"type": "boolean"},
+                "category": {"type": "boolean", "description": "The tag category existed."},
+                "tag": {"type": "boolean", "description": "The tag existed."},
+                "policy": {"type": "boolean", "description": "The policy existed."},
             },
             "required": ["category", "tag", "policy"],
             "additionalProperties": False,
@@ -6417,7 +6761,7 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {"type": ["string", "null"], "description": "Next-step hint."},
     },
     "required": ["status", "policy_id", "policy_name"],
     "additionalProperties": True,
@@ -6443,6 +6787,7 @@ STORAGE_POLICY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["policy_id"],
     "additionalProperties": False,
+    "examples": [{"policy_id": "<policy-id>", "policy_name": "<policy-name>"}],
 }
 
 #: ``vmware.composite.storage_policy.delete`` response schema.
@@ -6461,12 +6806,12 @@ STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "read-back still lists the id."
             ),
         },
-        "policy_id": {"type": "string"},
+        "policy_id": {"type": "string", "description": "The policy id from the call."},
         "fault": {
             "type": ["string", "null"],
             "description": "The per-id PbmDelete fault type, when status='delete_failed'.",
         },
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {"type": ["string", "null"], "description": "Next-step hint."},
     },
     "required": ["status", "policy_id"],
     "additionalProperties": True,
@@ -6505,10 +6850,8 @@ NAMESPACE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Supervisor id the namespace is created on (CreateSpecV2.supervisor "
-                "-- the id supervisor.enable returns / GET "
-                "/vcenter/namespaces/instances/v2 lists). Rides the POST body, not "
-                "the path."
+                "Supervisor id the namespace is created on (CreateSpecV2.supervisor): "
+                "the id supervisor.enable returns."
             ),
         },
         "namespace": {
@@ -6521,38 +6864,92 @@ NAMESPACE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         "access_list": {
             "type": "array",
             "description": (
-                "Namespaces.Instances.Access entries granting subjects access to "
-                "the namespace (subject_type / subject / domain / role). Optional; "
-                "passed through verbatim."
+                "Namespaces.Instances.Access entries: who may use the namespace, with "
+                "which role. Optional; passed to vCenter as given."
             ),
-            "items": {"type": "object", "additionalProperties": True},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject_type": {
+                        "type": "string",
+                        "enum": ["USER", "GROUP"],
+                        "description": "USER for one user, GROUP for a group of users.",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "User or group name, without the domain.",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain of the user or group, e.g. ``vsphere.local``.",
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["OWNER", "EDIT", "VIEW"],
+                        "description": (
+                            "OWNER may change and delete the namespace, EDIT may change it, "
+                            "VIEW may only read it."
+                        ),
+                    },
+                    "identity_provider": {
+                        "type": "string",
+                        "description": (
+                            "Id of an external identity provider for the subject. Leave it "
+                            "out to use vCenter Single Sign-On."
+                        ),
+                    },
+                },
+                "additionalProperties": True,
+            },
         },
         "storage_specs": {
             "type": "array",
             "description": (
-                "Namespaces.Instances.StorageSpec entries binding SPBM storage "
-                "policies (each entry's ``policy`` is a policy id, typically the "
-                "NFS tag-based policy from storage_policy.create / #3494). Optional; "
-                "passed through verbatim."
+                "Namespaces.Instances.StorageSpec entries: the storage policies the "
+                "namespace may use. Optional; passed to vCenter as given."
             ),
-            "items": {"type": "object", "additionalProperties": True},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "policy": {
+                        "type": "string",
+                        "description": (
+                            "Storage policy id, for example the one storage_policy.create "
+                            "returns. vCenter makes a Kubernetes storage class for it."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": (
+                            "Most storage (MiB) the namespace may use with this policy. "
+                            "Leave it out for no limit."
+                        ),
+                    },
+                },
+                "additionalProperties": True,
+            },
         },
         "vm_service_spec": {
             "type": "object",
             "description": (
-                "Namespaces.Instances.VMServiceSpec -- the VM Service binding: "
-                "``content_libraries`` (the TKr/VKr content-library ids from "
-                "content_library.subscribed.create / #3495) and ``vm_classes`` (the "
-                "builtin Supervisor VM class names). Optional; passed through verbatim."
+                "Namespaces.Instances.VMServiceSpec: the content libraries and VM "
+                "classes the namespace may use. Optional; passed to vCenter as given."
             ),
             "properties": {
                 "content_libraries": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
+                    "description": (
+                        "Content library ids, for example the Kubernetes release library "
+                        "from content_library.subscribed.create."
+                    ),
                 },
                 "vm_classes": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
+                    "description": (
+                        "VM class names that exist on the Supervisor, e.g. ``best-effort-small``."
+                    ),
                 },
             },
             "additionalProperties": True,
@@ -6560,6 +6957,25 @@ NAMESPACE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["supervisor", "namespace"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "supervisor": "<supervisor-id>",
+            "namespace": "example-ns",
+            "access_list": [
+                {
+                    "subject_type": "USER",
+                    "subject": "<user-name>",
+                    "domain": "vsphere.local",
+                    "role": "EDIT",
+                }
+            ],
+            "storage_specs": [{"policy": "<storage-policy-id>"}],
+            "vm_service_spec": {
+                "content_libraries": ["<content-library-id>"],
+                "vm_classes": ["best-effort-small"],
+            },
+        }
+    ],
 }
 
 #: ``vmware.composite.namespace.create`` response schema.
@@ -6584,7 +7000,10 @@ NAMESPACE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "yet visible or faulted."
             ),
         },
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next (poll namespace.status).",
+        },
     },
     "required": ["status", "namespace", "supervisor"],
     "additionalProperties": True,
@@ -6606,6 +7025,7 @@ NAMESPACE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["namespace"],
     "additionalProperties": False,
+    "examples": [{"namespace": "example-ns"}],
 }
 
 #: ``vmware.composite.namespace.delete`` response schema.
@@ -6623,12 +7043,15 @@ NAMESPACE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "still reports a non-REMOVING status."
             ),
         },
-        "namespace": {"type": "string"},
+        "namespace": {"type": "string", "description": "The namespace name."},
         "config_status": {
             "type": ["string", "null"],
             "description": "Read-back config_status when the namespace is still present.",
         },
-        "guidance": {"type": ["string", "null"]},
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next; ``null`` when the namespace is gone.",
+        },
     },
     "required": ["status", "namespace"],
     "additionalProperties": True,
@@ -6658,6 +7081,7 @@ NAMESPACE_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["namespace"],
     "additionalProperties": False,
+    "examples": [{"namespace": "example-ns", "messages_limit": 10}],
 }
 
 #: ``vmware.composite.namespace.status`` response schema. Shaped for inline
@@ -6696,10 +7120,15 @@ NAMESPACE_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "stats": {
             "type": ["object", "null"],
-            "description": (
-                "Namespaces.Instances.Stats (cpu_used / memory_used / "
-                "storage_used); ``null`` when absent."
-            ),
+            "properties": {
+                "cpu_used": {"type": "integer", "description": "CPU used by pods, in MHz."},
+                "memory_used": {"type": "integer", "description": "Memory used by pods, in MiB."},
+                "storage_used": {
+                    "type": "integer",
+                    "description": "Storage used by pods, in MiB.",
+                },
+            },
+            "description": "Namespaces.Instances.Stats; ``null`` when absent.",
         },
         "description": {
             "type": ["string", "null"],
@@ -6707,8 +7136,20 @@ NAMESPACE_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "messages": {
             "type": "array",
-            "items": {"type": "object"},
-            "description": "Capped Namespaces.Instances.Message rows (severity + details).",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "description": "INFO, WARNING or ERROR.",
+                    },
+                    "details": {
+                        "type": "object",
+                        "description": "The message text (vCenter localizable message).",
+                    },
+                },
+            },
+            "description": "Capped Namespaces.Instances.Message rows, as vCenter returns them.",
         },
         "message_count": {"type": "integer", "description": "Uncapped message count."},
     },
@@ -6743,10 +7184,10 @@ CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Publisher endpoint URL serving the library metadata "
-                "(``Content.Library.SubscriptionInfo.subscription_url``), e.g. "
-                "``https://wp-content.vmware.com/v2/latest/lib.json`` for the "
-                "upstream VMware Tanzu Kubernetes release (TKr/VKr) repo."
+                "URL of the publisher's library file "
+                "(``Content.Library.SubscriptionInfo.subscription_url``), for example the "
+                "public VMware Kubernetes release library "
+                "``https://wp-content.vmware.com/v2/latest/lib.json``."
             ),
         },
         "datastore": {
@@ -6831,6 +7272,15 @@ CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "subscription_url", "datastore"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "name": "<library-name>",
+            "subscription_url": "https://content.example.com/lib.json",
+            "datastore": "<datastore-name>",
+            "on_demand": True,
+            "authentication_method": "NONE",
+        }
+    ],
 }
 
 
@@ -6859,9 +7309,8 @@ CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "library_id": {
             "type": ["string", "null"],
             "description": (
-                "Identifier of the newly created subscribed library "
-                "(``com.vmware.content.Library``) — the id #3281's enable spec "
-                "consumes as ``default_kubernetes_service_content_library``. "
+                "Id of the new subscribed library (``com.vmware.content.Library``). "
+                "Pass it to namespace.create in ``vm_service_spec.content_libraries``. "
                 "``null`` unless ``status='created'``."
             ),
         },
@@ -6889,7 +7338,7 @@ CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "issues": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _HARD_FAILURE_ISSUES_PROPERTY["items"],
             "description": "Structured issue entries on a non-``created`` status.",
         },
     },
@@ -6921,8 +7370,9 @@ CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": [],
+    "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
     "additionalProperties": False,
+    "examples": [{"library_name": "<library-name>"}],
 }
 
 
@@ -6960,7 +7410,7 @@ CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "issues": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _HARD_FAILURE_ISSUES_PROPERTY["items"],
             "description": "Structured issue entries on a non-``sync_triggered`` status.",
         },
     },
@@ -6991,8 +7441,9 @@ CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": [],
+    "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
     "additionalProperties": False,
+    "examples": [{"library_name": "<library-name>"}],
 }
 
 
@@ -7052,7 +7503,20 @@ CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "storage_backings": {
             "type": ["array", "null"],
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "description": "DATASTORE or OTHER."},
+                    "datastore_id": {
+                        "type": "string",
+                        "description": "Datastore moid of a DATASTORE backing.",
+                    },
+                    "storage_uri": {
+                        "type": "string",
+                        "description": "URI of an OTHER backing.",
+                    },
+                },
+            },
             "description": "The library's storage backings (as returned by vCenter).",
         },
         "candidates": {
@@ -7062,7 +7526,7 @@ CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "issues": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _HARD_FAILURE_ISSUES_PROPERTY["items"],
             "description": "Structured issue entries on a non-``ok`` status.",
         },
     },
@@ -7093,8 +7557,9 @@ CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": [],
+    "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
     "additionalProperties": False,
+    "examples": [{"library_name": "<library-name>"}],
 }
 
 
@@ -7169,7 +7634,7 @@ CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "issues": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _HARD_FAILURE_ISSUES_PROPERTY["items"],
             "description": "Structured issue entries on a reference-resolution failure.",
         },
     },
@@ -7463,12 +7928,52 @@ NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["portgroup"],
     "additionalProperties": False,
+    "examples": [{"portgroup": "dvportgroup-42"}],
 }
 
 #: ``vmware.composite.network.portgroup.delete`` response schema.
 NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "precondition_failed", "still_present", "timeout"],
     _DELETE_STATUS_COMMON + " ``'timeout'`` -- Destroy_Task outran the poll bound.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``distributed_portgroup``."},
+        "moid": {"type": "string", "description": "Portgroup moid."},
+        "name": {"type": ["string", "null"], "description": "Portgroup name."},
+        "dvs": {"type": ["string", "null"], "description": "Moid of the distributed switch."},
+        "vlan": {
+            "type": ["object", "null"],
+            "description": "``{mode: trunk, ranges}`` or ``{mode: access, vlan_id}``.",
+        },
+        "num_ports": {"type": ["integer", "null"], "description": "``config.numPorts``."},
+        "port_binding": {
+            "type": ["string", "null"],
+            "description": "``config.type``: earlyBinding, lateBinding or ephemeral.",
+        },
+        "uplink": {"type": "boolean", "description": "Whether it is the uplink portgroup."},
+        "backing_type": {
+            "type": ["string", "null"],
+            "description": "``config.backingType``; ``nsx`` for an NSX segment.",
+        },
+        "port_check": {
+            "type": "string",
+            "description": "``ok``, or why the connected ports could not be read.",
+        },
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "``vm`` or ``port``."},
+        "moid": {"type": "string", "description": "VM moid (kind ``vm``)."},
+        "name": {"type": ["string", "null"], "description": "VM name (kind ``vm``)."},
+        "id": {"type": ["string", "null"], "description": "Port key (kind ``port``)."},
+        "connectee_type": {
+            "type": ["string", "null"],
+            "description": "What uses the port, e.g. ``vmVnic`` or ``hostVmkVnic``.",
+        },
+        "connected_entity": {
+            "type": ["string", "null"],
+            "description": "Moid of the VM or host on the port.",
+        },
+        "nic": {"type": ["string", "null"], "description": "NIC key on that VM or host."},
+    },
 )
 
 #: ``vmware.composite.host.standard_portgroup.delete`` parameter schema.
@@ -7489,12 +7994,33 @@ HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["host", "portgroup_name"],
     "additionalProperties": False,
+    "examples": [{"host": "host-21", "portgroup_name": "<portgroup-name>"}],
 }
 
 #: ``vmware.composite.host.standard_portgroup.delete`` response schema.
 HOST_STANDARD_PORTGROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present"],
     _DELETE_STATUS_COMMON + " ``'invalid_request'`` -- the host moid does not exist.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``host_standard_portgroup``."},
+        "host": {"type": "string", "description": "Host moid."},
+        "name": {"type": "string", "description": "Port group name."},
+        "host_name": {"type": ["string", "null"], "description": "Host name."},
+        "vswitch": {"type": ["string", "null"], "description": "Standard switch name."},
+        "vlan": {
+            "type": ["object", "null"],
+            "description": (
+                "``{mode, vlan_id}``; mode is ``untagged`` (0), ``access`` or ``trunk_all`` (4095)."
+            ),
+        },
+        "active_ports": {"type": "integer", "description": "Ports in use on the port group."},
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "``vm`` or ``vmkernel_adapter``."},
+        "moid": {"type": "string", "description": "VM moid (kind ``vm``)."},
+        "id": {"type": ["string", "null"], "description": "Adapter, e.g. ``vmk1``."},
+        "name": {"type": ["string", "null"], "description": "VM name; null for an adapter."},
+    },
 )
 
 #: ``vmware.composite.folder.delete`` parameter schema.
@@ -7646,6 +8172,7 @@ DATASTORE_FILE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["datastore", "path"],
     "additionalProperties": False,
+    "examples": [{"datastore": "datastore-17", "path": "<folder-name>"}],
 }
 
 #: ``vmware.composite.datastore.file.delete`` response schema.
@@ -7654,6 +8181,46 @@ DATASTORE_FILE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schem
     _DELETE_STATUS_COMMON
     + " ``'invalid_request'`` -- the path or datastore reference is unacceptable; "
     "``'timeout'`` -- DeleteDatastoreFile_Task outran the poll bound.",
+    object_properties={
+        "kind": {
+            "type": "string",
+            "description": (
+                "``datastore_file`` or ``datastore_directory``; ``datastore_path`` when "
+                "the path was not found."
+            ),
+        },
+        "datastore": {"type": ["string", "null"], "description": "Datastore moid."},
+        "path": {"type": ["string", "null"], "description": "The path from the call."},
+        "datastore_name": {"type": "string", "description": "Datastore name."},
+        "datastore_type": {"type": "string", "description": "Datastore type, e.g. ``NFS``."},
+        "datastore_path": {
+            "type": "string",
+            "description": "The full datastore path, ``[<datastore>] <path>``.",
+        },
+        "resolved_path": {
+            "type": "string",
+            "description": "The datastore path as vSphere found it; this is what is deleted.",
+        },
+        "file_type": {
+            "type": ["string", "null"],
+            "description": "vSphere ``FileInfo`` type, e.g. ``FolderFileInfo``.",
+        },
+        "size_bytes": {"type": ["integer", "null"], "description": "``FileInfo.fileSize``."},
+        "modified": {
+            "type": ["string", "null"],
+            "description": "``FileInfo.modification`` (date and time).",
+        },
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "``vm``."},
+        "moid": {"type": "string", "description": "VM moid."},
+        "name": {"type": ["string", "null"], "description": "VM name."},
+        "files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Files of that VM under the path (at most 10).",
+        },
+    },
 )
 
 #: ``vmware.composite.datastore.dir.create`` parameter schema.
@@ -7670,6 +8237,7 @@ DATASTORE_DIR_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["datastore", "path"],
     "additionalProperties": False,
+    "examples": [{"datastore": "datastore-17", "path": "<folder-name>", "create_parents": False}],
 }
 
 #: ``vmware.composite.datastore.dir.create`` response schema.
@@ -7682,6 +8250,17 @@ DATASTORE_DIR_CREATE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema
         "parent is missing without create_parents; ``'not_verified'`` -- MakeDirectory "
         "returned but the directory does not read back. A vSphere fault raises."
     ),
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``datastore_directory``."},
+        "datastore": {"type": ["string", "null"], "description": "Datastore moid."},
+        "path": {"type": ["string", "null"], "description": "The path from the call."},
+        "datastore_name": {"type": "string", "description": "Datastore name."},
+        "datastore_type": {"type": "string", "description": "Datastore type, e.g. ``NFS``."},
+        "datastore_path": {
+            "type": "string",
+            "description": "The full datastore path, ``[<datastore>] <path>``.",
+        },
+    },
 )
 
 #: ``vmware.composite.content_library.delete`` parameter schema.
@@ -7706,12 +8285,51 @@ CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
     "additionalProperties": False,
+    "examples": [{"library_name": "<library-name>", "delete_items": True}],
 }
 
 #: ``vmware.composite.content_library.delete`` response schema.
 CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present"],
     _DELETE_STATUS_COMMON + " ``'invalid_request'`` -- an ambiguous library_name.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``content_library``."},
+        "id": {"type": ["string", "null"], "description": "Library id (a UUID)."},
+        "name": {"type": ["string", "null"], "description": "Library name."},
+        "type": {"type": ["string", "null"], "description": "LOCAL or SUBSCRIBED."},
+        "published": {
+            "type": "boolean",
+            "description": "Whether the library is published to subscribers.",
+        },
+        "datastores": {
+            "type": "array",
+            "items": {"type": ["string", "null"]},
+            "description": "Datastore moids that back the library.",
+        },
+        "item_count": {"type": "integer", "description": "Number of items in the library."},
+        "total_size_bytes": {
+            "type": "integer",
+            "description": "Size of the items in bytes (only in the approval preview).",
+        },
+    },
+    blocker_properties={
+        "kind": {
+            "type": "string",
+            "description": "``subscribed_library`` (a library that subscribes to it) or ``vm``.",
+        },
+        "id": {"type": ["string", "null"], "description": "Id of the subscribed library."},
+        "name": {"type": ["string", "null"], "description": "Library or VM name."},
+        "vcenter": {
+            "type": ["string", "null"],
+            "description": "vCenter of a subscribed library on another vCenter.",
+        },
+        "moid": {"type": "string", "description": "VM moid of a ``vm`` blocker."},
+        "files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Library files the VM has in a CD-ROM or floppy drive.",
+        },
+    },
 )
 
 #: ``vmware.composite.content_library.item.delete`` parameter schema.
@@ -7728,8 +8346,16 @@ CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": "Item name; needs library_id or library_name.",
         },
-        "library_id": {"type": "string", "pattern": CONTENT_LIBRARY_ID_PATTERN},
-        "library_name": {"type": "string", "minLength": 1},
+        "library_id": {
+            "type": "string",
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
+            "description": "Id (a UUID) of the library that holds item_name.",
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the library that holds item_name.",
+        },
     },
     "anyOf": [
         {"required": ["item_id"]},
@@ -7737,10 +8363,34 @@ CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
         {"required": ["item_name", "library_name"]},
     ],
     "additionalProperties": False,
+    "examples": [{"item_name": "<item-name>", "library_name": "<library-name>"}],
 }
 
 #: ``vmware.composite.content_library.item.delete`` response schema.
 CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present"],
     _DELETE_STATUS_COMMON + " ``'invalid_request'`` -- an ambiguous item or library name.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``content_library_item``."},
+        "id": {"type": ["string", "null"], "description": "Item id (a UUID)."},
+        "name": {"type": ["string", "null"], "description": "Item name."},
+        "type": {"type": ["string", "null"], "description": "Item type, e.g. ``ovf`` or ``iso``."},
+        "size_bytes": {"type": ["integer", "null"], "description": "Item size in bytes."},
+        "library_id": {"type": ["string", "null"], "description": "Id of the item's library."},
+        "library_name": {"type": ["string", "null"], "description": "Name of the library."},
+        "library_type": {
+            "type": ["string", "null"],
+            "description": "LOCAL or SUBSCRIBED; only LOCAL items can be deleted.",
+        },
+    },
+    blocker_properties={
+        "kind": {"type": "string", "description": "Always ``vm``."},
+        "moid": {"type": "string", "description": "VM moid."},
+        "name": {"type": ["string", "null"], "description": "VM name."},
+        "files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Item files the VM has in a CD-ROM or floppy drive.",
+        },
+    },
 )

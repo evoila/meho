@@ -3,8 +3,8 @@
 
 """Tests for the modern fleet-lcm typed read core (#3047, initiative #3033).
 
-This is the appliance-free proof that restores 9.0 fleet dispatch: a VCF
-Fleet 9.x target resolves to ``fleet-lcm`` (most-specific-version) and now
+This is the appliance-free proof of modern fleet dispatch: a VCF Fleet 9.1
+or newer target resolves to ``fleet-lcm`` (``>=9.1,<10.0``) and
 dispatches a modern ``/v1/*`` read op end-to-end. Coverage:
 
 * **Zero-catalog typed dispatch.** Each of the 13 reads dispatches through
@@ -157,15 +157,14 @@ async def session() -> AsyncIterator[AsyncSession]:
 class _FleetLcmReadTarget:
     """Target satisfying both ``FleetLcmTargetLike`` and the resolver shape.
 
-    ``fingerprint.version="9.0.2"`` is in the ``fleet-lcm`` band
-    ``">=9.0,<10.0"``, so a fleet target resolves to this modern impl by the
-    resolver's most-specific-version tie-break (the "modern default now"
-    decision).
+    ``fingerprint.version="9.1.0"`` is in the ``fleet-lcm`` range
+    ``">=9.1,<10.0"`` and outside the legacy ``fleet-rest`` range
+    ``">=8.0,<9.1"``, so a fleet target resolves to this modern impl.
     """
 
     def __init__(self) -> None:
         self.product = FLEET_LCM_PRODUCT
-        self.fingerprint = type("_FP", (), {"version": "9.0.2"})()
+        self.fingerprint = type("_FP", (), {"version": "9.1.0"})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
         self.tenant_id: UUID = UUID("00000000-0000-0000-0000-0000000000e0")

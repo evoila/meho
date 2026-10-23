@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# The licence and the source code of each container image of the download.
+# build-download.sh writes them into LICENSES/README.txt. It stops when an
+# image of the chart or of the storage manifest has no line here, so a new
+# image needs a line before it can ship.
+#
+# The licence files are in packaging/licenses/, except Apache-2.0.txt and
+# MEHO-NOTICE.txt, which are MEHO's own LICENSE and NOTICE files.
+# Where the texts come from (read 2026-10-22):
+#   MPL-2.0.txt              https://github.com/openbao/openbao/blob/v2.7.1/LICENSE
+#   PostgreSQL.txt           https://github.com/postgres/postgres/blob/REL_17_STABLE/COPYRIGHT
+#                            (pgvector's LICENSE at v0.8.7 is the same licence text)
+#   BSD-3-Clause-Valkey.txt  https://github.com/valkey-io/valkey/blob/9.0.0/COPYING
+#   GPL-2.0-BusyBox.txt      the LICENSE file of BusyBox (GitHub mirror mirror/busybox)
+#
+# Format: <image repository> <licence files, comma-separated> <where the source code is>
+ghcr.io/evoila/meho                      Apache-2.0.txt,MEHO-NOTICE.txt https://github.com/evoila/meho
+docker.io/pgvector/pgvector              PostgreSQL.txt                 https://github.com/pgvector/pgvector and https://www.postgresql.org/ftp/source/
+quay.io/keycloak/keycloak                Apache-2.0.txt                 https://github.com/keycloak/keycloak
+quay.io/openbao/openbao-ubi              MPL-2.0.txt                    https://github.com/openbao/openbao
+docker.io/valkey/valkey                  BSD-3-Clause-Valkey.txt        https://github.com/valkey-io/valkey and https://github.com/valkey-io/valkey-container
+docker.io/rancher/local-path-provisioner Apache-2.0.txt                 https://github.com/rancher/local-path-provisioner
+docker.io/library/busybox                GPL-2.0-BusyBox.txt            https://busybox.net/downloads/ and https://github.com/docker-library/busybox

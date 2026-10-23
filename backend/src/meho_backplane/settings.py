@@ -40,6 +40,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
 
+from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.retrieval.embedding import (
     BAKED_MODEL_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
@@ -111,17 +112,10 @@ def parse_bool_env(value: str | None) -> bool:
 
 
 #: Default delete-shaped op-id patterns a service-principal standing grant
-#: may never cover (#3151). Case-sensitive ``fnmatchcase`` globs over the
-#: exact op id: raw HTTP DELETE ops (``DELETE:*``) plus the dotted typed
-#: delete/destroy/remove/purge families. Overridable via
-#: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
-_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
-    "DELETE:*",
-    "*.delete",
-    "*.destroy",
-    "*.remove",
-    "*.purge",
-)
+#: may never cover (#3151). The list lives in :mod:`meho_backplane.delete_names`
+#: so the contract check and the grant check read the same signs.
+#: Overridable via ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
+_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = DELETE_SHAPED_OP_ID_PATTERNS
 
 
 def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:
@@ -192,6 +186,14 @@ class Settings(BaseModel):
         but the CLI surfaces an actionable error rather than silently
         misusing ``audience`` (which is the confidential resource-
         server identifier, not a public client).
+    keycloak_discovery_url:
+        Realm base URL the backplane uses for its own calls to Keycloak:
+        the discovery document and the token endpoint. For example the
+        in-cluster Service address
+        ``http://<release>-keycloak:8080/auth/realms/meho``. The issuer
+        check keeps ``keycloak_issuer_url``, because tokens carry the
+        public address. Empty (the default) means the issuer URL, as
+        before (#4591).
     keycloak_jwks_cache_ttl_seconds:
         Maximum age of a cached JWKS document before it must be
         refetched. The cache also refreshes on a kid-miss (key
@@ -1299,6 +1301,7 @@ class Settings(BaseModel):
     keycloak_issuer_url: HttpUrl
     keycloak_audience: str = Field(min_length=1)
     keycloak_cli_client_id: str = ""
+    keycloak_discovery_url: HttpUrl | None = None
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
@@ -2160,6 +2163,14 @@ class Settings(BaseModel):
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 
+    @property
+    def keycloak_discovery_base(self) -> str:
+        """Realm base URL for discovery and token calls, without a trailing slash.
+
+        ``KEYCLOAK_DISCOVERY_URL`` when set, else the issuer URL.
+        """
+        return str(self.keycloak_discovery_url or self.keycloak_issuer_url).rstrip("/")
+
     @field_validator("vault_kv_tenant_scope_prefix")
     @classmethod
     def _vault_tenant_prefix_must_template_tenant_id(cls, value: str) -> str:
@@ -2496,6 +2507,7 @@ def get_settings() -> Settings:
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
         keycloak_cli_client_id=os.environ.get("KEYCLOAK_CLI_CLIENT_ID", ""),
+        keycloak_discovery_url=os.environ.get("KEYCLOAK_DISCOVERY_URL") or None,  # type: ignore[arg-type]
         keycloak_jwks_cache_ttl_seconds=int(
             os.environ.get("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300"),
         ),

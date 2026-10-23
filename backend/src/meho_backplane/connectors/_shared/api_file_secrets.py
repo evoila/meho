@@ -1,312 +1,361 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Find and replace secret values in an API description file, whatever its format.
+"""Check an API description file by parsing it; replace every secret value.
 
-An API description file or a documentation page an appliance serves can
-carry a clear-text secret: an example ``"password": "..."`` in a Swagger
-file, a ``<password>...</password>`` element in an XML file, a
-``password="..."`` attribute or a script block in an HTML page, a PEM
-private key. The stored-result redaction of MEHO finds only a labelled
-secret on one line (``password=...``), so the reads that return such a
-file check the text themselves first, with this helper.
+An API description file is a file an appliance serves to describe its
+own API: a Swagger or OpenAPI file (JSON or YAML), a WSDL or XSD file
+(XML) or a documentation page (HTML). Such a file can carry a clear-text
+secret: an example password in a request sample, a licence key in a
+list, a token in a form field, a private key in a text block.
 
-The scan works on the whole file as text. It does not parse the file, so
-the format does not matter and a secret that a part cut splits in two is
-found all the same. Hand-written rules per format do not hold up; one
-text scan does. What it finds:
+A text scan for such values is a race against the next trick: a value on
+the next line, a YAML alias, an escaped key, a quoted ``>`` inside an
+HTML attribute. This helper reads the file with a real parser for its
+format instead, so a secret is the value under a secret-named key,
+wherever it hides and however it is written. The checked copy is written
+back from the parsed file, so comments, repeated keys and anything else
+the parser skips never reach the caller.
 
-1. **The value of a secret-named key.** A key is secret-named by the one
-   rule MEHO uses for every secret-named field,
-   :func:`~meho_backplane.broadcast.events.is_secret_param_name`
-   (``password``, ``pwd``, ``clientSecret``, ``x-auth-token``,
-   ``private_key``, ``credentials``, ...), plus a licence key, a product
-   key and ``Authorization``. The key is in quotes (JSON, also with a
-   ``\\u`` escape inside), or bare at the start of a line (YAML, a
-   properties file), after a ``{`` or ``,`` (a flow mapping, a script
-   object) or before ``=`` (an attribute, a script, a query string). The
-   value follows ``:`` or ``=`` on the same line or, when the line ends
-   there or holds only a comment, on the next line that is not empty and
-   not a comment. A quoted value runs to its closing quote, also over a
-   line break. A bare value runs to the end of its line, and on over the
-   lines indented deeper than the key. A YAML block scalar (``|``, ``>``)
-   is the indented lines below the key. A tag (``!!str``) or an anchor
-   (``&name``) in front is skipped. An alias (``*name``) is a value, and
-   so is the value the anchor of that name marks anywhere in the file.
-   A bare secret-named word in running text (``Use password: ...``)
-   counts only before a dense value of at least 8 characters without
-   spaces, so a sentence about passwords stays as it is.
-   When the key holds an object or a list instead of one value, every
-   scalar inside it counts, at any depth, except the values of the
-   words a schema uses (``type``, ``format``, ``description``, ``$ref``,
-   ``example``, ``enum``, ``tags``, ``scopes``, ...: the fixed fields of
-   OpenAPI 3.1, Swagger 2 and JSON Schema 2020-12). So ``"password":
-   {"type": "string"}`` and a path item named ``/reset-password`` stay as
-   they are, while ``"credentials": {"value": "..."}`` and
-   ``"licenseKey": ["..."]`` are found. A bare number, ``true``, ``false``
-   and ``null`` are never a value here, as in the broadcast scrub.
-2. **The content of a secret-named element**, ``<password>...</password>``,
-   with or without a namespace prefix or attributes. Comments, CDATA
-   sections and child elements inside are part of the content.
-3. **The value attribute of an element named by its attributes**:
-   ``<property name="password" value="..."/>``, ``<input name="password"
-   value="...">``, ``<meta name="password" content="...">``, and the
-   content of ``<entry key="password">...</entry>``. An attribute value
-   may be in double quotes, in single quotes or bare, as HTML allows.
-4. **A PEM private key block**, from ``-----BEGIN ... PRIVATE KEY`` to
-   the ``-----END`` line or the end of the file.
+What the helper does, in order:
 
-Nothing is found for a schema stub: an empty value, a type word such as
-``string`` or ``null``, a placeholder in angle brackets or template braces
-(``<password>``, ``{{ token }}``, ``${TOKEN}``), a row of ``*``, or the
-placeholder this helper writes. So ``password: string`` stays as it is.
+1. Picks the parser from the content type: JSON (:mod:`json`), YAML
+   (PyYAML, safe loader), XML (:mod:`defusedxml`) or HTML
+   (:mod:`html.parser`). When the content type is ``text/plain`` or
+   missing, the file ending decides (``.json``, ``.yaml``, ``.yml``,
+   ``.xml``, ``.wsdl``, ``.xsd``, ``.html``, ``.htm``). YAML is never
+   tried on other text: almost any text is valid YAML.
+2. Refuses a file that does not parse, or that has no known format (for
+   example JavaScript or CSS), with :exc:`ApiFileFormatError`. The
+   message names the reason, never the text.
+3. Walks the parsed file and replaces every secret value with
+   :data:`REDACTED`, the placeholder the governed Vault read returns. A
+   name is secret-named by MEHO's one rule for that,
+   :func:`~meho_backplane.broadcast.events.is_secret_param_name`.
 
-:func:`scrub_api_file_secrets` replaces every found value with
-:data:`REDACTED`, the placeholder the governed Vault read writes for a
-secret-named value (:func:`~meho_backplane.broadcast.events.scrub_secret_named_values`),
-and returns the text and the number of replacements. A read that must
-return the exact file can refuse it when the count is not zero.
-:func:`find_api_file_secrets` returns where each value is and what names
-it, never the value itself.
+   * JSON and YAML: the value of every secret-named key, at any depth,
+     also inside lists. The whole value goes, whatever it is: text,
+     number, list or object. A YAML alias (``*name``) that points to a
+     secret value is replaced where the anchor is written too.
+   * XML and HTML: the whole content of a secret-named element (text and
+     child elements), and the value of a secret-named attribute. An
+     element whose ``name``, ``id``, ``key`` or ``type`` attribute is a
+     secret name (``<input type="password" value="...">``) loses its
+     content and the values of its other attributes.
+   * HTML ``<script>`` blocks: JSON content is checked like a JSON file.
+     Any other script content becomes the placeholder; the helper cannot
+     parse JavaScript, so it does not return it.
+   * A text value that is itself a JSON object or list (a sample request
+     in a description, a ``<pre>`` block) is parsed and checked the same
+     way.
+   * A text value that holds a private key in PEM form, under any name.
+
+4. Runs the caller's text rule, when one is given, on every text value
+   that was not replaced whole (``text_rule``: one text value in, the
+   changed value and the count of places changed out). The SRM read
+   gives MEHO's general secret-redaction rules here, so an
+   ``Authorization: Basic ...`` example in a description comes back as
+   a placeholder. The rule sees the parsed value, before the file is
+   written back, so the writer quotes the changed value as the format
+   needs and no value changes its type.
+5. Writes the checked copy in the same format and counts the replaced
+   values.
+
+:func:`scrub_query_string` does the same for the query of a redirect
+path: the names are decoded first (``license%4Bey`` reads as
+``licenseKey``), and a secret-named value is replaced.
 """
 
 from __future__ import annotations
 
-import re
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Final
+from urllib.parse import parse_qsl, urlencode
 
-from meho_backplane.connectors._shared.api_file_collections import collection_hits
-from meho_backplane.connectors._shared.api_file_text import (
-    KEY_RE,
-    SecretValue,
-    decode_key,
-    indent_of_line,
-    is_secret_name,
-    is_stub,
-    resolve_value,
+import yaml
+
+from meho_backplane.broadcast.events import is_secret_param_name
+from meho_backplane.connectors._shared.api_file_markup import check_html, check_xml
+from meho_backplane.connectors._shared.api_file_values import (
+    REDACTED,
+    ApiFileFormatError,
+    Scrubber,
+    TextRule,
+    dump_json,
 )
 
-__all__ = ["REDACTED", "SecretValue", "find_api_file_secrets", "scrub_api_file_secrets"]
+__all__ = [
+    "REDACTED",
+    "ApiFileFormatError",
+    "CheckedApiFile",
+    "TextRule",
+    "check_api_file",
+    "detect_format",
+    "scrub_query_string",
+]
 
-#: Written in place of every replaced value: the placeholder the
-#: dispatcher writes for a secret-named value of a governed credential
-#: read, so a caller sees one vocabulary.
-REDACTED: Final[str] = "[REDACTED:param_name]"
+#: Content types per format. A type that ends in ``+json``, ``+yaml`` or
+#: ``+xml`` counts as that format too.
+_MEDIA_TYPES: Final[dict[str, str]] = {
+    "application/json": "json",
+    "text/json": "json",
+    "application/yaml": "yaml",
+    "application/x-yaml": "yaml",
+    "text/yaml": "yaml",
+    "text/x-yaml": "yaml",
+    "text/vnd.yaml": "yaml",
+    "application/xml": "xml",
+    "text/xml": "xml",
+    "text/html": "html",
+}
+_MEDIA_SUFFIXES: Final[dict[str, str]] = {"+json": "json", "+yaml": "yaml", "+xml": "xml"}
+#: Content types that say nothing about the format; the file ending decides.
+_MEDIA_FROM_ENDING: Final[frozenset[str]] = frozenset({"", "text/plain"})
+_ENDINGS: Final[dict[str, str]] = {
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".xml": "xml",
+    ".wsdl": "xml",
+    ".xsd": "xml",
+    ".html": "html",
+    ".htm": "html",
+}
 
-_DENSE_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"""[ \t]*['"]?(?P<value>[^\s'"]{8,})""")
-
-
-#: self-closing tag. The name is checked in Python.
-_TAG_RE: Final[re.Pattern[str]] = re.compile(
-    r"<(?P<name>[A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?P<attrs>(?:\s[^<>]*?)?)(?P<close>/?)>"
-)
-#: One attribute. The value is in double quotes, in single quotes or
-#: bare; a bare value ends at whitespace, a quote, ``=``, ``<``, ``>`` or
-#: a backtick, the characters HTML keeps out of it.
-_ATTR_RE: Final[re.Pattern[str]] = re.compile(
-    r"""(?P<name>[\w.:-]+)\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s"'=<>`]+))"""
-)
-_ATTR_VALUE_GROUPS: Final[tuple[str, ...]] = ("dq", "sq", "bare")
-#: Attributes that name an element (``name="password"``) and the
-#: attributes that then hold its value. Every naming attribute is
-#: checked: ``id="login-field" name="password"`` names a password.
-_NAMING_ATTRS: Final[frozenset[str]] = frozenset({"name", "key", "id", "property"})
-_VALUE_ATTRS: Final[frozenset[str]] = frozenset({"value", "content"})
-
-_PEM_RE: Final[re.Pattern[str]] = re.compile(
-    r"-----BEGIN (?P<kind>[A-Z0-9 ]*PRIVATE KEY)-{0,5}[ \t]*\r?\n?"
-    r"(?P<body>.*?)"
-    r"(?=\s*-----END |\Z)",
-    re.DOTALL,
-)
-
-_ANCHOR_RE: Final[re.Pattern[str]] = re.compile(r"(?<![\w.-])&(?P<name>[\w.-]+)")
-
-
-# ---------------------------------------------------------------------------
-# The four finders
-# ---------------------------------------------------------------------------
-
-
-def _find_key_values(text: str, aliases: set[str]) -> list[SecretValue]:
-    hits: list[SecretValue] = []
-    walked_end = 0
-    for match in KEY_RE.finditer(text):
-        name = decode_key(match)
-        if not is_secret_name(name):
-            continue
-        lead = match.group("lead")
-        bare = match.group("bare") is not None
-        after = match.end()
-        if match.group("sep") == "=":
-            span = resolve_value(text, after, 0, "attr", aliases)
-        elif bare and lead is None:
-            dense = _DENSE_VALUE_RE.match(text, after)
-            span = None if dense is None or is_stub(dense.group("value")) else dense.span("value")
-        else:
-            mode = "flow" if lead and lead[0] in "{," else "block"
-            indent = indent_of_line(text, match.start())
-            span = resolve_value(text, after, indent, mode, aliases)
-            if span is None and match.start() >= walked_end:
-                # One walk covers every nested collection; a key inside
-                # an already walked one is not walked again.
-                inner, walked_end = collection_hits(text, after, indent, mode, name, aliases)
-                hits.extend(inner)
-        if span is not None:
-            hits.append(SecretValue(span[0], span[1], "field", name))
-    return hits
+_YAML_STR_TAG: Final[str] = "tag:yaml.org,2002:str"
+_YAML_LOADER: Final[type[yaml.SafeLoader]] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_YAML_DUMPER: Final[type[yaml.SafeDumper]] = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
 
-def _find_anchor_values(text: str, aliases: set[str]) -> list[SecretValue]:
-    """The values the anchors of the aliased *aliases* mark, anywhere in *text*."""
-    hits: list[SecretValue] = []
-    if not aliases:
-        return hits
-    for match in _ANCHOR_RE.finditer(text):
-        name = match.group("name")
-        if name not in aliases:
-            continue
-        indent = indent_of_line(text, match.start())
-        span = resolve_value(text, match.end(), indent, "block", set())
-        if span is not None:
-            hits.append(SecretValue(span[0], span[1], "field", f"&{name}"))
-        else:
-            hits.extend(collection_hits(text, match.end(), indent, "block", f"&{name}", set())[0])
-    return hits
+@dataclass(frozen=True, slots=True)
+class CheckedApiFile:
+    """The checked copy of a file and how many values were replaced in it."""
+
+    text: str
+    secrets_replaced: int
 
 
-def _element_content(
-    text: str, tag: re.Match[str], closings: dict[str, int | None]
-) -> tuple[int, int] | None:
-    """The span from the end of the opening *tag* to its closing tag, or ``None`` without one.
+def detect_format(content_type: str | None, path: str) -> str | None:
+    """Return ``json``, ``yaml``, ``xml`` or ``html`` for the file, or ``None``.
 
-    A tag that never closes is not an element: ``"<password>"`` is the
-    placeholder a schema example writes. *closings* remembers, per tag
-    name, where the last closing tag was found (or that none follows), so
-    many open tags of one name do not each scan to the end of the text.
+    The content type decides. When it is ``text/plain`` or missing, the
+    ending of *path* (without its query) decides.
     """
-    name = tag.group("name").lower()
-    start = tag.end()
-    known = closings.get(name, -1)
-    if known is None or known >= start:
-        return None if known is None else (start, known)
-    close = re.compile(rf"</{re.escape(name)}\s*>", re.IGNORECASE).search(text, start)
-    closings[name] = close_at = None if close is None else close.start()
-    return None if close_at is None else (start, close_at)
-
-
-def _secret_naming_attr(attrs: dict[str, re.Match[str]]) -> str | None:
-    """Return the secret name a naming attribute gives the element, or ``None``.
-
-    Every naming attribute is checked, in order, so an ``id`` before a
-    ``name="password"`` does not hide it.
-    """
-    for key, attr in attrs.items():
-        if key not in _NAMING_ATTRS:
-            continue
-        value = _attr_value(attr)[1]
-        if is_secret_name(value):
-            return value
+    media = (content_type or "").split(";", 1)[0].strip().lower()
+    if media in _MEDIA_TYPES:
+        return _MEDIA_TYPES[media]
+    for suffix, fmt in _MEDIA_SUFFIXES.items():
+        if media.endswith(suffix):
+            return fmt
+    if media not in _MEDIA_FROM_ENDING:
+        return None
+    name = path.partition("?")[0].lower()
+    for ending, fmt in _ENDINGS.items():
+        if name.endswith(ending):
+            return fmt
     return None
 
 
-def _attr_value(attr: re.Match[str]) -> tuple[str, str]:
-    """Return the group that holds the value of *attr* (quoted or bare) and the value."""
-    group = next(g for g in _ATTR_VALUE_GROUPS if attr.group(g) is not None)
-    return group, attr.group(group)
+def check_api_file(
+    text: str, *, content_type: str | None, path: str, text_rule: TextRule | None = None
+) -> CheckedApiFile:
+    """Parse *text*, replace every secret value, write the copy back.
+
+    *text_rule*, when given, runs on every text value that is not
+    replaced whole; its count joins ``secrets_replaced``. Raises
+    :exc:`ApiFileFormatError` when the format is unknown or the file
+    does not parse. An empty file comes back empty.
+    """
+    if not text:
+        return CheckedApiFile("", 0)
+    fmt = detect_format(content_type, path)
+    if fmt is None:
+        raise ApiFileFormatError(
+            f"{path} has no known format: content type {content_type!r} is not JSON, YAML, "
+            f"XML or HTML and the path ends in none of {sorted(_ENDINGS)}; the file is not "
+            "returned"
+        )
+    try:
+        copy, count = _CHECKERS[fmt](text, path, text_rule)
+    except RecursionError:
+        raise ApiFileFormatError(f"{path} is nested too deeply to check; not returned") from None
+    return CheckedApiFile(copy, count)
 
 
-def _find_elements(text: str) -> list[SecretValue]:
-    hits: list[SecretValue] = []
-    closings: dict[str, int | None] = {}
-    for tag in _TAG_RE.finditer(text):
-        attrs = {
-            attr.group("name").lower(): attr for attr in _ATTR_RE.finditer(tag.group("attrs") or "")
-        }
-        local = tag.group("name").rsplit(":", 1)[-1]
-        named_by_attr = _secret_naming_attr(attrs)
-        if named_by_attr is not None:
-            for key, attr in attrs.items():
-                if key in _VALUE_ATTRS:
-                    group, value = _attr_value(attr)
-                    if not is_stub(value):
-                        offset = tag.start("attrs")
-                        hits.append(
-                            SecretValue(
-                                offset + attr.start(group),
-                                offset + attr.end(group),
-                                "attribute",
-                                attr.group("name"),
-                            )
-                        )
-                    break
+def scrub_query_string(path: str) -> tuple[str, int]:
+    """Replace secret-named values in the query of *path*; return it and the count.
+
+    The names are decoded before the check, so an encoded name cannot hide
+    a secret-named key. A path whose query holds no secret comes back as
+    written.
+    """
+    base, separator, query = path.partition("?")
+    if not separator:
+        return path, 0
+    count = 0
+    pairs: list[tuple[str, str]] = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if is_secret_param_name(key):
+            pairs.append((key, REDACTED))
+            count += 1
+        else:
+            pairs.append((key, value))
+    if not count:
+        return path, 0
+    return f"{base}?{urlencode(pairs, safe='[]:')}", count
+
+
+# ---------------------------------------------------------------------------
+# The walk over parsed values (JSON, YAML, and text that holds JSON)
+# ---------------------------------------------------------------------------
+
+
+def _check_json(text: str, path: str, text_rule: TextRule | None) -> tuple[str, int]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ApiFileFormatError(
+            f"{path} is not well-formed JSON ({exc.msg} at line {exc.lineno}, column "
+            f"{exc.colno}); the file is not returned"
+        ) from None
+    scrubber = Scrubber(text_rule=text_rule)
+    copy = scrubber.tree(data, {})
+    return dump_json(copy), scrubber.count
+
+
+# ---------------------------------------------------------------------------
+# YAML: aliases are handled on the node graph, before the values exist
+# ---------------------------------------------------------------------------
+
+
+def _check_yaml(text: str, path: str, text_rule: TextRule | None) -> tuple[str, int]:
+    loader = _YAML_LOADER(text)
+    try:
+        try:
+            root = loader.get_single_node()
+            if root is None:
+                return "", 0
+            count = _redact_yaml_nodes(root)
+            data = loader.construct_document(root)
+        except RecursionError:
+            raise
+        except Exception as exc:
+            raise ApiFileFormatError(
+                f"{path} is not well-formed YAML ({_yaml_reason(exc)}); the file is not returned"
+            ) from None
+    finally:
+        loader.dispose()
+    scrubber = Scrubber(count, text_rule=text_rule)
+    copy = scrubber.tree(data, {})
+    try:
+        text_out = yaml.dump(copy, Dumper=_YAML_DUMPER, sort_keys=False, allow_unicode=True)
+    except yaml.YAMLError as exc:
+        raise ApiFileFormatError(
+            f"{path} cannot be written back as YAML ({type(exc).__name__}); not returned"
+        ) from None
+    return text_out, scrubber.count
+
+
+def _yaml_reason(exc: Exception) -> str:
+    """The kind of YAML error and where it is, never what the file says there.
+
+    PyYAML's ``problem`` text can quote the file (an unknown tag names the
+    tag), so only the error class and the position are returned. Building
+    the values can fail outside PyYAML's own errors too: a tagged scalar
+    that does not fit its tag (``!!int made-up``, ``!!float``,
+    ``!!timestamp``, ``!!bool``) raises the error of the stdlib call that
+    read it, and that error quotes the value. Such an error has no
+    position, so only its class is returned.
+    """
+    kind = type(exc).__name__
+    if isinstance(exc, yaml.MarkedYAMLError):
+        mark = exc.problem_mark or exc.context_mark
+        if mark is not None:
+            return f"{kind} at line {mark.line + 1}, column {mark.column + 1}"
+    return kind
+
+
+def _redact_yaml_nodes(root: yaml.Node) -> int:
+    """Replace the value nodes of secret-named keys in the node graph.
+
+    An alias points at the same node object as its anchor, so marking
+    the node (and every node inside it) and replacing each place that
+    refers to a marked node covers the anchor and every alias at once.
+    """
+    secret: set[int] = set()
+    _collect_secret_nodes(root, secret, set())
+    if not secret:
+        return 0
+    return _replace_marked_nodes(root, secret, set())
+
+
+def _collect_secret_nodes(node: yaml.Node, secret: set[int], seen: set[int]) -> None:
+    if id(node) in seen:
+        return
+    seen.add(id(node))
+    if isinstance(node, yaml.MappingNode):
+        for key, value in node.value:
+            if isinstance(key, yaml.ScalarNode) and is_secret_param_name(str(key.value)):
+                _mark_subtree(value, secret)
             else:
-                if not tag.group("close"):
-                    hits.extend(_content_hit(text, tag, named_by_attr, closings))
-        elif not tag.group("close") and is_secret_name(local):
-            hits.extend(_content_hit(text, tag, local, closings))
-    return hits
+                _collect_secret_nodes(value, secret, seen)
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            _collect_secret_nodes(item, secret, seen)
 
 
-def _content_hit(
-    text: str, tag: re.Match[str], name: str, closings: dict[str, int | None]
-) -> list[SecretValue]:
-    span = _element_content(text, tag, closings)
-    if span is None:
-        return []
-    start, end = span
-    plain = re.sub(r"<!--.*?-->|<!\[CDATA\[|\]\]>|<[^<>]*>", " ", text[start:end], flags=re.DOTALL)
-    if is_stub(plain):
-        return []
-    lead = len(text[start:end]) - len(text[start:end].lstrip())
-    return [SecretValue(start + lead, end, "element", name)]
+def _mark_subtree(node: yaml.Node, secret: set[int]) -> None:
+    if id(node) in secret:
+        return
+    secret.add(id(node))
+    if isinstance(node, yaml.MappingNode):
+        for key, value in node.value:
+            _mark_subtree(key, secret)
+            _mark_subtree(value, secret)
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            _mark_subtree(item, secret)
 
 
-def _find_pem_keys(text: str) -> list[SecretValue]:
-    return [
-        SecretValue(match.start("body"), match.end("body"), "PEM private key", match.group("kind"))
-        for match in _PEM_RE.finditer(text)
-        if not is_stub(match.group("body"))
-    ]
+def _replace_marked_nodes(node: yaml.Node, secret: set[int], seen: set[int]) -> int:
+    if id(node) in seen:
+        return 0
+    seen.add(id(node))
+    count = 0
+    if isinstance(node, yaml.MappingNode):
+        pairs: list[tuple[yaml.Node, yaml.Node]] = []
+        for key, value in node.value:
+            if id(key) in secret:
+                key, count = _redacted_node(), count + 1
+            else:
+                count += _replace_marked_nodes(key, secret, seen)
+            if id(value) in secret:
+                value, count = _redacted_node(), count + 1
+            else:
+                count += _replace_marked_nodes(value, secret, seen)
+            pairs.append((key, value))
+        node.value = pairs
+    elif isinstance(node, yaml.SequenceNode):
+        items: list[yaml.Node] = []
+        for item in node.value:
+            if id(item) in secret:
+                item, count = _redacted_node(), count + 1
+            else:
+                count += _replace_marked_nodes(item, secret, seen)
+            items.append(item)
+        node.value = items
+    return count
 
 
-# ---------------------------------------------------------------------------
-# Public entry points
-# ---------------------------------------------------------------------------
+def _redacted_node() -> yaml.ScalarNode:
+    return yaml.ScalarNode(_YAML_STR_TAG, REDACTED)
 
 
-def find_api_file_secrets(text: str) -> list[SecretValue]:
-    """Return every secret value in *text*, in order, without overlap.
-
-    A value inside another one (a ``"password"`` key inside a
-    ``<credentials>`` element, a PEM block inside a ``private_key`` block
-    scalar) is reported once, as the outer value.
-    """
-    aliases: set[str] = set()
-    found = _find_pem_keys(text) + _find_elements(text) + _find_key_values(text, aliases)
-    found += _find_anchor_values(text, aliases)
-    hits: list[SecretValue] = []
-    for hit in sorted(found, key=lambda h: (h.start, -h.end)):
-        if hits and hit.start < hits[-1].end:
-            continue
-        hits.append(hit)
-    return hits
-
-
-def scrub_api_file_secrets(text: str) -> tuple[str, int]:
-    """Return *text* with every secret value replaced by :data:`REDACTED`, and the count.
-
-    Every other character stays as it is. A count of zero means the text
-    is the file as served.
-    """
-    hits = find_api_file_secrets(text)
-    if not hits:
-        return text, 0
-    pieces: list[str] = []
-    copied = 0
-    for hit in hits:
-        pieces.append(text[copied : hit.start])
-        pieces.append(REDACTED)
-        copied = hit.end
-    pieces.append(text[copied:])
-    return "".join(pieces), len(hits)
+_CHECKERS: Final[dict[str, Callable[[str, str, TextRule | None], tuple[str, int]]]] = {
+    "json": _check_json,
+    "yaml": _check_yaml,
+    "xml": check_xml,
+    "html": check_html,
+}

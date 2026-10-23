@@ -390,6 +390,7 @@ is how to read the rows; the receipt is how to prove the call ran.
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |
 | `handle_owner_sub_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional handle owner `sub`; the approval resume binds the parking principal so it owns the spill (#3548) |
+| `FullResultCapture` / `full_result_capture_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional capture of the full redacted payload before the reduce; the sensor runner sets it so its rule sees every row (#4117) |
 
 ## Control flow (dispatch path)
 
@@ -403,6 +404,14 @@ is how to read the rows; the receipt is how to prove the call ran.
    the parker's `sub`, so the parker can read the handle that
    `GET /api/v1/approvals/{id}/result` gives it (#3548). See
    [`approvals.md`](approvals.md).
+   A second seam, `full_result_capture_var`, lets one caller read the
+   full redacted payload beside the shortened result (#4117). When it is
+   set, `_reduce_or_error` copies the payload reference into the
+   `FullResultCapture` before the reduce and then reduces as usual, so
+   the wire result, the handle, and the spill do not change. Only the
+   sensor runner sets it (`checks/runner.py`): a sensor rule runs over
+   every row, not over the summary. See
+   [`sensor.md`](sensor.md#the-rule-runs-over-the-full-result-4117).
 2. The reducer validates the captured payload and derives schema, summary,
    and preview directly from raw rows, then `_spill()`:
    - an admission-limit breach returns an unprofiled handle with no spill,
@@ -648,6 +657,7 @@ expected value on purpose and say why in the commit.
 - #3631 — the result field catalog built from every captured row.
 - #3633 — document records and RFC 6901 `path` reads.
 - #3635 — catalog-checked queries and raw-row output.
+- #4117 — the sensor runner checks its rule against the full result.
 - #3636 — the `audit_id` receipt on a completed operation.
 - RFC 6901 (JSON Pointer): https://www.rfc-editor.org/rfc/rfc6901
 - `docs/architecture/jsonflux.md` — engine provenance + full reducer

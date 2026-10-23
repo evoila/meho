@@ -60,7 +60,17 @@ __all__ = [
     "winsrv_localuser_set",
 ]
 
-_LOCALUSER_SELECT: str = "Name, Enabled, Description, FullName, PasswordRequired, LastLogon"
+#: ``PasswordLastSet`` / ``PasswordExpires`` are nullable DateTimes; they are
+#: rendered as ISO 8601 text (``.ToString('o')``, the ``system.os-info`` way)
+#: and stay null when Windows has no value (``PasswordExpires`` is null when
+#: the password never expires).
+_LOCALUSER_SELECT: str = (
+    "Name, Enabled, Description, FullName, PasswordRequired, LastLogon, "
+    "@{Name='PasswordLastSet'; Expression={ if ($_.PasswordLastSet) "
+    "{ $_.PasswordLastSet.ToString('o') } else { $null } }}, "
+    "@{Name='PasswordExpires'; Expression={ if ($_.PasswordExpires) "
+    "{ $_.PasswordExpires.ToString('o') } else { $null } }}"
+)
 
 
 async def winsrv_localuser_list(
@@ -73,7 +83,8 @@ async def winsrv_localuser_list(
 
     Runs ``Get-LocalUser`` and returns ``{rows, total}`` (each row carries
     ``Name`` / ``Enabled`` / ``Description`` / ``FullName`` /
-    ``PasswordRequired`` / ``LastLogon``). Read-only.
+    ``PasswordRequired`` / ``LastLogon`` / ``PasswordLastSet`` /
+    ``PasswordExpires``). Read-only.
     """
     del params  # declared empty in schema; intentionally ignored
     script = (
@@ -218,12 +229,14 @@ LOCALUSER_OPS: tuple[WinsrvOp, ...] = (
     WinsrvOp(
         op_id="winsrv.localuser.list",
         handler_attr="winsrv_localuser_list",
-        summary="List local users via ``Get-LocalUser`` (name/enabled/description).",
+        summary="List local users via ``Get-LocalUser`` (name/enabled/password dates).",
         description=(
             "Runs ``Get-LocalUser`` and returns one row per local account "
             "(Name, Enabled, Description, FullName, PasswordRequired, "
-            "LastLogon). Read-only. No password material is ever read or "
-            "returned."
+            "LastLogon, PasswordLastSet, PasswordExpires — the last two as ISO "
+            "8601 text, null when Windows has no value; PasswordExpires is null "
+            "when the password never expires). Read-only. No password material "
+            "is ever read or returned."
         ),
         parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
         response_schema={
@@ -241,12 +254,14 @@ LOCALUSER_OPS: tuple[WinsrvOp, ...] = (
         requires_approval=False,
         llm_instructions={
             "when_to_use": (
-                "Call to enumerate local user accounts and their enabled "
-                "state. Read-only; no password material. " + SSH_TRANSPORT_NOTE
+                "Call to enumerate local user accounts, their enabled state, and "
+                "when each password was last set / expires. Read-only; no "
+                "password material. " + SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {},
             "output_shape": (
-                "{'rows': [{Name, Enabled, Description, FullName, ...}], 'total': <int>}."
+                "{'rows': [{Name, Enabled, Description, FullName, PasswordLastSet, "
+                "PasswordExpires, ...}], 'total': <int>}."
             ),
         },
     ),

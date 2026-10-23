@@ -112,7 +112,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 import structlog
@@ -134,6 +134,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_operations.licensing_handlers import VropsLicensingHandlers
 from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsCredentialsLoader,
     VcfOperationsTargetLike,
@@ -163,6 +164,28 @@ _VERSIONS_CURRENT_PATH = "/suite-api/api/versions/current"
 _ALERTS_PATH = "/suite-api/api/alerts"
 _RESOURCES_QUERY_PATH = "/suite-api/api/resources/query"
 _RESOURCES_STATS_LATEST_PATH = "/suite-api/api/resources/stats/latest"
+_RESOURCE_KIND_PROPERTIES_PATH = (
+    "/suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/{resourceKindKey}/properties"
+)
+_LICENSING_EDITION_PATH = "/suite-api/api/product/licensing/edition"
+_LICENSING_INFO_PATH = "/suite-api/api/product/licensing/info"
+
+#: How many characters of a licence key stay visible after masking.
+_LICENSE_KEY_VISIBLE_CHARS = 5
+
+
+def _mask_license_key(value: Any) -> Any:
+    """Hide a licence key except its last few characters.
+
+    A short value is hidden in full, so a masked key never shows more than
+    a small tail. A value that is not a non-empty string is returned as is.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if len(value) <= 2 * _LICENSE_KEY_VISIBLE_CHARS:
+        return "*" * len(value)
+    tail = value[-_LICENSE_KEY_VISIBLE_CHARS:]
+    return "*" * (len(value) - _LICENSE_KEY_VISIBLE_CHARS) + tail
 
 
 def _vrops_acquire_payload_builder(
@@ -208,7 +231,7 @@ def _extract_ops_token(resp: httpx.Response) -> str | None:
     return value
 
 
-class VcfOperationsConnector(HttpConnector):
+class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
     """vROps 9.0 REST connector with acquired-token (``OpsToken``) auth.
 
     Per-target session token cached in :attr:`_session_tokens`; per-target
@@ -622,6 +645,68 @@ class VcfOperationsConnector(HttpConnector):
         )
 
         return await api_file_get_impl(self, operator, target, params)
+
+    async def resource_kind_properties(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.resource_kind.properties`` — the properties one resource kind has.
+
+        Reads ``GET /suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/
+        {resourceKindKey}/properties``. Both keys are required by the schema and
+        are percent-encoded into the path, so a key with a space or a slash
+        stays one path segment. A key of ``.`` or ``..`` is refused here as
+        well as by the schema, because it would not stay one path segment.
+        When ``keyContains`` is set, only the rows whose ``key`` or ``name``
+        contains that text (case-insensitive) are kept.
+        """
+        for name in ("adapterKindKey", "resourceKindKey"):
+            if params[name] in (".", ".."):
+                raise ValueError(f"{name} must not be '.' or '..'")
+        path = _RESOURCE_KIND_PROPERTIES_PATH.format(
+            adapterKindKey=quote(params["adapterKindKey"], safe=""),
+            resourceKindKey=quote(params["resourceKindKey"], safe=""),
+        )
+        payload = await self._get_json(target, path, operator=operator)
+        needle = params.get("keyContains")
+        rows = payload.get("resourceTypeAttributes")
+        if needle and isinstance(rows, list):
+            needle = needle.casefold()
+            payload["resourceTypeAttributes"] = [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and any(
+                    needle in value.casefold()
+                    for value in (row.get("key"), row.get("name"))
+                    if isinstance(value, str)
+                )
+            ]
+        return payload
+
+    async def license_info(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.license.info`` — the edition and the licence of this instance.
+
+        Reads ``GET /suite-api/api/product/licensing/edition`` and
+        ``GET /suite-api/api/product/licensing/info`` and returns one object
+        with the fields of both answers. ``licenseKey`` is masked before the
+        result leaves the handler, so no licence key reaches the agent, the
+        audit row or a stored result in clear text.
+        """
+        del params  # schema declares the param object empty
+        edition = await self._get_json(target, _LICENSING_EDITION_PATH, operator=operator)
+        info = await self._get_json(target, _LICENSING_INFO_PATH, operator=operator)
+        result = {**info, **edition}
+        if "licenseKey" in result:
+            result["licenseKey"] = _mask_license_key(result["licenseKey"])
+        return result
 
     async def invalidate_credentials(self, target: VcfOperationsTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396).

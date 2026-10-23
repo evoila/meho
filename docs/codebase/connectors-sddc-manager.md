@@ -216,6 +216,23 @@ credentials) get the same guards through the catalog row's `safety_overlay`
 and the same `_CREDENTIAL_READ_OPS` entry (#4617); see
 [spec-ingestion.md](spec-ingestion.md), "Catalog safety overlay".
 
+**Operation contracts.** The 20 typed ops meet the VMware operation-contract
+check (`backend/tests/test_operation_contracts.py`), with one exception (last item):
+
+- Each `response_schema` names the main fields of the vendor answer
+  (`PageOf<X>` → `elements[]` + `pageMetadata`, or the single object), taken
+  from the SDDC Manager 9.x OpenAPI schemas. It is informational; the reducer
+  does not read it.
+- Each `parameter_schema` describes every field, nested ones too, and carries
+  one example call under `examples` with neutral placeholders (`<domain-id>`).
+- Fields with fixed values carry an `enum`: the `sddc.host.list` `status`
+  filter, the `sddc.task.list` `status` filter and the host `storageType`.
+- `llm_instructions` carries `when_to_call`, `output_shape` and `next_step`;
+  the ops that are not `safe` also carry `preconditions`.
+- The two validation ops (`sddc.host.validate`, `sddc.domain.validate`) stay on
+  the gap list for `requires_approval`: they change nothing on the appliance
+  and run without approval today.
+
 ## Ingested breadth + read enablement
 
 The audited operational reads (domains list + status, clusters, hosts, vcenters,
@@ -287,12 +304,14 @@ resolves). A custom park-time blast-radius preview builder (the vcf-installer
 
 **The governed WLD build sequence** (the caller's responsibility — runbook or
 the meho-automation add-on — not the dispatcher's): `network_pool.create` →
-`host.validate` → `host.commission` → `domain.validate` → `domain.create`. The
-create calls are `202`-async (they return a `Task` in seconds while the build
-runs for hours on the appliance); poll `sddc.task.get` with the returned task id
-and `sddc.domain.status` once the domain object exists, to a terminal state.
+`host.validate` → `host.commission` → `domain.validate` → `domain.create`.
+`network_pool.create` returns the new pool at once; keep its id for
+`host.validate`. `host.commission` and `domain.create` are `202`-async (they
+return a `Task` in seconds while the build runs for hours on the appliance);
+poll `sddc.task.get` with the returned task id and `sddc.domain.status` once
+the domain object exists, to a terminal state.
 
-**NFS-principal shape.** For the Envision estate (and any NFS-principal domain)
+**NFS-principal shape.** For an NFS-principal domain
 the `DomainCreationSpec` uses
 `computeSpec.clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[].nasVolume`
 (`NasVolumeSpec`: `serverName[]` / `path` / `readOnly`) — **not**
@@ -301,8 +320,9 @@ so a well-formed NFS spec validates while a malformed `nasVolume` (the common
 trap of reusing a vSAN spec and swapping only the datastore) is rejected before
 dispatch; the schema stays permissive elsewhere so the full vendor
 `DomainCreationSpec` reaches the wire verbatim. Host commission and validation
-take a JSON **array** of `HostCommissionSpec` (`storageType="NFS"` for the
-estate).
+take a JSON **array** of `HostCommissionSpec`; `storageType` is an `enum` of the
+values the SDDC Manager 9.x spec lists (`VSAN`, `VSAN_ESA`, `VSAN_REMOTE`,
+`VSAN_MAX`, `NFS`, `NFS41`, `VMFS`, `VMFS_FC`, `FC`, `VVOL`).
 
 **JSONFlux.** The `Task` and `Validation` responses are set-shaped (a live
 build's `Task.subTasks[]` runs to hundreds of rows). `task.get` /

@@ -116,6 +116,11 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "parameter_hints": {
             "library_name": "Only narrows a library_item_name lookup to one library.",
             "network_mappings": "{<OVF network name>: <network moid>}.",
+            "deployment_option": (
+                "The OVF deployment option key, for example a size profile. Omit it for "
+                "the OVF default. A key the item does not offer returns "
+                "invalid_reference, with the offered keys in candidates."
+            ),
         },
         "output_shape": (
             "{status: deployed|deploy_failed|deploy_error|invalid_reference|"

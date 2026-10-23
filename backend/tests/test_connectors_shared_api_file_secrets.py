@@ -1,383 +1,686 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the shared whole-file secret scan of API description files.
+"""Tests for the shared API file secret check (``_shared/api_file_secrets.py``).
 
-Every secret here is made up. The refused cases are the ones the
-independent reviewer found passing the earlier per-format checks of the
-API file reads: comment lines before a YAML value, an alias with a
-trailing comment, an XML element, an HTML attribute (quoted or bare), a
-JSON value on the next line inside a script block, a value inside an
-object or a list under a secret-named key, and the rest.
+Every trick the code reviews of the first API file reads found is a test
+here. Each one shows that the secret does not come back: the placeholder
+stands in its place, or the file is refused. All values are made up.
 """
 
 from __future__ import annotations
 
-import pytest
+import json
 
-from meho_backplane.broadcast.events import scrub_secret_named_values
+import pytest
+import yaml
+
 from meho_backplane.connectors._shared.api_file_secrets import (
     REDACTED,
-    find_api_file_secrets,
-    scrub_api_file_secrets,
+    ApiFileFormatError,
+    check_api_file,
+    detect_format,
+    scrub_query_string,
 )
 
-# Built in pieces so that the test file itself holds no key header.
-_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE" + " KEY-----"
-_PEM_FOOTER = "-----END " + "RSA PRIVATE" + " KEY-----"
+_SECRET = "madeup-value-1234"
+_JSON = "application/json"
+_YAML = "application/yaml"
+_XML = "application/xml"
+_HTML = "text/html"
 
-#: ``(text, how many values are replaced, the name of the first one)``.
-#: The secret text is ``madeup`` or ``MADEUP`` in every case, so one
-#: assertion proves it is gone.
-_REFUSED = {
-    # The reviewer's examples on the VCF Operations read.
-    "json-quoted-password": ('{"openapi":"3.0.1","x-login":{"password": "madeup"}}', 1, "password"),
-    "json-quoted-token": ('{"x-session":{"token":"madeup"}}', 1, "token"),
-    "json-prefixed-key": ('{"x-login":{"x-auth-token": "madeup"}}', 1, "x-auth-token"),
-    "json-authorization": ('{"x-headers":{"Authorization": "Basic madeup"}}', 1, "Authorization"),
-    "json-licence-key": ('{"x-licence":{"licenseKey": "MADEUP-MADEUP"}}', 1, "licenseKey"),
-    "yaml-licence-key": ("x-licence:\n  licence_key: MADEUP-MADEUP\n", 1, "licence_key"),
-    "licence-key-in-running-text": (
-        '{"info":{"description":"Send licenseKey: MADEUP-MADEUP-MADEUP"}}',
-        1,
-        "licenseKey",
-    ),
-    "short-password": ('{"password": "madeup"}', 1, "password"),
-    "short-yaml-password": ("x-login:\n  password: madeup\n", 1, "password"),
-    "password-of-words": ('{"password": "madeup made up of words"}', 1, "password"),
-    "yaml-password-of-words-in-a-list": ("x:\n  - password: madeup of words\n", 1, "password"),
-    "yaml-block-scalar": ("x-login:\n  password: |\n    madeup\n", 1, "password"),
-    "yaml-folded-block-of-words": ("password: >-\n  madeup\n  words\n", 1, "password"),
-    "yaml-block-with-comment": ("a:\n  password: | # keep\n    madeup\n", 1, "password"),
-    "yaml-tagged": ("password: !!str madeup\n", 1, "password"),
-    "yaml-tagged-quoted": ('password: !!str "madeup"\n', 1, "password"),
-    "yaml-anchored": ("password: &pw madeup\n", 1, "password"),
-    "yaml-alias-of-an-anchor": (
-        "defaults:\n  pw: &pw madeup\nlogin:\n  password: *pw\n",
-        2,
-        "&pw",
-    ),
-    "yaml-plain-scalar-on-the-next-line": ("login:\n  password:\n    madeup\n", 1, "password"),
-    "yaml-comment-then-next-line": ("password: # set\n  madeup\n", 1, "password"),
-    "yaml-two-comment-lines-before-the-value": (
-        "login:\n  password: # first\n  # second\n  # third\n    madeup\n",
-        1,
-        "password",
-    ),
-    "yaml-alias-with-a-trailing-comment": (
-        "d: &pw madeup\npassword: *pw # use default\n",
-        2,
-        "&pw",
-    ),
-    "xml-element": ("<config><password>madeup</password></config>", 1, "password"),
-    "html-attribute": ('<input type="text" password="madeup">', 1, "password"),
-    "json-value-on-the-next-line-in-a-script": (
-        '<html><script>var cfg = {"password":\n  "madeup"};</script></html>',
-        1,
-        "password",
-    ),
-    "pem-private-key-in-a-yaml-block": (
-        "x-key: |\n  " + _PEM_HEADER + "\n  MADEUP\n  " + _PEM_FOOTER + "\n",
-        1,
-        "RSA PRIVATE KEY",
-    ),
-    "pem-private-key-in-a-json-string": (
-        '{"k": "' + _PEM_HEADER + "\\nMADEUP\\n" + _PEM_FOOTER + '"}',
-        1,
-        "RSA PRIVATE KEY",
-    ),
-    # The reviewer's examples on the Aria Automation read (#4731).
-    "split-json-key-in-an-html-script-block": (
-        '<script type="text/javascript">\n  window.cfg = {\n    "password":\n'
-        '      "madeup"\n  };\n</script>',
-        1,
-        "password",
-    ),
-    "xml-password-element": ("<settings><password>madeup</password></settings>", 1, "password"),
-    "json-apostrophe-in-the-value": ('{"password": "it\'s madeup"}', 1, "password"),
-    "yaml-flow-mapping": ("example: {password: madeup}\n", 1, "password"),
-    "json-value-on-the-next-line": ('{"password":\n"madeup"}', 1, "password"),
-    "yaml-quoted-value-over-two-lines": ('password: "madeup\n  words"\n', 1, "password"),
-    "yaml-value-of-two-words": ("password: madeup words\n", 1, "password"),
-    "yaml-value-continued-on-the-next-line": ("password: madeup\n  words\n", 1, "password"),
-    "xml-comment-inside-the-element": ("<password>made<!-- note -->up</password>", 1, "password"),
-    "xml-cdata-inside-the-element": ("<password><![CDATA[madeup]]></password>", 1, "password"),
-    "xml-child-element-inside": ("<password>made<b>up</b></password>", 1, "password"),
-    "json-escaped-key": ('{"pass\\u0077ord":"madeup"}', 1, "password"),
-    # More shapes a served page can take.
-    "xml-namespaced-element-with-attributes": (
-        '<ns:password type="x">madeup</ns:password>',
-        1,
-        "password",
-    ),
-    "xml-element-value-on-the-next-line": ("<password>\n  madeup\n</password>", 1, "password"),
-    "xml-element-closed-in-another-case": ("<Password>madeup</PASSWORD>", 1, "Password"),
-    "xml-credentials-element-with-children": (
-        "<credentials><user>a</user><password>madeup</password></credentials>",
-        1,
-        "credentials",
-    ),
-    "xml-property-name-and-value": ('<property name="password" value="madeup"/>', 1, "value"),
-    "html-input-name-and-value": (
-        '<form><input name="user"><input type="password" name="password" value="madeup"></form>',
-        1,
-        "value",
-    ),
-    "html-meta-name-and-content": ('<meta name="password" content="madeup">', 1, "content"),
-    "xml-entry-key": ('<entry key="password">madeup</entry>', 1, "password"),
-    "html-attribute-in-single-quotes": ("<x password='madeup'/>", 1, "password"),
-    "html-attribute-unquoted": ("<x password=madeup>", 1, "password"),
-    "script-var": ("var password = 'madeup';", 1, "password"),
-    "script-object": ("const c = {user: 'a', password: 'madeup'};", 1, "password"),
-    "script-object-over-lines": (
-        "const cfg = {\n  user: 'a',\n  password: 'madeup',\n};",
-        1,
-        "password",
-    ),
-    "query-string": ("u=https://h/x?password=madeup&token=madeup2", 2, "password"),
-    "ini-and-properties": ("[login]\npassword=madeup\ndb.password=madeup\n", 2, "password"),
-    "json-space-before-the-colon": ('{"password" : "madeup"}', 1, "password"),
-    "json-colon-on-the-next-line": ('{"password"\n: "madeup"}', 1, "password"),
-    "json-escaped-quote-in-the-value": ('{"password":"a\\"madeup"}', 1, "password"),
-    "json-unterminated-value": ('{"password": "madeup', 1, "password"),
-    "json-single-quoted": ("{'password': 'madeup'}", 1, "password"),
-    "yaml-single-quoted-key-and-value": ("'password': 'madeup'\n", 1, "password"),
-    "yaml-doubled-quote-in-the-value": ("password: 'it''s madeup'\n", 1, "password"),
-    "yaml-complex-key": ("? password\n: madeup\n", 1, "password"),
-    "yaml-anchor-then-tag": ("password: &a !!str madeup\n", 1, "password"),
-    "yaml-binary-block": ("password: !!binary |\n  madeup\n", 1, "password"),
-    "yaml-blank-line-inside-the-block": ("password: >\n\n  madeup\n", 1, "password"),
-    "yaml-comment-inside-the-block": (
-        "login:\n  password:\n    # c\n    madeup\n  user: a\n",
-        1,
-        "password",
-    ),
-    "yaml-alias-in-a-flow-mapping": ("x: {password: *pw}\n", 1, "password"),
-    "yaml-anchor-under-another-key": (
-        "default: &pw madeup\nlogin:\n  password: *pw\n",
-        2,
-        "&pw",
-    ),
-    "yaml-nested-flow-mapping": ("a: {b: 1, c: {password: madeup, d: 2}}\n", 1, "password"),
-    "yaml-secret-id-pair": ("secret_id: madeup\nsecret_name: foo\n", 1, "secret_id"),
-    "yaml-token-final-only": ("tokenUrl: https://x\nx-auth-token: madeup\n", 1, "x-auth-token"),
-    "json-nested-under-credentials": ('{"credentials": {"password": "madeup"}}', 1, "password"),
-    "json-unicode-value": ('{"password": "mädeup"}', 1, "password"),
-    "crlf-lines": ("password: # note\r\n  madeup\r\n", 1, "password"),
-    "prose-with-equals": ("Use password=madeup12 to log in", 1, "password"),
-    "pem-without-an-end-line": (
-        "-----BEGIN EC PRIVATE" + " KEY-----\nMADEUP\n",
-        1,
-        "EC PRIVATE KEY",
-    ),
-    # The reviewer's examples on the second round: a naming attribute
-    # behind another one, and block text that looks like structure.
-    "html-input-id-before-name": (
-        '<input id="login-field" name="password" value="madeup">',
-        1,
-        "value",
-    ),
-    "html-input-name-before-id": (
-        '<input name="password" id="login-field" value="madeup">',
-        1,
-        "value",
-    ),
-    "yaml-block-text-with-a-colon": ("password: |\n  madeup: phrase\n", 1, "password"),
-    "yaml-block-text-with-a-dash": ("password: |\n  - madeup\n", 1, "password"),
-    "yaml-block-text-with-a-hash": ("password: |\n  # madeup\n", 1, "password"),
-    "yaml-block-text-after-a-blank-line": (
-        "login:\n  password: |\n\n    # madeup\n  user: a\n",
-        1,
-        "password",
-    ),
-    # The reviewer's examples on the third round: bare attribute values,
-    # and an object or a list under a secret-named key.
-    "html-input-unquoted-name": ('<input name=password value="madeup">', 1, "value"),
-    "html-input-unquoted-value": ('<input name="password" value=madeup>', 1, "value"),
-    "html-input-both-unquoted": ("<input name=password value=madeup>", 1, "value"),
-    "html-input-unquoted-self-closing": ("<input name=password value=madeup/>", 1, "value"),
-    "json-object-under-credentials": ('{"credentials":{"value":"madeup"}}', 1, "value"),
-    "json-list-under-licence-key": ('{"licenseKey":["MADEUP-MADEUP"]}', 1, "licenseKey"),
-    "yaml-mapping-under-credentials": ("credentials:\n  value: madeup\n", 1, "value"),
-    "yaml-list-under-licence-key": ("licenseKey:\n  - MADEUP-MADEUP\n", 1, "licenseKey"),
-    "json-object-nested-under-credentials": (
-        '{"credentials":{"type":"x","inner":{"value":"madeup"}}}',
-        1,
-        "value",
-    ),
-    "json-secret-key-inside-a-schema-example": (
-        '{"credentials":{"example":{"token":{"value":"madeup"}}}}',
-        1,
-        "value",
-    ),
-    "json-list-of-objects-under-credentials": ('{"credentials":[{"pass":"madeup"}]}', 1, "pass"),
-    "json-value-of-words-under-credentials": (
-        '{"credentials":{"value":"made up of words"}}',
-        1,
-        "value",
-    ),
-    "json-object-on-the-next-line-under-credentials": (
-        '{"credentials":\n  {"value": "madeup"}}',
-        1,
-        "value",
-    ),
-    "yaml-list-of-mappings-under-credentials": (
-        "credentials:\n  - pass: madeup\n",
-        1,
-        "pass",
-    ),
-    "yaml-block-scalar-inside-credentials": ("credentials:\n  value: |\n    madeup\n", 1, "value"),
-    "yaml-hidden-sibling-then-value": (
-        "credentials:\n  - type: x\n    value: madeup\n",
-        1,
-        "value",
-    ),
-    "yaml-anchored-mapping-aliased-by-a-password": (
-        "pw: &pw {value: madeup}\npassword: *pw\n",
-        2,
-        "value",
-    ),
-    "script-object-under-credentials": (
-        "window.cfg = {credentials: {value: 'madeup'}};",
-        1,
-        "value",
-    ),
-}
+
+def _pem(kind: str = "", indent: str = "") -> str:
+    """A made-up private key in PEM form.
+
+    The header is built from parts so that secret scanners do not flag
+    this test file as a key.
+    """
+    label = f"{kind} PRIVATE KEY-----" if kind else "PRIVATE KEY-----"
+    return f"-----BEGIN {label}\n{indent}{_SECRET}\n{indent}-----END {label}"
+
+
+def _check(text: str, content_type: str | None = None, path: str = "/x") -> tuple[str, int]:
+    checked = check_api_file(text, content_type=content_type, path=path)
+    assert _SECRET not in checked.text
+    return checked.text, checked.secrets_replaced
+
+
+# ---------------------------------------------------------------------------
+# Picking the parser
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("text", "count", "first_name"), list(_REFUSED.values()), ids=list(_REFUSED)
-)
-def test_secret_values_are_found_and_replaced(text: str, count: int, first_name: str) -> None:
-    scrubbed, replaced = scrub_api_file_secrets(text)
-    assert replaced == count
-    assert "madeup" not in scrubbed.lower().replace("\n", "").replace(" ", "")
-    assert "MADEUP" not in scrubbed and "mädeup" not in scrubbed
-    assert scrubbed.count(REDACTED) == count
-
-    hits = find_api_file_secrets(text)
-    assert len(hits) == count
-    assert hits[0].name == first_name
-    assert all("made" not in hit.description.lower() for hit in hits)
-
-
-_ACCEPTED = {
-    "schema-property": '{"properties":{"password":{"type":"string","format":"password"}}}',
-    "short-stubs": '{"password": "string", "token": "string", "max_tokens": 12345678901}',
-    "security-scheme": '{"type": "apiKey", "name": "Authorization", "in": "header"}',
-    "security-scheme-name": (
-        '{"securitySchemes": {"apiKey": {"type": "apiKey", "name": "Authorization"}}}'
-    ),
-    "key-with-a-secret-prefix": '{"passwordPolicy": {"minimum": "eight-or-more"}}',
-    "url-names": '{"tokenUrl": "https://login.example/token", "authorizationUrl": "https://a.example/"}',
-    "licence-object": '{"info": {"license": {"name": "Apache 2.0", "url": "https://www.apache.org/"}}}',
-    "placeholders": (
-        '{"password": "<password>", "token": "${TOKEN}", "licenseKey": "{{ licence_key }}"}'
-    ),
-    "empty-and-literals": '{"password": "", "token": null, "secret": true}',
-    "sentence-about-a-password": '{"description": "Use password: must be at least 8 characters"}',
-    "parameter-named-password": '{"name": "password", "in": "formData", "type": "string"}',
-    "yaml-schema": (
-        "components:\n  schemas:\n    Login:\n      properties:\n        password:\n"
-        "          type: string\n        token: {type: string}\n"
-        "        pwd: |\n          <password>\n"
-    ),
-    "yaml-stubs-and-placeholder": (
-        "password: string\ntoken: null\nlicenseKey: <licence key>\nsecret: # set later\n"
-    ),
-    "yaml-comment-tag-and-tagged-stub": (
-        "password:\n  # the schema\n  type: string\ntoken: !!null\nsecret: !!str string\n"
-    ),
-    "yaml-anchored-schema": "- password: &pw\n    type: string\n",
-    "yaml-flow-anchor-and-empty-block": "s: &s {type: string}\ntoken: |\nnext: 1\n",
-    "yaml-block-of-blank-lines": "token: |\n\n\nnext: 1\n",
-    "yaml-list-under-the-key": "password:\n  - type: string\n",
-    "yaml-masked-value": "password: ********\n",
-    "already-replaced": f"password: {REDACTED}\n" + '{"password": "' + REDACTED + '"}',
-    "xsd-element-named-password": '<xs:element name="password" type="xs:string"/>',
-    "html-password-input-without-a-value": '<input type="password" name="password">',
-    "empty-elements": "<password/><password></password><password><!-- none --></password>",
-    "script-with-credentials-flag": "fetch(url, {withCredentials: true});\n",
-    # A collection under a secret-named key that describes an API.
-    "path-item-named-after-a-password": (
-        '{"paths":{"/users/{id}/reset-password":{"post":{"tags":["users"],"summary":"Reset",'
-        '"operationId":"reset_password","parameters":[{"name":"sort","in":"query",'
-        '"schema":{"type":"string","default":"asc","enum":["asc","desc"]}}],'
-        '"responses":{"200":{"description":"Done","content":{"text/html":'
-        '{"schema":{"type":"string"}}}}},"security":[{"OAuth2":["read"]}]}}}}'
-    ),
-    "oauth-password-flow": (
-        "components:\n  securitySchemes:\n    oauth:\n      type: oauth2\n      flows:\n"
-        "        password:\n          tokenUrl: https://login.example/token\n"
-        "          scopes:\n            read: Read access\n"
-    ),
-    "schema-with-an-example": '{"password": {"type": "string", "example": "example-only"}}',
-    "numbers-and-literals-under-credentials": '{"credentials":{"port":8443,"on":true,"n":null}}',
-    "description-block-under-credentials": "credentials:\n  description: |\n    value: words\n",
-    "stubs-in-a-list-under-a-token": "token:\n  - string\n  - <token>\n",
-    "placeholder-in-brackets-under-credentials": (
-        f"credentials:\n  value: {REDACTED}\n  - {REDACTED}\n"
-    ),
-}
-
-
-@pytest.mark.parametrize("text", list(_ACCEPTED.values()), ids=list(_ACCEPTED))
-def test_ordinary_api_description_text_is_left_as_it_is(text: str) -> None:
-    assert find_api_file_secrets(text) == []
-    assert scrub_api_file_secrets(text) == (text, 0)
-
-
-def test_everything_outside_the_values_stays_as_it_is() -> None:
-    text = (
-        '{\n  "openapi": "3.0.1",\n  "x-login": {"user": "svc", "password": "madeup"},\n'
-        '  "x-page": "<settings><password>madeup</password></settings>"\n}\n'
-    )
-    scrubbed, count = scrub_api_file_secrets(text)
-    assert count == 2
-    assert scrubbed == text.replace("madeup", REDACTED)
-
-
-def test_the_placeholder_is_the_one_the_governed_vault_read_writes() -> None:
-    assert scrub_secret_named_values({"password": "madeup"}) == ({"password": REDACTED}, True)
-
-
-def test_a_secret_split_across_a_part_cut_is_found_in_the_whole_text() -> None:
-    head = '{"pad":"' + "a" * 100 + '","pass'
-    tail = 'word": "madeup"}'
-    assert find_api_file_secrets(head) == [] and find_api_file_secrets(tail) == []
-    assert [hit.name for hit in find_api_file_secrets(head + tail)] == ["password"]
-
-
-def test_the_description_names_the_field_and_the_place_never_the_value() -> None:
-    (hit,) = find_api_file_secrets('{"password": "madeup"}')
-    assert hit.description == "the field 'password' at character 14"
-    (hit,) = find_api_file_secrets("<password>madeup</password>")
-    assert hit.description == "the element 'password' at character 10"
-    (hit,) = find_api_file_secrets('<property name="password" value="madeup"/>')
-    assert hit.description == "the attribute 'value' at character 33"
-    (hit,) = find_api_file_secrets('<input id="login-field" name="password" value="madeup">')
-    assert hit.description == "the attribute 'value' at character 47"
-    (hit,) = find_api_file_secrets('{"credentials":{"value":"madeup"}}')
-    assert hit.description == "the field 'value' at character 25"
-    (hit,) = find_api_file_secrets(_PEM_HEADER + "\nMADEUP\n" + _PEM_FOOTER)
-    assert hit.description == "a PEM private key (RSA PRIVATE KEY) at character 32"
-
-
-@pytest.mark.parametrize(
-    "text",
+    ("content_type", "path", "expected"),
     [
-        "<password>" * 20_000,
-        "".join(f"password: *a{i}\n" for i in range(5_000))
-        + "".join(f"x{i}: &a{i} madeup\n" for i in range(5_000)),
-        '"password": "madeup", ' * 20_000,
-        "password:\n" * 20_000,
-        '{"token":' * 20_000 + '"madeup"' + "}" * 20_000,
-        '{"credentials":[' + '"madeup",' * 50_000 + '"madeup"]}',
-        "credentials:\n" + "  - a: madeup\n" * 50_000,
+        ("application/json", "/x", "json"),
+        ("application/vnd.oai.openapi+json; charset=utf-8", "/x", "json"),
+        ("application/yaml", "/x", "yaml"),
+        ("application/x-yaml", "/x", "yaml"),
+        ("text/yaml", "/x", "yaml"),
+        ("application/vnd.oai.openapi+yaml", "/x", "yaml"),
+        ("text/xml; charset=UTF-8", "/x", "xml"),
+        ("application/xml", "/x", "xml"),
+        ("application/wsdl+xml", "/x", "xml"),
+        ("TEXT/HTML; charset=utf-8", "/x", "html"),
+        ("text/plain", "/api/openapi.json?group=a", "json"),
+        ("text/plain", "/api/spec.yaml", "yaml"),
+        ("text/plain", "/api/spec.YML", "yaml"),
+        (None, "/sso/admin.wsdl", "xml"),
+        ("", "/sso/types.xsd", "xml"),
+        (None, "/docs/index.html", "html"),
+        (None, "/docs/index.htm", "html"),
+        ("text/plain", "/docs", None),
+        ("text/plain", "/docs/readme.txt", None),
+        ("application/javascript", "/docs/app.js", None),
+        ("text/css", "/docs/app.css", None),
+        ("application/octet-stream", "/docs/openapi.json", None),
     ],
-    ids=["open-tags", "aliases", "keys", "empty-keys", "nested-objects", "list", "block-list"],
 )
-def test_many_repeated_shapes_scan_in_one_pass(text: str) -> None:
-    # Each shape once scanned a quadratic path; the scan must stay linear.
-    scrubbed, _ = scrub_api_file_secrets(text)
-    assert "madeup" not in scrubbed
+def test_detect_format_uses_the_content_type_then_the_file_ending(
+    content_type: str | None, path: str, expected: str | None
+) -> None:
+    assert detect_format(content_type, path) == expected
+
+
+def test_javascript_and_css_files_are_refused() -> None:
+    for content_type, path in (("application/javascript", "/app.js"), ("text/css", "/a.css")):
+        with pytest.raises(ApiFileFormatError, match="no known format"):
+            check_api_file(f'var password = "{_SECRET}";', content_type=content_type, path=path)
+
+
+def test_plain_text_without_a_known_ending_is_never_read_as_yaml() -> None:
+    with pytest.raises(ApiFileFormatError, match="no known format"):
+        check_api_file(f"password: {_SECRET}", content_type="text/plain", path="/docs")
+
+
+def test_a_file_that_does_not_parse_is_refused_without_its_text() -> None:
+    cases = [
+        ('{"password": "' + _SECRET, _JSON, "not well-formed JSON"),
+        (f"password: [{_SECRET}\n", _YAML, "not well-formed YAML"),
+        (f"x: !{_SECRET} 1\n", _YAML, r"YAML \(ConstructorError at line 1, column 4\)"),
+        (f"x: !!int {_SECRET}\n", _YAML, r"YAML \(ValueError\)"),
+        (f"x: !!float {_SECRET}\n", _YAML, r"YAML \(ValueError\)"),
+        (f"x: !!timestamp {_SECRET}\n", _YAML, r"YAML \(\w+Error\)"),
+        (f"x: !!bool {_SECRET}\n", _YAML, r"YAML \(KeyError\)"),
+        (f"<a><password>{_SECRET}</a>", _XML, "not well-formed XML"),
+        (f'<!DOCTYPE a [<!ENTITY x "{_SECRET}">]><a>&x;</a>', _XML, "refuses to parse"),
+    ]
+    for text, content_type, reason in cases:
+        with pytest.raises(ApiFileFormatError, match=reason) as excinfo:
+            check_api_file(text, content_type=content_type, path="/x")
+        assert _SECRET not in str(excinfo.value)
+
+
+def test_an_empty_file_comes_back_empty_whatever_its_type() -> None:
+    assert _check("", "application/javascript") == ("", 0)
+
+
+# ---------------------------------------------------------------------------
+# JSON
+# ---------------------------------------------------------------------------
+
+
+def test_clean_openapi_json_comes_back_with_zero_replacements() -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Example", "version": "1.0"},
+        "paths": {"/items": {"get": {"summary": "List items", "responses": {"200": {}}}}},
+    }
+    text, count = _check(json.dumps(spec, indent=2), _JSON)
+    assert count == 0
+    assert json.loads(text) == spec
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ({"credentials": {"value": _SECRET}}, {"credentials": REDACTED}),
+        ({"credentials": {"default": _SECRET}}, {"credentials": REDACTED}),
+        ({"licenseKey": [_SECRET]}, {"licenseKey": REDACTED}),
+        ({"example": {"password": "abc"}}, {"example": {"password": REDACTED}}),
+        ({"items": [{"a": 1}, {"token": _SECRET}]}, {"items": [{"a": 1}, {"token": REDACTED}]}),
+        ({"password": "ab"}, {"password": REDACTED}),
+        ({"password": "a b c"}, {"password": REDACTED}),
+        ({"password": "it's"}, {"password": REDACTED}),
+        ({"password": 12345678}, {"password": REDACTED}),
+        ({"password": None}, {"password": REDACTED}),
+        ({"properties": {"password": {"type": "string"}}}, {"properties": {"password": REDACTED}}),
+    ],
+)
+def test_json_value_under_a_secret_name_is_replaced_at_any_depth(
+    document: dict[str, object], expected: dict[str, object]
+) -> None:
+    text, count = _check(json.dumps(document), _JSON)
+    assert json.loads(text) == expected
+    assert count == 1
+
+
+def test_json_escaped_key_is_read_as_the_key_it_spells() -> None:
+    text, count = _check('{"p\\u0061ssword": "' + _SECRET + '"}', _JSON)
+    assert json.loads(text) == {"password": REDACTED}
+    assert count == 1
+
+
+def test_json_text_value_that_is_itself_json_is_checked() -> None:
+    sample = json.dumps({"user": "admin", "password": _SECRET})
+    text, count = _check(json.dumps({"description": sample}), _JSON)
+    assert json.loads(json.loads(text)["description"]) == {"user": "admin", "password": REDACTED}
+    assert count == 1
+
+
+def test_json_text_value_that_is_json_with_a_repeated_key_comes_back_parsed() -> None:
+    sample = '{"a": {"password": "' + _SECRET + '"}, "a": {}}'
+    text, count = _check(json.dumps({"description": sample}), _JSON)
+    assert json.loads(text) == {"description": '{"a":{}}'}
+    assert count == 0
+
+
+def test_json_pem_private_key_under_any_name_is_replaced() -> None:
+    pem = _pem("RSA")
+    text, count = _check(json.dumps({"example": pem}), _JSON)
+    assert json.loads(text) == {"example": REDACTED}
+    assert count == 1
+
+
+def test_json_repeated_keys_and_formatting_do_not_come_back() -> None:
+    text, count = _check('{"a": 1, "a": 2,\n\n "b": [1,\n 2]}', _JSON)
+    assert text == '{"a":2,"b":[1,2]}'
+    assert count == 0
+
+
+def test_json_count_adds_up_over_the_whole_file() -> None:
+    document = {"a": {"password": "x"}, "b": [{"token": "y"}, {"apiKey": "z"}], "c": {"d": 1}}
+    _, count = _check(json.dumps(document), _JSON)
+    assert count == 3
+
+
+# ---------------------------------------------------------------------------
+# YAML
+# ---------------------------------------------------------------------------
+
+
+def test_clean_openapi_yaml_comes_back_with_zero_replacements() -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Example", "version": "1.0"},
+        "paths": {"/items": {"get": {"summary": "List items"}}},
+    }
+    text, count = _check(yaml.safe_dump(spec, sort_keys=False), _YAML)
+    assert count == 0
+    assert yaml.safe_load(text) == spec
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param(f"password: # note\n  {_SECRET}\n", id="value-on-the-next-line"),
+        pytest.param(f"password:\n  # one\n  # two\n  {_SECRET}\n", id="after-two-comment-lines"),
+        pytest.param(f"password: |\n  {_SECRET}\n", id="block-scalar"),
+        pytest.param(f"password: >\n  {_SECRET}\n", id="folded-scalar"),
+        pytest.param(f"password: !!str {_SECRET}\n", id="tag"),
+        pytest.param(f"password: made\n  {_SECRET}\n", id="value-over-two-lines"),
+        pytest.param(f"password: null {_SECRET}\n", id="null-then-value"),
+        pytest.param(f"password: made,{_SECRET}\n", id="comma"),
+        pytest.param(f'password: "{_SECRET}"\n', id="double-quoted"),
+        pytest.param(f"password: '{_SECRET}'\n", id="single-quoted"),
+        pytest.param(f"password: ' {_SECRET} '\n", id="spaces-inside"),
+        pytest.param(f"password: it's-{_SECRET}\n", id="apostrophe"),
+        pytest.param("password: ab\n", id="short"),
+        pytest.param(f"{{password: {_SECRET}}}\n", id="flow-mapping"),
+    ],
+)
+def test_yaml_value_under_a_secret_name_is_replaced_however_written(document: str) -> None:
+    text, count = _check(document, _YAML)
+    assert yaml.safe_load(text) == {"password": REDACTED}
+    assert count == 1
+
+
+def test_yaml_list_with_the_dash_at_the_key_indentation_is_replaced() -> None:
+    text, count = _check(f"licenseKey:\n- {_SECRET}\n- other\n", _YAML)
+    assert yaml.safe_load(text) == {"licenseKey": REDACTED}
+    assert count == 1
+
+
+def test_yaml_secret_inside_an_object_or_a_list_is_replaced() -> None:
+    document = (
+        f"example: {{password: {_SECRET}}}\n"
+        f"credentials:\n  value: {_SECRET}\n"
+        f"servers:\n  - url: https://example.invalid\n    token: {_SECRET}\n"
+    )
+    text, count = _check(document, _YAML)
+    assert yaml.safe_load(text) == {
+        "example": {"password": REDACTED},
+        "credentials": REDACTED,
+        "servers": [{"url": "https://example.invalid", "token": REDACTED}],
+    }
+    assert count == 3
+
+
+def test_yaml_alias_to_a_secret_value_is_replaced_at_the_anchor_too() -> None:
+    text, count = _check(f"defaults: &pw {_SECRET}\npassword: *pw\n", _YAML)
+    assert yaml.safe_load(text) == {"defaults": REDACTED, "password": REDACTED}
+    assert count == 2
+
+
+def test_yaml_anchor_on_the_secret_value_is_replaced_at_every_alias() -> None:
+    text, count = _check(f"password: &pw {_SECRET}\nhint: *pw\nnested:\n  again: *pw\n", _YAML)
+    assert yaml.safe_load(text) == {
+        "password": REDACTED,
+        "hint": REDACTED,
+        "nested": {"again": REDACTED},
+    }
+    assert count == 3
+
+
+def test_yaml_merge_key_cannot_bring_the_secret_back() -> None:
+    text, count = _check(f"base: &b\n  password: {_SECRET}\nderived:\n  <<: *b\n", _YAML)
+    assert yaml.safe_load(text) == {
+        "base": {"password": REDACTED},
+        "derived": {"password": REDACTED},
+    }
+    assert count == 1
+
+
+def test_yaml_comment_does_not_come_back() -> None:
+    text, count = _check(f"a: 1 # the password is {_SECRET}\nb: 2\n", _YAML)
+    assert text == "a: 1\nb: 2\n"
+    assert count == 0
+
+
+def test_yaml_text_value_that_is_json_and_pem_key_are_checked() -> None:
+    document = 'sample: \'{"password": "' + _SECRET + f"\"}}'\ncert: |\n  {_pem(indent='  ')}\n"
+    text, count = _check(document, _YAML)
+    loaded = yaml.safe_load(text)
+    assert json.loads(loaded["sample"]) == {"password": REDACTED}
+    assert loaded["cert"] == REDACTED
+    assert count == 2
+
+
+def test_yaml_empty_document_comes_back_empty() -> None:
+    assert _check("# only a comment\n", _YAML) == ("", 0)
+
+
+# ---------------------------------------------------------------------------
+# XML
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (f"<r><password>{_SECRET}</password></r>", f"<r><password>{REDACTED}</password></r>"),
+        (
+            f"<r><password>made<!-- note -->{_SECRET}</password></r>",
+            f"<r><password>{REDACTED}</password></r>",
+        ),
+        (
+            f"<r><password>made<b>{_SECRET}</b>up</password></r>",
+            f"<r><password>{REDACTED}</password></r>",
+        ),
+        (f'<r><a password="{_SECRET}"/></r>', f'<r><a password="{REDACTED}"/></r>'),
+        (
+            f'<r><property name="password" value="{_SECRET}"/></r>',
+            f'<r><property name="password" value="{REDACTED}"/></r>',
+        ),
+        (
+            f'<r><entry key="licenseKey">{_SECRET}</entry></r>',
+            f'<r><entry key="licenseKey">{REDACTED}</entry></r>',
+        ),
+        (f"<r><token>{_SECRET}</token></r>", f"<r><token>{REDACTED}</token></r>"),
+    ],
+)
+def test_xml_secret_element_or_attribute_is_replaced(document: str, expected: str) -> None:
+    text, count = _check(document, _XML)
+    assert text == expected
+    assert count == 1
+
+
+def test_xml_comment_and_cdata_markers_do_not_come_back() -> None:
+    text, count = _check(f"<r><!-- password {_SECRET} --><a><![CDATA[1 < 2]]></a></r>", _XML)
+    assert text == "<r><a>1 &lt; 2</a></r>"
+    assert count == 0
+
+
+def test_xml_text_that_is_json_or_a_pem_key_is_checked() -> None:
+    document = f'<r><sample>{{"password": "{_SECRET}"}}</sample><cert>{_pem("EC")}</cert></r>'
+    text, count = _check(document, _XML)
+    assert text == f'<r><sample>{{"password":"{REDACTED}"}}</sample><cert>{REDACTED}</cert></r>'
+    assert count == 2
+
+
+_WSDL = """<?xml version="1.0" encoding="UTF-8"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:example:admin" targetNamespace="urn:example:admin">
+  <wsdl:import namespace="urn:example:admin:messages" location="admin-messages.wsdl"/>
+  <wsdl:types>
+    <xsd:schema targetNamespace="urn:example:admin">
+      <xsd:element name="password" type="xsd:string"/>
+      <xsd:element name="user" type="tns:User" minOccurs="0"/>
+    </xsd:schema>
+  </wsdl:types>
+</wsdl:definitions>
+"""
+
+
+def test_wsdl_keeps_its_namespace_prefixes_and_schema_elements() -> None:
+    text, count = _check(_WSDL, "text/xml")
+    assert count == 1
+    assert text.startswith(
+        '<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" '
+        'xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:example:admin" '
+        'targetNamespace="urn:example:admin">'
+    )
+    assert f'<xsd:element name="password" type="{REDACTED}"/>' in text
+    assert '<xsd:element name="user" type="tns:User" minOccurs="0"/>' in text
+    assert "<?xml" not in text
+
+
+def test_xml_default_namespace_is_declared_where_it_starts_and_ends() -> None:
+    document = '<a xmlns="urn:one"><b xmlns=""><c/></b><d xml:lang="en">t</d></a>'
+    text, count = _check(document, _XML)
+    assert text == document
+    assert count == 0
+
+
+def test_xml_prefix_bound_again_in_a_child_keeps_its_meaning_there() -> None:
+    document = '<a xmlns:p="urn:one"><p:x/><b xmlns:p="urn:two"><p:y type="p:t"/></b><p:z/></a>'
+    text, count = _check(document, _XML)
+    assert text == document
+    assert count == 0
+
+
+def test_xml_attribute_prefix_declared_on_a_child_is_declared_there() -> None:
+    document = '<root xmlns="urn:one"><child xmlns:p="urn:one" p:attr="1"/></root>'
+    text, count = _check(document, _XML)
+    assert text == document
+    assert count == 0
+
+
+def test_xml_element_named_secret_by_its_type_attribute_loses_its_other_values() -> None:
+    document = f'<r><field type="password" label="Secret" value="{_SECRET}">{_SECRET}</field></r>'
+    text, count = _check(document, _XML)
+    assert text == (
+        f'<r><field type="password" label="{REDACTED}" value="{REDACTED}">{REDACTED}</field></r>'
+    )
+    assert count == 3
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "count"),
+    [
+        pytest.param(
+            f'<r><field name="password" id="abc" value="{_SECRET}"/></r>',
+            f'<r><field name="password" id="{REDACTED}" value="{REDACTED}"/></r>',
+            2,
+            id="id-after-name",
+        ),
+        pytest.param(
+            f'<r><field id="{_SECRET}" name="password"/></r>',
+            f'<r><field id="{REDACTED}" name="password"/></r>',
+            1,
+            id="id-before-name",
+        ),
+        pytest.param(
+            f'<r><field type="password" name="api_key" key="{_SECRET}"/></r>',
+            f'<r><field type="password" name="api_key" key="{REDACTED}"/></r>',
+            1,
+            id="two-labels",
+        ),
+        pytest.param(
+            f'<r><password name="{_SECRET}" type="string"/></r>',
+            f'<r><password name="{REDACTED}" type="{REDACTED}"/></r>',
+            2,
+            id="secret-named-element",
+        ),
+    ],
+)
+def test_xml_only_the_label_of_a_secret_element_stays(
+    document: str, expected: str, count: int
+) -> None:
+    text, replaced = _check(document, _XML)
+    assert text == expected
+    assert replaced == count
+
+
+def test_xml_special_characters_are_written_back_escaped() -> None:
+    document = '<a title="1 &gt; 0 &amp; &quot;q&quot;">a &lt; b &amp; c</a>'
+    text, count = _check(document, _XML)
+    assert text == '<a title="1 &gt; 0 &amp; &quot;q&quot;">a &lt; b &amp; c</a>'
+    assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# HTML
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param(f'<input name="password" value="{_SECRET}">', id="quoted"),
+        pytest.param(f"<input name=password value={_SECRET}>", id="unquoted"),
+        pytest.param(f'<INPUT NAME="Password" VALUE="{_SECRET}">', id="upper-case"),
+        pytest.param(f'<input name="password" value="{_SECRET}" />', id="self-closing"),
+        pytest.param(f'<form><input type="password" value="{_SECRET}"></form>', id="type"),
+        pytest.param(f'<div password="{_SECRET}"></div>', id="attribute"),
+        pytest.param(f'<meta name="csrf-token" content="{_SECRET}">', id="meta"),
+        pytest.param(f'<a licenseKey="{_SECRET}"></a>', id="camel-case-attribute"),
+        pytest.param(f'<input name="licenseKey" value="{_SECRET}">', id="camel-case-name"),
+    ],
+)
+def test_html_secret_attribute_value_is_replaced(document: str) -> None:
+    text, count = _check(document, _HTML)
+    assert f'="{REDACTED}"' in text
+    assert count == 1
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "count"),
+    [
+        pytest.param(
+            f'<input id="login-field" name="password" value="{_SECRET}">',
+            f'<input id="{REDACTED}" name="password" value="{REDACTED}">',
+            2,
+            id="after-id",
+        ),
+        pytest.param(
+            f'<input name="password" id="{_SECRET}">',
+            f'<input name="password" id="{REDACTED}">',
+            1,
+            id="only-id",
+        ),
+        pytest.param(
+            f'<input name="password" name="normal" value="{_SECRET}">',
+            f'<input name="password" name="{REDACTED}" value="{REDACTED}">',
+            2,
+            id="repeated",
+        ),
+        pytest.param(
+            f'<input value="{_SECRET}" name="normal" name="password">',
+            f'<input value="{REDACTED}" name="{REDACTED}" name="password">',
+            2,
+            id="repeated-last",
+        ),
+        pytest.param(
+            f'<input type="password" name="api_key" id="{_SECRET}" disabled>',
+            f'<input type="password" name="api_key" id="{REDACTED}" disabled>',
+            1,
+            id="two-labels",
+        ),
+        pytest.param(
+            f'<password name="{_SECRET}" type="text">x</password>',
+            f'<password name="{REDACTED}" type="{REDACTED}">{REDACTED}</password>',
+            3,
+            id="secret-named-element",
+        ),
+    ],
+)
+def test_html_only_the_label_of_a_secret_element_stays(
+    document: str, expected: str, count: int
+) -> None:
+    text, replaced = _check(document, _HTML)
+    assert text == expected
+    assert replaced == count
+
+
+def test_html_camel_case_element_is_secret_although_the_parser_lowercases_it() -> None:
+    text, count = _check(
+        f"<licenseKey>{_SECRET}</licenseKey><clientSecret>{_SECRET}</clientSecret>", _HTML
+    )
+    assert text == f"<licensekey>{REDACTED}</licensekey><clientsecret>{REDACTED}</clientsecret>"
+    assert count == 2
+
+
+def test_html_gt_inside_a_quoted_attribute_does_not_end_the_tag() -> None:
+    text, count = _check(f'<input title="1 > 0" name="password" value="{_SECRET}">', _HTML)
+    assert text == f'<input title="{REDACTED}" name="password" value="{REDACTED}">'
+    assert count == 2
+
+
+def test_html_secret_element_content_is_replaced() -> None:
+    text, count = _check(f"<p>x</p><password>made <b>{_SECRET}</b></password>", _HTML)
+    assert text == f"<p>x</p><password>{REDACTED}</password>"
+    assert count == 1
+
+
+def test_html_script_with_json_on_the_next_line_is_checked_as_json() -> None:
+    document = f'<script type="application/json">\n{{"password":\n"{_SECRET}"}}\n</script>'
+    text, count = _check(document, _HTML)
+    assert text == f'<script type="application/json">{{"password":"{REDACTED}"}}</script>'
+    assert count == 1
+
+
+def test_html_script_that_is_not_json_does_not_come_back() -> None:
+    document = f'<script>var password = "{_SECRET}";</script><script src="app.js"></script>'
+    text, count = _check(document, _HTML)
+    assert text == f'<script>{REDACTED}</script><script src="app.js"></script>'
+    assert count == 1
+
+
+def test_html_pre_block_with_json_is_checked() -> None:
+    text, count = _check(f'<pre>{{"password": "{_SECRET}"}}</pre>', _HTML)
+    assert text == f'<pre>{{"password":"{REDACTED}"}}</pre>'
+    assert count == 1
+
+
+def test_html_comment_does_not_come_back() -> None:
+    text, count = _check(f"<p>a<!-- password: {_SECRET} --></p>", _HTML)
+    assert text == "<p>a</p>"
+    assert count == 0
+
+
+def test_html_free_text_stays_as_written_and_escaped() -> None:
+    document = "<!DOCTYPE html><html><body><p>a &amp; b &lt; c</p><br><hr/></body></html>"
+    text, count = _check(document, _HTML)
+    assert text == "<!DOCTYPE html><html><body><p>a &amp; b &lt; c</p><br><hr></body></html>"
+    assert count == 0
+
+
+def test_html_pem_private_key_in_text_is_replaced() -> None:
+    document = f"<pre>{_pem()}</pre>"
+    text, count = _check(document, _HTML)
+    assert text == f"<pre>{REDACTED}</pre>"
+    assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Redirect paths
+# ---------------------------------------------------------------------------
+
+
+def test_query_string_secret_is_replaced_also_with_an_encoded_name() -> None:
+    assert scrub_query_string(f"/x?license%4Bey={_SECRET}&group=a") == (
+        f"/x?licenseKey={REDACTED}&group=a",
+        1,
+    )
+    assert scrub_query_string(f"/x?token={_SECRET}") == (f"/x?token={REDACTED}", 1)
+
+
+def test_query_string_without_a_secret_comes_back_as_written() -> None:
+    assert scrub_query_string("/x?group=a%20b&apiVersion=2") == ("/x?group=a%20b&apiVersion=2", 0)
+    assert scrub_query_string("/x") == ("/x", 0)
+
+
+# ---------------------------------------------------------------------------
+# The caller's text rule
+# ---------------------------------------------------------------------------
+
+
+def _mark_rule(value: str) -> tuple[str, int]:
+    """A text rule for the tests: a value that holds ``TOKEN`` becomes ``[MARK]``."""
+    if "TOKEN" not in value:
+        return value, 0
+    return value.replace("TOKEN", "[MARK]"), value.count("TOKEN")
+
+
+def test_text_rule_runs_on_parsed_values_and_the_yaml_keeps_its_types() -> None:
+    document = (
+        "info:\n"
+        "  note: Bearer TOKEN\n"
+        '  description: "line one\\nAuthorization: TOKEN"\n'
+        "  count: 3\n"
+        "  flag: true\n"
+        "responses:\n"
+        "  200:\n"
+        "    description: TOKEN ok\n"
+    )
+    checked = check_api_file(document, content_type=_YAML, path="/x", text_rule=_mark_rule)
+    assert checked.secrets_replaced == 3
+    assert "TOKEN" not in checked.text
+    assert yaml.safe_load(checked.text) == {
+        "info": {
+            "note": "Bearer [MARK]",
+            "description": "line one\nAuthorization: [MARK]",
+            "count": 3,
+            "flag": True,
+        },
+        "responses": {200: {"description": "[MARK] ok"}},
+    }
+
+
+def test_text_rule_does_not_run_on_a_value_replaced_whole() -> None:
+    document = f"password: TOKEN\nkey: |\n  {_pem(indent='  ')}\n  TOKEN\nnote: TOKEN\n"
+    checked = check_api_file(document, content_type=_YAML, path="/x", text_rule=_mark_rule)
+    assert yaml.safe_load(checked.text) == {
+        "password": REDACTED,
+        "key": REDACTED,
+        "note": "[MARK]",
+    }
+    assert checked.secrets_replaced == 3
+
+
+def test_text_rule_runs_inside_json_held_in_a_text_value() -> None:
+    document = json.dumps({"example": '{"header": "Bearer TOKEN", "n": 1}', "plain": "TOKEN"})
+    checked = check_api_file(document, content_type=_JSON, path="/x", text_rule=_mark_rule)
+    assert json.loads(checked.text) == {
+        "example": '{"header":"Bearer [MARK]","n":1}',
+        "plain": "[MARK]",
+    }
+    assert checked.secrets_replaced == 2
+
+
+def test_text_rule_runs_on_xml_and_html_text_and_attributes() -> None:
+    xml = check_api_file(
+        '<a note="TOKEN &amp; more"><b>Bearer TOKEN</b></a>',
+        content_type=_XML,
+        path="/x",
+        text_rule=_mark_rule,
+    )
+    assert xml.text == '<a note="[MARK] &amp; more"><b>Bearer [MARK]</b></a>'
+    assert xml.secrets_replaced == 2
+    html = check_api_file(
+        '<p title="TOKEN">Bearer TOKEN &lt; 1</p>',
+        content_type=_HTML,
+        path="/x",
+        text_rule=_mark_rule,
+    )
+    assert html.text == '<p title="[MARK]">Bearer [MARK] &lt; 1</p>'
+    assert html.secrets_replaced == 2
+
+
+def test_without_a_text_rule_text_values_come_back_as_they_are() -> None:
+    text, count = _check("note: Bearer TOKEN\n", _YAML)
+    assert (text, count) == ("note: Bearer TOKEN\n", 0)

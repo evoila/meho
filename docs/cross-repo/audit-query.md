@@ -59,7 +59,7 @@ If you are auditing someone else's activity:
 meho audit query --principal damir --since 24h
 ```
 
-`--principal` is a partial-match on `audit_log.operator_sub` (case-insensitive `ILIKE %damir%`). The pre-canned `my-recent` infers the principal from your own JWT subject and never accepts a `--principal` override — it always reports on you.
+`--principal` is a partial, case-insensitive match on the user id (`audit_log.operator_sub`) **or** on the name the row stores (`principal_name`), so `--principal damir` finds the rows of a person named Damir as well as rows whose user id contains `damir`. The pre-canned `my-recent` matches your own JWT subject exactly and never accepts a `--principal` override — it always reports on you.
 
 ### "All denied operations across the tenant in the last week"
 

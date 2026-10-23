@@ -64,6 +64,9 @@ from meho_backplane.connectors.sddc_manager import (
     SddcManagerConnector,
     register_sddc_typed_operations,
 )
+from meho_backplane.connectors.sddc_manager.typed_ops import (
+    SDDC_TYPED_WHEN_TO_USE_BY_GROUP,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
@@ -243,7 +246,24 @@ def test_write_ops_registration_shape() -> None:
         assert op.requires_approval is approval, op_id
         assert op.group_key == "sddc-lifecycle", op_id
         assert "write" in op.tags, op_id
-        assert op.llm_instructions and op.llm_instructions["when_to_use"], op_id
+        assert op.llm_instructions and op.llm_instructions["when_to_call"], op_id
+
+
+def test_lifecycle_group_text_polls_a_task_only_after_async_writes() -> None:
+    """The lifecycle group sends callers to sddc.task.get only after a 202 write.
+
+    sddc.network_pool.create returns the finished pool, not a Task, so the
+    group text tells callers to keep the pool id for sddc.host.validate.
+    Only host commission and domain create return a task to poll.
+    """
+    text = SDDC_TYPED_WHEN_TO_USE_BY_GROUP["sddc-lifecycle"]
+    assert "Creating a pool returns the pool" in text
+    assert "keep its id for sddc.host.validate" in text
+    assert "Adding hosts and creating a domain return a task" in text
+    pool_create = next(o for o in SDDC_TYPED_OPS if o.op_id == SDDC_NETWORK_POOL_CREATE_OP_ID)
+    assert pool_create.llm_instructions is not None
+    assert "sddc.task.get" not in pool_create.llm_instructions["next_step"]
+    assert "sddc.host.validate" in pool_create.llm_instructions["next_step"]
 
 
 def test_write_op_handlers_resolve_to_connector_bound_methods() -> None:

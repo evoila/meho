@@ -63,11 +63,12 @@ passwordless-create:
 
 A unit test (`test_no_op_exposes_a_secret_value_field` +
 `test_no_op_id_is_password_reset`) pins this at the schema level: no op declares a
-`password` / `secret` / `credential` parameter, and no op id contains
-"password". This is the "password-bearing params provably redacted" acceptance
+`password` / `secret` / `credential` parameter, and no op id is a password reset
+or password set. The one op id that mentions a password is the
+`msad.user.password-expiry` read below; it returns no password or hash. This is the "password-bearing params provably redacted" acceptance
 criterion, satisfied the winsrv way — there are none, proven at the schema level.
 
-## Op surface (27 ops across five groups)
+## Op surface (28 ops across five groups)
 
 Safety tier is a reach decision per the Initiative #3259 satellite table: reads =
 `safe` (ride satellite runners); recoverable writes = `caution` (satellite-
@@ -85,6 +86,7 @@ central-dial / on-site only).
 | `msad.user.list` | safe | no | `Get-ADUser -Filter *` (capped) |
 | `msad.user.get` | safe | no | `Get-ADUser -Identity` |
 | `msad.user.search` | safe | no | `Get-ADUser -Filter {name/sam -like}` (capped) |
+| `msad.user.password-expiry` | safe | no | `Get-ADUser -Identity -Properties pwdLastSet, PasswordNeverExpires, PasswordExpired, msDS-UserPasswordExpiryTimeComputed` |
 | `msad.user.create` | caution | no | `New-ADUser` (disabled, no password) |
 | `msad.user.set` | caution | no | `Set-ADUser` (never a password) |
 | `msad.user.enable` | caution | no | `Enable-ADAccount` |
@@ -127,13 +129,87 @@ the domain, but its account object is retained (re-enable restores trust). A ful
 object removal is the separate `dangerous` `computer.delete`. This keeps the
 `caution` (recoverable) / `dangerous` (destructive) split honest.
 
+## Password age and expiry (`msad.user.password-expiry`)
+
+MEHO logs in to Windows hosts over SSH with a domain account. Windows warns a
+person who signs in that the password is about to expire. It does not warn a
+service account that logs in over SSH; the login just stops working one day (by
+default a domain password expires after 42 days). This read shows when that will
+happen, for one account at a time. It is `safe`, needs no approval, changes
+nothing, and returns no password or hash.
+
+One parameter: `identity` (the same as `msad.user.get`: sAMAccountName, DN, GUID
+or SID). The script runs `Get-ADUser -Identity <id> -Properties pwdLastSet,
+PasswordNeverExpires, PasswordExpired, msDS-UserPasswordExpiryTimeComputed` and
+returns the raw numbers; the date math runs in Python
+(`ops_password.py::password_expiry_fields`) so the special values below are
+unit-tested. The domain controller computes
+`msDS-UserPasswordExpiryTimeComputed` itself, with the password rule that applies
+to the account (the domain rule or a fine-grained password policy). Service
+accounts are normal user objects, so the read covers them too.
+
+It returns one flat object (not a list), so a sensor can point at it:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `identity` | string | The identity you asked for. |
+| `sam_account_name` | string | The account name. |
+| `enabled` | bool | The account is enabled. |
+| `password_last_set` | string or null | When the password was last set (ISO 8601 UTC). Null when it must be changed at the next logon. |
+| `password_age_days` | integer or null | Whole days since then. |
+| `password_never_expires` | bool | The "password never expires" flag is set. |
+| `password_expired` | bool | The password has expired. |
+| `password_expires_at` | string or null | When the password expires (ISO 8601 UTC). Null when it never expires. |
+| `days_to_expiry` | integer or null | Whole days left, rounded down. Below 0 once expired. Null when it never expires. |
+
+Both timestamps are FILETIME values (100-nanosecond intervals since 1601-01-01
+UTC). The computed attribute has two special values
+([MS-ADTS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/f9e9b7e2-c7ac-4db6-ba38-71d9696981e9)),
+checked before any date conversion — `0x7FFFFFFFFFFFFFFF` lies after the year
+9999 and would overflow a naive conversion:
+
+| Value | Meaning | `password_expires_at` | `days_to_expiry` |
+| --- | --- | --- | --- |
+| `0x7FFFFFFFFFFFFFFF` | Never expires: the flag is set, a smart card is required, or the rule has no maximum age. | null | null |
+| `0` | `pwdLastSet` is 0: the password must be changed at the next logon. | null | 0 |
+
+### Sensor pin recipe: warn before a login password expires
+
+Add one sensor for each account that MEHO logs in with. Point a threshold
+assertion at `$.days_to_expiry` (the same field name `net.tls_inspect` uses for
+certificates). Use it only for an account whose password can expire: for a
+"never expires" account `days_to_expiry` is null and the sensor shows `unknown`.
+
+```json
+{"select": {"path": "$.days_to_expiry"},
+ "compare": {"type": "threshold", "op": "lt", "degraded": 7, "critical": 1}}
+```
+
+```bash
+meho sensor create --name ad-login-password-expiry \
+  --connector-id msad-ssh-2022.x --op-id msad.user.password-expiry \
+  --target '{"name": "<domain controller target>"}' \
+  --params '{"identity": "<account name>"}' \
+  --assertion '{"select":{"path":"$.days_to_expiry"},"compare":{"type":"threshold","op":"lt","degraded":7,"critical":1}}' \
+  --cadence-kind interval --interval-seconds 21600 --severity critical
+```
+
+- 7 days or more left: `ok`.
+- Fewer than 7 days left: `degraded` (a warning).
+- Less than 1 day left, or already expired: `critical`.
+- The check runs every 6 hours.
+
+Member servers have the same gap for local accounts: `winsrv.localuser.list` rows
+carry `PasswordLastSet` and `PasswordExpires` as ISO 8601 text (see
+`docs/codebase/connectors-winsrv.md`).
+
 ## Key types
 
 - **`MsadConnector`** (`connector.py`) — `SshConnector` subclass. Class
   attributes: `product="msad"`, `version="2022.x"`, `impl_id="msad-ssh"`,
   `POWERSHELL_EXECUTABLE="powershell"`, `POWERSHELL_SCRIPT_PREFIX` (the
   `$ProgressPreference` guard), `POWERSHELL_LOG_EVENT="msad_pwsh_executed"`. Ships
-  `fingerprint`, `probe`, `about`, the 27 bound-method op shims,
+  `fingerprint`, `probe`, `about`, the 28 bound-method op shims,
   `register_operations`, and the operator-less `execute` dispatcher shim.
 - **Shared pwsh transport** (`_shared/pwsh.py`, #3260) — `pwsh_run`,
   `ps_single_quote` (the `shlex.quote` analogue), `encode_pwsh_command`,
@@ -143,8 +219,9 @@ object removal is the separate `dangerous` `computer.delete`. This keeps the
   (curated per-group blurbs, registration fails closed without them),
   `normalise_json_rows`, `validate_limit`, and `ad_list_read` (the shared
   read-under-`'Stop'` helper that builds the `{rows, total}` envelope).
-- **Per-domain op modules** — `ops_domain.py`, `ops_users.py`, `ops_groups.py`,
-  `ops_computers.py`, `ops_ou.py`.
+- **Per-domain op modules** — `ops_domain.py`, `ops_users.py`, `ops_password.py`
+  (the password-expiry read and its date math), `ops_groups.py`, `ops_computers.py`,
+  `ops_ou.py`.
 - **Registration** (`__init__.py`) — two-phase, mirroring winsrv: synchronous
   `register_connector_v2` at import time (versioned triple + wildcard row); async
   `register_msad_typed_operations` queued onto the lifespan registrar list. No v1
@@ -267,11 +344,12 @@ credential material in any script; and destructive ops on the `dangerous` +
 (`_StubTarget`, `_completed_process`, `patch.object(connector, "_run_command",
 AsyncMock(...))`); assertions decode the `-EncodedCommand` base64 back to the
 script text. Covers the transport (`powershell` + `$ProgressPreference`), the
-registry-triple round-trip, the 27-op surface + safety-tier + group-coverage
+registry-triple round-trip, the 28-op surface + safety-tier + group-coverage
 invariants, every op group's script construction, the injection-safety escape on
 every parameterized script (identity / member / search query / OU DN —
 single-quote doubling), the `user.search` script-block filter form, the
-`limit`/`-ResultSetSize` validation, the secret-hygiene invariant (no
+`limit`/`-ResultSetSize` validation, the password-expiry date math (both special
+values, an expired password, missing values), the secret-hygiene invariant (no
 secret-value parameter on any op; no `password-reset` op; passwordless create),
 the `about` fingerprint mapping, and the full six-reason probe matrix. The global
 `test_flight_recorder_typed_spans.py` conformance sweep lists `msad-ssh` in

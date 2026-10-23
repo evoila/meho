@@ -49,6 +49,7 @@ __all__ = [
     "DEFAULT_PASSWORD_MOUNT",
     "entity_ref",
     "find_by_field",
+    "find_by_odata_name",
     "find_global_role",
     "find_org",
     "find_org_user",
@@ -221,12 +222,35 @@ async def find_project(
     name: str,
 ) -> dict[str, Any] | None:
     """The tenant project named *name*, or ``None`` (tenant plane)."""
+    return await find_by_odata_name(connector, target, operator, TENANT_PROJECTS_PATH, name)
+
+
+async def find_by_odata_name(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    path: str,
+    name: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    match: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """The row of the tenant list *path* named *name* (case-insensitive), or ``None``.
+
+    Asks with an OData ``name eq`` filter and checks the name again here, so
+    an appliance that ignores the filter still gives the right answer.
+    *match* names more fields the row must carry with exactly these values
+    (``projectId`` scopes a deployment name to one project); they join the
+    filter with ``and`` and are checked here too.
+    """
+    clauses = [f"name eq {_odata_literal(name)}"]
+    clauses.extend(f"{field} eq {_odata_literal(value)}" for field, value in (match or {}).items())
     payload = await connector._request_json(
         target,
         "GET",
-        TENANT_PROJECTS_PATH,
+        path,
         operator=operator,
-        params={"$filter": f"name eq {_odata_literal(name)}"},
+        params={**(params or {}), "$filter": " and ".join(clauses)},
     )
     content = payload.get("content")
     wanted = name.casefold()
@@ -235,6 +259,7 @@ async def find_project(
             isinstance(row, dict)
             and isinstance(row.get("name"), str)
             and row["name"].casefold() == wanted
+            and all(row.get(field) == value for field, value in (match or {}).items())
         ):
             return row
     return None

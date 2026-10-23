@@ -104,7 +104,10 @@ connector-related release-notes line.
   runs the script; on the machine's console the option is required. The
   script stops before any change when the admin's own SSH address is
   outside the range. It turns firewalld or ufw off only after the MEHO
-  rules are loaded. Port 80 of RKE2's Traefik now redirects to 443.
+  rules are loaded. Port 80 of RKE2's Traefik now redirects to 443. The
+  file also has the input, forward and output chains of the MEHO
+  appliance. On a form-2 machine their policy is accept and they have no
+  drop rule, so they change nothing. The appliance build sets them to drop.
 
 ## [0.36.0] - 2026-10-23
 

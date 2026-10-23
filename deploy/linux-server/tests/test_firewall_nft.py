@@ -8,6 +8,11 @@ checks it ("nft -c", check only) and loads it, in a new user and network
 namespace (unshare --map-root-user --net). The namespace has its own empty
 firewall, so the machine that runs the tests keeps its own rules.
 
+One test also loads the variant of the MEHO appliance, where the chains
+input, forward and output have policy drop, and opens a TCP connection over
+lo with it. Programs on the machine (the kubelet, the API server, etcd)
+reach each other that way.
+
 The tests need nft, unshare, user namespaces, and a kernel with the
 nftables parts the rules use (ct and fib for the inet family). Without them
 the tests are skipped, and the reason says what is missing. The CI job sets
@@ -19,6 +24,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +33,7 @@ from harness import InstallTestCase
 
 RULES = "/etc/meho/firewall.nft"
 REQUIRED = os.environ.get("MEHO_REQUIRE_NFT_CHECK") == "1"
+APPLIANCE_CHAINS = ("input", "forward", "output")
 
 # The smallest rule set with the kernel parts the MEHO rules need.
 PROBE = """\
@@ -52,6 +59,27 @@ table ip6 filter {
         type filter hook forward priority filter; policy accept;
     }
 }
+"""
+
+# Runs in the namespace: turn lo on (a new network namespace starts with lo
+# down; SIOCSIFFLAGS from netdevice(7)), then open a TCP connection to
+# 127.0.0.1 and send two bytes. A dropped packet makes the connect time out.
+LOOPBACK_CONNECTION = """\
+import fcntl
+import socket
+import struct
+
+SIOCGIFFLAGS, SIOCSIFFLAGS, IFF_UP = 0x8913, 0x8914, 0x1
+with socket.socket() as control:
+    request = struct.pack("16sH22x", b"lo", 0)
+    flags = struct.unpack_from("16sH", fcntl.ioctl(control, SIOCGIFFLAGS, request))[1]
+    fcntl.ioctl(control, SIOCSIFFLAGS, struct.pack("16sH22x", b"lo", flags | IFF_UP))
+with socket.create_server(("127.0.0.1", 0)) as server:
+    with socket.create_connection(server.getsockname(), timeout=5) as client:
+        peer, _ = server.accept()
+        with peer:
+            client.sendall(b"ok")
+            assert peer.recv(2) == b"ok"
 """
 
 
@@ -138,7 +166,30 @@ class NftCheckTests(InstallTestCase):
             ["table ip filter", "table ip6 filter", "table inet meho", "table inet meho {"], tables
         )
         self.assertIn("type filter hook prerouting priority mangle; policy drop;", result.stdout)
+        for hook in APPLIANCE_CHAINS:
+            self.assertIn(f"type filter hook {hook} priority filter; policy accept;", result.stdout)
         self.assertIn("elements = { 10.0.0.0/24 }", result.stdout)
+
+    def test_the_appliance_variant_loads_and_lets_lo_through(self) -> None:
+        rules = self.rules_file("--admin-network", "10.0.0.0/24").read_text()
+        self.assertEqual(len(APPLIANCE_CHAINS), rules.count("policy accept;"))
+        appliance = self.machine.home / "appliance.nft"
+        appliance.write_text(rules.replace("policy accept;", "policy drop;"))
+
+        result = in_namespace(
+            "sh",
+            "-c",
+            'nft -c -f "$1" && nft -f "$1" && "$2" -I -c "$3" && nft list table inet meho',
+            "sh",
+            str(appliance),
+            sys.executable,
+            LOOPBACK_CONNECTION,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("type filter hook prerouting priority mangle; policy drop;", result.stdout)
+        for hook in APPLIANCE_CHAINS:
+            self.assertIn(f"type filter hook {hook} priority filter; policy drop;", result.stdout)
 
 
 if __name__ == "__main__":

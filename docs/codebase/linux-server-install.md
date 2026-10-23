@@ -151,10 +151,10 @@ customer's security team. `render_firewall_rules` writes it.
   CNI `portmap` plugin turns a host port into a destination NAT in the
   prerouting hook, at priority `dstnat` (-100). After that NAT, a packet
   for port 443 of the machine is a packet for the Traefik pod, so a rule
-  in the input hook would never see it. The only chain of the table is a
-  `filter` chain in the prerouting hook at priority `mangle` (-150). It
-  runs after connection tracking (-200) and before the NAT, so it sees the
-  original port. Its policy is `drop`.
+  in the input hook would never see it. The chain that filters is the
+  `filter` chain `prerouting`, in the prerouting hook at priority `mangle`
+  (-150). It runs after connection tracking (-200) and before the NAT, so
+  it sees the original port. Its policy is `drop`.
 - **The machine's own traffic passes first.** Packets on `lo`, on Calico's
   pod interfaces (`cali*`) and on flannel's VXLAN interface (`flannel*`)
   come from this machine or its pods. The chain accepts them before any
@@ -175,7 +175,43 @@ customer's security team. `render_firewall_rules` writes it.
   discovery, router advertisements and multicast listener queries; the
   replies of DHCP servers (UDP 67 to 68, and 547 to 546). The last rule
   is a `counter` of the packets that the policy drops.
-- **Outgoing traffic** is not filtered. The table has no output chain.
+- **Outgoing traffic** is not filtered on a form-2 machine. The chain
+  `output` has policy `accept` and no drop rule (see the next point).
+- **Three chains for the appliance.** The table also has base chains on
+  the `input`, `forward` and `output` hooks, at priority `filter` (0).
+  They hold the rules of the MEHO appliance for traffic to the machine,
+  through it and from it. On a form-2 machine their policy is `accept`
+  and they have no drop rule, so they change nothing. The appliance build
+  sets the three policies to `drop` and changes nothing else (form-2
+  design, section 2, "One file for both forms"; ADR 0009 decision 1). The
+  CIS Ubuntu 24.04 rules 4.3.5 to 4.3.8 look for a base chain with policy
+  `drop` on each of these three hooks. They do not look at the prerouting
+  hook. The design of 2026-10-22 named the `forward` and `output` chains.
+  The `input` chain was added in the review of #4823, so that the
+  appliance passes 4.3.5 and 4.3.8 too.
+  - `input`: the same accept rules as the chain `prerouting`, without
+    `fib daddr type local`, because the input hook sees only packets for
+    this machine. The console on 80 and 443 does not normally come here:
+    the host-port NAT sends it to the Traefik pod, through the `forward`
+    hook. The kubelet, the API server and etcd reach each other over `lo`,
+    also when they use the machine's own address, because Linux sends a
+    packet for a local address through `lo`. Pods reach them over their
+    `cali*` interfaces. The drop rules of `prerouting` (`ct state invalid`
+    and the forged pod and service sources) stay in `prerouting` only.
+  - `forward`: connections already set up, packets that the port
+    forwarding rewrote (`ct status dnat`), and the pod and service ranges
+    as source or destination.
+  - `output`: `lo` and the cluster interfaces (for example the kubelet's
+    health checks), connections already set up, the pod and service
+    ranges, DNS (UDP and TCP 53), NTP (UDP 123), the requests of the DHCP
+    clients, ping, IPv6 neighbour discovery, and the multicast listener
+    reports of MLD versions 1 and 2. Linux sends version 2 by default
+    (`force_mld_version` is 0), so the chain accepts
+    `mld2-listener-report` next to the design's list. The rule for the
+    customer's log server comes with `meho-host log-server` (#4739).
+  - The loopback drop rules that CIS rule 4.3.6 also looks for (packets
+    from `127.0.0.0/8` or `::1` on a network card) are not in the file.
+    They can come with the appliance build.
 - **The customer's own rules.** The header of the file says where they
   go: accept rules in the chain `prerouting`, before its last rule
   (`counter`), then a reload. The form-2 design (section 8) tells the
@@ -321,9 +357,14 @@ machine for each test:
 
 `tests/test_firewall.py` covers the admin network check, the three
 firewall files, the order of step 2, firewalld and ufw, the port list and
-`firewall_state`. `tests/test_firewall_nft.py` checks the written rules
+`firewall_state`. It also checks that the chains `input`, `forward` and
+`output` have policy `accept` and no drop rule, and that the chain `input`
+accepts the same traffic as the chain `prerouting`, so the two cannot
+drift apart. `tests/test_firewall_nft.py` checks the written rules
 file with the real `nft` and the real kernel: `nft -c -f`, and a load
-twice next to stand-in tables of kube-proxy and Canal. It runs in a new
+twice next to stand-in tables of kube-proxy and Canal. It also loads the
+appliance variant, with the three policies set to `drop`, and opens a TCP
+connection over `lo` with it. It runs in a new
 user and network namespace (`unshare --map-root-user --net`), so the
 machine's own firewall stays as it is. It needs `nft`, user namespaces and
 a kernel with `nft_ct` and `nft_fib_inet`, and it is skipped without them.
@@ -380,7 +421,11 @@ this folder are checked by the same job.
   machine: `ss -tulpn`, a port scan from inside and outside the admin
   network, the console in a browser, the redirect of port 80, and every
   pod Ready. It records the real port list, and the closed list in
-  `lib/firewall.sh` follows it.
+  `lib/firewall.sh` follows it. It also sets the policies of the chains
+  `input`, `forward` and `output` to `drop`, as the appliance does, and
+  checks the CIS rules 4.3.5 to 4.3.8 with Canal running. The kernel test
+  here proves only that nft loads that variant and that traffic over `lo`
+  passes it.
 - **A customer's `nftables.service`.** Its stop command (and on RHEL its
   reload) runs `flush ruleset`, which removes the MEHO table and the rules
   of kube-proxy and Canal. RKE2 keeps running until its next start, which
@@ -399,7 +444,10 @@ Firewall:
 
 - `nft(8)`: priority names (`mangle` -150, `dstnat` -100), `-c`/`--check`,
   `fib`, `ct`: https://www.netfilter.org/projects/nftables/manpage.html
-- nftables wiki, Netfilter hooks (conntrack at -200 before mangle):
+- nftables wiki, Netfilter hooks (conntrack at -200 before mangle; a
+  packet for this machine passes prerouting and input, a forwarded packet
+  prerouting, forward and postrouting, a local packet output and
+  postrouting):
   https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks
 - nftables wiki, base chains (an accept goes on to later base chains of
   the same hook; a drop is final):
@@ -423,6 +471,13 @@ Firewall:
 - sudo `env_reset` and its default list of kept variables (sudo 1.9.15p5,
   `plugins/sudoers/env.c`); Ubuntu 24.04's `/etc/sudoers`:
   https://git.launchpad.net/ubuntu/+source/sudo/tree/debian/etc/sudoers?h=ubuntu/noble-updates
+- CIS rules 4.3.5 and 4.3.8 as the SCAP Security Guide checks them (base
+  chains on the hooks input, forward and output at priority 0, and policy
+  `drop` on each):
+  https://docs.datadoghq.com/security/default_rules/xccdf-org-ssgproject-content-rule-set-nftables-base-chain,
+  https://docs.datadoghq.com/security/default_rules/xccdf-org-ssgproject-content-rule-nftables-ensure-default-deny-policy
+- Linux `force_mld_version` (default 0: MLD version 2, with a fallback to
+  version 1): https://docs.kernel.org/networking/ip-sysctl.html
 
 Install:
 

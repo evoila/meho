@@ -198,15 +198,17 @@ check_join_firewall() {
 }
 
 # render_firewall_rules <SSH range, address or ""> <note> <pod range> <service range>:
-# print the MEHO nftables file. The nft manual (nft(8), "CHAINS") and the
-# nftables wiki ("Netfilter hooks") give the priorities: conntrack -200,
-# mangle -150, dstnat -100. RKE2's port forwarding to Traefik is a
-# destination NAT at dstnat, so the chain at mangle sees the packet first,
-# with its original port, and connection tracking has already run.
+# print the MEHO nftables file. The chain prerouting filters the traffic
+# from the network. The chains input, forward and output carry the rules of
+# the MEHO appliance for traffic to the machine, through it and from it
+# (form-2 design, section 2, "One file for both forms"; ADR 0009 decision 1).
+# On a form-2 machine their policy is accept and they have no drop rule, so
+# they let every packet pass. The appliance build sets the three policies to
+# drop: the CIS Ubuntu 24.04 rules 4.3.5 to 4.3.8 look for a base chain with
+# policy drop on each of the hooks input, forward and output.
 render_firewall_rules() {
-    local ssh_allowed=$1 note=$2 cluster_cidr=$3 service_cidr=$4 interface open_ports elements=""
+    local ssh_allowed=$1 note=$2 cluster_cidr=$3 service_cidr=$4 elements=""
     local open_text closed_text
-    open_ports=$(join_by ', ' "${FIREWALL_OPEN_TCP_PORTS[@]}")
     open_text=$(join_by ' and ' "${FIREWALL_OPEN_TCP_PORTS[@]}")
     closed_text="$(join_by ', ' "${FIREWALL_CLOSED_TCP_PORTS[@]}") and $(join_by ', ' "${FIREWALL_CLOSED_UDP_PORTS[@]}")/UDP"
     if [[ -n $ssh_allowed ]]; then
@@ -229,6 +231,12 @@ render_firewall_rules() {
 # Everything else from another machine is dropped, RKE2's own ports too:
 # TCP ${closed_text}.
 #
+# The chain prerouting does this filtering. The chains input, forward and
+# output hold the rules of the MEHO appliance, for traffic to this machine,
+# through it and from it. The appliance sets their policy to drop. Here
+# their policy is accept and they have no drop rule, so every packet passes
+# them.
+#
 # The file changes only the table inet meho. It never runs "flush ruleset",
 # because RKE2's network layer (Canal) and kube-proxy keep their own rules
 # in other tables.
@@ -249,6 +257,52 @@ table inet meho {
         type ipv4_addr
         flags interval${elements}
     }
+EOF
+    render_prerouting_chain "$cluster_cidr" "$service_cidr"
+    render_input_chain
+    render_forward_chain "$cluster_cidr" "$service_cidr"
+    render_output_chain "$cluster_cidr" "$service_cidr"
+    printf '}\n'
+}
+
+# render_interface_rules <iifname or oifname>: accept the interfaces of the
+# machine's own Kubernetes (FIREWALL_CLUSTER_INTERFACES).
+render_interface_rules() {
+    local match=$1 interface
+    for interface in "${FIREWALL_CLUSTER_INTERFACES[@]}"; do
+        printf '        %s "%s" accept\n' "$match" "$interface"
+    done
+}
+
+# render_inbound_accept_rules <match for "this machine", or "">: the accept
+# rules for traffic from another machine to this one. The chains prerouting
+# and input both print them, so the input chain of the appliance lets in
+# the same traffic as the chain prerouting.
+render_inbound_accept_rules() {
+    local local_match=$1 open_ports
+    open_ports=$(join_by ', ' "${FIREWALL_OPEN_TCP_PORTS[@]}")
+    cat <<EOF
+        ${local_match}tcp dport { ${open_ports} } accept
+        ${local_match}ip saddr @admin_network tcp dport ${FIREWALL_SSH_PORT} accept
+        ${local_match}ip saddr @admin_network icmp type echo-request accept
+
+        # IPv6 neighbour discovery and router advertisements, and the
+        # replies of DHCP servers.
+        icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept
+        udp sport 67 udp dport 68 accept
+        udp sport 547 udp dport 546 accept
+EOF
+}
+
+# render_prerouting_chain <pod range> <service range>: the chain that filters
+# the traffic from the network. The nft manual (nft(8), "CHAINS") and the
+# nftables wiki ("Netfilter hooks") give the priorities: conntrack -200,
+# mangle -150, dstnat -100. RKE2's port forwarding to Traefik is a
+# destination NAT at dstnat, so the chain at mangle sees the packet first,
+# with its original port, and connection tracking has already run.
+render_prerouting_chain() {
+    local cluster_cidr=$1 service_cidr=$2
+    cat <<EOF
 
     # RKE2's Traefik takes ports 80 and 443 through a host port: a
     # destination NAT (priority dstnat, -100) turns a packet for port 443 of
@@ -259,9 +313,7 @@ table inet meho {
 
         # The machine itself and its pods.
 EOF
-    for interface in "${FIREWALL_CLUSTER_INTERFACES[@]}"; do
-        printf '        iifname "%s" accept\n' "$interface"
-    done
+    render_interface_rules iifname
     cat <<EOF
 
         # From here on, the packet came in on a network card.
@@ -272,20 +324,117 @@ EOF
         ip saddr { ${cluster_cidr}, ${service_cidr} } drop
 
         # "fib daddr type local": the packet is for this machine, not passed on.
-        fib daddr type local tcp dport { ${open_ports} } accept
-        fib daddr type local ip saddr @admin_network tcp dport ${FIREWALL_SSH_PORT} accept
-        fib daddr type local ip saddr @admin_network icmp type echo-request accept
-
-        # IPv6 neighbour discovery and router advertisements, and the
-        # replies of DHCP servers.
-        icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept
-        udp sport 67 udp dport 68 accept
-        udp sport 547 udp dport 546 accept
+EOF
+    render_inbound_accept_rules "fib daddr type local "
+    cat <<EOF
 
         # Counts the packets that the policy drops.
         counter
     }
+EOF
 }
+
+# render_input_chain: the chain for traffic to this machine, after the port
+# forwarding. It accepts what the chain prerouting accepts, without
+# "fib daddr type local": the input hook sees only packets for this machine.
+# Programs on the machine (the kubelet, the API server, etcd) reach each
+# other over lo, also when they use the machine's own address. Pods reach
+# them over their cali interfaces.
+render_input_chain() {
+    cat <<EOF
+
+    # Traffic to this machine, after the port forwarding. The console on 80
+    # and 443 normally does not come here: the port forwarding sends it to
+    # the Traefik pod, through the chain forward. The appliance sets the
+    # policy to drop. Here it is accept: the chain prerouting already filters.
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        # The machine itself and its pods. Programs on this machine reach
+        # each other over lo, also through the machine's own address.
+EOF
+    render_interface_rules iifname
+    cat <<EOF
+
+        ct state established,related accept
+
+        # The same rules as in the chain prerouting.
+EOF
+    render_inbound_accept_rules ""
+    cat <<EOF
+
+        # Counts the packets that reach the policy.
+        counter
+    }
+EOF
+}
+
+# render_forward_chain <pod range> <service range>: the chain for traffic
+# through this machine: between the pods, from the pods to the network, and
+# the console on its way to the Traefik pod.
+render_forward_chain() {
+    local cluster_cidr=$1 service_cidr=$2
+    cat <<EOF
+
+    # Traffic through this machine: to and from its pods. The appliance sets
+    # the policy to drop. Here it is accept.
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+
+        ct state established,related accept
+
+        # Packets that the port forwarding rewrote: the console on 80 and
+        # 443, on its way to the Traefik pod.
+        ct status dnat accept
+
+        # The pod and service ranges.
+        ip saddr { ${cluster_cidr}, ${service_cidr} } accept
+        ip daddr { ${cluster_cidr}, ${service_cidr} } accept
+
+        # Counts the packets that reach the policy.
+        counter
+    }
+EOF
+}
+
+# render_output_chain <pod range> <service range>: the chain for traffic
+# from this machine. Linux sends version 2 of the multicast listener
+# reports (MLD) by default (force_mld_version 0, ip-sysctl), so both report
+# types pass: without them, a switch that follows MLD may stop passing the
+# IPv6 neighbour discovery to this machine.
+render_output_chain() {
+    local cluster_cidr=$1 service_cidr=$2
+    cat <<EOF
+
+    # Traffic from this machine. The appliance sets the policy to drop. Here
+    # it is accept, because the OS and its other software belong to the
+    # customer (ADR 0009 decision 2).
+    chain output {
+        type filter hook output priority filter; policy accept;
+
+        # The machine itself and its pods, for example the health checks of
+        # the kubelet.
+EOF
+    render_interface_rules oifname
+    cat <<EOF
+
+        ct state established,related accept
+        ip daddr { ${cluster_cidr}, ${service_cidr} } accept
+
+        # DNS, NTP, the requests of the DHCP clients, and ping.
+        udp dport { 53, 123 } accept
+        tcp dport 53 accept
+        udp sport 68 udp dport 67 accept
+        udp sport 546 udp dport 547 accept
+        icmp type echo-request accept
+
+        # IPv6 neighbour discovery, and the multicast listener reports of
+        # MLD versions 1 and 2.
+        icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-report, mld2-listener-report } accept
+
+        # Counts the packets that reach the policy.
+        counter
+    }
 EOF
 }
 

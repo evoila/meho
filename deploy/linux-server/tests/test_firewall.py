@@ -49,6 +49,13 @@ def admin_network_set(rules: str) -> str:
     return rules[start : rules.index("    }\n", start) + 6]
 
 
+def chain_rules(rules: str, chain: str) -> list[str]:
+    """The lines of a chain without comments and blank lines, the type line first."""
+    start = rules.index(f"    chain {chain} {{\n")
+    body = rules[start : rules.index("\n    }\n", start)].splitlines()[1:]
+    return [line.strip() for line in body if line.strip() and not line.strip().startswith("#")]
+
+
 class FirewallTestCase(InstallTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -142,6 +149,45 @@ class RulesFileTests(FirewallTestCase):
 
         self.assert_succeeds(result)
         self.assertIn("ip saddr { 172.30.0.0/16, 172.31.0.0/20 } drop", self.host_text(RULES))
+
+    def test_the_appliance_chains_let_every_packet_pass_on_form_2(self) -> None:
+        self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
+
+        rules = self.host_text(RULES)
+        for hook in ("input", "forward", "output"):
+            with self.subTest(chain=hook):
+                lines = chain_rules(rules, hook)
+                self.assertEqual(
+                    f"type filter hook {hook} priority filter; policy accept;", lines[0]
+                )
+                self.assertEqual([], [line for line in lines[1:] if "drop" in line])
+                self.assertEqual("counter", lines[-1])
+
+    def test_the_input_chain_accepts_what_the_chain_prerouting_accepts(self) -> None:
+        self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
+
+        rules = self.host_text(RULES)
+        prerouting = [
+            line.removeprefix("fib daddr type local ")
+            for line in chain_rules(rules, "prerouting")
+            if line.endswith(" accept")
+        ]
+        accepted = [line for line in chain_rules(rules, "input") if line.endswith(" accept")]
+        self.assertEqual(prerouting, accepted)
+        self.assertNotIn("fib", "\n".join(accepted))
+
+    def test_the_forward_and_output_chains_accept_the_pod_and_service_ranges(self) -> None:
+        result = self.machine.run(
+            *ADMIN_NETWORK, "--cluster-cidr", "172.30.0.0/16", "--service-cidr", "172.31.0.0/20"
+        )
+
+        self.assert_succeeds(result)
+        rules = self.host_text(RULES)
+        ranges = "{ 172.30.0.0/16, 172.31.0.0/20 }"
+        self.assertIn(f"ip saddr {ranges} accept", chain_rules(rules, "forward"))
+        self.assertIn(f"ip daddr {ranges} accept", chain_rules(rules, "forward"))
+        self.assertIn("ct status dnat accept", chain_rules(rules, "forward"))
+        self.assertIn(f"ip daddr {ranges} accept", chain_rules(rules, "output"))
 
     def test_the_admin_network_set_for_each_choice(self) -> None:
         cases = {
@@ -505,8 +551,10 @@ class PortListTests(FirewallTestCase):
     def test_the_rules_open_exactly_the_open_ports_of_the_list(self) -> None:
         self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
 
+        # The chain prerouting decides what answers from another machine. The
+        # chain input repeats its accept rules (see RulesFileTests).
         tcp_rules = [
-            line.strip() for line in self.host_text(RULES).splitlines() if "tcp dport" in line
+            line for line in chain_rules(self.host_text(RULES), "prerouting") if "tcp dport" in line
         ]
         self.assertEqual(
             [

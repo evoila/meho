@@ -64,6 +64,7 @@ from meho_backplane.connectors.vmware_rest.composites._guest_perf_response_schem
     PERF_ENTITY_METRIC_SCHEMA,
     PERF_METRIC_ID_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.snapshot_tree import SNAPSHOT_ROW_SCHEMA
 
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
@@ -173,6 +174,11 @@ __all__ = [
     "VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA",
     "VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA",
     "VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA",
+    "VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA",
+    "VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_MOID_PATTERN",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
@@ -1522,10 +1528,16 @@ VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: vCenter snapshot moid shape, e.g. ``snapshot-12``.
+VM_SNAPSHOT_MOID_PATTERN: str = r"^snapshot-[0-9]+$"
+
+
 #: ``vmware.composite.vm.snapshot.revert`` parameter schema.
 #:
-#: Idempotent revert by snapshot name. Ambiguity (multiple snapshots
-#: share the name) returns ``status='ambiguous'`` rather than guessing.
+#: Idempotent revert by snapshot name or by snapshot id (exactly one).
+#: Ambiguity (multiple snapshots share the name) returns
+#: ``status='ambiguous'`` rather than guessing; an id that is not in the
+#: VM's snapshot tree returns ``status='not_found'``.
 VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1538,15 +1550,28 @@ VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Display name of the snapshot to revert to. Multiple "
-                "snapshots with the same name return "
-                "``status='ambiguous'`` so the caller can pick by id."
+                "Display name of the snapshot to revert to. Give snapshot_name or "
+                "snapshot_id, not both. Multiple snapshots with the same name return "
+                "``status='ambiguous'``; then pass snapshot_id."
+            ),
+        },
+        "snapshot_id": {
+            "type": "string",
+            "pattern": VM_SNAPSHOT_MOID_PATTERN,
+            "description": (
+                "Moid of the snapshot to revert to, e.g. 'snapshot-12' (from "
+                "vmware.snapshot.list). Give snapshot_name or snapshot_id, not both. It "
+                "must be a snapshot of this VM."
             ),
         },
     },
-    "required": ["vm", "snapshot_name"],
+    "required": ["vm"],
+    "oneOf": [{"required": ["snapshot_name"]}, {"required": ["snapshot_id"]}],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42", "snapshot_name": "<snapshot-name>"}],
+    "examples": [
+        {"vm": "vm-42", "snapshot_name": "<snapshot-name>"},
+        {"vm": "vm-42", "snapshot_id": "snapshot-12"},
+    ],
 }
 
 
@@ -8347,6 +8372,170 @@ CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response
             "type": "array",
             "items": {"type": "string"},
             "description": "Item files the VM has in a CD-ROM or floppy drive.",
+        },
+    },
+)
+
+
+#: ``vmware.composite.vm.snapshot.create`` parameter schema.
+VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "pattern": VM_MOID_PATTERN,
+            "description": (
+                "Moid of the VM, e.g. 'vm-42'. Not the VM name: vmware.vm.info finds the "
+                "moid from the name."
+            ),
+        },
+        "snapshot_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the new snapshot. When the VM already has a snapshot with this "
+                "name, nothing is created (status 'unchanged')."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "Optional text stored with the snapshot, for example why it was taken.",
+        },
+        "memory": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Also save the memory of the running VM, so a revert brings it back running. "
+                "Slower and uses more disk space. Default false: disks only, and a revert "
+                "leaves the VM powered off."
+            ),
+        },
+        "quiesce": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Ask VMware Tools in the guest to flush its file systems first, for a "
+                "consistent disk state. vCenter ignores it when the VM is off or has no "
+                "VMware Tools. Default false."
+            ),
+        },
+    },
+    "required": ["vm", "snapshot_name"],
+    "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "snapshot_name": "<snapshot-name>", "description": "<reason>"}],
+}
+
+#: ``vmware.composite.vm.snapshot.create`` response schema.
+VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
+        "status": {
+            "type": "string",
+            "enum": ["created", "unchanged", "not_found", "invalid_request", "timeout"],
+            "description": (
+                "``'created'`` -- the task ended and the snapshot was taken; "
+                "``'unchanged'`` -- the VM already has a snapshot with this name, nothing "
+                "was written; ``'not_found'`` -- no VM with this moid; "
+                "``'invalid_request'`` -- the VM moid has the wrong shape; ``'timeout'`` -- "
+                "CreateSnapshotEx_Task outran the poll bound, it may still finish. A vSphere "
+                "fault is not a status: it raises (``connector_error``, audited as failed)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "snapshot_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Moid of the new snapshot (created), or of the snapshot that already has this "
+                "name (unchanged)."
+            ),
+        },
+        "snapshot": {
+            **SNAPSHOT_ROW_SCHEMA,
+            "type": ["object", "null"],
+            "description": (
+                "The snapshot as vmware.snapshot.list shows it, read again after the task; "
+                "null when it does not read back."
+            ),
+        },
+        "task": {"type": ["string", "null"], "description": "vCenter task moid, when one ran."},
+        "task_state": {
+            "type": ["string", "null"],
+            "description": "Final task state (success or timeout), when a task ran.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next, when the snapshot was not created as asked.",
+        },
+    },
+    "required": ["status", "vm"],
+}
+
+#: ``vmware.composite.vm.snapshot.delete`` parameter schema.
+VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "pattern": VM_MOID_PATTERN,
+            "description": "Moid of the VM the snapshot belongs to, e.g. 'vm-42'.",
+        },
+        "snapshot_id": {
+            "type": "string",
+            "pattern": VM_SNAPSHOT_MOID_PATTERN,
+            "description": (
+                "Moid of the snapshot to delete, e.g. 'snapshot-12' (from "
+                "vmware.snapshot.list). It must be a snapshot of this VM."
+            ),
+        },
+        "remove_children": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Also delete every snapshot below this one. Default false: the child "
+                "snapshots stay, and only this restore point goes."
+            ),
+        },
+    },
+    "required": ["vm", "snapshot_id"],
+    "additionalProperties": False,
+    "examples": [{"vm": "vm-42", "snapshot_id": "snapshot-12"}],
+}
+
+#: ``vmware.composite.vm.snapshot.delete`` response schema.
+VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "still_present", "timeout"],
+    "``'deleted'`` -- the delete ran and the snapshot no longer reads back; "
+    "``'unchanged'`` -- the VM has no snapshot with this id, nothing was written; "
+    "``'invalid_request'`` -- no VM with this moid, or a moid has the wrong shape; "
+    "``'still_present'`` -- the task ended but the snapshot still reads back; "
+    "``'timeout'`` -- RemoveSnapshot_Task outran the poll bound, it may still finish. A "
+    "vSphere fault on the delete is not a status: it raises (``connector_error``, audited "
+    "as failed).",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``vm_snapshot``."},
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "snapshot_id": {"type": "string", "description": "Snapshot moid."},
+        "remove_children": {
+            "type": "boolean",
+            "description": "Whether the snapshots below this one are deleted too.",
+        },
+        "name": {"type": ["string", "null"], "description": "Snapshot name."},
+        "description": {"type": ["string", "null"], "description": "Snapshot description."},
+        "created": {"type": ["string", "null"], "description": "When the snapshot was taken."},
+        "power_state": {
+            "type": ["string", "null"],
+            "description": "The VM power state saved in the snapshot.",
+        },
+        "current": {
+            "type": "boolean",
+            "description": "Whether it is vCenter's current snapshot of the VM.",
+        },
+        "child_count": {
+            "type": "integer",
+            "description": "Number of snapshots below this one (children and their children).",
         },
     },
 )

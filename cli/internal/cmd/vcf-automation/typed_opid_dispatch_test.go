@@ -82,6 +82,17 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.tenant.fabric_image.list":              "",
 	"vcfa.tenant.cloud_account.enumerate_images": "",
 	"vcfa.tenant.image_profile.mapping.update":   "",
+	// A project's own network and its first deployment: agent-surface-only,
+	// reached through `meho operation call` / MCP call_operation.
+	"vcfa.tenant.fabric_network.list":      "",
+	"vcfa.tenant.fabric_compute.list":      "",
+	"vcfa.tenant.region.list":              "",
+	"vcfa.tenant.zone.list":                "",
+	"vcfa.tenant.fabric_network.update":    "",
+	"vcfa.tenant.network_profile.create":   "",
+	"vcfa.tenant.blueprint_request.create": "",
+	"vcfa.tenant.blueprint_request.get":    "",
+	"vcfa.tenant.deployment.delete":        "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

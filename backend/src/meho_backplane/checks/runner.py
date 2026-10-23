@@ -118,6 +118,8 @@ target-resolution failure (#2595) persists ``unknown`` too, with the evidence
 ``reason`` in the #136/#2110 target vocabulary (``no_target`` /
 ``ambiguous_target`` / ``target_required`` / ``target_invalid_type``) rather
 than the misleading ``no_connector`` a raw-dict dispatch used to yield.
+A result the dispatcher shortened (over 50 rows / 4 KB) is checked against
+the full redacted payload, not the summary (#4117, :func:`_evaluate_result`).
 Rollup, hysteresis, and ``skip`` derivation belong to #2506.
 """
 
@@ -148,6 +150,7 @@ from meho_backplane.checks.repository import (
     record_sensor_result,
 )
 from meho_backplane.checks.watchdog import note_tick_completed, reset_watchdog_state
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
@@ -155,6 +158,7 @@ from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
+from meho_backplane.operations.reducer import FullResultCapture, full_result_capture_var
 from meho_backplane.scheduler.cron import (
     InvalidCronExpressionError,
     InvalidTimezoneError,
@@ -435,13 +439,20 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
             )
             if target_error is not None:
                 return _target_resolution_outcome(target_error)
-            result = await dispatch(
-                operator=operator,
-                connector_id=snap.connector_id,
-                op_id=snap.op_id,
-                target=resolved_target,
-                params=snap.params,
-            )
+            # #4117: ask the dispatcher for the full redacted payload beside
+            # the shortened result, so the rule runs over every row.
+            capture = FullResultCapture()
+            token = full_result_capture_var.set(capture)
+            try:
+                result = await dispatch(
+                    operator=operator,
+                    connector_id=snap.connector_id,
+                    op_id=snap.op_id,
+                    target=resolved_target,
+                    params=snap.params,
+                )
+            finally:
+                full_result_capture_var.reset(token)
     except TimeoutError:
         return _unknown_outcome(
             "evaluation_timeout",
@@ -463,11 +474,54 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
 
     try:
         spec = AssertionSpec.model_validate(snap.assertion)
-        return evaluate_assertion(spec, result.result, now=now)
+        return _evaluate_result(spec, result, capture, now=now)
     except Exception as exc:
         # Never-raises contract: a corrupt persisted spec or an unexpected
         # evaluator failure is an ``unknown`` outcome, not a crashed task.
         return _unknown_outcome("assertion_evaluation_error", error=str(exc))
+
+
+def _evaluate_result(
+    spec: AssertionSpec,
+    result: OperationResult,
+    capture: FullResultCapture,
+    *,
+    now: datetime,
+) -> AssertionOutcome:
+    """Check *spec* against the full result when the dispatch shortened it (#4117).
+
+    A result over the reduction threshold (50 rows / 4 KB) reaches the caller
+    as a summary plus a handle: a long list keeps only counts, a big object
+    keeps only its small top-level values. A rule on the rows (``$.hosts[*]``)
+    or on a nested object (``$.data.result``) then reads ``unknown`` with
+    ``missing key`` -- the sensor stops working exactly when the answer grows.
+    So the runner checks the full redacted payload the dispatcher captured
+    before the reduce. The summary stays the fallback for a rule that reads
+    it on purpose (``$.row_count``): when the full payload cannot answer the
+    rule and the summary can, the summary's outcome wins and the evidence
+    says so (``checked: "summary"``). A payload the reducer refused under its
+    admission work limit is too big to check and reads ``result_too_large``.
+    Evidence samples stay bounded by the evaluator (at most 5 rows).
+    """
+    if result.handle is None or not capture.captured:
+        # Not shortened: ``result.result`` is already the whole payload.
+        return evaluate_assertion(spec, result.result, now=now)
+    fetch_more = result.handle.fetch_more
+    drill_in = fetch_more.drill_in if fetch_more is not None else None
+    if drill_in is not None and drill_in.reason == "admission_limit_exceeded":
+        return _unknown_outcome(
+            "result_too_large",
+            handle_id=str(result.handle.handle_id),
+            total_rows=result.handle.total_rows,
+        )
+    outcome = evaluate_assertion(spec, capture.payload, now=now)
+    if outcome.state != "unknown":
+        return outcome
+    summary_outcome = evaluate_assertion(spec, result.result, now=now)
+    if summary_outcome.state == "unknown":
+        return outcome
+    evidence = {**summary_outcome.evidence, "checked": "summary"}
+    return summary_outcome.model_copy(update={"evidence": evidence})
 
 
 async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> None:

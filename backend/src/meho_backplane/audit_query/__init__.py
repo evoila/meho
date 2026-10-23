@@ -44,6 +44,14 @@ from __future__ import annotations
 
 from .cursor import CursorPosition, InvalidCursorError, decode_cursor, encode_cursor
 from .duration import DurationParseError, parse_duration
+from .loose_rows import (
+    DEFAULT_RECENT_WINDOW,
+    LOOSE_ROWS_MAX_LIMIT,
+    LooseRow,
+    LooseRowsResult,
+    count_loose_rows_in_forest,
+    find_loose_rows,
+)
 from .policy_replay import PolicyReplayResult, PolicyReplayStatus, replay_policy
 from .query import DEFAULT_COUNT_WINDOW, UnsupportedFilterError, count_event_classes, query_audit
 from .replay import replay_session
@@ -58,6 +66,8 @@ from .schemas import (
 
 __all__ = [
     "DEFAULT_COUNT_WINDOW",
+    "DEFAULT_RECENT_WINDOW",
+    "LOOSE_ROWS_MAX_LIMIT",
     "AuditEntry",
     "AuditQueryFilters",
     "AuditQueryResult",
@@ -65,14 +75,18 @@ __all__ = [
     "DurationParseError",
     "EventClassCounts",
     "InvalidCursorError",
+    "LooseRow",
+    "LooseRowsResult",
     "MyRecentPage",
     "PolicyReplayResult",
     "PolicyReplayStatus",
     "ReplayNode",
     "UnsupportedFilterError",
     "count_event_classes",
+    "count_loose_rows_in_forest",
     "decode_cursor",
     "encode_cursor",
+    "find_loose_rows",
     "parse_duration",
     "query_audit",
     "replay_policy",

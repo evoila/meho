@@ -26,6 +26,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.github.composites import (
+    branch_commit_files_composite,
+    git_ref_view_composite,
+    git_tree_view_composite,
     pr_status_summary_composite,
     project_item_add_composite,
     project_item_set_field_composite,
@@ -49,6 +52,9 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "gh.composite.project_item_add",
     "gh.composite.project_item_set_field",
     "gh.composite.sub_issue_add",
+    "gh.composite.git_ref_view",
+    "gh.composite.git_tree_view",
+    "gh.composite.branch_commit_files",
 )
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
@@ -67,6 +73,15 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "gh.composite.sub_issue_add": (
         "meho_backplane.connectors.github.composites._sub_issues.sub_issue_add_composite"
     ),
+    "gh.composite.git_ref_view": (
+        "meho_backplane.connectors.github.composites._git.git_ref_view_composite"
+    ),
+    "gh.composite.git_tree_view": (
+        "meho_backplane.connectors.github.composites._git.git_tree_view_composite"
+    ),
+    "gh.composite.branch_commit_files": (
+        "meho_backplane.connectors.github.composites._git.branch_commit_files_composite"
+    ),
 }
 
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
@@ -75,6 +90,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "gh.composite.project_item_add": "board",
     "gh.composite.project_item_set_field": "board",
     "gh.composite.sub_issue_add": "issues",
+    "gh.composite.git_ref_view": "git",
+    "gh.composite.git_tree_view": "git",
+    "gh.composite.branch_commit_files": "git",
 }
 
 # Governance posture per op: reads are safe, the three writes are caution;
@@ -86,6 +104,9 @@ _EXPECTED_SAFETY_BY_OP: dict[str, str] = {
     "gh.composite.project_item_add": "caution",
     "gh.composite.project_item_set_field": "caution",
     "gh.composite.sub_issue_add": "caution",
+    "gh.composite.git_ref_view": "safe",
+    "gh.composite.git_tree_view": "safe",
+    "gh.composite.branch_commit_files": "dangerous",
 }
 
 
@@ -554,6 +575,9 @@ def test_new_handlers_are_module_level_coroutines() -> None:
         project_item_add_composite,
         project_item_set_field_composite,
         sub_issue_add_composite,
+        git_ref_view_composite,
+        git_tree_view_composite,
+        branch_commit_files_composite,
     ):
         assert inspect.iscoroutinefunction(handler), handler
         assert "<locals>" not in handler.__qualname__, handler

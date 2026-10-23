@@ -22,13 +22,16 @@ handles upsert, body-hash dedupe, embedding pipeline, and
 Scope
 -----
 
-Five composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) is
+Eight composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) is
 read-only. #2081 adds four more: ``gh.composite.project_view`` (read),
 ``gh.composite.project_item_add`` /
 ``gh.composite.project_item_set_field`` (Projects-v2 GraphQL writes),
 and ``gh.composite.sub_issue_add`` (sub-issue linkage REST write) --
 together the "file a board-complete ticket without a gh CLI fallback"
-surface.
+surface. The ``git`` group adds ``gh.composite.git_ref_view`` and
+``gh.composite.git_tree_view`` (reads) and
+``gh.composite.branch_commit_files`` (a ``dangerous`` write that always
+waits for approval; see :mod:`._git`).
 
 The composite-helper's defaults are ``safety_level="dangerous"`` +
 ``requires_approval=True`` (suited to high-blast-radius write
@@ -63,6 +66,11 @@ from meho_backplane.connectors.github.composites._board import (
     project_item_set_field_composite,
     project_view_composite,
 )
+from meho_backplane.connectors.github.composites._git import (
+    branch_commit_files_composite,
+    git_ref_view_composite,
+    git_tree_view_composite,
+)
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
 )
@@ -80,6 +88,17 @@ from meho_backplane.connectors.github.composites.schemas import (
     PROJECT_VIEW_RESPONSE_SCHEMA,
     SUB_ISSUE_ADD_PARAMETER_SCHEMA,
     SUB_ISSUE_ADD_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.github.composites.schemas_git import (
+    BRANCH_COMMIT_FILES_LLM_INSTRUCTIONS,
+    BRANCH_COMMIT_FILES_PARAMETER_SCHEMA,
+    BRANCH_COMMIT_FILES_RESPONSE_SCHEMA,
+    GIT_REF_VIEW_LLM_INSTRUCTIONS,
+    GIT_REF_VIEW_PARAMETER_SCHEMA,
+    GIT_REF_VIEW_RESPONSE_SCHEMA,
+    GIT_TREE_VIEW_LLM_INSTRUCTIONS,
+    GIT_TREE_VIEW_PARAMETER_SCHEMA,
+    GIT_TREE_VIEW_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -132,6 +151,13 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "database id. The sub-issue must share the parent's repository "
         "owner."
     ),
+    "git": (
+        "Use to work with the git objects of a repository: which commit a "
+        "branch or tag points to (git_ref_view), the files and folders of a "
+        "branch, tag or commit (git_tree_view), and writing text files to a "
+        "branch as one new commit (branch_commit_files, waits for approval, "
+        "never forces). Start with git_ref_view, then git_tree_view."
+    ),
 }
 
 
@@ -155,6 +181,7 @@ class _CompositeSpec(NamedTuple):
     tags: list[str]
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
+    llm_instructions: dict[str, Any] | None = None
 
 
 _COMPOSITES: tuple[_CompositeSpec, ...] = (
@@ -265,6 +292,61 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="caution",
         requires_approval=False,
     ),
+    _CompositeSpec(
+        op_id="gh.composite.git_ref_view",
+        handler=git_ref_view_composite,
+        summary="Read the commit a branch or tag points to.",
+        description=(
+            "Reads GET /repos/{owner}/{repo}/git/ref/{ref} for a branch or tag "
+            "name. MEHO builds the ref (heads/<name> or tags/<name>) itself. "
+            "A missing branch or tag answers found=false, not an error. "
+            "Read-only."
+        ),
+        parameter_schema=GIT_REF_VIEW_PARAMETER_SCHEMA,
+        response_schema=GIT_REF_VIEW_RESPONSE_SCHEMA,
+        group_key="git",
+        tags=["composite", "read-only", "git", "ref", "branch", "tag"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=GIT_REF_VIEW_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.git_tree_view",
+        handler=git_tree_view_composite,
+        summary="List the files and folders of a branch, tag, commit or tree.",
+        description=(
+            "Reads GET /repos/{owner}/{repo}/git/trees/{tree_sha}, with "
+            "recursive=1 when asked, and returns each entry's path, type, mode, "
+            "SHA-1 and size. A long list comes back behind a result handle. "
+            "Read-only."
+        ),
+        parameter_schema=GIT_TREE_VIEW_PARAMETER_SCHEMA,
+        response_schema=GIT_TREE_VIEW_RESPONSE_SCHEMA,
+        group_key="git",
+        tags=["composite", "read-only", "git", "tree", "files"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=GIT_TREE_VIEW_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.branch_commit_files",
+        handler=branch_commit_files_composite,
+        summary="Write text files to a branch as one new commit (waits for approval).",
+        description=(
+            "Reads the branch, creates a tree on top of its commit with the "
+            "files, creates the commit, and moves the branch to it without "
+            "force. If the branch moved after the read, the call stops with "
+            "precondition_failed and changes nothing. Every call waits for "
+            "approval."
+        ),
+        parameter_schema=BRANCH_COMMIT_FILES_PARAMETER_SCHEMA,
+        response_schema=BRANCH_COMMIT_FILES_RESPONSE_SCHEMA,
+        group_key="git",
+        tags=["composite", "write", "git", "commit", "branch", "files"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=BRANCH_COMMIT_FILES_LLM_INSTRUCTIONS,
+    ),
 )
 
 
@@ -309,5 +391,6 @@ async def register_github_composite_operations(
             tags=spec.tags,
             safety_level=spec.safety_level,
             requires_approval=spec.requires_approval,
+            llm_instructions=spec.llm_instructions,
             embedding_service=embedding_service,
         )

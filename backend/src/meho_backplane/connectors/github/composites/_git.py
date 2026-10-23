@@ -1,0 +1,389 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Git composites of the gh-rest connector: read a ref, read a tree, commit files.
+
+Three hand-written operations replace the raw git calls people used to chain
+by hand (and often got wrong, because a raw ref call needs the exact
+``heads/<branch>`` form):
+
+* ``gh.composite.git_ref_view`` -- the commit a branch or tag points to
+  (``GET /repos/{owner}/{repo}/git/ref/{ref}``). MEHO builds the ref.
+* ``gh.composite.git_tree_view`` -- the files and folders of a tree
+  (``GET /repos/{owner}/{repo}/git/trees/{tree_sha}``, ``recursive=1`` on
+  request).
+* ``gh.composite.branch_commit_files`` -- write text files to a branch as one
+  new commit: read the branch, read its commit for the base tree, create a
+  tree on top of it, create the commit, move the branch to it. The branch
+  update is never forced. If the branch moved after the read, the call stops
+  with ``status="precondition_failed"`` and changes nothing visible (a tree
+  or commit object that was already created is unreachable and harmless).
+
+All three use the direct-session substrate: the handler declares a
+``connector`` parameter and calls the resolved connector's own session, so
+they work on a fresh deploy with no gh catalog ingest.
+
+The write is registered ``safety_level="dangerous"`` /
+``requires_approval=True``: every call waits for approval. The approver sees
+the park-time preview built in :mod:`._git_preview` (branch, the commit it
+starts from, each file's path, size and SHA-256 -- never the content).
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Final
+
+import httpx
+
+from meho_backplane.connectors.github.composites.schemas_git import (
+    MAX_FILE_BYTES,
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+)
+
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.connectors.github.connector import GitHubRestConnector
+
+__all__ = [
+    "STATUS_COMMITTED",
+    "STATUS_INVALID_REQUEST",
+    "STATUS_PRECONDITION_FAILED",
+    "GitRepo",
+    "branch_commit_files_composite",
+    "describe_files",
+    "git_ref_view_composite",
+    "git_tree_view_composite",
+]
+
+STATUS_COMMITTED: Final = "committed"
+STATUS_PRECONDITION_FAILED: Final = "precondition_failed"
+STATUS_INVALID_REQUEST: Final = "invalid_request"
+
+# GitHub REST wire paths, keyed with ``str.format`` placeholders. The
+# connector mounts them under ``https://api.github.com``; ``mount_op_path``
+# is identity for github.com.
+_REF_PATH: Final = "/repos/{owner}/{repo}/git/ref/{ref}"
+_REFS_PATH: Final = "/repos/{owner}/{repo}/git/refs/{ref}"
+_TREE_PATH: Final = "/repos/{owner}/{repo}/git/trees/{tree}"
+_TREES_PATH: Final = "/repos/{owner}/{repo}/git/trees"
+_COMMIT_PATH: Final = "/repos/{owner}/{repo}/git/commits/{sha}"
+_COMMITS_PATH: Final = "/repos/{owner}/{repo}/git/commits"
+
+_REF_PREFIX_BY_KIND: Final[dict[str, str]] = {"branch": "heads", "tag": "tags"}
+_BLOB_MODE: Final = "100644"
+
+# Status codes GitHub uses to refuse a branch update that is not a fast
+# forward (``force=false``). The exact wording is GitHub's; MEHO quotes it.
+_REFUSED_UPDATE_STATUSES: Final = frozenset({409, 422})
+
+
+@dataclass(frozen=True)
+class GitRepo:
+    """One repository reached through the resolved connector's session."""
+
+    connector: GitHubRestConnector
+    target: Any
+    operator: Operator
+    owner: str
+    repo: str
+
+    async def _path(self, template: str, **fields: str) -> str:
+        return await self.connector.mount_op_path(
+            self.target, template.format(owner=self.owner, repo=self.repo, **fields), self.operator
+        )
+
+    async def get(
+        self, template: str, *, params: dict[str, Any] | None = None, **fields: str
+    ) -> dict[str, Any]:
+        path = await self._path(template, **fields)
+        return await self.connector._get_json(
+            self.target, path, operator=self.operator, params=params
+        )
+
+    async def send(
+        self, verb: str, template: str, *, json: dict[str, Any], **fields: str
+    ) -> dict[str, Any]:
+        path = await self._path(template, **fields)
+        return await self.connector._post_json(
+            self.target, path, operator=self.operator, verb=verb, json=json
+        )
+
+    async def read_ref(self, ref: str) -> dict[str, Any] | None:
+        """Return GitHub's payload for ``ref`` (``heads/x`` / ``tags/x``), or ``None`` on 404."""
+        try:
+            return await self.get(_REF_PATH, ref=ref)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
+    async def ref_sha(self, ref: str) -> str | None:
+        """Return the SHA-1 the ref points to, or ``None`` when the ref does not exist."""
+        payload = await self.read_ref(ref)
+        return _object_sha(payload)
+
+
+def _object_sha(payload: dict[str, Any] | None) -> str | None:
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    return sha if isinstance(sha, str) and sha else None
+
+
+def _github_message(exc: httpx.HTTPStatusError) -> str:
+    """Return GitHub's ``message`` from an error response, or the status text."""
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        payload = None
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if isinstance(message, str) and message:
+        return message
+    return f"HTTP {exc.response.status_code}"
+
+
+def _repo(
+    connector: GitHubRestConnector, target: Any, operator: Operator, params: dict[str, Any]
+) -> GitRepo:
+    return GitRepo(connector, target, operator, params["owner"], params["repo"])
+
+
+async def git_ref_view_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: GitHubRestConnector,
+) -> dict[str, Any]:
+    """Return the commit a branch or tag points to (``gh.composite.git_ref_view``)."""
+    name = params["name"]
+    kind = params.get("kind", "branch")
+    ref = f"{_REF_PREFIX_BY_KIND[kind]}/{name}"
+    payload = await _repo(connector, target, operator, params).read_ref(ref)
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    obj = obj if isinstance(obj, dict) else {}
+    return {
+        "found": payload is not None,
+        "kind": kind,
+        "name": name,
+        "ref": ref,
+        "sha": obj.get("sha"),
+        "object_type": obj.get("type"),
+        "url": obj.get("url"),
+    }
+
+
+async def git_tree_view_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: GitHubRestConnector,
+) -> dict[str, Any]:
+    """Return the files and folders of a tree (``gh.composite.git_tree_view``)."""
+    recursive = bool(params.get("recursive", False))
+    payload = await _repo(connector, target, operator, params).get(
+        _TREE_PATH, params={"recursive": "1"} if recursive else None, tree=params["tree"]
+    )
+    raw_entries = payload.get("tree")
+    entries = [
+        {
+            "path": entry.get("path"),
+            "type": entry.get("type"),
+            "mode": entry.get("mode"),
+            "sha": entry.get("sha"),
+            "size": entry.get("size"),
+        }
+        for entry in (raw_entries if isinstance(raw_entries, list) else [])
+        if isinstance(entry, dict)
+    ]
+    return {
+        "sha": payload.get("sha"),
+        "recursive": recursive,
+        "truncated": bool(payload.get("truncated", False)),
+        "entry_count": len(entries),
+        "entries": entries,
+    }
+
+
+def _path_problem(path: object) -> str | None:
+    if not isinstance(path, str) or not path:
+        return "path is empty"
+    if path.startswith("/"):
+        return f"path {path!r} starts with '/'"
+    if "\\" in path:
+        return f"path {path!r} contains a backslash"
+    parts = path.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return f"path {path!r} has an empty, '.' or '..' part"
+    return None
+
+
+def describe_files(files: object) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return ``[{path, size, sha256}]`` for the files, and the problems found.
+
+    Shared by the handler and the park-time preview, so the approver reads
+    exactly the file list the commit would write. Never includes content.
+    """
+    if not isinstance(files, list) or not files:
+        return [], ["files must be a non-empty list"]
+    described: list[dict[str, Any]] = []
+    problems: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    if len(files) > MAX_FILES:
+        problems.append(f"{len(files)} files; at most {MAX_FILES} per call")
+    for entry in files:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        content = entry.get("content") if isinstance(entry, dict) else None
+        problem = _path_problem(path)
+        if problem is not None:
+            problems.append(problem)
+        elif path in seen:
+            problems.append(f"path {path!r} appears twice")
+        else:
+            seen.add(str(path))
+        if not isinstance(content, str):
+            problems.append(f"content of {path!r} is not text")
+            continue
+        data = content.encode("utf-8")
+        total += len(data)
+        if len(data) > MAX_FILE_BYTES:
+            problems.append(f"{path!r} has {len(data)} bytes; at most {MAX_FILE_BYTES} per file")
+        described.append(
+            {"path": path, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        )
+    if total > MAX_TOTAL_BYTES:
+        problems.append(f"all files together have {total} bytes; at most {MAX_TOTAL_BYTES}")
+    return described, problems
+
+
+def _stopped(
+    status: str, reason: str, *, branch: str, base_sha: str | None, files: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The envelope of a call that stopped before the branch was moved."""
+    return {
+        "status": status,
+        "reason": reason,
+        "branch": branch,
+        "base_sha": base_sha,
+        "tree_sha": None,
+        "commit_sha": None,
+        "html_url": None,
+        "file_count": len(files),
+        "files": files,
+    }
+
+
+async def _create_commit(
+    repo: GitRepo, *, base_sha: str, message: str, files: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Create a tree on top of ``base_sha``'s tree and a commit with ``base_sha`` as parent."""
+    base_commit = await repo.get(_COMMIT_PATH, sha=base_sha)
+    base_tree_sha = base_commit.get("tree", {}).get("sha")
+    if not isinstance(base_tree_sha, str) or not base_tree_sha:
+        raise RuntimeError(
+            f"GitHub returned no tree for commit {base_sha} of {repo.owner}/{repo.repo}"
+        )
+    tree = await repo.send(
+        "POST",
+        _TREES_PATH,
+        json={
+            "base_tree": base_tree_sha,
+            "tree": [
+                {
+                    "path": entry["path"],
+                    "mode": _BLOB_MODE,
+                    "type": "blob",
+                    "content": entry["content"],
+                }
+                for entry in files
+            ],
+        },
+    )
+    return await repo.send(
+        "POST",
+        _COMMITS_PATH,
+        json={"message": message, "tree": tree["sha"], "parents": [base_sha]},
+    )
+
+
+async def _move_branch(repo: GitRepo, *, ref: str, base_sha: str, commit_sha: str) -> str | None:
+    """Move ``ref`` from ``base_sha`` to ``commit_sha`` without force.
+
+    Returns ``None`` on success, else the reason the branch was not moved.
+    """
+    sha_now = await repo.ref_sha(ref)
+    if sha_now != base_sha:
+        return f"branch moved from {base_sha} to {sha_now} after the read; nothing changed"
+    try:
+        await repo.send("PATCH", _REFS_PATH, json={"sha": commit_sha, "force": False}, ref=ref)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in _REFUSED_UPDATE_STATUSES:
+            raise
+        return (
+            f"GitHub refused to move the branch without force: {_github_message(exc)}; "
+            "nothing changed"
+        )
+    return None
+
+
+async def branch_commit_files_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: GitHubRestConnector,
+) -> dict[str, Any]:
+    """Write text files to a branch as one commit (``gh.composite.branch_commit_files``).
+
+    Steps: read the branch; read its commit for the base tree; create a tree
+    on top of it with the files; create the commit with the branch's commit
+    as parent; read the branch again and move it with ``force=false``. Any
+    step that finds the branch gone or moved returns
+    ``status="precondition_failed"`` and the branch is not touched. A
+    transport error or an unexpected status raises, so the dispatcher
+    records the call as failed.
+    """
+    branch = params["branch"]
+    ref = f"heads/{branch}"
+    files, problems = describe_files(params.get("files"))
+    if problems:
+        return _stopped(
+            STATUS_INVALID_REQUEST, "; ".join(problems), branch=branch, base_sha=None, files=files
+        )
+    repo = _repo(connector, target, operator, params)
+    base_sha = await repo.ref_sha(ref)
+    if base_sha is None:
+        return _stopped(
+            STATUS_PRECONDITION_FAILED,
+            f"branch {branch!r} does not exist in {repo.owner}/{repo.repo}",
+            branch=branch,
+            base_sha=None,
+            files=files,
+        )
+    commit = await _create_commit(
+        repo, base_sha=base_sha, message=params["message"], files=params["files"]
+    )
+    reason = await _move_branch(repo, ref=ref, base_sha=base_sha, commit_sha=commit["sha"])
+    if reason is not None:
+        return _stopped(
+            STATUS_PRECONDITION_FAILED,
+            f"branch {branch!r}: {reason}",
+            branch=branch,
+            base_sha=base_sha,
+            files=files,
+        )
+    return {
+        "status": STATUS_COMMITTED,
+        "reason": None,
+        "branch": branch,
+        "base_sha": base_sha,
+        "tree_sha": commit.get("tree", {}).get("sha"),
+        "commit_sha": commit["sha"],
+        "html_url": commit.get("html_url"),
+        "file_count": len(files),
+        "files": files,
+    }

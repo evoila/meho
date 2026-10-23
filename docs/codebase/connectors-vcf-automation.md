@@ -35,7 +35,7 @@ session with **zero catalog state**. Seven ops:
 | op_id | plane | path |
 |---|---|---|
 | `vcfa.provider.org.list` | provider | `GET /cloudapi/1.0.0/orgs` |
-| `vcfa.provider.region.list` | provider | `GET /cloudapi/vcf/regions` |
+| `vcfa.provider.region.list` | provider | 9.0: `GET /cloudapi/vcf/regions`; 9.1 and 9.1.1: `GET /cloudapi/v1/regions` |
 | `vcfa.provider.health` | provider | `GET /cloudapi/1.0.0/orgs?pageSize=1` (authenticated) + unauthenticated `GET /iaas/api/about` |
 | `vcfa.tenant.project.list` | tenant | `GET /iaas/api/projects` |
 | `vcfa.tenant.deployment.list` | tenant | `GET /iaas/api/deployments` |
@@ -53,12 +53,27 @@ provider-leg failure is the op's error; an `about` failure is reported in
 The region list rides the `vcf/` cloudapi prefix, not the classic
 `1.0.0/` one — VCFA 9.0 moved Region there and 404s the classic form
 (repointed by the #2983 reconcile; rationale on the
-`PROVIDER_REGIONS_PATH` constant). Every hand-coded `METHOD:/path` in
+`PROVIDER_REGIONS_PATH` constant). The path depends on the target's
+version (#4604). Broadcom's API reference for 9.1 and 9.1.1 shows
+Region only under the `v1/` prefix (`GET /cloudapi/v1/regions`); it shows
+no `vcf/` path at all. `typed_ops.provider_regions_path` picks the path
+with the same version rule as the 9.1 login: version 9.1 or newer gets
+`v1/`. Anything else gets `vcf/`: version 9.0, no version, or a label
+that is not a product version (the fingerprint can record the
+`2021-07-15` API date). 9.1 still answers the `vcf/` path, so such a
+target keeps working. Set the target's version to get the `v1/` path.
+The `Accept` header stays `application/json;version=9.0.0` on every
+version: the reference says the call was added in 9.0.0, and a client
+may pick an older API version. Every hand-coded `METHOD:/path` in
 the connector is swept by the spec-reconcile lane
 (`backend/tests/test_connectors_vcf_automation_spec_reconcile.py`,
 #2983): the tenant-plane half asserts against the pinned Apache-2.0
 `vra-iaas.json` on the spec shelf; the provider-plane half is an
-evidenced exclusion (no pinnable wire spec exists — see the
+evidenced exclusion, except the region path. The region path of each
+version is checked against that version's reference list on the shelf
+(the `provider-infrastructure-apis` list in `vcf-automation-9.0-reference/`,
+`vcf-automation-9.1/` and `vcf-automation-9.1.1/`); CI requires the
+three lists. For the rest, no pinnable wire spec exists — see the
 `vcf-automation-9.0` entry in
 `docs/decisions/spec-reconcile-guards-standard.md`).
 

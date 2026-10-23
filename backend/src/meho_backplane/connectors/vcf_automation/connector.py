@@ -141,11 +141,11 @@ from meho_backplane.connectors.vcf_automation.session import (
 )
 from meho_backplane.connectors.vcf_automation.typed_ops import (
     PROVIDER_ORGS_PATH,
-    PROVIDER_REGIONS_PATH,
     TENANT_ABOUT_PATH,
     TENANT_DEPLOYMENT_DETAIL_PATH,
     TENANT_DEPLOYMENTS_PATH,
     TENANT_PROJECTS_PATH,
+    provider_regions_path,
 )
 
 __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
@@ -773,11 +773,15 @@ class VcfAutomationConnector(HttpConnector):
         target: VcfAutomationTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions`` (provider plane)."""
+        """``vcfa.provider.region.list`` — the region list path of *target*'s version.
+
+        ``GET /cloudapi/vcf/regions`` on 9.0, ``GET /cloudapi/v1/regions`` on
+        9.1 and newer (:func:`~.typed_ops.provider_regions_path`).
+        """
         return await self._request_json(
             target,
             "GET",
-            PROVIDER_REGIONS_PATH,
+            provider_regions_path(target),
             operator=operator,
             params=_provider_pagination_query(params),
         )

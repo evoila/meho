@@ -110,7 +110,7 @@ this stage it exposes:
   the `sub`-keyed self-approval refusal (#1401) is unchanged (an approver
   cannot approve a request it parked). No new MCP tool: the
   approval-decision verbs stay human-only (console / CLI / REST), so the
-  25-tool working surface and the 78-tool inventory are untouched. See
+  working surface and the tool inventory are untouched. See
   [`approvals.md`](approvals.md) "Access model". The realm-side
   provisioning recipe for the `approver` claim (group-based Keycloak
   protocol mapper, verification, rollback) is in

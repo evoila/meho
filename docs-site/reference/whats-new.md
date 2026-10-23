@@ -19,7 +19,7 @@ notes.
   them, and these reads wait for approval.
 - **Security fixes in the image and the CLI.** The image gets newer
   `certifi` and `aiohttp` versions, and the CLI is built with Go
-  1.26.10. The image still has 19 known Pillow findings. MEHO never
+  1.26.10. The image still has 27 known Pillow findings. MEHO never
   opens image files, and the image scan skips these findings until 30
   November 2026, while the fix is prepared.
 - **More risky work waits for a second person.** A VM move that copies

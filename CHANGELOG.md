@@ -104,7 +104,7 @@ This release closes four security gaps: everyone who used the shared
 CLI and MCP logins was an admin, agent and service logins could create
 standing grants, and approval requests and some credential reads showed
 secrets. `certifi`, `aiohttp` and the Go version of the CLI are updated
-for known flaws. The image still has 19 known Pillow findings; MEHO
+for known flaws. The image still has 27 known Pillow findings; MEHO
 never opens image files, and the image scan skips these findings until
 2026-11-30.
 
@@ -180,13 +180,13 @@ OpenBao; all three are off by default.
   GO-2026-6809, a flaw in how Go checks certificates (`crypto/x509`).
   Install the new CLI to get the fix. The image and the chart hold no Go
   code. Contributors who build the CLI need Go 1.26.10 or later.
-- Not fixed yet: the image still has Pillow 12.3.0, with 19 known
-  findings (3 critical, 16 high) (#4768). Pillow 13 fixes them, but the
-  embedding library `fastembed` does not allow Pillow 13 yet. MEHO never
-  opens image files; Pillow is in the image only because `fastembed`
-  needs it. So the image security scan skips exactly these 19 findings
-  until 2026-11-30. After that date the scan counts them again by
-  itself. The real fix is tracked in #4729.
+- Not fixed yet: the image still has Pillow 12.3.0, with 27 known
+  findings (4 critical, 23 high) (#4768, #4803). Pillow 13 fixes them,
+  but the embedding library `fastembed` does not allow Pillow 13 yet.
+  MEHO never opens image files; Pillow is in the image only because
+  `fastembed` needs it. So the image security scan skips exactly these
+  27 findings until 2026-11-30. After that date the scan counts them
+  again by itself. The real fix is tracked in #4729.
 
 ### Breaking changes
 
@@ -536,6 +536,16 @@ OpenBao; all three are off by default.
   edition and licence: edition, whether it is licensed, licence name,
   expiry date, and the licence key with only its last 5 characters shown
   (#4705 / #4791). Tested against fakes; not yet run against a live VCF
+  Operations.
+- Six new operations on `vrops-rest-9.0` read and change VCF 9 licences
+  in VCF Operations 9.x, in the new group `vrops-licensing` (#4089 /
+  #4793): `vrops.licensing.registration.status`,
+  `vrops.licensing.server.list`, `vrops.licensing.entitlement.query`,
+  `vrops.licensing.vcenter.query` and `vrops.licensing.server.query` are
+  reads. `vrops.licensing.assign` assigns licences to one vCenter and
+  waits for approval. The vendor does not publish these calls; VCF
+  Operations accepts them only with its header for unsupported calls,
+  which MEHO sends. Tested against fakes; not yet run against a live VCF
   Operations.
 
 #### Other connectors
@@ -1245,6 +1255,12 @@ OpenBao; all three are off by default.
   #4792). Before, they got `fleet-lcm-9.0`, whose reads call paths a 9.0
   appliance does not have. `fleet-lcm-9.0` now covers only 9.1 and later
   9.x. Not yet checked against a live 9.0 or 9.1 appliance.
+- On VCF Automation 9.1 and 9.1.1, `vcfa.provider.region.list` now calls
+  `GET /cloudapi/v1/regions`, the path the vendor's API reference shows
+  for these versions (#4604 / #4796). On 9.0 it still calls
+  `GET /cloudapi/vcf/regions`. A target with no version, or with a label
+  that is not a product version, keeps the 9.0 path. Today a probed
+  target records the API date, so it keeps the 9.0 path too.
 
 #### Other connectors
 

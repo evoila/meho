@@ -586,6 +586,43 @@ def test_html_pem_private_key_in_text_is_replaced() -> None:
     assert count == 1
 
 
+# A session id is a login token
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("document", "content_type", "expected"),
+    [
+        (
+            f'{{"sessionId":"{_SECRET}","ttl":1800}}',
+            _JSON,
+            f'{{"sessionId":"{REDACTED}","ttl":1800}}',
+        ),
+        (f"session_id: {_SECRET}\n", _YAML, f"session_id: '{REDACTED}'\n"),
+        (
+            f"<X-Session-Id>{_SECRET}</X-Session-Id>",
+            _XML,
+            f"<X-Session-Id>{REDACTED}</X-Session-Id>",
+        ),
+        (f"<sessionId>{_SECRET}</sessionId>", _HTML, f"<sessionid>{REDACTED}</sessionid>"),
+    ],
+    ids=["json", "yaml", "xml", "html"],
+)
+def test_session_id_value_is_replaced_in_every_format(
+    document: str, content_type: str, expected: str
+) -> None:
+    """Some appliances use the session id as the login token, so its value goes."""
+    assert _check(document, content_type) == (expected, 1)
+    assert scrub_query_string(f"/x?JSESSIONID={_SECRET}") == (f"/x?JSESSIONID={REDACTED}", 1)
+
+
+def test_a_name_that_only_starts_with_session_is_not_a_secret() -> None:
+    assert _check('{"sessionTimeout":1800,"session_id_format":"uuid"}', _JSON) == (
+        '{"sessionTimeout":1800,"session_id_format":"uuid"}',
+        0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Redirect paths
 # ---------------------------------------------------------------------------

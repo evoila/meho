@@ -25,9 +25,20 @@ import re
 from collections.abc import Callable
 from typing import Any, Final
 
-from meho_backplane.broadcast.events import is_secret_param_name
+from meho_backplane.broadcast.events import (
+    is_secret_param_name,
+    is_secret_param_name_lowercased,
+)
 
-__all__ = ["REDACTED", "ApiFileFormatError", "Scrubber", "TextRule", "dump_json"]
+__all__ = [
+    "REDACTED",
+    "ApiFileFormatError",
+    "Scrubber",
+    "TextRule",
+    "dump_json",
+    "is_secret_name",
+    "is_secret_name_lowercased",
+]
 
 #: A rule for one text value: returns the changed value and the count of
 #: places changed.
@@ -39,6 +50,35 @@ TextRule = Callable[[str], tuple[str, int]]
 REDACTED: Final[str] = "[REDACTED:param_name]"
 
 _PEM_PRIVATE_KEY: Final[re.Pattern[str]] = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+
+
+#: The end of a name that holds a login session id (``sessionId``,
+#: ``session_id``, ``X-Session-Id``, ``JSESSIONID``), with case, ``-``,
+#: ``_`` and ``.`` removed. Some appliances use the session id as the
+#: login token, so an API file example of it is a secret. MEHO's general
+#: rule for secret names does not count it: there a ``session_id`` is
+#: often MEHO's own agent session, which is no secret.
+_SESSION_ID_NAME: Final[str] = "sessionid"
+
+
+def _ends_in_session_id(name: str) -> bool:
+    return (
+        name.replace("-", "").replace("_", "").replace(".", "").lower().endswith(_SESSION_ID_NAME)
+    )
+
+
+def is_secret_name(name: str) -> bool:
+    """True when the value under *name* is a secret in an API file.
+
+    MEHO's general rule (:func:`is_secret_param_name`) plus a name that
+    ends in a session id.
+    """
+    return is_secret_param_name(name) or _ends_in_session_id(name)
+
+
+def is_secret_name_lowercased(name: str) -> bool:
+    """:func:`is_secret_name` for a name whose case is lost (HTML)."""
+    return is_secret_param_name_lowercased(name) or _ends_in_session_id(name)
 
 
 class ApiFileFormatError(ValueError):
@@ -71,7 +111,7 @@ class Scrubber:
             mapping: dict[Any, Any] = {}
             memo[id(node)] = mapping
             for key, value in node.items():
-                if is_secret_param_name(str(key)) and value != REDACTED:
+                if is_secret_name(str(key)) and value != REDACTED:
                     mapping[key] = REDACTED
                     self.count += 1
                 else:

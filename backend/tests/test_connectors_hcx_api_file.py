@@ -1072,8 +1072,8 @@ async def test_registered_op_is_typed_safe_and_documented(
         .scalars()
         .all()
     )
-    assert {r.op_id for r in rows} == {op.op_id for op in HCX_TYPED_OPS} == {"hcx.api_file.get"}
-    row = rows[0]
+    assert {r.op_id for r in rows} == {op.op_id for op in HCX_TYPED_OPS}
+    row = next(r for r in rows if r.op_id == "hcx.api_file.get")
     assert row.source_kind == "typed"
     assert row.handler_ref is not None
     assert row.safety_level == "safe"

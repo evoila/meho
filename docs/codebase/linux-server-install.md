@@ -25,6 +25,10 @@ This first version runs steps 1 to 3 of the design:
 Exit codes: 0 when RKE2 and its storage are ready, 1 when a check or a step
 failed, 2 for wrong usage (an unknown option or a bad value).
 
+The download itself, `meho-linux-<version>-amd64.tar`, is built by
+`build-download.sh` (#4734); see
+[linux-server-download.md](linux-server-download.md).
+
 Later Tasks add their steps to `main()` in `install.sh`:
 
 - #4635 adds the host firewall to step 2.
@@ -160,8 +164,8 @@ this folder are checked by the same job.
 
 ## Dependencies
 
-- RKE2 v1.37.1+rke2r1 and its offline files, from the download that #4734
-  builds.
+- RKE2 v1.37.1+rke2r1 and its offline files, from the download that
+  `build-download.sh` builds (#4734).
 - On the machine: bash, coreutils, `awk`, `sed`, `grep`, `ss` and `ip`
   (iproute2), `systemctl`, `timedatectl`, `getent`, and `resolvectl` when
   `systemd-resolved` runs. Ubuntu 24.04 has all of them.
@@ -173,10 +177,11 @@ this folder are checked by the same job.
   80 GB the smallest disk. The week-4 install (#4741) should decide whether
   the check compares the size of the file system or the free space.
 - **The pinned digests must survive the download build.** The manifest
-  names both images by digest. The image archive from #4734 must keep these
-  digests (an OCI archive does; `docker save` with the classic image store
-  does not). Otherwise RKE2 cannot find the images offline, and the wait for
-  the storage provisioner runs into the time limit.
+  names both images by digest, so the image archive must keep the registry
+  manifests. The download build (#4734) writes an OCI image layout for this
+  reason, and `check-download.sh` checks every digest; see
+  [linux-server-download.md](linux-server-download.md). A `docker save`
+  archive would get new digests, and RKE2 would not find the images offline.
 - **No CIS profile yet.** Without a profile, RKE2 applies the `privileged`
   pod security level, so the local-path helper pods run. #4636 adds the
   profile and the exception for the `local-path-storage` namespace.

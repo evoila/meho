@@ -937,6 +937,27 @@ class HttpConnector(Connector):
             f"target {target.name!r} uses {target.auth_model}"
         )
 
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Return the response body the flight recorder records, or ``None``.
+
+        ``None`` (the default) records the raw response bytes, redacted by
+        the shared engine (header allowlist, credential-shape scrub, secret
+        op families). A connector whose vendor answers can carry a secret in
+        a field the shared engine does not know by shape -- for example a
+        stored pairing password in a list of site pairings -- parses the
+        body here and masks those fields, so the secret never reaches the
+        stored trace. The returned value is recorded in place of the raw
+        bytes and still passes the shared redaction. Must not raise.
+        """
+        del response
+        return None
+
+    def _trace_response_body(self, start: Any, response: httpx.Response) -> Any:
+        """Call :meth:`trace_response_body` only while a trace is being captured."""
+        if start is None:
+            return None
+        return self.trace_response_body(response)
+
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
@@ -1008,6 +1029,7 @@ class HttpConnector(Connector):
             response=resp,
             request_body=json,
             request_content_type="application/json" if json is not None else None,
+            response_body=self._trace_response_body(_fr_start, resp),
         )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
@@ -1122,6 +1144,7 @@ class HttpConnector(Connector):
             response=resp,
             request_body=json if json is not None else data,
             request_content_type=_post_body_content_type(json, data),
+            response_body=self._trace_response_body(_fr_start, resp),
         )
         resp.raise_for_status()
         return json_payload_or_empty(resp)

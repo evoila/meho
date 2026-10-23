@@ -34,6 +34,21 @@ Built-in PostgreSQL (corePostgres):
   - The disk (PVC data-{{ include "corePostgres.statefulSetName" . }}-0) stays after helm uninstall.
     Delete the PVC and these Secrets together, or neither.
 {{- end }}
+{{- if .Values.coreVault.enabled }}
+{{- $unseal := printf "%s-core-vault-unseal" .Release.Name }}
+
+Built-in OpenBao (coreVault), the password safe:
+  - StatefulSet / {{ include "coreVault.fullname" . }}; pods reach it at http://{{ include "coreVault.fullname" . }}:{{ .Values.coreVault.service.port }}.
+  - It unseals itself after every restart while the Secret {{ $unseal }} exists.
+    Print the unseal key:
+      kubectl -n {{ .Release.Namespace }} get secret {{ $unseal }} -o jsonpath='{.data.key}' | base64 -d
+    Copy this to your key store now; for a keyholder at every restart, delete the Secret and restart OpenBao:
+      kubectl -n {{ .Release.Namespace }} delete secret {{ $unseal }}
+      kubectl -n {{ .Release.Namespace }} rollout restart statefulset {{ include "coreVault.fullname" . }}
+    In keyholder mode, unseal by hand with:
+      kubectl -n {{ .Release.Namespace }} exec -it {{ include "coreVault.fullname" . }}-0 -c {{ .Values.coreVault.binary }} -- {{ .Values.coreVault.binary }} operator unseal
+    Never create the Secret again just to unseal once: that switches back to self-unseal.
+{{- end }}
 
 {{- if .Values.sandboxMode.enabled }}
 

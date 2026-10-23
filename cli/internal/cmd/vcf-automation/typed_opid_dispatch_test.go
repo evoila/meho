@@ -76,6 +76,12 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.provider.api_token.revoke": "",
 	"vcfa.tenant.project.create":     "",
 	"vcfa.tenant.login.test":         "",
+	// Image ops: agent-surface-only too, reached through
+	// `meho operation call` / MCP call_operation.
+	"vcfa.tenant.image_profile.list":             "",
+	"vcfa.tenant.fabric_image.list":              "",
+	"vcfa.tenant.cloud_account.enumerate_images": "",
+	"vcfa.tenant.image_profile.mapping.update":   "",
 	// A project's own network and its first deployment: agent-surface-only,
 	// reached through `meho operation call` / MCP call_operation.
 	"vcfa.tenant.fabric_network.list":      "",

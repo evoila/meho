@@ -68,11 +68,19 @@ var ingestedDispatchCases = []struct {
 // typed op that is not classified here — the "typed op ⇒ repoint the
 // CLI verb ⇒ pin it" contract (#2942).
 var typedOpCLICoverage = map[string]string{
-	"vrops.liveness":       "about",
-	"vrops.alert.list":     "alert list",
-	"vrops.resource.query": "", // agent surface only (POST query; `resource list` is the plain GET list)
-	"vrops.resource.stats": "", // agent surface only
-	"vrops.license.info":   "", // no verb; use `operation call vrops.license.info`
+	"vrops.liveness":                 "about",
+	"vrops.alert.list":               "alert list",
+	"vrops.resource.query":           "", // agent surface only (POST query; `resource list` is the plain GET list)
+	"vrops.resource.stats":           "", // agent surface only
+	"vrops.resource_kind.properties": "", // no verb; use `operation call vrops.resource_kind.properties`
+	"vrops.license.info":             "", // no verb; use `operation call vrops.license.info`
+	// VCF 9 licence management: no CLI verb yet, agent surface only.
+	"vrops.licensing.registration.status": "",
+	"vrops.licensing.server.list":         "",
+	"vrops.licensing.entitlement.query":   "",
+	"vrops.licensing.vcenter.query":       "",
+	"vrops.licensing.server.query":        "",
+	"vrops.licensing.assign":              "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed vROps

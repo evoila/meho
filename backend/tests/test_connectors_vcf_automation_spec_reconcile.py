@@ -59,7 +59,7 @@ that hand-code a path:
   declares ``GET:``; the org and project constants are also POSTed
   by the #3890 creates (:data:`_TYPED_OPS_EXTRA_METHODS`).
 * :mod:`~meho_backplane.connectors.vcf_automation._paths` — the #3890
-  provisioning paths, each mapped to its method(s) in
+  provisioning paths and the image-op paths, each mapped to its method(s) in
   :data:`_PATHS_METHODS`. The ``/oauth/*`` token endpoints are
   provider-plane by :func:`plane_for_path`, so they sit in the
   evidenced exclusion with the rest of the provider plane.
@@ -93,6 +93,7 @@ from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
+from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import (
@@ -151,6 +152,13 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     "PROVIDER_TOKENS_PATH": frozenset({"GET"}),
     "PROVIDER_TOKEN_PATH": frozenset({"DELETE"}),
     "PROVIDER_USERS_PATH": frozenset({"GET", "POST"}),
+    # Image ops.
+    "TENANT_FABRIC_IMAGES_PATH": frozenset({"GET"}),
+    "TENANT_FABRIC_IMAGE_PATH": frozenset({"GET"}),
+    "TENANT_IMAGE_ENUMERATION_PATH": frozenset({"POST"}),
+    "TENANT_IMAGE_PROFILES_PATH": frozenset({"GET"}),
+    "TENANT_IMAGE_PROFILE_PATH": frozenset({"GET", "PATCH"}),
+    "TENANT_REQUEST_TRACKER_PATH": frozenset({"GET"}),
     # A project's own network and its first deployment (tenant plane).
     "TENANT_BLUEPRINT_REQUESTS_PATH": frozenset({"POST"}),
     "TENANT_BLUEPRINT_REQUEST_PATH": frozenset({"GET"}),
@@ -258,7 +266,13 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
     }
     unswept = {
         op.op_id: op.path
-        for op in (*VCFA_TYPED_OPS, *VCFA_PROVISIONING_OPS, *VCFA_NETWORK_OPS, *VCFA_DEPLOY_OPS)
+        for op in (
+            *VCFA_TYPED_OPS,
+            *VCFA_PROVISIONING_OPS,
+            *VCFA_IMAGE_OPS,
+            *VCFA_NETWORK_OPS,
+            *VCFA_DEPLOY_OPS,
+        )
         if op.path not in swept
     }
     assert not unswept, (
@@ -310,6 +324,14 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/oauth/{context}/register",
         "POST:/oauth/{context}/token",
         "PUT:/cloudapi/1.0.0/globalRoles/{id}/rights",
+        # Image ops.
+        "GET:/iaas/api/fabric-images",
+        "GET:/iaas/api/fabric-images/{id}",
+        "GET:/iaas/api/image-profiles",
+        "GET:/iaas/api/image-profiles/{id}",
+        "GET:/iaas/api/request-tracker/{id}",
+        "PATCH:/iaas/api/image-profiles/{id}",
+        "POST:/iaas/api/cloud-accounts/{id}/private-image-enumeration",
         # A project's own network and its first deployment.
         "DELETE:/deployment/api/deployments/{deploymentId}",
         "GET:/blueprint/api/blueprint-requests/{requestId}",

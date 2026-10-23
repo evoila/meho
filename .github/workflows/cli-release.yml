@@ -35,6 +35,12 @@
 # so it works on the self-hosted runner image, which ships without `gh`
 # (#3171).
 #
+# After the `release` job, the `linux-download` job calls
+# linux-download.yml (#4734). It builds the download of install form 2,
+# meho-linux-<version>-amd64.tar, from the `release` job's Linux CLI and
+# the tag's chart and image. It attaches the tar, SHA256SUMS-linux and
+# SHA256SUMS-linux.cosign.bundle to the same Release.
+#
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
 #   * workflow-default = `contents: read` (just enough to checkout).
@@ -43,6 +49,8 @@
 #     `packages: write`, no `security-events: write` — CLI tarballs
 #     land on GitHub Releases, not GHCR, and there is no SARIF scan
 #     in this Task's scope.
+#   * `linux-download` grants the same two to the called workflow, where
+#     only its `publish` job (sign + attach) uses them.
 
 name: cli-release
 
@@ -284,6 +292,19 @@ jobs:
           # standard sigstore.dev CI guidance.
           COSIGN_YES: "true"
 
+      - name: Keep the Linux amd64 CLI for the form-2 download
+        # The `linux-download` job below packs this exact archive's `meho`
+        # binary into meho-linux-<version>-amd64.tar. GoReleaser's SHA256SUMS
+        # rides along, so that job checks the archive before it unpacks it.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: meho-cli-linux-amd64
+          path: |
+            cli/dist/meho_*_linux_amd64.tar.gz
+            cli/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Build Claude Desktop .mcpb bundle
         # `build.sh` runs the pinned `mcpb pack` (which validates the
         # manifest) with the tag version stripped of its leading `v` —
@@ -413,4 +434,27 @@ jobs:
             echo "(auto-published, #1127) — verify the four tarballs +"
             echo "bundles, the .mcpb asset and SHA256SUMS-mcpb are present and that"
             echo "\`meho version\` reports the expected tag."
+            echo ""
+            echo "The form-2 download \`meho-linux-${TAG#v}-amd64.tar\`, with"
+            echo "\`SHA256SUMS-linux\` and its \`.cosign.bundle\`, is attached later"
+            echo "by the \`linux-download\` job (see docs/RELEASING.md)."
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  linux-download:
+    name: Form-2 download (meho-linux-<version>-amd64.tar)
+    # Builds the one download of install form 2 from this tag's chart, image
+    # and CLI, signs its checksum file and attaches the three files to the
+    # release that the `release` job created (#4734). See
+    # .github/workflows/linux-download.yml.
+    needs: release
+    uses: ./.github/workflows/linux-download.yml
+    with:
+      tag: ${{ github.ref_name }}
+    # A called workflow can use at most the permissions its calling job
+    # grants. Inside linux-download.yml only the `publish` job, which signs
+    # and attaches, takes these two; its `build` job stays read-only.
+    # GitHub does not allow `timeout-minutes` on a job that calls a
+    # workflow; each job of linux-download.yml sets its own.
+    permissions:
+      contents: write
+      id-token: write

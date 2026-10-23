@@ -36,7 +36,7 @@ Requirement 1 of the delete decision says today: "Mandatory human approval, alwa
 
 > 1. **Mandatory human approval, always — except on an instance in sandbox mode.** There, a standing grant may cover a delete by a service principal. A person creates that grant in the web console, and it expires within 30 days. The rest of this requirement is unchanged: no self-approval, no autonomous-session approval.
 
-The same exception applies wherever that record says that no standing grant can cover a delete, and to the cell "service principal, destructive" in the rules table of #3325. The 30 days are open question 2.
+The same exception applies wherever that record says that no standing grant can cover a delete, and to the cell "service principal, destructive" in the rules table of #3325. The 30 days are answer 2 in "Answered (2026-10-20)".
 
 ## What stays
 
@@ -130,12 +130,15 @@ Test 1 (`backend/tests/test_sandbox_mode_verdict_table.py`) checks the verdict (
 - **The "proofs are code" runner** (a fixed runner runs only reviewed test scripts, and each delete still waits for a person, for example in a daily batch, #3322): deletes would still wait, which the program owner decided against for disposable systems. It also needs a new runner and a review flow for the scripts.
 - **A "minimum version" mark in the database, checked at start:** no such check exists today, and builds from before the mark do not read it. So it cannot stop the older builds that matter. The separate table works against every build, old or new.
 
-## Open questions for the program owner (answer before merge)
+## Answered (2026-10-20)
 
-1. **Delete grants only in the web console?** Then no automation and no CLI can create a delete grant, also not with a person's token. The second reviewer would keep this.
-2. **30 or 60 days for a delete grant?** The second reviewer would keep 30: daily tests do not need daily approval, and a monthly review is a fair price for deletes without a person.
-3. **Wording for other instances.** The record says that AI agents on service principal logins are on purpose on a sandbox and change nothing elsewhere. Is that enough, or should it also say that other instances must not do it?
-4. **The review after 20 completed runs:** the results go into this record, and you keep or change the decision. Is that the review you want?
+The program owner answered on 2026-10-20, in the approving review of [pull request #4633](https://github.com/evoila/meho/pull/4633). All five choices stay as written.
+
+1. **Delete grants only in the web console.** Yes: no automation and no CLI can create a delete grant, also not with a person's token.
+2. **30 days for a delete grant.** Yes: every delete grant expires within 30 days of its creation.
+3. **Wording for other instances.** The wording stays: AI agents on service principal logins are on purpose on a sandbox, and the record changes nothing for other instances.
+4. **The review after 20 completed runs.** Yes: the results go into this record, and the program owner keeps or changes the decision.
+5. **Rollback safety by the separate grant table.** Yes: delete grants are stored only in `sandbox_delete_grant`, so an older build never finds one.
 
 ## Acceptance criteria for the code of #4622
 

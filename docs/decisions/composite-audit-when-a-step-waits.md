@@ -86,7 +86,7 @@ before its code ran. The `result_status` says how it ended.
 - The `parent_audit_id` filter finds direct children only, one link at a time. The replay view
   (console, REST, `meho audit replay`) follows the whole chain (`audit_query/replay.py:91`).
 
-**5. What changes for the code that reads `result_status`? Two help texts and one doc table.**
+**5. What changes for the code that reads `result_status`? Two help texts and two doc tables.**
 
 - Audit query filters (REST, console, MCP `query_audit`, CLI `meho audit query`): no new value. The
   query reads the status code, not `payload.result_status` (`audit_query/query.py:314-340`, `:405-423`):

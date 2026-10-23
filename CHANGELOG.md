@@ -158,7 +158,13 @@ OpenBao; all three are off by default.
   keys). Now these reads wait for approval, and MEHO hides the secret
   values in the answer. The hiding and the `bind9.config.show` change
   work right after the upgrade. For the approval step on SDDC Manager,
-  load the connector again: `meho connector ingest --catalog sddc/9.0`.
+  load your original vendor API file again into the same connector and
+  tenant:
+  `meho connector ingest --product sddc --version 9.0 --impl sddc-rest --spec file:///abs/path/to/spec.yaml`,
+  with the path of the file you loaded before. Add
+  `--tenant-id <tenant-uuid>` if the connector belongs to a tenant.
+  `--catalog sddc/9.0` is not enough: it loads only nine inventory
+  reads, not these credential reads.
 
 ### Security
 

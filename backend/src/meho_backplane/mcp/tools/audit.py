@@ -128,8 +128,9 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         "principal": {
             "type": ["string", "null"],
             "description": (
-                "Operator sub or partial-name substring. Matches "
-                "`audit_log.operator_sub` via case-insensitive LIKE."
+                "Part of the user id or of the name. Matches "
+                "`audit_log.operator_sub` or the row's `principal_name` "
+                "via case-insensitive LIKE."
             ),
             "maxLength": 256,
         },

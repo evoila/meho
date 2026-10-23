@@ -24,7 +24,7 @@ import (
 //
 //	meho audit query \
 //	  [--target T]                 # name or alias (server resolves)
-//	  [--principal P]              # operator sub or partial match
+//	  [--principal P]              # part of the user id or the name
 //	  [--op-id PATTERN]            # glob: vsphere.vm.*
 //	  [--op-class C]               # read | write | credential_read | audit_query | other
 //	  [--result-status S]          # ok | error | denied | pending
@@ -101,7 +101,7 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&target, "target", "",
 		"narrow to one target (name or alias; server-side resolution)")
 	cmd.Flags().StringVar(&principal, "principal", "",
-		"narrow to one operator (JWT subject; partial-match supported)")
+		"narrow to one operator (part of the user id or the name; case does not matter)")
 	cmd.Flags().StringVar(&opID, "op-id", "",
 		"narrow to one op-id (glob with * wildcards)")
 	cmd.Flags().StringVar(&opClass, "op-class", "",

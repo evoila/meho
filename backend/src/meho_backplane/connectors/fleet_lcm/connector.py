@@ -58,7 +58,9 @@ comes from one of two places:
   (``token/exchange`` with the service key ``fleet-lcm``). See
   :func:`~meho_backplane.connectors.fleet_lcm.session.mint_fleet_lcm_token`.
   The login goes to ``vcf_ops_url`` from the secret when it is set, else to
-  the target's own address. The token is kept per target
+  the target's own host and port. The login paths start at the root of the
+  host, so a service path carried on the target's ``host`` (for example
+  ``/fleet-lcm``) is not used for the login. The token is kept per target
   (``(tenant_id, target.id)``) until :meth:`invalidate_session` drops it.
 * **Stored token (fallback).** When the secret carries a ``token``, MEHO
   sends it as is and does not log in.
@@ -243,8 +245,7 @@ class FleetLcmConnector(HttpConnector):
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
-            ops_url = creds.get("vcf_ops_url")
-            login_target: Any = _VcfOpsEndpoint(target, ops_url) if ops_url else target
+            login_target: Any = _LoginEndpoint(target, creds.get("vcf_ops_url"))
             client = await self._http_client(login_target)
             token = await mint_fleet_lcm_token(
                 client,
@@ -531,24 +532,36 @@ class FleetLcmConnector(HttpConnector):
         await super().aclose()
 
 
-class _VcfOpsEndpoint:
-    """The target, seen at the VCF Operations address from ``vcf_ops_url``.
+class _LoginEndpoint:
+    """The target, seen at the address where VCF Operations answers.
 
-    Only the address changes. Everything else (``id`` / ``tenant_id``,
-    ``verify_tls``, ``tls_ca_pin``) comes from the target, so the login gets
-    its own pooled client with the same TLS rules and the same address
-    check. A ``tls_server_name`` set on the target belongs to the target's
-    address, so it is not used here.
+    The login paths start at the root of the host (``/suite-api/...``), so
+    the login never runs on the fleet client: a target's ``host`` may carry
+    the ``/fleet-lcm`` service path, and that path must not sit in front of
+    the login paths. Without ``vcf_ops_url`` the login goes to the target's
+    own host and port, with any path on ``host`` dropped. With
+    ``vcf_ops_url`` it goes to that address, and an IPv6 address keeps its
+    brackets so the client address stays valid.
+
+    Everything else (``id`` / ``tenant_id``, ``verify_tls``, ``tls_ca_pin``)
+    comes from the target, so the login gets its own pooled client with the
+    same TLS rules and the same address check. A ``tls_server_name`` set on
+    the target belongs to the target's address, so it is kept only when the
+    login goes there.
     """
 
-    tls_server_name: str | None = None
-
-    def __init__(self, target: FleetLcmTargetLike, ops_url: str) -> None:
-        url = httpx.URL(ops_url)
+    def __init__(self, target: FleetLcmTargetLike, ops_url: str | None) -> None:
         self._target = target
-        self.host = url.host
-        self.port = url.port
-        self.extras = {"scheme": "https"}
+        if ops_url:
+            url = httpx.URL(ops_url)
+            self.host = f"[{url.host}]" if ":" in url.host else url.host
+            self.port = url.port
+            self.extras = {"scheme": "https"}
+            self.tls_server_name: str | None = None
+        else:
+            self.host = str(target.host).partition("/")[0]
+            self.port = target.port
+            self.tls_server_name = getattr(target, "tls_server_name", None)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._target, name)

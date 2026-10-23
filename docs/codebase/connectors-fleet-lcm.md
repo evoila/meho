@@ -122,13 +122,16 @@ out in two steps. `auth_headers` returns `Authorization: Bearer <token>`:
      `Authorization: OpsToken <token>` and `{"serviceKeys": ["fleet-lcm"]}`
      → `{"jwtToken": ...}`, the Bearer token.
 
-**Where the login goes.** By default MEHO logs in at the target's own address.
-When VCF Operations has a different address, put it in the secret as
-`vcf_ops_url` (`https://host` or `https://host:port`; https only, no path).
-The login then uses its own pooled client for that address. It gets the same
-address check (SSRF guard) and the same TLS rules (`verify_tls`,
-`tls_ca_pin`) as the target. A target's `tls_server_name` is not used for the
-VCF Operations address.
+**Where the login goes.** The login paths start at the root of the host
+(`/suite-api/...`). By default MEHO logs in at the target's own host and port.
+A service path carried on the target's `host` (for example `/fleet-lcm`) is
+used for the fleet calls only, not for the login. When VCF Operations has a
+different address, put it in the secret as `vcf_ops_url` (`https://host` or
+`https://host:port`; https only, no path). An IPv6 address keeps its brackets,
+for example `https://[fd00::10]:8443`. The login always uses its own pooled
+client (`_LoginEndpoint`). It gets the same address check (SSRF guard) and the
+same TLS rules (`verify_tls`, `tls_ca_pin`) as the target. A target's
+`tls_server_name` is used only when the login goes to the target's own host.
 
 **Renewal.** When a fleet call answers `401`, the dispatcher calls
 `invalidate_session(target)` and runs the call once more. `invalidate_session`

@@ -81,8 +81,10 @@ Operations at the first call and keeps it:
 When the token expires, the fleet API answers `401`. MEHO then logs in once
 more and runs the call again. You do not need to do anything.
 
-By default MEHO logs in at the target's own address. If VCF Operations has a
-different address, add it to the secret as `vcf_ops_url` (see below).
+By default MEHO logs in at the target's own host and port. If the target's
+`host` carries the `/fleet-lcm` service path, MEHO leaves that path out of the
+login. If VCF Operations has a different address, add it to the secret as
+`vcf_ops_url` (see below).
 
 **Fallback: a stored token.** If the secret has a `token` field, MEHO sends
 that token as is and does not log in. A stored token expires, so use this

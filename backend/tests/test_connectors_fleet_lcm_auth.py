@@ -291,6 +291,53 @@ async def test_login_goes_to_vcf_ops_url_when_set() -> None:
 
 
 @pytest.mark.asyncio
+async def test_login_goes_to_ipv6_vcf_ops_url_with_explicit_port() -> None:
+    """An IPv6 ``vcf_ops_url`` keeps its brackets, so the login client address is valid."""
+
+    async def _ops_url_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
+        return {
+            "username": "admin",
+            "password": _PASSWORD,
+            "vcf_ops_url": "https://[fd00::10]:8443",
+        }
+
+    connector = FleetLcmConnector(credentials_loader=_ops_url_loader)
+    async with (
+        respx.mock(base_url="https://[fd00::10]:8443") as ops_mock,
+        respx.mock(base_url="https://fleet-lcm-a.test.invalid", assert_all_called=False) as fleet,
+    ):
+        _mock_login(ops_mock)
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        assert _paths_in_order(ops_mock) == [_ACQUIRE_PATH, _EXCHANGE_PATH]
+        acquire_url = ops_mock.calls[0].request.url
+        assert (acquire_url.host, acquire_url.port) == ("fd00::10", 8443)
+        assert fleet.calls.call_count == 0
+
+    assert headers == {"Authorization": f"Bearer {_JWT}"}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_login_skips_the_service_path_on_the_target_host() -> None:
+    """A ``/fleet-lcm`` service path on ``host`` is used for fleet calls, not for the login."""
+    target = _StubTarget(
+        name="fleet-lcm-prefixed",
+        host="fleet-lcm-a.test.invalid/fleet-lcm",
+        port=443,
+        secret_ref="fleet-lcm/fleet-lcm-prefixed",
+    )
+    connector = FleetLcmConnector(credentials_loader=_login_loader)
+    async with respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock:
+        _mock_login(mock)
+        mock.get("/fleet-lcm/v1/health").respond(200, json={"status": "HEALTHY"})
+        fp = await connector.fingerprint(target, operator=_make_operator())
+        assert _paths_in_order(mock) == [_ACQUIRE_PATH, _EXCHANGE_PATH, "/fleet-lcm/v1/health"]
+
+    assert fp.reachable is True
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("step", ["acquire", "exchange"])
 @pytest.mark.parametrize("status", [401, 403])
 async def test_refused_login_raises_connector_auth_error(step: str, status: int) -> None:

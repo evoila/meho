@@ -8,6 +8,10 @@ Operations or Aria Operations appliance with one ``GET`` on the target's
 own login. HTTP is mocked with ``respx``, like
 ``test_connectors_vcf_operations_typed_reads.py``. All file contents are
 made up here; the large files are built by helpers, not stored in the repo.
+
+The secret check itself (the parser for each format) has its own tests in
+``test_connectors_shared_api_file_secrets.py``. The tests here check that
+the read runs it on the whole file and returns the checked copy.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import respx
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.api_file_secrets import find_api_file_secrets
+from meho_backplane.connectors._shared.api_file_secrets import REDACTED, check_api_file
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import AuthModel
@@ -49,7 +53,7 @@ from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
-from tests.test_vmware_operation_contracts import OperationContract, check_operation
+from tests.test_operation_contracts import OperationContract, check_operation
 
 _HOST = "vrops-api-file.test.invalid"
 _BASE = f"https://{_HOST}"
@@ -148,6 +152,11 @@ def _redact_like_the_dispatcher(answer: dict[str, Any]) -> Any:
     )
 
 
+def _checked(text: str, content_type: str | None, path: str = _FILE_PATH) -> str:
+    """The copy the shared check makes of *text*: what the read returns."""
+    return check_api_file(text, content_type=content_type, path=path).text
+
+
 def _json_text_size(text: str) -> int:
     """Size of *text* as a JSON string, without the quotes."""
     return len(msgspec.json.encode(text)) - 2
@@ -173,10 +182,16 @@ async def test_reads_the_swagger_page_with_size_hash_version_and_parts() -> None
     assert answer["status"] == 200
     assert answer["content_type"] == "text/html;charset=UTF-8"
     assert answer["redirect_path"] is None
-    assert answer["size"] == len(body)
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
+    # The inline script is not JSON, so the check replaces it; the rest of
+    # the page comes back as served.
+    copy = _checked(_PAGE, "text/html;charset=UTF-8", _PAGE_PATH)
+    assert answer["secrets_replaced"] == 1
+    assert REDACTED in copy and "SwaggerUIBundle" not in copy
+    assert '<div id="swagger-ui"></div>' in copy
+    assert answer["size"] == len(copy.encode())
+    assert answer["sha256"] == hashlib.sha256(copy.encode()).hexdigest()
     assert answer["parts"] == 1
-    assert answer["text_parts"] == [{"index": 0, "text": _PAGE}]
+    assert answer["text_parts"] == [{"index": 0, "text": copy}]
     assert answer["version"] == "9.1.1.24000000"
     assert answer["build"] == "24000000"
     assert answer["version_error"] is None
@@ -355,6 +370,26 @@ async def test_secret_named_query_value_in_a_redirect_is_replaced() -> None:
     assert answer["status"] == 302
     assert answer["parts"] == 0
     assert answer["redirect_path"] == "/suite-api/doc/?licenseKey=[REDACTED:param_name]"
+    assert answer["secrets_replaced"] == 1
+    assert "MADEUP" not in msgspec.json.encode(answer).decode()
+
+
+async def test_encoded_secret_query_name_in_a_redirect_is_replaced() -> None:
+    # ``%4B`` is ``K``: the name is ``licenseKey`` once it is decoded.
+    raw = "/suite-api/doc/?license%4Bey=MADEUP-MADEUP"
+    redaction = _redact_like_the_dispatcher({"redirect_path": raw})
+    assert redaction.manifest == () and redaction.redacted == redaction.raw
+
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_PAGE_PATH).respond(302, headers={"Location": raw})
+        answer = await _call(connector, _PAGE_PATH)
+    await connector.aclose()
+
+    assert answer["status"] == 302
+    assert answer["redirect_path"] == "/suite-api/doc/?licenseKey=[REDACTED:param_name]"
+    assert answer["secrets_replaced"] == 1
     assert "MADEUP" not in msgspec.json.encode(answer).decode()
 
 
@@ -368,7 +403,8 @@ async def test_failed_version_read_still_returns_the_file(version_status: int) -
         answer = await _call(connector, _PAGE_PATH)
     await connector.aclose()
 
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
+    copy = _checked(_PAGE, "text/html", _PAGE_PATH).encode()
+    assert answer["sha256"] == hashlib.sha256(copy).hexdigest()
     assert answer["version"] is None
     assert answer["build"] is None
     assert _VERSION_PATH in answer["version_error"]
@@ -436,7 +472,9 @@ async def test_joined_parts_have_the_file_sha256(body: bytes) -> None:
         answer = await _call(connector, _FILE_PATH)
     await connector.aclose()
 
-    assert answer["size"] == len(body)
+    copy = _checked(body.decode(), "application/json").encode()
+    assert answer["size"] == len(copy)
+    assert answer["secrets_replaced"] == 0
     assert answer["parts"] == len(answer["text_parts"]) > 1
     assert [part["index"] for part in answer["text_parts"]] == list(range(answer["parts"]))
     assert all(len(part["text"].encode()) <= PART_MAX_BYTES for part in answer["text_parts"])
@@ -486,9 +524,10 @@ def _settings_with(**caps: int) -> Any:
 async def test_file_too_big_for_one_result_stops_with_its_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = _many_line_json(4_000)
+    body = _one_line_json(200_000)
     # The file fits the read cap, but not once it is stored as JSON text
-    # (quotes and line ends are escaped, and the record needs room).
+    # (quotes are escaped, and the record needs room). A compact file is
+    # its own checked copy, so its size is the size the error names.
     cap = len(body) + 2_000
     monkeypatch.setattr(
         api_file, "get_settings", _settings_with(result_handle_max_record_bytes=cap)
@@ -587,6 +626,14 @@ async def test_file_whose_text_redaction_would_change_is_refused() -> None:
     assert "made-up-pass-value" not in message
 
 
+def _json_with_a_secret_key_across_the_part_cut() -> bytes:
+    """Valid one-line JSON whose ``password`` key straddles the first part cut."""
+    head = '{"pad":"'
+    joint = '","pass'
+    padding = "a" * (PART_MAX_BYTES - _json_text_size(head + joint))
+    return (head + padding + joint + 'word":"made-up-pass-value-0123"}').encode()
+
+
 def _json_with_a_secret_across_the_part_cut(tail: str) -> bytes:
     """Valid one-line JSON whose secret label straddles the first part cut.
 
@@ -627,274 +674,162 @@ async def test_secret_split_across_the_part_cut_is_refused() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Secret shapes the stored-result redaction does not see
+# Secret values: the shared check replaces them before the file is cut
 # ---------------------------------------------------------------------------
 
 # Built in pieces so that the test file itself holds no key header.
 _PEM_HEADER = "-----BEGIN " + "RSA PRIVATE" + " KEY-----"
 
+_JSON = "application/json"
+_YAML = "application/yaml"
+_XML = "application/xml"
+_HTML = "text/html"
+
+#: Files with a secret value the stored-result redaction does not see.
+#: Each value is (content type, file text). The last four are the
+#: examples of the fourth code review, which a text scan let through.
 _SECRET_SHAPED_FILES = {
-    "quoted-json-password": (
-        '{"openapi":"3.0.1","x-login":{"password": "made-up-pass-value-0123"}}',
-        "the field 'password'",
-    ),
-    "quoted-json-token": (
-        '{"openapi":"3.0.1","x-session":{"token":"made-up-token-value-0123"}}',
-        "the field 'token'",
-    ),
-    "quoted-json-prefixed-label": (
-        '{"openapi":"3.0.1","x-login":{"x-auth-token": "made-up-token-value-0123"}}',
-        "the field 'x-auth-token'",
-    ),
-    "single-quoted-yaml": (
-        "openapi: 3.0.1\nx-login:\n  'password': 'made-up-pass-value-0123'\n",
-        "the field 'password'",
-    ),
-    "quoted-authorization": (
-        '{"openapi":"3.0.1","x-headers":{"Authorization": "Basic bWFkZS11cDpwYXNz"}}',
-        "the field 'Authorization'",
-    ),
-    "quoted-json-licence-key": (
-        '{"openapi":"3.0.1","x-licence":{"licenseKey": "MADEUP-MADEUP-MADEUP-MADEUP"}}',
-        "the field 'licenseKey'",
-    ),
-    "yaml-licence-key": (
-        "openapi: 3.0.1\nx-licence:\n  licence_key: MADEUP-MADEUP-MADEUP-MADEUP\n",
-        "the field 'licence_key'",
-    ),
-    "licence-key-in-running-text": (
-        '{"openapi":"3.0.1","info":{"description":"Send licenseKey: MADEUP-MADEUP-MADEUP"}}',
-        "the field 'licenseKey'",
-    ),
-    "short-quoted-password": (
-        '{"openapi":"3.0.1","x-login":{"password": "made-up"}}',
-        "the field 'password'",
-    ),
-    "short-yaml-password": (
-        "openapi: 3.0.1\nx-login:\n  password: made-up\n",
-        "the field 'password'",
-    ),
-    "password-of-words": (
-        '{"openapi":"3.0.1","x-login":{"password": "made up pass of words"}}',
-        "the field 'password'",
-    ),
-    "yaml-password-of-words": (
-        "openapi: 3.0.1\nx-login:\n  - password: made up pass of words\n",
-        "the field 'password'",
-    ),
-    "yaml-block-password": (
-        "openapi: 3.0.1\nx-login:\n  password: |\n    made-up-pass-value\n",
-        "the field 'password'",
-    ),
-    "yaml-tagged-password": (
-        "openapi: 3.0.1\nx-login:\n  password: !!str made-up-pass-value\n",
-        "the field 'password'",
-    ),
-    "pem-private-key": (
-        "openapi: 3.0.1\nx-key: |\n  " + _PEM_HEADER + "\n  MADEUPMADEUPMADEUP\n",
-        "a PEM private key",
-    ),
-    # The reviewer's last examples: valid YAML, XML and HTML that the
-    # per-format checks let through.
-    "yaml-two-comment-lines-before-the-value": (
-        "openapi: 3.0.1\nx-login:\n  password: # first\n  # second\n  # third\n    made-up\n",
-        "the field 'password'",
-    ),
-    "yaml-alias-with-a-trailing-comment": (
-        "openapi: 3.0.1\nd: &pw made-up\nx-login:\n  password: *pw # use default\n",
-        "the field '&pw'",
-    ),
-    "xml-password-element": (
-        "<settings><version>9</version><password>made-up</password></settings>",
-        "the element 'password'",
-    ),
-    "html-password-attribute": (
-        '<html><body><input type="text" password="made-up"></body></html>',
-        "the field 'password'",
-    ),
-    "json-value-on-the-next-line-in-a-script-block": (
-        '<html><script>var cfg = {"password":\n  "made-up"};</script></html>',
-        "the field 'password'",
-    ),
-    # The reviewer's second-round examples: an id attribute before the
-    # name, and block text that looks like a mapping, a list or a comment.
-    "html-input-id-before-name": (
-        '<html><body><input id="login-field" name="password" value="made-up"></body></html>',
-        "the attribute 'value'",
-    ),
-    "html-input-name-before-id": (
-        '<html><body><input name="password" id="login-field" value="made-up"></body></html>',
-        "the attribute 'value'",
-    ),
-    "yaml-block-text-with-a-colon": (
-        "openapi: 3.0.1\nx-login:\n  password: |\n    made-up: phrase\n",
-        "the field 'password'",
-    ),
-    "yaml-block-text-with-a-dash": (
-        "openapi: 3.0.1\nx-login:\n  password: |\n    - made-up\n",
-        "the field 'password'",
-    ),
-    "yaml-block-text-with-a-hash": (
-        "openapi: 3.0.1\nx-login:\n  password: |\n    # made-up\n",
-        "the field 'password'",
-    ),
-    # The reviewer's third-round examples: bare attribute values, and an
-    # object or a list under a secret-named key.
-    "html-input-unquoted-name": (
-        '<html><body><input name=password value="made-up"></body></html>',
-        "the attribute 'value'",
-    ),
-    "html-input-unquoted-value": (
-        '<html><body><input name="password" value=made-up></body></html>',
-        "the attribute 'value'",
-    ),
+    "json-password": (_JSON, '{"openapi":"3.0.1","x-login":{"password": "made-up"}}'),
+    "json-token": (_JSON, '{"openapi":"3.0.1","x-session":{"token":"made-up-token"}}'),
+    "json-prefixed-name": (_JSON, '{"openapi":"3.0.1","x-login":{"x-auth-token": "made-up"}}'),
+    "json-licence-key": (_JSON, '{"openapi":"3.0.1","x":{"licenseKey": "MADEUP-MADEUP"}}'),
+    "json-password-of-words": (_JSON, '{"x-login":{"password": "made up pass of words"}}'),
     "json-object-under-credentials": (
+        _JSON,
         '{"openapi":"3.0.1","credentials":{"value":"made-up"}}',
-        "the field 'value'",
     ),
-    "json-list-under-licence-key": (
-        '{"openapi":"3.0.1","licenseKey":["MADEUP-MADEUP"]}',
-        "the field 'licenseKey'",
+    "json-list-under-licence-key": (_JSON, '{"openapi":"3.0.1","licenseKey":["MADEUP-MADEUP"]}'),
+    "yaml-single-quoted": (_YAML, "openapi: 3.0.1\nx-login:\n  'password': 'made-up'\n"),
+    "yaml-licence-key": (_YAML, "openapi: 3.0.1\nx:\n  licence_key: MADEUP-MADEUP\n"),
+    "yaml-list-item": (_YAML, "openapi: 3.0.1\nx-login:\n  - password: made up pass of words\n"),
+    "yaml-block": (_YAML, "openapi: 3.0.1\nx-login:\n  password: |\n    made-up: phrase\n"),
+    "yaml-tagged": (_YAML, "openapi: 3.0.1\nx-login:\n  password: !!str made-up\n"),
+    "yaml-comments-before-the-value": (
+        _YAML,
+        "openapi: 3.0.1\nx-login:\n  password: # first\n  # second\n    made-up\n",
     ),
-    "yaml-mapping-under-credentials": (
-        "openapi: 3.0.1\ncredentials:\n  value: made-up\n",
-        "the field 'value'",
+    "yaml-alias": (_YAML, "openapi: 3.0.1\nd: &pw made-up\nx-login:\n  password: *pw # x\n"),
+    "yaml-mapping-under-credentials": (_YAML, "openapi: 3.0.1\ncredentials:\n  value: made-up\n"),
+    "pem-private-key": (
+        _YAML,
+        "openapi: 3.0.1\nx-key: |\n  " + _PEM_HEADER + "\n  MADEUPMADEUPMADEUP\n",
+    ),
+    "xml-password-element": (_XML, "<settings><v>9</v><password>made-up</password></settings>"),
+    "html-password-attribute": (_HTML, '<html><body><input password="made-up"></body></html>'),
+    "html-input-id-before-name": (
+        _HTML,
+        '<html><body><input id="f" name="password" value="made-up"></body></html>',
+    ),
+    "html-input-unquoted": (_HTML, "<html><body><input name=password value=made-up></body></html>"),
+    "html-json-script-on-two-lines": (
+        _HTML,
+        '<html><script>var cfg = {"password":\n  "made-up"};</script></html>',
+    ),
+    # Fourth review: a schema word under a secret name, a YAML list at the
+    # key's indentation, and a ``>`` inside a quoted attribute.
+    "json-default-under-credentials": (_JSON, '{"credentials":{"default":"made-up"}}'),
+    "yaml-list-at-the-key-indentation": (_YAML, "licenseKey:\n- MADEUP-MADEUP\n"),
+    "html-quoted-angle-bracket-before-the-name": (
+        _HTML,
+        '<html><body><input title="1 > 0" name=password value=made-up></body></html>',
     ),
 }
 
 
 @pytest.mark.parametrize(
-    ("text", "shape"), list(_SECRET_SHAPED_FILES.values()), ids=list(_SECRET_SHAPED_FILES)
+    ("content_type", "text"),
+    list(_SECRET_SHAPED_FILES.values()),
+    ids=list(_SECRET_SHAPED_FILES),
 )
-async def test_file_with_a_secret_shape_is_refused(text: str, shape: str) -> None:
+async def test_secret_value_in_the_file_is_replaced(content_type: str, text: str) -> None:
     # The stored-result redaction leaves these forms as they are; the
-    # read's own check must refuse them.
+    # read's own check must replace them.
     redaction = _redact_like_the_dispatcher({"text": text})
     assert redaction.manifest == () and redaction.redacted == redaction.raw
 
     connector = _connector()
-    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+    async with respx.mock(base_url=_BASE) as mock:
         _mock_session_and_version(mock)
-        mock.get(_FILE_PATH).respond(200, content=text.encode())
-        with pytest.raises(VropsApiFileError) as excinfo:
-            await _call(connector, _FILE_PATH)
+        mock.get(_FILE_PATH).respond(
+            200, content=text.encode(), headers={"Content-Type": content_type}
+        )
+        answer = await _call(connector, _FILE_PATH)
     await connector.aclose()
 
-    message = str(excinfo.value)
-    assert _FILE_PATH in message
-    assert shape in message
-    assert "not returned" in message
-    assert "made-up" not in message and "made up" not in message
-    assert "MADEUP" not in message and "bWFkZS" not in message
+    copy = _joined(answer)
+    encoded = msgspec.json.encode(answer).decode()
+    assert answer["secrets_replaced"] >= 1
+    assert REDACTED.encode() in copy
+    assert answer["sha256"] == hashlib.sha256(copy).hexdigest()
+    assert answer["size"] == len(copy)
+    assert "made-up" not in encoded and "made up" not in encoded
+    assert "MADEUP" not in encoded
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("content_type", "text"),
     [
-        '{"properties":{"password":{"type":"string","format":"password"}}}',
-        '{"password": "string", "token": "string", "max_tokens": 12345678901}',
-        '{"type": "apiKey", "name": "Authorization", "in": "header"}',
-        '{"securitySchemes": {"apiKey": {"type": "apiKey", "name": "Authorization"}}}',
-        '{"passwordPolicy": {"minimum": "eight-or-more"}}',
-        '{"tokenUrl": "https://login.example/token", "authorizationUrl": "https://a.example/"}',
-        '{"info": {"license": {"name": "Apache 2.0", "url": "https://www.apache.org/"}}}',
-        '{"password": "<password>", "token": "${TOKEN}", "licenseKey": "{{ licence_key }}"}',
-        '{"password": "", "token": null, "secret": true}',
-        '{"description": "Use password: must be at least 8 characters"}',
-        "components:\n  schemas:\n    Login:\n      properties:\n        password:\n"
-        "          type: string\n        token: {type: string}\n"
-        "        pwd: |\n          <password>\n",
-        "password: string\ntoken: null\nlicenseKey: <licence key>\nsecret: # set later\n",
-        "password:\n  # the schema\n  type: string\ntoken: !!null\nsecret: !!str string\n",
-        "- password: &pw\n    type: string\n",
-        "s: &s {type: string}\ntoken: |\nnext: 1\n",
-        '{"paths":{"/auth/token":{"get":{"tags":["auth"],"operationId":"token",'
-        '"parameters":[{"name":"sort","in":"query","schema":{"type":"string",'
-        '"default":"asc"}}],"responses":{"200":{"description":"Done"}}}}}}',
-        _PAGE,
+        (_JSON, '{"securitySchemes":{"basic":{"type":"http","scheme":"basic"}}}'),
+        (_JSON, '{"info":{"license":{"name":"Apache 2.0","url":"https://www.apache.org/"}}}'),
+        (_YAML, "openapi: 3.0.1\ninfo:\n  title: Suite API\n"),
+        (_XML, '<definitions name="suite"><types/></definitions>'),
     ],
-    ids=[
-        "schema-property",
-        "short-stubs",
-        "security-scheme",
-        "security-scheme-name",
-        "label-prefix-of-a-name",
-        "label-prefix-of-url-names",
-        "licence-object",
-        "placeholders",
-        "empty-and-literals",
-        "sentence-about-a-password",
-        "yaml-schema",
-        "yaml-stubs-and-placeholder",
-        "yaml-comment-tag-and-tagged-stub",
-        "yaml-anchored-schema",
-        "yaml-flow-anchor-and-empty-block",
-        "path-item-named-after-a-token",
-        "swagger-page",
-    ],
+    ids=["security-scheme", "licence-object", "yaml", "xml"],
 )
-def test_ordinary_api_description_text_holds_no_secret_value(text: str) -> None:
-    assert find_api_file_secrets(text) == []
+async def test_file_without_a_secret_name_comes_back_with_nothing_replaced(
+    content_type: str, text: str
+) -> None:
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_FILE_PATH).respond(
+            200, content=text.encode(), headers={"Content-Type": content_type}
+        )
+        answer = await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    assert answer["secrets_replaced"] == 0
+    assert _joined(answer).decode() == _checked(text, content_type)
+    assert REDACTED not in _joined(answer).decode()
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "password: |\n  made-up-pass-value\n",
-        "password: >-\n  made up\n  words\n",
-        "password: | # keep\n  made-up-pass-value\n",
-        '"password": |\n  made-up-pass-value\n',
-        "- password: |\n    made-up-pass-value\n",
-        "password: !!str made-up-pass-value\n",
-        'password: !!str "made-up-pass-value"\n',
-        "password: &pw made-up-pass-value\n",
-        "defaults:\n  pw: &pw made-up-pass-value\nlogin:\n  password: *pw\n",
-        "login:\n  password:\n    made-up-pass-value\n",
-        "password: # set\n  made-up-pass-value\n",
-    ],
-    ids=[
-        "literal-block",
-        "folded-block-of-words",
-        "block-with-comment",
-        "quoted-key-block",
-        "list-item-block",
-        "tagged",
-        "tagged-quoted",
-        "anchored",
-        "alias-of-an-anchored-value",
-        "plain-scalar-on-the-next-line",
-        "comment-then-next-line",
-    ],
-)
-def test_yaml_block_tagged_and_anchored_secrets_are_found(text: str) -> None:
-    # The value sits after a YAML marker or on the lines below the key;
-    # the scan must read through to it, not take the marker for a stub.
-    hits = find_api_file_secrets(text)
-    assert any(hit.name == "password" for hit in hits)
-    assert all("made" not in hit.description for hit in hits)
-
-
-async def test_quoted_secret_split_across_the_part_cut_is_refused() -> None:
-    body = _json_with_a_secret_across_the_part_cut('word": "made-up-pass-value-0123"}')
+async def test_quoted_secret_split_across_the_part_cut_is_replaced() -> None:
+    body = _json_with_a_secret_key_across_the_part_cut()
     parts = split_text_parts(body)
-    assert parts[0].endswith('"pass') and parts[1].startswith('word": ')
-    # Neither part alone shows the secret; the whole text does.
-    assert all(find_api_file_secrets(part) == [] for part in parts)
-    assert find_api_file_secrets(body.decode()) != []
+    assert parts[0].endswith('"pass') and parts[1].startswith('word":')
     assert _redact_like_the_dispatcher({"text": body.decode()}).manifest == ()
 
     connector = _connector()
-    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+    async with respx.mock(base_url=_BASE) as mock:
         _mock_session_and_version(mock)
-        mock.get(_FILE_PATH).respond(200, content=body)
-        with pytest.raises(VropsApiFileError) as excinfo:
-            await _call(connector, _FILE_PATH)
+        mock.get(_FILE_PATH).respond(200, content=body, headers={"Content-Type": _JSON})
+        answer = await _call(connector, _FILE_PATH)
     await connector.aclose()
 
-    message = str(excinfo.value)
-    assert "the field 'password'" in message
-    assert "not returned" in message
-    assert "made-up-pass-value" not in message
+    # The check ran on the whole file before the cut, so the value is gone.
+    assert answer["secrets_replaced"] == 1
+    assert json.loads(_joined(answer))["password"] == REDACTED
+    assert "made-up-pass-value" not in msgspec.json.encode(answer).decode()
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type", "text", "reason"),
+    [
+        ("/suite-api/doc/swagger-ui-bundle.js", "application/javascript", "var a = 1;", "format"),
+        (_FILE_PATH, _JSON, '{"openapi": "3.0.1",', "not well-formed JSON"),
+    ],
+    ids=["javascript", "broken-json"],
+)
+async def test_file_the_check_cannot_parse_is_refused(
+    path: str, content_type: str, text: str, reason: str
+) -> None:
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(path).respond(200, content=text.encode(), headers={"Content-Type": content_type})
+        with pytest.raises(VropsApiFileError, match=reason):
+            await _call(connector, path)
+    await connector.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -920,7 +855,7 @@ class _FakeRedis:
         (_one_line_json(1024 * 1024), "application/json", 2),
         # Every vertical tab is six bytes as JSON text. The parts are bounded
         # by that size, so each row still fits the result_query byte budget.
-        (("\x0b" * (3 * PART_MAX_BYTES)).encode(), "text/plain", 1),
+        (f"<html><body>{chr(0x0B) * (3 * PART_MAX_BYTES)}</body></html>".encode(), "text/html", 1),
     ],
     ids=["one-line-json", "vertical-tabs"],
 )

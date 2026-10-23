@@ -121,23 +121,25 @@ sends the `GET` with its own `vRealizeOpsToken` login header.
   is refused before a request goes out; see the modern doc for the full
   rule.
 - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-  `size`, `sha256`, `parts`, `text_parts`, `version`, `build`,
-  `version_error`. `version` and `build` are the `releaseName` and
+  `size`, `sha256`, `secrets_replaced`, `parts`, `text_parts`, `version`,
+  `build`, `version_error`. `version` and `build` are the `releaseName` and
   `buildNumber` of `GET /suite-api/api/versions/current`; if that read
   fails, the file still comes back and `version_error` says why.
-- **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
-  each at most 64 KiB, measured as JSON text, so a part always fits one
-  `result_query` answer. A large answer is a result handle whose
-  rows are the parts; page them with `result_query` (`offset`, small
+- **No secret comes back.** The read runs the shared check
+  ([`connectors-shared-api-file-secrets.md`](connectors-shared-api-file-secrets.md))
+  on the whole file before it cuts it into parts. The check parses the
+  file (JSON, YAML, XML or HTML) and replaces every value under a secret
+  name with `[REDACTED:param_name]`; `secrets_replaced` says how many. A
+  file that does not parse, or a JavaScript, CSS or plain text file, is
+  refused. A secret-named query value in `redirect_path` is replaced too.
+- **How to rebuild the checked copy.** `text_parts` is a list of
+  `{index, text}`, each at most 64 KiB, measured as JSON text, so a part
+  always fits one `result_query` answer. A large answer is a result handle
+  whose rows are the parts; page them with `result_query` (`offset`, small
   `limit`). Join the `text` of all parts in `index` order and encode as
   UTF-8; the SHA-256 of the result equals `sha256`. A file too big for one
   stored result stops with an error that names its size; the read never
-  returns a cut file. A file in which the shared whole-file secret scan
-  would replace a value (a password, token, key or Authorization field
-  with a value, alone or inside an object or list, in JSON, YAML, XML or
-  HTML, or a PEM private key) is refused; the read never returns a
-  secret. A secret-named query value in `redirect_path` is replaced by
-  `[REDACTED:param_name]`.
+  returns a cut file.
 
 Details (the path rule, redirects, redaction, limits):
 [`connectors-vcf-operations.md`](connectors-vcf-operations.md).

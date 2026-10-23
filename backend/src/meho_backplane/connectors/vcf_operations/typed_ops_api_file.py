@@ -24,18 +24,22 @@ The read is narrow on purpose:
 * It sends one ``GET`` to the target's own address with the target's own
   login (the connector's token session), on the pooled client.
 * It does not follow a redirect. The answer names the redirect's path;
-  a secret-named query setting in it (``?licenseKey=...``) comes back
-  with its value replaced by the placeholder.
-* The file comes back as text parts of at most 64 KiB each, measured as
-  JSON text, so a part always fits one ``result_query`` answer. Joining
-  the parts in order gives the exact file; ``sha256`` is the hash of the
-  file bytes. A file that does not fit in one stored result is refused
-  with its size, never cut.
-* The read never returns a secret. It runs the redaction rules the
-  dispatcher will apply on the whole file text and on each part, refuses a
-  file whose text they would change, and also refuses a file in which the
-  shared secret scan (:mod:`meho_backplane.connectors._shared.api_file_secrets`)
-  would replace a value. So the stored parts always match ``sha256``.
+  a secret-named query setting in it (``?licenseKey=...``, also with an
+  encoded name) comes back with its value replaced by the placeholder.
+* The read never returns a secret. The shared check
+  (:mod:`meho_backplane.connectors._shared.api_file_secrets`) parses the
+  whole file (JSON, YAML, XML or HTML) and replaces every value under a
+  secret name with ``[REDACTED:param_name]`` before the file is cut into
+  parts; ``secrets_replaced`` says how many. A file that does not parse,
+  or whose format is unknown (JavaScript, CSS, plain text), is refused.
+* The checked copy comes back as text parts of at most 64 KiB each,
+  measured as JSON text, so a part always fits one ``result_query``
+  answer. Joining the parts in order gives the checked copy; ``size`` and
+  ``sha256`` describe it. A file that does not fit in one stored result is
+  refused with its size, never cut.
+* The read then runs the redaction rules the dispatcher will apply, on
+  the whole copy and on each part, and refuses a copy whose text they
+  would still change. So the stored parts always match ``sha256``.
 
 The appliance version and build come from
 ``GET /suite-api/api/versions/current`` (``releaseName``, ``buildNumber``),
@@ -57,7 +61,11 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared import api_file_secrets
+from meho_backplane.connectors._shared.api_file_secrets import (
+    ApiFileFormatError,
+    check_api_file,
+    scrub_query_string,
+)
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.vcf_operations.connector import _VERSIONS_CURRENT_PATH
 from meho_backplane.connectors.vcf_operations.session import VcfOperationsTargetLike
@@ -309,21 +317,32 @@ async def _read_version(
 
 
 def _file_fields(path: str, content_type: str | None, body: bytes) -> dict[str, Any]:
-    """Decode a ``2xx`` body and build the file fields of the answer."""
+    """Decode a ``2xx`` body, check the whole file and build the file fields of the answer.
+
+    The shared check runs on the whole text before it is cut into parts,
+    so a part cut cannot hide a secret. ``size``, ``sha256`` and the parts
+    describe the checked copy.
+    """
     if not _is_text(content_type):
         raise VropsApiFileError(
             f"{path!r} is {content_type!r}, not text. This read returns only UTF-8 text."
         )
     try:
-        body.decode("utf-8")
+        text = body.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise VropsApiFileError(
             f"{path!r} ({content_type or 'no content type'}) is not UTF-8 text: {exc.reason}."
         ) from exc
-    parts = split_text_parts(body)
+    try:
+        checked = check_api_file(text, content_type=content_type, path=path)
+    except ApiFileFormatError as exc:
+        raise VropsApiFileError(str(exc)) from None
+    copy = checked.text.encode("utf-8")
+    parts = split_text_parts(copy)
     return {
-        "size": len(body),
-        "sha256": hashlib.sha256(body).hexdigest(),
+        "size": len(copy),
+        "sha256": hashlib.sha256(copy).hexdigest(),
+        "secrets_replaced": checked.secrets_replaced,
         "parts": len(parts),
         "text_parts": [{"index": index, "text": text} for index, text in enumerate(parts)],
     }
@@ -350,43 +369,10 @@ def _check_fits(answer: dict[str, Any], max_record_bytes: int, max_rows: int) ->
         )
 
 
-def _check_no_secret_value(answer: dict[str, Any]) -> None:
-    """Refuse a file in which the shared secret scan would replace a value.
-
-    The scan reads the whole file text, so a secret that a part cut splits
-    in two is found too. The error names the count and the first field,
-    never a value.
-    """
-    file_text = "".join(part["text"] for part in answer["text_parts"])
-    _, count = api_file_secrets.scrub_api_file_secrets(file_text)
-    if count:
-        first = api_file_secrets.find_api_file_secrets(file_text)[0].description
-        raise VropsApiFileError(
-            f"{answer['path']!r} holds {count} secret value{'s' if count != 1 else ''}; "
-            f"the first is {first}. This read never returns a secret, so the file was not returned."
-        )
-
-
-#: Answer fields that repeat a header the appliance sent.
-_HEADER_FIELDS = ("content_type", "redirect_path")
-
-
-def _scrub_header_fields(answer: dict[str, Any]) -> None:
-    """Replace a secret value in a field that repeats a header the appliance sent.
-
-    A redirect path can carry a secret-named query setting, which the
-    stored-result redaction does not see. There is no file to keep whole
-    here, so the value is replaced and the path stays usable.
-    """
-    for field in _HEADER_FIELDS:
-        if isinstance(answer[field], str):
-            answer[field], _ = api_file_secrets.scrub_api_file_secrets(answer[field])
-
-
 def _check_redaction_keeps_text(
     answer: dict[str, Any], connector: VcfOperationsConnector, operator: Operator
 ) -> None:
-    """Refuse a file whose text the stored-result redaction would change.
+    """Refuse a checked copy whose text the stored-result redaction would change.
 
     The dispatcher redacts every result with the policy for this
     (connector, tenant, operation) before it stores the result. A rule
@@ -433,9 +419,11 @@ async def api_file_get_impl(
     1. Check the path (no request goes out for a refused path).
     2. ``GET`` the file with the target's login, without following a redirect.
     3. Read the appliance version and build (best effort).
-    4. Refuse a file that does not fit in one stored result, whose text the
-       stored-result redaction would change, or that holds a secret value;
-       replace a secret value in ``redirect_path`` or ``content_type``.
+    4. Check the whole file and replace every secret value (see
+       :func:`_file_fields`); replace a secret-named query value in
+       ``redirect_path``.
+    5. Refuse a copy that does not fit in one stored result, or whose
+       text the stored-result redaction would still change.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -445,24 +433,27 @@ async def api_file_get_impl(
     max_record_bytes = settings.result_handle_max_record_bytes
 
     fetched = await _fetch_file(connector, operator, target, path, max_record_bytes)
+    redirect_path, redirect_replaced = (
+        scrub_query_string(fetched["redirect"]) if fetched["redirect"] else (None, 0)
+    )
     answer: dict[str, Any] = {
         "path": path,
         "status": fetched["status"],
         "content_type": fetched["content_type"],
-        "redirect_path": fetched["redirect"],
+        "redirect_path": redirect_path,
         "size": None,
         "sha256": None,
+        "secrets_replaced": 0,
         "parts": 0,
         "text_parts": [],
     }
     if 200 <= fetched["status"] < 300:
         answer.update(_file_fields(path, fetched["content_type"], fetched["body"]))
+    answer["secrets_replaced"] += redirect_replaced
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         _check_fits(answer, max_record_bytes, settings.result_handle_max_spill_rows)
         _check_redaction_keeps_text(answer, connector, operator)
-        _check_no_secret_value(answer)
-    _scrub_header_fields(answer)
 
     _log.info(
         "vrops_api_file_read",
@@ -471,6 +462,7 @@ async def api_file_get_impl(
         status=answer["status"],
         size=answer["size"],
         parts=answer["parts"],
+        secrets_replaced=answer["secrets_replaced"],
         has_build=answer["build"] is not None,
     )
     return answer
@@ -515,8 +507,19 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "For a 3xx answer: the path the redirect points to (not followed), "
             "a secret-named query value in it replaced by [REDACTED:param_name].",
         },
-        "size": {"type": ["integer", "null"], "description": "File size in bytes; null unless 2xx"},
-        "sha256": {"type": ["string", "null"], "description": "SHA-256 (hex) of the file bytes"},
+        "size": {
+            "type": ["integer", "null"],
+            "description": "Size in bytes of the checked copy; null unless 2xx.",
+        },
+        "sha256": {
+            "type": ["string", "null"],
+            "description": "SHA-256 (hex) of the checked copy; null unless 2xx.",
+        },
+        "secrets_replaced": {
+            "type": "integer",
+            "description": "How many secret values the read replaced with "
+            "[REDACTED:param_name], in the file and in redirect_path.",
+        },
         "parts": {"type": "integer", "description": "How many text parts the file has."},
         "text_parts": {
             "type": "array",
@@ -531,13 +534,13 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 },
                 "required": ["index", "text"],
             },
-            "description": "The file text, in order. Joining all parts gives the exact file.",
+            "description": "The checked copy, in order. Joining all parts gives the copy.",
         },
         "version": {"type": ["string", "null"], "description": "releaseName of the appliance."},
         "build": {"type": ["string", "null"], "description": "buildNumber of the appliance."},
         "version_error": {"type": ["string", "null"], "description": "Why the version is null."},
     },
-    "required": ["path", "status", "parts", "text_parts"],
+    "required": ["path", "status", "secrets_replaced", "parts", "text_parts"],
 }
 
 #: Group text: says what the group holds, makes no claim for other ops.
@@ -584,12 +587,13 @@ VROPS_API_FILE_GET_OP = VropsTypedOp(
             ),
         },
         "output_shape": (
-            "{path, status, content_type, redirect_path, size, sha256, parts, "
-            "text_parts: [{index, text}], version, build, version_error}. A large answer "
-            "comes back as a result handle whose rows are the text parts: page them with "
-            "result_query (offset and a small limit such as 2; one answer is at most 256 "
-            "KiB). Join the text of all parts in index order to get the exact file; its "
-            "SHA-256 equals sha256."
+            "{path, status, content_type, redirect_path, size, sha256, secrets_replaced, "
+            "parts, text_parts: [{index, text}], version, build, version_error}. A large "
+            "answer comes back as a result handle whose rows are the text parts: page them "
+            "with result_query (offset and a small limit such as 2; one answer is at most "
+            "256 KiB). Join the text of all parts in index order to get the checked copy; "
+            "its SHA-256 equals sha256. The copy is the file with every value under a "
+            "secret name replaced by [REDACTED:param_name]; secrets_replaced counts them."
         ),
         "next_step": (
             "On a 3xx status, read redirect_path next. If the page names another file "

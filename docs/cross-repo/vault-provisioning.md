@@ -169,7 +169,8 @@ This is a *distinct* identity from the `meho-mcp` JWT-login role
 (surfaces 1–3): it is bound to its own narrow policy on the
 agent-credentials KV path
 (`scheduler_agent_vault_path_pattern`, default
-`secret/data/agents/+/credentials`).
+`secret/data/agents/{tenant_id}_{client_id}/credentials`, which the
+policy below covers with `secret/data/agents/+/credentials`).
 
 The capability scope must be **read + write**, not read-only:
 
@@ -211,6 +212,14 @@ token is invalid or expired …` on every surface — REST detail, MCP
 naming the **re-mint**, not the policy. A live token keeps the
 policy-scope wording above unchanged. The probe is diagnosis only: the
 write is never retried. See the two rows in *Failure modes* below.
+
+How Vault reads the wildcards in these policies: `*` is only special
+as the **last** character of a path — `secret/data/meho/*` means
+"everything below `meho/`, at any depth". A `+` matches **one** path
+segment of any name: `secret/data/agents/+/credentials` covers
+`secret/data/agents/<tenant>_<client>/credentials`. `**` is not a Vault
+pattern at all, and a `*` in the middle of a path is a plain character.
+See the [Vault policy docs](https://developer.hashicorp.com/vault/docs/concepts/policies).
 
 ```hcl
 # Policy: meho-scheduler

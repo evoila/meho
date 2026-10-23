@@ -282,7 +282,7 @@ The empty spec `{}` resolves, in order: `list_operation_groups`,
 `list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
 `broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
 keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
-out of the catalog on purpose; this is not full 25-tool parity with MCP.
+out of the catalog on purpose; this is not full parity with the MCP working surface.
 
 Hosted calls to these four tools do not write the per-call MCP audit row
 (`mcp/audit.py`); that row belongs to the MCP transport. They write the

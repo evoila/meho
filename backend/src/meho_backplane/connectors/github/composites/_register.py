@@ -22,8 +22,9 @@ handles upsert, body-hash dedupe, embedding pipeline, and
 Scope
 -----
 
-Five composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) is
-read-only. #2081 adds four more: ``gh.composite.project_view`` (read),
+Six composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
+``gh.composite.repo_view`` (one repository, read) are read-only. #2081
+adds four more: ``gh.composite.project_view`` (read),
 ``gh.composite.project_item_add`` /
 ``gh.composite.project_item_set_field`` (Projects-v2 GraphQL writes),
 and ``gh.composite.sub_issue_add`` (sub-issue linkage REST write) --
@@ -65,6 +66,7 @@ from meho_backplane.connectors.github.composites._board import (
 )
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
+    repo_view_composite,
 )
 from meho_backplane.connectors.github.composites._sub_issues import (
     sub_issue_add_composite,
@@ -78,6 +80,8 @@ from meho_backplane.connectors.github.composites.schemas import (
     PROJECT_ITEM_SET_FIELD_RESPONSE_SCHEMA,
     PROJECT_VIEW_PARAMETER_SCHEMA,
     PROJECT_VIEW_RESPONSE_SCHEMA,
+    REPO_VIEW_PARAMETER_SCHEMA,
+    REPO_VIEW_RESPONSE_SCHEMA,
     SUB_ISSUE_ADD_PARAMETER_SCHEMA,
     SUB_ISSUE_ADD_RESPONSE_SCHEMA,
 )
@@ -132,6 +136,14 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "database id. The sub-issue must share the parent's repository "
         "owner."
     ),
+    "repos": (
+        "Use for questions about one repository as a whole: does it "
+        "exist, who owns it, is it public or private, what is its "
+        "default branch, is it archived, how many issues are open, when "
+        "was the last push, and what may the connector's identity do in "
+        "it. Start here before you read branches, files, issues or pull "
+        "requests of a repository you have not seen in this session."
+    ),
 }
 
 
@@ -155,6 +167,7 @@ class _CompositeSpec(NamedTuple):
     tags: list[str]
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
+    llm_instructions: dict[str, Any] | None = None
 
 
 _COMPOSITES: tuple[_CompositeSpec, ...] = (
@@ -265,6 +278,47 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="caution",
         requires_approval=False,
     ),
+    _CompositeSpec(
+        op_id="gh.composite.repo_view",
+        handler=repo_view_composite,
+        summary=(
+            "Read one repository: owner, visibility, default branch, topics, "
+            "open issues, permissions."
+        ),
+        description=(
+            "Reads one repository with GET /repos/{owner}/{repo} and returns a "
+            "short summary: name, owner, visibility, default branch, archived "
+            "flag, topics, open issue count, last push time, and what the "
+            "connector's identity may do there (read, write, admin). Read-only."
+        ),
+        parameter_schema=REPO_VIEW_PARAMETER_SCHEMA,
+        response_schema=REPO_VIEW_RESPONSE_SCHEMA,
+        group_key="repos",
+        tags=["composite", "read-only", "repos"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_call": (
+                "Call when you need the basic facts of one repository: whether it "
+                "exists and is reachable, its owner and visibility, its default "
+                "branch, whether it is archived, how many issues are open, when it "
+                "was last pushed to, and whether the connector may read, write or "
+                "administer it."
+            ),
+            "output_shape": (
+                "{name, full_name, owner, owner_type, visibility, default_branch, "
+                "archived, topics: [string], open_issues_count, pushed_at, "
+                "permissions: {read, write, admin} | null}. open_issues_count "
+                "counts open issues and open pull requests together."
+            ),
+            "next_step": (
+                "A 404 means the repository does not exist or the connector's "
+                "identity cannot see it. Use default_branch as the branch for "
+                "later reads of files or commits. If permissions.write is false, "
+                "do not plan a write to this repository."
+            ),
+        },
+    ),
 )
 
 
@@ -309,5 +363,6 @@ async def register_github_composite_operations(
             tags=spec.tags,
             safety_level=spec.safety_level,
             requires_approval=spec.requires_approval,
+            llm_instructions=spec.llm_instructions,
             embedding_service=embedding_service,
         )

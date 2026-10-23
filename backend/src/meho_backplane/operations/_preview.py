@@ -694,8 +694,9 @@ async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | Non
     use (#3274 — the dispatch ``target``'s ``extras["vault_role"]``, or
     the settings-global ``meho-mcp`` role when the target names none) and
     issues ``POST sys/capabilities-self`` on the op's authorization path
-    to learn whether that token holds the ``create`` / ``update``
-    capability the write needs. Threading ``ctx.target`` is what makes the
+    to learn whether that token holds the capabilities the write needs
+    (``create`` / ``update`` for ``put``; ``read`` / ``update`` for
+    ``patch``, which reads before it writes). Threading ``ctx.target`` is what makes the
     banner reflect the role that will actually execute. The response
     carries only capability names -- no secret value -- so it is
     redaction-safe and runs even though ``vault.kv.put`` /

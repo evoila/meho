@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 66 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 68 hand-authored composites
 that orchestrate cross-spec workflows: 16 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -18,7 +18,7 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880`) and 50 write
+reservation read `vm.resource_allocation.show` / `#3880`) and 52 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -59,7 +59,9 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 `host.standard_portgroup.delete`, `folder.delete`, `datastore.file.delete`,
 `content_library.delete`, `content_library.item.delete`, plus the caution
 `datastore.dir.create` (see **Governed teardown deletes**), and the destructive
-DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**)). The
+DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), and the
+two caution alarm changes `alarm.acknowledge` + `alarm.reset` / `#4383` (see
+**Alarms**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -466,10 +468,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 66
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 68
   `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 42 dangerous/destructive
-  writes + 8 caution writes); each row carries its
+  writes + 10 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -801,6 +803,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     (the SSO Admin folder is a documentation path that the pinned 8.0 and
     9.0 `vcenter.yaml` do not serve; both serve
     `GET /appliance/system/version`).
+- **Alarms** (`alarm_state.py`, `typed_ops_alarm_triggered.py`,
+  `composites/_alarm.py`, `#4383` part 1) — one read and two changes in the
+  group `alarms`. The read `vmware.alarm.triggered.list` is a typed op
+  (`safe`, handler `alarm_triggered_list`). The changes
+  `vmware.composite.alarm.acknowledge` and `vmware.composite.alarm.reset` are
+  composites (`caution`, they wait for approval). All three are on both
+  catalogs. See **Alarms: list, acknowledge, reset to green** under Control
+  flow.
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the
@@ -957,13 +967,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 66 `vmware.composite.*` rows with
+   queued registrar and upserts: the 68 `vmware.composite.*` rows with
    `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 50 writes, all `requires_approval=True`
-   (32 `safety_level="dangerous"`; 8 `safety_level="caution"` —
-   `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
+   service principals), and 52 writes, all `requires_approval=True`
+   (32 `safety_level="dangerous"`; 10 `safety_level="caution"` —
+   `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`;
@@ -1350,7 +1360,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 66 composites (16 reads + 50 writes) land as `source_kind="composite"`
+The 68 composites (16 reads + 52 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1417,7 +1427,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 66 composites are hand-authored aggregators the connector ships as
+The 68 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -3371,6 +3381,94 @@ shelf-gated lane checks each rule against the pinned 8.0 and 9.0
 `vcenter.yaml` and the 9.0 `vi-json.yaml`) and
 `test_connectors_vmware_rest_vm_relocate_dispatch.py` (a person's call
 waits for approval with the copy size on the row).
+
+### Alarms: list, acknowledge, reset to green (`#4383`, part 1)
+
+What an operator or agent can do now, through MEHO:
+
+- See every alarm that is red or yellow now, for the whole vCenter or under
+  one object.
+- Acknowledge one alarm on one object, so its actions (emails, SNMP traps)
+  stop while someone works on the cause. The alarm stays red or yellow.
+- Reset alarms to green after the cause is fixed. This is for alarms whose
+  rule has no green condition: they stay red until someone resets them.
+
+| Operation | Risk | vSphere call | Versions |
+|---|---|---|---|
+| `vmware.alarm.triggered.list` | `safe` | `ManagedEntity.triggeredAlarmState`, `Alarm.info.name` + `.expression`, `ManagedEntity.name` (all through `PropertyCollector.RetrievePropertiesEx`) | vCenter 8.0 U1, U2, U3; 9.0, 9.1, 9.1.1 |
+| `vmware.composite.alarm.acknowledge` | `caution`, waits for approval | `AlarmManager.AcknowledgeAlarm` | the same |
+| `vmware.composite.alarm.reset` | `caution`, waits for approval | `AlarmManager.ClearTriggeredAlarms` | the same |
+
+**The reads** (`alarm_state.py`, shared by all three operations).
+`ServiceInstance.RetrieveServiceContent` gives the root folder and the alarm
+manager; their ids are read, never guessed. vCenter copies every triggered
+alarm up the inventory tree, so the root folder's `triggeredAlarmState` holds
+the triggered alarms of the whole vCenter. Each entry names the object the
+alarm is triggered on. Two more reads add the alarm names and rules and the
+object names. When one of them fails, the rows keep their ids and
+`read_note` says which read failed. A long list is stored behind a result
+handle, like every other list.
+
+**Trigger kind.** Each row has `trigger_kind`, from the alarm rule
+(`Alarm.info.expression`): `event` (only event conditions), `metric` (only
+metric or state conditions), `mixed` (both) or null (not known). The reset
+filter needs it.
+
+**Why the reset takes a filter.** The public vSphere API cannot reset one
+alarm on one object. vCenter's own manual reset uses
+`AlarmManager.setAlarmStatus` (the pinned spec names it once, in the note on
+`AlarmState.eventKey`). That call is in neither pyVmomi 8.0.3 nor the pinned
+VI-JSON files of 8.0 U1 to U3 and 9.0, so MEHO cannot call or check it.
+`alarm.reset` uses `ClearTriggeredAlarms` with an `AlarmFilterSpec`: one or
+more statuses (`red`, `yellow`), an object kind (`all`, `host`, `vm`) and a
+trigger kind (`all`, `event`, `metric`). It resets every triggered alarm in
+the vCenter that matches. An alarm on the vCenter itself, a cluster or a
+datastore needs object kind `all`.
+
+**What the reset answers.** The handler reads the triggered alarms before
+and after the call:
+
+- `cleared`: the alarms with the asked status and object kind that were
+  triggered before and are not now. This can include alarms the caller did
+  not mean, so the guidance tells the agent to report them.
+- `still_triggered`: matching alarms that are still triggered. Their cause
+  is still there, or vCenter did not count them under this trigger kind.
+- `unchanged`, and no call to vCenter, when no triggered alarm matches.
+  `not_verified`, with an error issue, when the read after the call fails.
+
+**Acknowledge.** Takes `alarm_id` and `entity_id` from a list row. The
+handler checks that the alarm is triggered on that object (else
+`not_triggered`, with an error issue), does nothing for an acknowledged
+alarm (`unchanged`), sends `AcknowledgeAlarm` with the two object
+references, and reads again: `acknowledged` with who and when, or
+`not_verified` with an error issue.
+
+**Risk and approval.** Both changes are `caution` with
+`requires_approval=True`, like every other VMware write composite; the
+operation contract check requires the flag for every operation that is not
+`safe`. A person's call waits for approval. The same person may approve a
+`caution` request only where the install allows self-approval
+(`APPROVAL_ALLOW_SELF_APPROVAL`); else a second person approves. An agent's
+call waits too. Inside the composite, the one change goes through the shared
+write seam (`_write_vmomi_sub_op`) like in the other composites, and the
+child-op list is in `composites/_governed_subops.py`. The approval preview
+reads the alarm (acknowledge) or the triggered alarms the filter matches now,
+at most 25 (reset).
+
+**Not covered.** A standalone ESXi host target (not tested; the changes
+answer `no_alarm_manager` when the ServiceContent has no alarm manager).
+vCenter 7.0 (no `vmware-rest` catalog, and VI-JSON starts at 8.0 U1). Alarm
+definitions, and reading or cancelling one task, are the rest of `#4383`.
+
+**Tests.** `tests/test_connectors_vmware_rest_alarms.py` (a fake VI-JSON
+seam: the read, both changes, the previews, the rows on both catalogs, the
+contract rules, and a reset that waits for approval and then runs once).
+`tests/test_connectors_vmware_rest_alarms_reconcile.py` checks the methods,
+the filter enum values and the object types against the pinned 9.0
+`vi-json.yaml`; the source scan of
+`test_connectors_vmware_rest_8_0_spec_reconcile.py` checks the methods
+against 8.0 U1 to U3. `AlarmFilterSpec` is in the type-name list of
+`test_connectors_vmware_rest_composites_write_body_reconcile.py`.
 
 ### Version check for typed operations (`_version_gate.py`, #4316)
 

@@ -75,6 +75,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VCENTER_SSO_ADMIN_API_FILE_GET_OP",
+    "VMWARE_ALARM_TRIGGERED_LIST_OP",
     "VMWARE_HOST_NETWORK_UPLINKS_OP",
     "VMWARE_HOST_STORAGE_DEVICES_OP",
     "VMWARE_HOST_USAGE_OP",
@@ -373,6 +374,11 @@ async def host_usage_impl(
 # defined -- to break the import cycle (the sibling modules import both
 # names from this module). E402 is expected: moving these to the top
 # would re-introduce the cycle.
+from meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered import (  # noqa: E402
+    ALARM_TRIGGERED_GROUP_KEY,
+    ALARM_TRIGGERED_WHEN_TO_USE,
+    VMWARE_ALARM_TRIGGERED_LIST_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import (  # noqa: E402
     HOST_NETWORK_UPLINKS_GROUP_KEY,
     HOST_NETWORK_UPLINKS_WHEN_TO_USE,
@@ -437,6 +443,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
     TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE,
     SSO_ADMIN_API_FILE_GROUP_KEY: SSO_ADMIN_API_FILE_WHEN_TO_USE,
+    ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -500,9 +507,10 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
 #: standalone-ESXi); and the incident-survival reads ``vm.info`` +
 #: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
-#: (#3701, tasks older than the recent list); and the SSO Admin API
-#: description read ``vcenter.sso_admin.api_file.get``. The tuple shape lets
-#: future typed reads join without touching the registrar.
+#: (#3701, tasks older than the recent list); the SSO Admin API
+#: description read ``vcenter.sso_admin.api_file.get``; and the triggered-alarm
+#: list ``alarm.triggered.list`` (#4383). The tuple shape lets future typed
+#: reads join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -513,6 +521,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_TASKS_RECENT_OP,
     VMWARE_TASKS_HISTORY_OP,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
+    VMWARE_ALARM_TRIGGERED_LIST_OP,
 )
 
 

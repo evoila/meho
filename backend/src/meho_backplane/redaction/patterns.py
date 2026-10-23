@@ -150,7 +150,13 @@ _JWT = re.compile(
 # secret: an earlier pass (the engine itself, or a read that checks a
 # file before it returns it) wrote it. Matching it again would take the
 # label away with it (``password: [REDACTED:param_name]`` would become
-# ``[REDACTED:api_key]``), so the look-ahead leaves it alone.
+# ``[REDACTED:api_key]``), so the look-ahead leaves it alone. Only a
+# complete placeholder is skipped: ``[REDACTED:``, a name, ``]`` and
+# then the end of the value (whitespace, a quote or the end of the
+# blob). A value that only starts like one (``[REDACTED:made-up``) or
+# that goes on after the ``]`` (``[REDACTED:x]made-up``) is a value
+# like any other and is redacted whole.
+_NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?!" + _VALUE_CHARS + "))"
 _API_KEY = re.compile(
     r"\b(?:"
     r"api[_-]?key"
@@ -164,7 +170,7 @@ _API_KEY = re.compile(
     r"|client[_-]?secret"
     r"|token"
     r")"
-    r"\s*[=:]\s*['\"]?(?!\[REDACTED:)" + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
+    r"\s*[=:]\s*['\"]?" + _NOT_A_PLACEHOLDER + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
     re.IGNORECASE,
 )
 

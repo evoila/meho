@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `sddc.license.list` now shows each licence key masked, like
+  `vrops.license.info` (#4853). Each row has `key_masked` in place of
+  `key`. Only the last 5 characters stay visible, for example
+  `*****-*****-*****-*****-AB12C`. Every other field of a row stays the
+  same. The operation also has the tag `license-key`, so the flight
+  recorder keeps no body of its call to SDDC Manager. `vrops.license.info`
+  uses the same rule, so its masked `licenseKey` now keeps the dashes of
+  the key. **Migration:** read `key_masked` instead of `key`. To tell two
+  keys apart, use the row `id` or the last 5 characters.
+
 ## [0.36.0] - 2026-10-23
 
 MEHO 0.36.0 makes risky work wait for a second person more often: a VM

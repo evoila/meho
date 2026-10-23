@@ -78,6 +78,14 @@ argocd-api:
     - summary
     - llm_instructions
     - examples
+# audit.loose_rows landed on main after this list was first written. Its gaps
+# go on the list once, like every other gap that was already on main.
+audit-integrity:
+  audit.loose_rows:
+    - summary
+    - llm_instructions
+    - examples
+
 bind9-ssh:
   bind9.about:
     - summary

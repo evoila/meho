@@ -100,7 +100,7 @@ _SHA1: Final = re.compile(r"^[0-9a-f]{40}$")
 _FORBIDDEN_CHARS: Final = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
 # What GitHub allows in a user, organisation or repository name.
-_GITHUB_NAME: Final = re.compile(r"^[A-Za-z0-9._-]+$")
+_GITHUB_NAME: Final = re.compile(r"[A-Za-z0-9._-]+")
 
 # Status codes GitHub uses to refuse a branch update that is not a fast
 # forward (``force=false``). The exact wording is GitHub's; MEHO quotes it.
@@ -118,7 +118,7 @@ def check_github_name(value: object) -> str | None:
         return "name is empty"
     if value in (".", ".."):
         return f"name {value!r} is not allowed"
-    if not _GITHUB_NAME.match(value):
+    if not _GITHUB_NAME.fullmatch(value):
         return f"name {value!r} may hold only letters, digits, '.', '-' and '_'"
     return None
 

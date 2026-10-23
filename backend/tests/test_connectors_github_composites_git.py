@@ -801,6 +801,8 @@ def test_check_github_name_accepts_github_names(name: str) -> None:
     assert check_github_name(name) is None
 
 
-@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a b", "a#b", "a%b", "../x", "a\\b"])
+@pytest.mark.parametrize(
+    "name", ["", ".", "..", "a/b", "a b", "a#b", "a%b", "../x", "a\\b", "a\n", "\na"]
+)
 def test_check_github_name_refuses_unsafe_names(name: str) -> None:
     assert check_github_name(name) is not None

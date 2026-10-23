@@ -49,6 +49,7 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "gh.composite.project_item_add",
     "gh.composite.project_item_set_field",
     "gh.composite.sub_issue_add",
+    "gh.composite.repo_view",
 )
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
@@ -67,6 +68,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "gh.composite.sub_issue_add": (
         "meho_backplane.connectors.github.composites._sub_issues.sub_issue_add_composite"
     ),
+    "gh.composite.repo_view": (
+        "meho_backplane.connectors.github.composites._read.repo_view_composite"
+    ),
 }
 
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
@@ -75,6 +79,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "gh.composite.project_item_add": "board",
     "gh.composite.project_item_set_field": "board",
     "gh.composite.sub_issue_add": "issues",
+    "gh.composite.repo_view": "repos",
 }
 
 # Governance posture per op: reads are safe, the three writes are caution;
@@ -86,6 +91,7 @@ _EXPECTED_SAFETY_BY_OP: dict[str, str] = {
     "gh.composite.project_item_add": "caution",
     "gh.composite.project_item_set_field": "caution",
     "gh.composite.sub_issue_add": "caution",
+    "gh.composite.repo_view": "safe",
 }
 
 
@@ -558,3 +564,65 @@ def test_new_handlers_are_module_level_coroutines() -> None:
         assert inspect.iscoroutinefunction(handler), handler
         assert "<locals>" not in handler.__qualname__, handler
         assert handler.__qualname__ != "<lambda>", handler
+
+
+# ---------------------------------------------------------------------------
+# gh.composite.repo_view
+# ---------------------------------------------------------------------------
+
+_REPO_VIEW_OP_ID = "gh.composite.repo_view"
+
+
+@pytest.mark.asyncio
+async def test_repo_view_is_a_safe_read_that_runs_at_once(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``gh.composite.repo_view`` is ``safe`` with ``requires_approval=False``."""
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "gh.composite.repo_view"
+                )
+            )
+        ).scalar_one()
+    assert row.safety_level == "safe"
+    assert row.requires_approval is False
+    assert row.handler_ref == _EXPECTED_HANDLER_REF_BY_OP["gh.composite.repo_view"]
+
+
+@pytest.mark.asyncio
+async def test_repo_view_meets_every_operation_contract_rule(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The row passes the operation contract rules with no gap."""
+    from tests.test_vmware_operation_contracts import OperationContract, check_operation
+
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "gh.composite.repo_view"
+                )
+            )
+        ).scalar_one()
+        group = (
+            await fresh.execute(select(OperationGroup).where(OperationGroup.id == row.group_id))
+        ).scalar_one()
+    contract = OperationContract(
+        connector="gh-rest",
+        op_id=row.op_id,
+        summary=row.summary,
+        description=row.description,
+        parameter_schema=dict(row.parameter_schema),
+        response_schema=row.response_schema,
+        llm_instructions=row.llm_instructions,
+        safety_level=row.safety_level,
+        requires_approval=row.requires_approval,
+        group_text=group.when_to_use,
+    )
+    assert check_operation(contract) == {}

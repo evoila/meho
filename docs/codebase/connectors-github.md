@@ -181,6 +181,34 @@ database id rather than its number. Per-handler unit tests live in
 `test_connectors_github_composites_sub_issues.py`; registration/posture
 assertions are in `test_connectors_github_composites_register.py`.
 
+### One repository (`gh.composite.repo_view`)
+
+`gh.composite.repo_view` reads one repository with
+`GET /repos/{owner}/{repo}` and returns a short summary, not the full
+vendor answer: `name`, `full_name`, `owner`, `owner_type`, `visibility`,
+`default_branch`, `archived`, `topics`, `open_issues_count`, `pushed_at`
+and `permissions`. `permissions` maps GitHub's `pull` / `push` / `admin`
+flags to `read` / `write` / `admin`, and is `null` when GitHub does not
+report them. `open_issues_count` counts open issues and open pull
+requests together, as GitHub does.
+
+- Handler: `repo_view_composite` in `composites/_read.py`. Same
+  direct-session substrate as the other reads (`connector._get_json`
+  through `mount_op_path`, no `endpoint_descriptor` lookup). A non-2xx
+  answer (404 for a repository the identity cannot see) propagates as an
+  `httpx.HTTPStatusError`; a payload that is not a JSON object raises
+  `RuntimeError`. Both reach the dispatcher's `connector_error` branch.
+- Group: `repos`, with its own "when to use" text.
+- Posture: `safety_level="safe"`, `requires_approval=False`. It runs at
+  once.
+- Contract: the registrar row carries `llm_instructions` (`when_to_call`,
+  `output_shape`, `next_step`) and one example call with placeholder
+  values, so the operation contract check passes with no gap.
+- Tests: `test_connectors_github_composites_read.py` drives the handler
+  with the saved answer in `tests/data/github_repo_view_response.json`;
+  `test_connectors_github_composites_register.py` checks the posture and
+  runs the contract rules against the registered row.
+
 ## Key types
 
 - **`GitHubRestConnector`** (`connector.py`) — `HttpConnector` subclass

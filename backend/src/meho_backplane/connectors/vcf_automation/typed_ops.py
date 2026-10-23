@@ -207,6 +207,15 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "tenant org (vcfa.tenant.project.create). A person must approve each "
         "call. Safe to run twice: an existing project answers 'unchanged'."
     ),
+    "vcfa-tenant-images": (
+        "Image names of the tenant org (image profiles), on the tenant plane. A cloud "
+        "template asks for an image by name, for example 'RHEL 9'; the profile of each "
+        "region maps the name to a vCenter template. Read the names and their templates "
+        "(vcfa.tenant.image_profile.list) and the templates VCF Automation knows "
+        "(vcfa.tenant.fabric_image.list), make it read new vCenter templates now "
+        "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
+        "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
+    ),
 }
 
 

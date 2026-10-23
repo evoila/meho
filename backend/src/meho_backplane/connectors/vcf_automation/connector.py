@@ -992,15 +992,68 @@ class VcfAutomationConnector(HttpConnector):
 
         return await tenant_login_test(self, operator, target, params)
 
+    # ------------------------------------------------------------------
+    # Image ops -- thin shims over :mod:`._images`; metadata in :mod:`.image_ops`.
+    # ------------------------------------------------------------------
+
+    async def tenant_image_profile_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.image_profile.list`` — see :mod:`._images`."""
+        from meho_backplane.connectors.vcf_automation._images import tenant_image_profile_list
+
+        return await tenant_image_profile_list(self, operator, target, params)
+
+    async def tenant_fabric_image_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.fabric_image.list`` — see :mod:`._images`."""
+        from meho_backplane.connectors.vcf_automation._images import tenant_fabric_image_list
+
+        return await tenant_fabric_image_list(self, operator, target, params)
+
+    async def tenant_cloud_account_enumerate_images(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.cloud_account.enumerate_images`` — see :mod:`._images`."""
+        from meho_backplane.connectors.vcf_automation._images import (
+            tenant_cloud_account_enumerate_images,
+        )
+
+        return await tenant_cloud_account_enumerate_images(self, operator, target, params)
+
+    async def tenant_image_profile_mapping_update(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.image_profile.mapping.update`` — see :mod:`._images`."""
+        from meho_backplane.connectors.vcf_automation._images import (
+            tenant_image_profile_mapping_update,
+        )
+
+        return await tenant_image_profile_mapping_update(self, operator, target, params)
+
     @classmethod
     async def register_typed_operations(cls) -> None:
-        """Upsert every typed op (reads + provisioning ops) into ``endpoint_descriptor``.
+        """Upsert every typed op (reads, provisioning and image ops) into ``endpoint_descriptor``.
 
         Called from the application lifespan via the registrar queued in
         :mod:`meho_backplane.connectors.vcf_automation.__init__`. Walks
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_OPS`
         plus
-        :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`
+        and :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1014,6 +1067,7 @@ class VcfAutomationConnector(HttpConnector):
         # Lazy import: the operations package pulls in the embedding
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
+        from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
             VCFA_PROVISIONING_OPS,
         )
@@ -1023,7 +1077,7 @@ class VcfAutomationConnector(HttpConnector):
         )
         from meho_backplane.operations.typed_register import register_typed_operation
 
-        all_ops = (*VCFA_TYPED_OPS, *VCFA_PROVISIONING_OPS)
+        all_ops = (*VCFA_TYPED_OPS, *VCFA_PROVISIONING_OPS, *VCFA_IMAGE_OPS)
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:

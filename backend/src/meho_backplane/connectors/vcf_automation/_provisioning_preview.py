@@ -22,6 +22,9 @@ credential-class ops (``user.create`` / ``api_token.revoke`` =
 generic params echo, so the bespoke builder is their only preview;
 ``preview_operation`` still answers ``unavailable`` for them by design
 (``_request_preview._is_previewable``).
+
+``vcfa.tenant.deployment.delete`` also has a builder here: it reads the
+deployment once so the approver sees its name and project, not only an id.
 """
 
 from __future__ import annotations
@@ -37,7 +40,9 @@ from meho_backplane.connectors.vcf_automation._lookups import (
     find_org_user,
     find_project,
     password_ref,
+    quote_segment,
 )
+from meho_backplane.connectors.vcf_automation.typed_ops import TENANT_DEPLOYMENT_DETAIL_PATH
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_permission_preflight,
@@ -206,8 +211,31 @@ async def _project_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "administrators": p.get("administrators") or [],
         "members": p.get("members") or [],
         "viewers": p.get("viewers") or [],
+        "zones": p.get("zones") or [],
+        "network_constraints": p.get("network_constraints") or [],
         **await _existence(ctx, lambda c: find_project(c, ctx.target, ctx.operator, name)),
     }
+
+
+async def _deployment_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    deployment_id = ctx.params.get("id")
+    if not isinstance(deployment_id, str):
+        return None
+    preview: dict[str, Any] = {
+        "action": "delete_deployment",
+        "id": deployment_id,
+        "name": None,
+        "project_id": None,
+    }
+    connector: Any = ctx.connector_instance
+    if connector is None:
+        return preview
+    path = TENANT_DEPLOYMENT_DETAIL_PATH.format(id=quote_segment(deployment_id))
+    try:
+        row = await connector._request_json(ctx.target, "GET", path, operator=ctx.operator)
+    except (httpx.HTTPError, RuntimeError, ValueError):
+        return preview
+    return {**preview, "name": row.get("name"), "project_id": row.get("projectId")}
 
 
 _BUILDERS = {
@@ -217,6 +245,7 @@ _BUILDERS = {
     "vcfa.provider.api_token.create": _api_token_create_preview,
     "vcfa.provider.api_token.revoke": _api_token_revoke_preview,
     "vcfa.tenant.project.create": _project_create_preview,
+    "vcfa.tenant.deployment.delete": _deployment_delete_preview,
 }
 
 for _op_id, _builder in _BUILDERS.items():

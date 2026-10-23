@@ -80,8 +80,8 @@ flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
 the 9.1 appliance-served IaaS document above would qualify, and none is
 pinned.
 
-**Operation contracts.** The 16 typed ops (the seven reads above and the
-nine provisioning ops below) meet the VMware operation-contract check
+**Operation contracts.** The 25 typed ops (the seven reads above, the
+nine provisioning ops and the nine network and deploy ops below) meet the VMware operation-contract check
 (`backend/tests/test_vmware_operation_contracts.py`) and have no entry in its
 gap list:
 
@@ -208,9 +208,66 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
 
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
-`__init__.py`) upserts the seven read descriptors plus the nine
-provisioning descriptors on startup — the same argocd / bind9 /
-Kubernetes typed-registrar shape.
+`__init__.py`) upserts the seven read descriptors, the nine
+provisioning descriptors and the nine network and deploy descriptors on
+startup — the same argocd / bind9 / Kubernetes typed-registrar shape.
+
+**A project's own network and its first deployment.** With an org, a
+tenant login and a project in place, these nine tenant-plane ops cover the
+rest of "one more project for one more team": give the project its own
+network, a quota and a network rule, then deploy a first VM from a cloud
+template and undo it. Metadata is in `network_ops.py` / `deploy_ops.py`,
+handlers in `_network.py` / `_deploy.py`, paths in `_paths.py`:
+
+| op_id | risk level / approval | wire |
+|---|---|---|
+| `vcfa.tenant.fabric_network.list` | safe | `GET /iaas/api/fabric-networks-vsphere` |
+| `vcfa.tenant.fabric_compute.list` | safe | `GET /iaas/api/fabric-computes` |
+| `vcfa.tenant.region.list` | safe | `GET /iaas/api/regions` (the `region_id` of a network profile) |
+| `vcfa.tenant.zone.list` | safe | `GET /iaas/api/zones` (the `zone_id` of a project quota) |
+| `vcfa.tenant.fabric_network.update` | caution, approval | `GET` then `PATCH /iaas/api/fabric-networks-vsphere/{id}` |
+| `vcfa.tenant.network_profile.create` | caution, approval | `GET` (name check) then `POST /iaas/api/network-profiles` |
+| `vcfa.tenant.blueprint_request.create` | caution, approval | `POST /blueprint/api/blueprint-requests` (`plan: true` is the dry run) |
+| `vcfa.tenant.blueprint_request.get` | safe | `GET /blueprint/api/blueprint-requests/{requestId}` |
+| `vcfa.tenant.deployment.delete` | dangerous, approval | `DELETE /deployment/api/deployments/{deploymentId}` |
+
+`vcfa.tenant.project.create` also takes `zones` (each a `zone_id` with a
+priority and limits for VMs, vCPUs, memory and storage, sent as
+`zoneAssignmentConfigurations`) and `network_constraints` (tag rules such as
+`project:<name>`, sent as `constraints.network`, `mandatory` defaults to
+true).
+
+- **`apiVersion`.** Every `/iaas/api` call of these ops sends
+  `apiVersion=2021-07-15` (`TENANT_IAAS_API_VERSION`). The older reads
+  (`project.list`, `deployment.list` / `.get`) still send none.
+- **One tenant login for three APIs.** `plane_for_path` sends
+  `/iaas/api/*`, `/blueprint/api/*` and `/deployment/api/*` to the tenant
+  plane: the bearer from `POST /iaas/api/login` works on all three, as on
+  Aria Automation 8 (`connectors/vra8/_paths.py`).
+- **Safe to run twice.** `fabric_network.update` reads the network first and
+  sends only the fields that differ (`unchanged` when none do).
+  `add_tags` is added to the tags the network has; the `PATCH` sends the
+  whole tag list back, so no tag is lost and none is removed.
+  `network_profile.create` answers `unchanged` for an existing name. A real
+  `blueprint_request.create` whose `deployment_name` already names a
+  deployment answers `unchanged` and requests nothing. `deployment.delete`
+  answers `unchanged` on a `404`.
+- **Two traps in the guidance.** A plan (`plan: true`) only checks the
+  template and its inputs; it does not find placement errors (no fitting
+  zone, network or quota) — only a real request does. VCF Automation reads
+  new vCenter objects on its own schedule (2 to 12 minutes were measured),
+  so a new port group may be missing from `fabric_network.list` for a while.
+- **Waiting.** A deploy request and a delete run in the background. The
+  agent or runbook reads `blueprint_request.get` until `status` is
+  `FINISHED`, `FAILED` or `CANCELLED`, and `deployment.get` until it answers
+  not found. No op waits by itself.
+- **Delete.** `deployment.delete` is `dangerous` (the person who asks cannot
+  approve it alone), like `argocd.app.delete`. Its park-time preview reads
+  the deployment once so the approver sees its name and project
+  (`_provisioning_preview.py`).
+- **Spec check.** The reconcile lane checks the new paths against
+  `vra-iaas.json`, `vra-blueprint.json` and `vra-catalog-deployment.json`
+  of the pinned `vra-sdk-go` v0.6.5 shelf.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
@@ -262,6 +319,10 @@ domains.
   deployment list #2839; tenant deployment get #2960) and the four
   per-plane groups (`vcfa-provider-reads`, `vcfa-tenant-reads`, and the
   #3890 `vcfa-provider-writes`, `vcfa-tenant-writes`).
+- **`VCFA_NETWORK_OPS`** (`network_ops.py`) / **`VCFA_DEPLOY_OPS`**
+  (`deploy_ops.py`) — the six network ops and the three deploy ops (see
+  **A project's own network and its first deployment** above), checked by
+  the same `validate_typed_ops()`.
 - **`VCFA_PROVISIONING_OPS`** (`provisioning_ops.py`) — the nine #3890
   provisioning ops (see **Provisioning ops** above), validated by the
   same `validate_typed_ops()`. Each `VcfaTypedOp` carries a `plane` + `path`;
@@ -293,8 +354,9 @@ domains.
    idempotency check (in `ensure_connector_class_registered`) no-ops on
    subsequent ingests against the same triple.
 4. `run_typed_op_registrars()` (lifespan) invokes the registrar, which
-   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors plus the nine
-   `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890) — no ingest needed, so
+   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors, the nine
+   `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890) and the nine
+   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS` — no ingest needed, so
    the audited read surface and the provisioning writes work on a fresh
    boot.
 
@@ -350,7 +412,7 @@ before resolving headers.
 
 Plane classification (`_plane_for_path`):
 
-- `/iaas/api/*` → tenant plane.
+- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*` → tenant plane.
 - Everything else (`/cloudapi/*`, `/api/*`) → provider plane.
 
 The provider plane Bearer JWT authenticates both `/cloudapi/*` and the

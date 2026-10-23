@@ -598,7 +598,7 @@ async def test_repo_view_meets_every_operation_contract_rule(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """The row passes the operation contract rules with no gap."""
-    from tests.test_vmware_operation_contracts import OperationContract, check_operation
+    from tests.test_operation_contracts import OperationContract, check_operation
 
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()

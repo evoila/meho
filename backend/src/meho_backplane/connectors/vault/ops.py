@@ -1334,6 +1334,7 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
         "response_schema": _VAULT_KV_READ_RESPONSE_SCHEMA,
         "tags": ["read-only", "secret-read"],
         "safety_level": "safe",
+        "requires_approval": False,
         "llm_instructions": _VAULT_KV_READ_LLM_INSTRUCTIONS,
     },
     {
@@ -1354,6 +1355,7 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
         "response_schema": _VAULT_KV_LIST_RESPONSE_SCHEMA,
         "tags": ["read-only", "credential-read"],
         "safety_level": "safe",
+        "requires_approval": False,
         "llm_instructions": _VAULT_KV_LIST_LLM_INSTRUCTIONS,
     },
     {
@@ -1417,6 +1419,7 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
         "response_schema": _VAULT_KV_VERSIONS_RESPONSE_SCHEMA,
         "tags": ["read-only", "metadata"],
         "safety_level": "safe",
+        "requires_approval": False,
         "llm_instructions": _VAULT_KV_VERSIONS_LLM_INSTRUCTIONS,
     },
     {
@@ -1534,20 +1537,18 @@ async def register_vault_typed_operations(
         "value itself."
     )
     for spec in _KV_OP_SPECS:
-        # ``requires_approval`` is carried per-op in the spec (default
-        # False for the read ops, which omit the key). The mutating KV
-        # ops (put / patch / delete) set it True so the dispatcher routes
-        # human principals to the approval queue rather than executing
-        # the write inline (G3.15-T1 #1409, on the G11.7-T1 #1401 queue).
+        # Every spec states ``safety_level`` and ``requires_approval``. The
+        # mutating KV ops (put / patch / delete) set it True so the
+        # dispatcher routes human principals to the approval queue rather
+        # than executing the write inline (G3.15-T1 #1409).
         await register_typed_operation(
             product="vault",
             version="1.x",
             impl_id="vault",
             group_key="kv",
             when_to_use=kv_when_to_use,
-            requires_approval=spec.get("requires_approval", False),
             embedding_service=embedding_service,
-            **{k: v for k, v in spec.items() if k != "requires_approval"},
+            **spec,
         )
     # Identity-read group (Task #547) -- registered from its own
     # module so the auth surface stays independently reviewable while

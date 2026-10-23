@@ -1176,8 +1176,8 @@ def test_kv_op_ids_classify_per_decision_3(op_id: str, expected_class: str) -> N
 # ---------------------------------------------------------------------------
 
 #: The KV-v2 ops that register ``requires_approval=True`` plus their
-#: ``safety_level`` posture. Read ops are excluded — they default
-#: ``requires_approval=False``.
+#: ``safety_level`` posture. Read ops are excluded — they state
+#: ``requires_approval=False`` themselves.
 _KV_APPROVAL_CONTRACT = {
     "vault.kv.put": "caution",
     "vault.kv.patch": "caution",
@@ -1206,9 +1206,22 @@ def test_kv_mutating_ops_require_approval(op_id: str, expected_safety: str) -> N
 
 @pytest.mark.parametrize("op_id", ["vault.kv.read", "vault.kv.list", "vault.kv.versions"])
 def test_kv_read_ops_do_not_require_approval(op_id: str) -> None:
-    """Read-only KV-v2 ops omit ``requires_approval`` (default False)."""
+    """Read-only KV-v2 ops state ``requires_approval=False`` explicitly."""
     by_id = {spec["op_id"]: spec for spec in _KV_OP_SPECS}
-    assert by_id[op_id].get("requires_approval", False) is False, op_id
+    assert by_id[op_id]["requires_approval"] is False, op_id
+
+
+def test_every_kv_spec_states_safety_level_and_requires_approval() -> None:
+    """No KV spec may inherit a value from ``register_typed_operation``.
+
+    The registrar splats each spec into the helper. A spec that leaves
+    out one of the two keys would silently take the helper's default,
+    so every spec must carry both.
+    """
+    levels = {"safe", "caution", "dangerous", "destructive"}
+    for spec in _KV_OP_SPECS:
+        assert spec["safety_level"] in levels, spec["op_id"]
+        assert isinstance(spec["requires_approval"], bool), spec["op_id"]
 
 
 # ---------------------------------------------------------------------------

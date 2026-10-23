@@ -11,13 +11,17 @@ profile's own ``_links.region.href``. All names are synthetic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import respx
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
 from meho_backplane.connectors.vcf_automation import (
@@ -387,6 +391,49 @@ async def test_mapping_update_warns_when_the_answer_lost_a_name(
     assert "Windows 2019" in result["result"]["guidance"]
 
 
+async def test_mapping_update_warns_when_the_answer_has_an_empty_mapping(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    # An empty mapping after a nonempty write lacks every name; it is not "no answer".
+    profile = _profile(**{"RHEL 9": _UBUNTU, "Windows 2019": _WIN})
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_change(mock, profile, patched=_profile())
+        result = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-rhel"},
+        )
+    out = result["result"]
+    assert out["status"] == "updated"
+    assert "['RHEL 9', 'Windows 2019']" in out["guidance"]
+
+
+async def test_mapping_update_warns_when_the_answer_has_no_mapping(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_change(mock, _profile(**{"RHEL 9": _UBUNTU}), patched={})
+        result = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-rhel"},
+        )
+    out = result["result"]
+    assert out["status"] == "updated"
+    assert "without a mapping" in out["guidance"]
+
+
+async def test_mapping_update_removing_the_last_name_accepts_an_empty_answer(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_change(mock, _profile(**{"RHEL 9": _UBUNTU}), patched=_profile())
+        result = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "RHEL 9", "remove": True},
+        )
+    assert result["result"]["status"] == "updated"
+    assert result["result"]["guidance"] is None
+
+
 async def test_mapping_update_remove(vcfa: VcfAutomationConnector) -> None:
     profile = _profile(**{"RHEL 9": _UBUNTU, "Windows 2019": _WIN})
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
@@ -398,6 +445,164 @@ async def test_mapping_update_remove(vcfa: VcfAutomationConnector) -> None:
     assert result["result"]["status"] == "updated"
     assert result["result"]["change"]["action"] == "remove"
     assert set(_body(patch)["imageMapping"]) == {"Windows 2019"}
+
+
+def _mapping_update_schema() -> dict[str, Any]:
+    op = next(op for op in VCFA_IMAGE_OPS if op.op_id == "vcfa.tenant.image_profile.mapping.update")
+    schema: dict[str, Any] = op.response_schema
+    Draft202012Validator.check_schema(schema)
+    return schema
+
+
+async def test_mapping_update_add_and_remove_results_meet_the_response_schema(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    # An add has no old target and a remove has no new target: both are null.
+    validator = Draft202012Validator(_mapping_update_schema())
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_change(mock, _profile(**{"RHEL 9": _UBUNTU}), patched=_profile())
+        added = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "Rocky 9", "fabric_image_id": "fi-rhel"},
+        )
+        removed = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "RHEL 9", "remove": True},
+        )
+    assert added["result"]["change"]["old_target"] is None
+    assert removed["result"]["change"]["new_target"] is None
+    for result in (added, removed):
+        assert result["result"]["status"] == "updated", result
+        assert list(validator.iter_errors(result["result"])) == []
+
+
+class _Appliance:
+    """A profile that keeps the mapping of the last ``PATCH``."""
+
+    def __init__(self, profile: dict[str, Any]) -> None:
+        self.profile = profile
+        self.patch_bodies: list[dict[str, Any]] = []
+
+    def get(self, _request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=self.profile)
+
+    def patch(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.patch_bodies.append(body)
+        mapping = {
+            name: {"id": entry["id"], "name": f"{entry['id']}-template"}
+            for name, entry in body["imageMapping"].items()
+        }
+        self.profile = {**self.profile, "imageMappings": {"mapping": mapping}}
+        return httpx.Response(200, json=self.profile)
+
+    @property
+    def names(self) -> set[str]:
+        return set(self.profile["imageMappings"]["mapping"])
+
+
+def _pause_after_profile_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the profile read, wait a moment for the other call to read too.
+
+    Without the lock both calls read the same profile and the barrier
+    opens at once; with the lock the second read cannot happen before the
+    first call wrote, so the wait runs out and the call goes on.
+    """
+    read = images_module._read_profile
+    reads = 0
+    both_read = asyncio.Event()
+
+    async def paused(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal reads
+        profile = await read(*args, **kwargs)
+        reads += 1
+        if reads >= 2:
+            both_read.set()
+        with suppress(TimeoutError):
+            await asyncio.wait_for(both_read.wait(), 0.5)
+        return profile
+
+    monkeypatch.setattr(images_module, "_read_profile", paused)
+
+
+async def test_mapping_update_serializes_two_changes_to_one_profile(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: two calls that each add a name must both keep their name.
+    _pause_after_profile_read(monkeypatch)
+    appliance = _Appliance(_profile(**{"RHEL 9": _UBUNTU}))
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_PROFILE).mock(side_effect=appliance.get)
+        mock.get("/iaas/api/fabric-images/fi-rhel").respond(200, json=_RHEL)
+        mock.get("/iaas/api/fabric-images/fi-rocky").respond(
+            200, json={"id": "fi-rocky", "externalRegionId": "region-a"}
+        )
+        mock.patch(_PROFILE).mock(side_effect=appliance.patch)
+        results = await asyncio.gather(
+            run(
+                "vcfa.tenant.image_profile.mapping.update",
+                {"profile_id": "ip-1", "image_name": "Rocky 9", "fabric_image_id": "fi-rocky"},
+            ),
+            run(
+                "vcfa.tenant.image_profile.mapping.update",
+                {"profile_id": "ip-1", "image_name": "Debian 12", "fabric_image_id": "fi-rhel"},
+            ),
+        )
+    assert [r["result"]["status"] for r in results] == ["updated", "updated"], results
+    assert appliance.names == {"RHEL 9", "Rocky 9", "Debian 12"}
+    assert len(appliance.patch_bodies) == 2
+    assert set(appliance.patch_bodies[1]["imageMapping"]) == appliance.names
+    assert [r["result"]["guidance"] for r in results] == [None, None]
+    assert images_module._profile_locks == {}
+
+
+def _record_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch, *, locked: bool
+) -> list[tuple[int, dict[str, Any]]]:
+    calls: list[tuple[int, dict[str, Any]]] = []
+
+    @asynccontextmanager
+    async def fake(key: int, **kwargs: Any) -> AsyncIterator[bool]:
+        calls.append((key, kwargs))
+        yield locked
+
+    monkeypatch.setattr(images_module, "advisory_lock", fake)
+    return calls
+
+
+async def test_mapping_update_holds_the_cross_worker_lock_of_the_profile(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _record_advisory_lock(monkeypatch, locked=True)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_change(mock, _profile(**{"RHEL 9": _UBUNTU}), patched=_profile())
+        result = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "RHEL 9", "remove": True},
+        )
+    assert result["result"]["status"] == "updated"
+    target = await resolved_target()
+    key, kwargs = calls[0]
+    assert key == images_module._lock_key(target, "ip-1")
+    assert key != images_module._lock_key(target, "ip-2")
+    assert kwargs["wait_seconds"] == images_module.PROFILE_LOCK_WAIT_SECONDS
+
+
+async def test_mapping_update_fails_without_writing_when_the_lock_stays_busy(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record_advisory_lock(monkeypatch, locked=False)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        patch = _mount_change(mock, _profile(**{"RHEL 9": _UBUNTU}), patched=_profile())
+        result = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "RHEL 9", "remove": True},
+        )
+    assert result["status"] == "error"
+    assert "still running" in json.dumps(result)
+    assert not patch.called
+    assert images_module._profile_locks == {}
 
 
 async def test_mapping_update_unchanged_writes_nothing(vcfa: VcfAutomationConnector) -> None:

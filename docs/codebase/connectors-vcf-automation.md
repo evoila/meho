@@ -240,8 +240,17 @@ approval preview in `_images.py`, all on the tenant plane, in the group
   unknown fabric image, or a template of another region; checked before
   any write). A template of another cloud account is refused too: the
   profile's `cloudAccountId` must be in the image's `cloudAccountIds`,
-  because a vSphere region id is unique only inside one vCenter. When the `PATCH` answer lacks a name that was sent,
-  `guidance` names it.
+  because a vSphere region id is unique only inside one vCenter. When the
+  `PATCH` answer lacks a name that was sent, `guidance` names it; an
+  answer with an empty mapping is checked the same way, and an answer
+  without any mapping gets a `guidance` to read the profile again.
+- **One change at a time per profile.** Two changes that read the same
+  profile would each send the whole mapping back, and the second write
+  would drop the first name. So the handler holds a lock for the profile
+  from the read to the write: an `asyncio.Lock` for calls in this
+  process and a PG advisory lock (`db/advisory.py`, keyed by tenant,
+  target and profile id) for calls in other workers. A second call waits
+  up to 30 seconds, then fails without writing.
 - **Approval card.** The preview builder reads the profile and the fabric
   image at park time and shows the old and the new template plus the
   other names. Without a connector (`preview_operation`) it only echoes

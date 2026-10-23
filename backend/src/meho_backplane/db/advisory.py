@@ -51,6 +51,8 @@ trivial ``SELECT``\\ s and is returned on block exit.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import cast
@@ -76,17 +78,22 @@ def _log() -> structlog.typing.FilteringBoundLogger:
 
 
 @asynccontextmanager
-async def advisory_lock(key: int, *, subsystem: str) -> AsyncIterator[bool]:
+async def advisory_lock(
+    key: int, *, subsystem: str, wait_seconds: float = 0.0, poll_seconds: float = 0.2
+) -> AsyncIterator[bool]:
     """Hold the session-level PG advisory lock *key* on a pinned connection.
 
     Yields ``True`` when the lock was acquired (or the engine dialect has
     no advisory locks — the SQLite single-replica test path) and the
     caller should run its tick body; yields ``False`` when another holder
-    owns *key* and the caller should skip. On acquisition the lock is
-    hosted on a dedicated connection checked out for the whole ``async
-    with`` block, so the caller's work sessions may commit freely without
-    ever moving the lock, and the unlock in the ``finally`` runs on the
-    very connection that acquired it (the #3010 invariant).
+    owns *key* and the caller should skip. With ``wait_seconds > 0`` a
+    held key is tried again every *poll_seconds* until that much time
+    has passed; the tick loops keep the default and skip at once. On
+    acquisition the lock is hosted on a dedicated connection checked out
+    for the whole ``async with`` block, so the caller's work sessions may
+    commit freely without ever moving the lock, and the unlock in the
+    ``finally`` runs on the very connection that acquired it (the #3010
+    invariant).
 
     *subsystem* labels the ``advisory_lock_busy_total`` counter
     incremented on a miss and the ``advisory_unlock_failed`` tripwire
@@ -99,7 +106,12 @@ async def advisory_lock(key: int, *, subsystem: str) -> AsyncIterator[bool]:
         yield True
         return
     async with engine.connect() as conn:
-        locked = bool(await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}))
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            locked = bool(await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}))
+            if locked or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(poll_seconds)
         if not locked:
             ADVISORY_LOCK_BUSY_TOTAL.labels(subsystem=subsystem).inc()
             yield False

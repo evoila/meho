@@ -117,14 +117,18 @@ _FABRIC_IMAGE_FIELDS: dict[str, Any] = {
     "updatedAt": field("string", "When VCF Automation last saw a change (ISO 8601, UTC)."),
 }
 
-_TARGET = obj(
-    "A template an image name gives, or null when the name has none.",
-    {
-        "fabric_image_id": field(["string", "null"], "The fabric image id."),
-        "name": field(["string", "null"], "The template name in vCenter."),
-        "externalId": field(["string", "null"], "The template id in vCenter."),
-    },
-)
+_TARGET: dict[str, Any] = {
+    **obj(
+        "A template an image name gives, or null when the name has none "
+        "(old_target of an add, new_target of a remove).",
+        {
+            "fabric_image_id": field(["string", "null"], "The fabric image id."),
+            "name": field(["string", "null"], "The template name in vCenter."),
+            "externalId": field(["string", "null"], "The template id in vCenter."),
+        },
+    ),
+    "type": ["object", "null"],
+}
 
 _IMAGE_PROFILE_LIST = VcfaTypedOp(
     op_id="vcfa.tenant.image_profile.list",

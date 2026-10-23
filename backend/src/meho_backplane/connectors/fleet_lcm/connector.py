@@ -48,40 +48,25 @@ pattern.
 Auth
 ----
 
-Per the pinned spec's ``securitySchemes``, the global security scheme is
-``bearerToken`` (HTTP Bearer), with ``basicAuth`` (HTTP Basic) also
-defined. :meth:`auth_headers` implements Bearer as the primary path and
-Basic as the fallback:
+The API takes a Bearer token that VCF Operations hands out (#4476).
+:meth:`auth_headers` returns ``Authorization: Bearer <token>``. The token
+comes from one of two places:
 
-* When the loaded credentials carry a non-empty ``"token"`` key, the
-  header is ``Authorization: Bearer <token>`` — the spec's primary
-  scheme.
-* Otherwise the header is ``Authorization: Basic <b64>`` off the
-  ``username`` / ``password`` pair — the spec's ``basicAuth`` alternative,
-  reusing the shared
-  :func:`~meho_backplane.connectors._shared.vcf_auth.basic_auth_header`
-  the legacy impl uses.
+* **Login (the normal way).** MEHO logs in to VCF Operations with the
+  ``username`` / ``password`` from the target's Vault secret
+  (``token/acquire``), then trades that token for a fleet lifecycle token
+  (``token/exchange`` with the service key ``fleet-lcm``). See
+  :func:`~meho_backplane.connectors.fleet_lcm.session.mint_fleet_lcm_token`.
+  The login goes to ``vcf_ops_url`` from the secret when it is set, else to
+  the target's own address. The token is kept per target
+  (``(tenant_id, target.id)``) until :meth:`invalidate_session` drops it.
+* **Stored token (fallback).** When the secret carries a ``token``, MEHO
+  sends it as is and does not log in.
 
-The shared
-:class:`~meho_backplane.connectors._shared.vcf_auth.CredentialsCache`
-enforces the ``{"username", "password"}`` contract, so the loader always
-returns that pair (the appliance accepts ``basicAuth`` too) and may
-additionally carry the optional ``"token"``. Credentials are cached
-per tenant-unique ``(tenant_id, target.id)`` and reused on subsequent
-calls, the legacy Basic shape verbatim.
-
-**Bearer live-verify is a follow-up (non-goal here).** There is no
-reachable Fleet LCM appliance (#1002 / #995), so the Bearer *header
-shape* is unit-tested (an injected loader returning a ``"token"``) but
-never exercised against a live appliance, and the default
-:func:`~meho_backplane.connectors.fleet_lcm.session.load_credentials_from_vault`
-surfaces only the ``username`` / ``password`` pair (the shared
-basic-creds read) — so the live default is the Basic alternative until
-the Bearer-token provisioning seam lands. That seam — a fleet-lcm loader
-surfacing a Vault-stored token, or a POST-``basicAuth`` →
-mint-``bearerToken`` session flow — is the documented live-verify
-follow-up gated on a stood-up appliance, exactly the posture the legacy
-skeleton shipped with.
+On a ``401`` from a fleet call, the dispatcher calls
+:meth:`invalidate_session` and runs the call once more, so an expired token
+is renewed with one new login. A second ``401`` ends as
+``connector_auth_failed``.
 
 Auth model gating
 -----------------
@@ -125,7 +110,7 @@ impl carries are its ``/lcm/*`` back-compat surface, distinct from these
 The handler bodies build their ``/v1/*`` request paths from the templates
 in :mod:`._paths` (reconcile-lane-introspectable) and dispatch on this
 class's authenticated client, so the reads ride :meth:`auth_headers`
-(Bearer primary, Basic fallback) exactly as an ingested op would. The
+(the VCF Operations Bearer token) exactly as an ingested op would. The
 wider surface — the full 51-op spec as ``source_kind="ingested"`` breadth
 plus the component / upgrade / task **writes** — is a follow-up enabled
 operationally through the generic review flow
@@ -136,6 +121,7 @@ dispatch shim for any such ingested ``op_id``.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -143,10 +129,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
-    basic_auth_header,
     is_acceptable_auth_model,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -154,6 +140,7 @@ from meho_backplane.connectors.fleet_lcm.session import (
     FleetLcmCredentialsLoader,
     FleetLcmTargetLike,
     load_credentials_from_vault,
+    mint_fleet_lcm_token,
 )
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -181,16 +168,14 @@ _FLEET_LCM_PROBE_METHOD = "GET /v1/health (VCF Fleet LCM Service health endpoint
 
 
 class FleetLcmConnector(HttpConnector):
-    """VCF 9 Fleet LCM Service REST connector — Bearer (Basic fallback) auth.
+    """VCF 9 Fleet LCM Service REST connector — Bearer token from VCF Operations.
 
-    Per-target credentials cached in :attr:`_creds` via the shared
-    :class:`~meho_backplane.connectors._shared.vcf_auth.CredentialsCache`
-    (loaded once via the injectable
+    Per-target credentials are kept in :attr:`_creds` (the shared
+    :class:`~meho_backplane.connectors._shared.vcf_auth.CredentialsCache`,
+    loaded with the injectable
     :class:`~meho_backplane.connectors.fleet_lcm.session.FleetLcmCredentialsLoader`).
-    :meth:`auth_headers` emits ``Authorization: Bearer <token>`` when the
-    loaded credentials carry a ``"token"`` (the spec's primary scheme),
-    falling back to ``Authorization: Basic <b64>`` off the
-    username/password pair (the spec's ``basicAuth`` alternative).
+    Per-target Bearer tokens from the VCF Operations login are kept in
+    :attr:`_session_tokens`.
 
     :attr:`priority` is ``1`` — equal to the legacy ``fleet-rest`` impl by
     design: the two impls are split by **version range**, not priority
@@ -220,25 +205,16 @@ class FleetLcmConnector(HttpConnector):
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
         self._creds: CredentialsCache = CredentialsCache(loader, product_label="fleet-lcm")
+        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_lock = asyncio.Lock()
 
     async def auth_headers(self, target: FleetLcmTargetLike, operator: Operator) -> dict[str, str]:
-        """Return the ``Authorization`` header — Bearer primary, Basic fallback.
+        """Return ``{"Authorization": "Bearer <token>"}`` for *target*.
 
-        Loads credentials from Vault on first call against *target* via the
-        shared :class:`CredentialsCache` (reused on subsequent calls) and
-        threads the full ``operator`` through so the live default loader
-        reads the per-target secret under the operator's Vault Identity
-        entity — the locked Option A decision, the same path the legacy
-        impl uses.
-
-        When the loaded credentials carry a non-empty ``"token"``, returns
-        ``{"Authorization": "Bearer <token>"}`` (the spec's global
-        ``bearerToken`` scheme). Otherwise returns
-        ``{"Authorization": "Basic <b64>"}`` off the ``username`` /
-        ``password`` pair (the spec's ``basicAuth`` alternative), reusing
-        the shared :func:`basic_auth_header`. The
-        :class:`CredentialsCache` contract guarantees the username/password
-        pair is present, so the Basic fallback never raises ``KeyError``.
+        Reads the credentials from Vault under the operator's identity
+        (kept per target after the first read). A stored ``token`` is sent
+        as is; otherwise the token comes from the VCF Operations login,
+        which runs once per target and is then reused.
 
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
@@ -250,11 +226,40 @@ class FleetLcmConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
+        # ``CredentialsCache.get`` refuses an operator without a JWT even on a
+        # cache hit, so a token minted for one caller never reaches a
+        # system-initiated one.
         creds = await self._creds.get(target, operator)
-        token = creds.get("token")
-        if token:
-            return {"Authorization": f"Bearer {token}"}
-        return {"Authorization": basic_auth_header(creds["username"], creds["password"])}
+        token = creds.get("token") or await self._session_token(target, creds)
+        return {"Authorization": f"Bearer {token}"}
+
+    async def _session_token(self, target: FleetLcmTargetLike, creds: dict[str, str]) -> str:
+        """Return the kept Bearer token for *target*, logging in on first use.
+
+        The lock makes concurrent first callers for a target share one login.
+        """
+        cache_key = target_cache_key(target)
+        async with self._session_lock:
+            cached = self._session_tokens.get(cache_key)
+            if cached is not None:
+                return cached
+            ops_url = creds.get("vcf_ops_url")
+            login_target: Any = _VcfOpsEndpoint(target, ops_url) if ops_url else target
+            client = await self._http_client(login_target)
+            token = await mint_fleet_lcm_token(
+                client,
+                username=creds["username"],
+                password=creds["password"],
+                target_name=target.name,
+                request_extensions=self._request_extensions(login_target),
+            )
+            self._session_tokens[cache_key] = token
+            _log.info(
+                "fleet_lcm_session_established",
+                target=target.name,
+                login_host=login_target.host,
+            )
+            return token
 
     async def fingerprint(
         self,
@@ -498,22 +503,52 @@ class FleetLcmConnector(HttpConnector):
 
         return await fleet_lcm_release_version_list_impl(self, operator, target, params)
 
-    async def invalidate_credentials(self, target: FleetLcmTargetLike) -> None:
-        """Public duck-typed credential-eviction hook for the dispatch path (#2396).
+    async def invalidate_session(self, target: FleetLcmTargetLike) -> None:
+        """Drop the kept token and credentials for *target* (the #2067 seam).
 
-        Delegates to the shared :class:`CredentialsCache.invalidate` so the
-        next credential read re-reads Vault. The dispatcher calls this hook
-        on an establish-auth failure so an operator's out-of-band restage
-        converges on the next dispatch without a backplane restart.
+        The dispatcher calls this on a ``401`` from a fleet call and then
+        runs the call once more. The next call reads Vault again and logs in
+        again, so both an expired login token and a replaced stored token
+        are picked up.
+        """
+        async with self._session_lock:
+            self._session_tokens.pop(target_cache_key(target), None)
+        await self._creds.invalidate(target)
+
+    async def invalidate_credentials(self, target: FleetLcmTargetLike) -> None:
+        """Drop the kept credentials for *target* (#2396).
+
+        The dispatcher calls this when the login itself is refused, so the
+        next call re-reads Vault after an operator fixes the secret.
         """
         await self._creds.invalidate(target)
 
     async def aclose(self) -> None:
-        """Clear cached credentials, then tear down the httpx pool.
-
-        No server-side session to revoke — the Bearer/Basic header is sent
-        per request. The credential cache is cleared so a post-aclose reuse
-        of the same connector instance starts clean.
-        """
+        """Clear kept tokens and credentials, then close the httpx pool."""
+        async with self._session_lock:
+            self._session_tokens.clear()
         await self._creds.clear()
         await super().aclose()
+
+
+class _VcfOpsEndpoint:
+    """The target, seen at the VCF Operations address from ``vcf_ops_url``.
+
+    Only the address changes. Everything else (``id`` / ``tenant_id``,
+    ``verify_tls``, ``tls_ca_pin``) comes from the target, so the login gets
+    its own pooled client with the same TLS rules and the same address
+    check. A ``tls_server_name`` set on the target belongs to the target's
+    address, so it is not used here.
+    """
+
+    tls_server_name: str | None = None
+
+    def __init__(self, target: FleetLcmTargetLike, ops_url: str) -> None:
+        url = httpx.URL(ops_url)
+        self._target = target
+        self.host = url.host
+        self.port = url.port
+        self.extras = {"scheme": "https"}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)

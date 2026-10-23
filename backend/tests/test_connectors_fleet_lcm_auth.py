@@ -1,27 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for :class:`FleetLcmConnector` auth + fingerprint/probe (#3036).
+"""Unit tests for :class:`FleetLcmConnector` auth + fingerprint/probe (#3036, #4476).
 
-Exercises the modern Fleet LCM Service connector's auth seam — Bearer as the
-primary scheme (``securitySchemes.bearerToken``) with Basic fallback
-(``securitySchemes.basicAuth``) — per-target credential isolation, the
-auth_model boundary gate, and the fingerprint/probe shapes against the
-``GET /v1/health`` reachability probe.
-
-No live appliance is reachable (#1002 / #995), so the Bearer *header shape* is
-proven via an injected loader returning a ``"token"`` and the transport is
-mocked with ``respx``; live Bearer verification is the documented follow-up.
-
-Test layout mirrors :mod:`tests.test_connectors_vcf_fleet_auth` (the legacy
-impl's auth test) — the shared ``CredentialsCache`` / ``basic_auth_header`` /
-``is_acceptable_auth_model`` scaffolding and the fixture-clean registry
-pattern.
+Covers the login seam — the two-step VCF Operations login (``token/acquire``,
+then ``token/exchange`` with the service key ``fleet-lcm``) that yields the
+Bearer token, the stored-token fallback, the optional ``vcf_ops_url`` login
+address, session renewal through :meth:`FleetLcmConnector.invalidate_session`,
+per-target isolation, the auth_model gate, and the fingerprint/probe shapes
+against ``GET /v1/health``. The transport is mocked with ``respx``; the
+acquire and exchange answers are hand-made fixtures shaped like the vendor's
+VCF Operations 9.1 API file.
 """
 
 from __future__ import annotations
 
-import base64
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
@@ -29,8 +23,11 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.fleet_lcm import (
     FleetLcmConnector,
@@ -104,31 +101,43 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _basic_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
-    """Return canned username/password (no token) → Basic fallback path."""
-    return {"username": "admin@local", "password": "stub-password"}
+_PASSWORD = "stub-password-must-not-leak"
+_OPS_TOKEN = "ops-token-must-not-leak"
+_JWT = "fleet-jwt-must-not-leak"
+_ACQUIRE_PATH = "/suite-api/api/auth/token/acquire"
+_EXCHANGE_PATH = "/suite-api/api/auth/token/exchange"
+
+
+async def _login_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
+    """VCF Operations username/password only → the connector logs in."""
+    return {"username": "admin", "password": _PASSWORD}
 
 
 async def _bearer_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
-    """Return canned credentials carrying a ``token`` → Bearer primary path.
-
-    Carries username/password too (the ``CredentialsCache`` contract requires
-    them), plus the ``token`` that activates the Bearer header.
-    """
-    return {"username": "admin@local", "password": "stub-password", "token": "tok-abc123"}
+    """Credentials carrying a stored ``token`` → sent as is, no login."""
+    return {"username": "admin", "password": _PASSWORD, "token": "tok-abc123"}
 
 
 def _make_connector() -> FleetLcmConnector:
-    """Build a connector wired with the Basic (no-token) stub loader."""
-    return FleetLcmConnector(credentials_loader=_basic_loader)
+    """Build a connector with a stored token, so no login runs (fingerprint tests)."""
+    return FleetLcmConnector(credentials_loader=_bearer_loader)
 
 
-def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
-    """Decode an ``Authorization: Basic <b64>`` header into (username, password)."""
-    assert authorization_header.startswith("Basic ")
-    decoded = base64.b64decode(authorization_header[6:]).decode()
-    username, _, password = decoded.partition(":")
-    return username, password
+def _mock_login(
+    mock: respx.MockRouter, *, jwt: str = _JWT, ops_token: str = _OPS_TOKEN
+) -> tuple[respx.Route, respx.Route]:
+    """Mock the acquire and exchange answers (vendor 9.1 shapes) on *mock*."""
+    acquire = mock.post(_ACQUIRE_PATH).respond(
+        200,
+        json={"token": ops_token, "validity": 1767225600000, "expiresAt": "x", "roles": []},
+    )
+    exchange = mock.post(_EXCHANGE_PATH).respond(200, json={"jwtToken": jwt, "services": []})
+    return acquire, exchange
+
+
+def _paths_in_order(mock: respx.MockRouter) -> list[str]:
+    """The request paths *mock* saw, in order."""
+    return [call.request.url.path for call in mock.calls]
 
 
 # ---------------------------------------------------------------------------
@@ -173,70 +182,176 @@ def test_importing_package_registers_versioned_triple_only() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Auth — Bearer primary + Basic fallback
+# Auth — VCF Operations login (acquire, then exchange) + stored-token fallback
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_auth_headers_emits_bearer_when_token_present() -> None:
-    """A loader returning a ``token`` yields ``Authorization: Bearer <token>``."""
+async def test_login_acquires_then_exchanges_and_sends_bearer() -> None:
+    """No stored token: acquire, then exchange with ``fleet-lcm``, then Bearer <jwtToken>."""
+    connector = FleetLcmConnector(credentials_loader=_login_loader)
+
+    async with respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock:
+        acquire, exchange = _mock_login(mock)
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        # Acquire runs before exchange.
+        assert _paths_in_order(mock) == [_ACQUIRE_PATH, _EXCHANGE_PATH]
+
+    assert headers == {"Authorization": f"Bearer {_JWT}"}
+    assert acquire.call_count == 1 and exchange.call_count == 1
+    acquire_request = acquire.calls[0].request
+    assert json.loads(acquire_request.content) == {"username": "admin", "password": _PASSWORD}
+    exchange_request = exchange.calls[0].request
+    assert exchange_request.headers["Authorization"] == f"OpsToken {_OPS_TOKEN}"
+    assert json.loads(exchange_request.content) == {"serviceKeys": ["fleet-lcm"]}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stored_token_is_sent_without_login() -> None:
+    """A stored ``token`` is sent as is; no login request is made (the fallback)."""
     connector = FleetLcmConnector(credentials_loader=_bearer_loader)
-    headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    async with respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock:
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
     assert headers == {"Authorization": "Bearer tok-abc123"}
+    assert mock.calls.call_count == 0
     await connector.aclose()
 
 
 @pytest.mark.asyncio
-async def test_auth_headers_falls_back_to_basic_without_token() -> None:
-    """A loader returning only username/password yields the Basic header (spec's basicAuth)."""
-    connector = _make_connector()
-    headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-
-    assert "Authorization" in headers
-    assert headers["Authorization"].startswith("Basic ")
-    username, password = _decode_basic_auth(headers["Authorization"])
-    assert username == "admin@local"
-    assert password == "stub-password"
-    await connector.aclose()
-
-
-@pytest.mark.asyncio
-async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
-    """Second auth_headers call against the same target does NOT re-invoke the loader."""
+async def test_token_is_reused_until_invalidated() -> None:
+    """The login runs once per target; invalidate_session makes the next call log in again."""
     call_count = 0
 
     async def _counting_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
-        return {"username": "admin@local", "password": "stub-password"}
+        return {"username": "admin", "password": _PASSWORD}
 
     connector = FleetLcmConnector(credentials_loader=_counting_loader)
-    h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    async with respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock:
+        acquire, exchange = _mock_login(mock)
+        exchange.side_effect = [
+            httpx.Response(200, json={"jwtToken": "jwt-1"}),
+            httpx.Response(200, json={"jwtToken": "jwt-2"}),
+        ]
+        h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        await connector.invalidate_session(_TARGET_A)
+        h3 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert h1 == h2
-    assert call_count == 1
+    assert h1 == h2 == {"Authorization": "Bearer jwt-1"}
+    assert h3 == {"Authorization": "Bearer jwt-2"}
+    assert acquire.call_count == 2 and exchange.call_count == 2
+    # invalidate_session also re-reads Vault, so a replaced secret is picked up.
+    assert call_count == 2
     await connector.aclose()
 
 
 @pytest.mark.asyncio
-async def test_per_target_isolation_keeps_credentials_separate() -> None:
-    """Two targets get two distinct credential cache entries; no cross-target leakage."""
-    call_log: list[str] = []
+async def test_per_target_isolation_keeps_tokens_separate() -> None:
+    """Two targets log in at their own address and get their own token."""
+    connector = FleetLcmConnector(credentials_loader=_login_loader)
+    async with (
+        respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock_a,
+        respx.mock(base_url="https://fleet-lcm-b.test.invalid") as mock_b,
+    ):
+        _mock_login(mock_a, jwt="jwt-a")
+        _mock_login(mock_b, jwt="jwt-b")
+        h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
 
-    async def _tracking_loader(target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
-        call_log.append(target.name)
-        return {"username": f"svc-{target.name}", "password": "pass"}
+    assert h_a == {"Authorization": "Bearer jwt-a"}
+    assert h_b == {"Authorization": "Bearer jwt-b"}
+    await connector.aclose()
 
-    connector = FleetLcmConnector(credentials_loader=_tracking_loader)
-    h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
 
-    username_a, _ = _decode_basic_auth(h_a["Authorization"])
-    username_b, _ = _decode_basic_auth(h_b["Authorization"])
-    assert username_a == "svc-fleet-lcm-a"
-    assert username_b == "svc-fleet-lcm-b"
-    assert call_log == ["fleet-lcm-a", "fleet-lcm-b"]
+@pytest.mark.asyncio
+async def test_login_goes_to_vcf_ops_url_when_set() -> None:
+    """With ``vcf_ops_url`` the login runs on that address, not the target's."""
+
+    async def _ops_url_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
+        return {
+            "username": "admin",
+            "password": _PASSWORD,
+            "vcf_ops_url": "https://vcf-ops.test.invalid:8443",
+        }
+
+    connector = FleetLcmConnector(credentials_loader=_ops_url_loader)
+    async with (
+        respx.mock(base_url="https://vcf-ops.test.invalid:8443") as ops_mock,
+        respx.mock(base_url="https://fleet-lcm-a.test.invalid", assert_all_called=False) as fleet,
+    ):
+        _mock_login(ops_mock)
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert headers == {"Authorization": f"Bearer {_JWT}"}
+    assert fleet.calls.call_count == 0
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["acquire", "exchange"])
+@pytest.mark.parametrize("status", [401, 403])
+async def test_refused_login_raises_connector_auth_error(step: str, status: int) -> None:
+    """A 401/403 at acquire or exchange is an auth failure naming the target, no secret."""
+    connector = FleetLcmConnector(credentials_loader=_login_loader)
+    async with respx.mock(
+        base_url="https://fleet-lcm-a.test.invalid", assert_all_called=False
+    ) as mock:
+        acquire, exchange = _mock_login(mock)
+        (acquire if step == "acquire" else exchange).respond(status)
+        with pytest.raises(ConnectorAuthError) as exc_info:
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert exc_info.value.status_code == status
+    message = str(exc_info.value)
+    assert "fleet-lcm-a" in message
+    for secret in (_PASSWORD, _OPS_TOKEN, _JWT):
+        assert secret not in message
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_exchange_without_jwt_token_raises_session_login_error() -> None:
+    """A 200 exchange answer with no ``jwtToken`` fails clearly, with no token in the text."""
+    connector = FleetLcmConnector(credentials_loader=_login_loader)
+    async with respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock:
+        _acquire, exchange = _mock_login(mock)
+        exchange.respond(200, json={"services": []})
+        with pytest.raises(SessionLoginError, match="no jwtToken") as exc_info:
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert not isinstance(exc_info.value, ConnectorAuthError)
+    assert _OPS_TOKEN not in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_login_never_logs_a_token_or_password() -> None:
+    """No password or token value appears in any log event of the login."""
+    connector = FleetLcmConnector(credentials_loader=_login_loader)
+    with capture_logs() as captured:
+        async with respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock:
+            _mock_login(mock)
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert any(event["event"] == "fleet_lcm_session_established" for event in captured)
+    log_blob = repr(captured)
+    for secret in (_PASSWORD, _OPS_TOKEN, _JWT):
+        assert secret not in log_blob
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_kept_token_is_not_served_to_a_caller_without_jwt() -> None:
+    """A token kept for an operator is refused to a system caller with no JWT."""
+    connector = FleetLcmConnector(credentials_loader=_login_loader)
+    async with respx.mock(base_url="https://fleet-lcm-a.test.invalid") as mock:
+        _mock_login(mock)
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        with pytest.raises(VaultCredentialsReadError):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator(raw_jwt=""))
     await connector.aclose()
 
 
@@ -244,9 +359,8 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
 async def test_loader_missing_password_key_raises_runtime_error_naming_target() -> None:
     """Loader returning a dict missing 'password' raises RuntimeError naming the target.
 
-    The shared ``CredentialsCache`` contract holds even on the Bearer path —
-    username/password are always required (the appliance accepts basicAuth),
-    so a token-only secret is a misconfiguration surfaced here.
+    The shared ``CredentialsCache`` contract holds even with a stored token:
+    the VCF Operations username/password are always required.
     """
 
     async def _bad_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
@@ -301,7 +415,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
     )
     connector = _make_connector()
     headers = await connector.auth_headers(target, operator=_make_operator())
-    assert headers["Authorization"].startswith("Basic ")
+    assert headers == {"Authorization": "Bearer tok-abc123"}
     await connector.aclose()
 
 
@@ -439,7 +553,7 @@ async def test_aclose_clears_credential_cache() -> None:
     async def _counting_loader(_target: FleetLcmTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
-        return {"username": "admin@local", "password": "stub-password"}
+        return {"username": "admin", "password": _PASSWORD, "token": "tok-abc123"}
 
     connector = FleetLcmConnector(credentials_loader=_counting_loader)
     await connector.auth_headers(_TARGET_A, operator=_make_operator())

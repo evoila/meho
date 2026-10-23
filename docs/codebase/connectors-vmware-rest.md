@@ -2725,7 +2725,9 @@ Per file, one at a time:
 1. `HEAD` the final path: `401` / `403` stops (no write access); a file that
    is there stops unless `overwrite` is set.
 2. `HEAD` `<name>.meho-partial`: a partial file from an earlier run is
-   deleted, or the new `PUT` replaces it.
+   deleted. A destination without `DELETE` (`405` / `501`) keeps it and the
+   new `PUT` replaces it. Any other error answer to this check or to the
+   delete stops the run before the upload.
 3. Stream the `GET` into a `PUT` of `<name>.meho-partial`, in chunks of at
    most 8 MiB, counting bytes and computing SHA-256. It stops at the per-file
    or total size limit, on a size that does not match, or on an error answer.

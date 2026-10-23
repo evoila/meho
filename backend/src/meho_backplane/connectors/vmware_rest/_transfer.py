@@ -23,7 +23,9 @@ What the helper does, one file at a time:
    allowed to write). A file that is already there stops the run unless
    ``overwrite`` is set.
 2. ``HEAD`` ``<name>.meho-partial``. A partial file from an earlier run is
-   deleted (or, if the destination cannot delete, the new ``PUT`` replaces it).
+   deleted. When the destination does not support ``DELETE`` (``405`` /
+   ``501``), the new ``PUT`` replaces it. Any other error answer to this check
+   or to the delete stops the run before the upload.
 3. ``GET`` the vCenter download as a stream and ``PUT`` it to
    ``<name>.meho-partial``. Chunks are at most 8 MiB; nothing holds a whole
    file in memory. The helper counts bytes and computes SHA-256 as the bytes
@@ -120,7 +122,8 @@ _KEEP_ALIVE_INTERVAL = 60.0
 # waits five minutes means the connection is dead.
 _TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=300.0, pool=10.0)
 
-_RENAME_NOT_SUPPORTED = frozenset({405, 501})
+# The destination does not support the WebDAV method (MOVE or DELETE).
+_METHOD_NOT_SUPPORTED = frozenset({405, 501})
 _NO_WRITE_ACCESS = frozenset({401, 403})
 
 FileStatus = Literal["done", "partial", "failed"]
@@ -307,11 +310,23 @@ async def _prepare_destination(
         )
     partial_url = dest.url(name + PARTIAL_SUFFIX)
     partial = await dest.send("HEAD", partial_url)
-    if partial.is_success:
-        removed = await dest.send("DELETE", partial_url)
-        # When the destination cannot delete, the PUT below replaces the file.
-        if removed.is_success or removed.status_code == 404:
-            leftovers.append(partial_url.path)
+    if partial.status_code == 404:
+        return
+    if not partial.is_success:
+        raise TransferError(
+            f"{name}: the destination answered HTTP {partial.status_code} to the check of "
+            "the temporary file"
+        )
+    removed = await dest.send("DELETE", partial_url)
+    if removed.is_success or removed.status_code == 404:
+        leftovers.append(partial_url.path)
+    elif removed.status_code not in _METHOD_NOT_SUPPORTED:
+        # Without DELETE support, the PUT below replaces the file. Any other
+        # error means the destination is not ready for the upload.
+        raise TransferError(
+            f"{name}: the destination could not delete the temporary file "
+            f"(HTTP {removed.status_code})"
+        )
 
 
 async def _open_source(
@@ -402,7 +417,7 @@ async def _rename(dest: _Dest, name: str, row: FileResult, *, overwrite: bool) -
     if moved.is_success:
         row.destination_path = final_url.path
         row.status = "done"
-    elif moved.status_code in _RENAME_NOT_SUPPORTED:
+    elif moved.status_code in _METHOD_NOT_SUPPORTED:
         row.status = "partial"
     else:
         raise TransferError(

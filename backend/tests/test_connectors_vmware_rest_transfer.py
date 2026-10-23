@@ -96,6 +96,7 @@ def _destination(
     *,
     final_head: int = 404,
     partial_head: int = 404,
+    delete: int = 204,
     put: int = 201,
     move: int = 201,
 ) -> dict[str, respx.Route]:
@@ -104,7 +105,7 @@ def _destination(
     return {
         "head_final": mock.head(final).mock(return_value=httpx.Response(final_head)),
         "head_partial": mock.head(partial).mock(return_value=httpx.Response(partial_head)),
-        "delete_partial": mock.delete(partial).mock(return_value=httpx.Response(204)),
+        "delete_partial": mock.delete(partial).mock(return_value=httpx.Response(delete)),
         "put": mock.put(partial).mock(return_value=httpx.Response(put)),
         "move": mock.route(method="MOVE", url=partial).mock(return_value=httpx.Response(move)),
     }
@@ -383,6 +384,61 @@ async def test_leftovers_of_an_earlier_run_are_removed(respx_mock: respx.MockRou
     assert is_meho_temp_name(stale)
     assert not is_meho_temp_name("export-1")
     assert result.files[0].status == "done"
+
+
+@pytest.mark.parametrize("status", [403, 500])
+@respx.mock(assert_all_called=False)
+async def test_temporary_file_check_error_stops_before_the_upload(
+    respx_mock: respx.MockRouter, status: int
+) -> None:
+    source = _source(respx_mock, "disk-1.vmdk", b"x" * 10)
+    routes = _destination(respx_mock, "disk-1.vmdk", partial_head=status)
+    calls = _Calls()
+
+    with pytest.raises(TransferError, match=f"HTTP {status} to the check of the temp") as info:
+        await _run([_file("disk-1.vmdk")], calls)
+
+    assert not source.called
+    assert not routes["delete_partial"].called
+    assert not routes["put"].called
+    assert not routes["move"].called
+    assert [row.status for row in info.value.files] == ["failed"]
+    assert calls.cleanup == 1
+
+
+@pytest.mark.parametrize("status", [403, 500, 507])
+@respx.mock(assert_all_called=False)
+async def test_temporary_file_delete_error_stops_before_the_upload(
+    respx_mock: respx.MockRouter, status: int
+) -> None:
+    source = _source(respx_mock, "disk-1.vmdk", b"x" * 10)
+    routes = _destination(respx_mock, "disk-1.vmdk", partial_head=200, delete=status)
+    calls = _Calls()
+
+    with pytest.raises(TransferError, match=f"could not delete the temporary file .HTTP {status}"):
+        await _run([_file("disk-1.vmdk")], calls)
+
+    assert routes["delete_partial"].called
+    assert not source.called
+    assert not routes["put"].called
+    assert not routes["move"].called
+    assert calls.cleanup == 1
+
+
+@pytest.mark.parametrize("status", [405, 501])
+@respx.mock(assert_all_called=False)
+async def test_destination_without_delete_replaces_the_temporary_file(
+    respx_mock: respx.MockRouter, status: int
+) -> None:
+    _source(respx_mock, "disk-1.vmdk", b"x" * 10)
+    routes = _destination(respx_mock, "disk-1.vmdk", partial_head=200, delete=status)
+
+    result = await _run([_file("disk-1.vmdk")], _Calls())
+
+    assert routes["delete_partial"].called
+    assert routes["put"].called
+    assert result.files[0].status == "done"
+    assert result.leftovers_removed == []
 
 
 @respx.mock(assert_all_called=False)

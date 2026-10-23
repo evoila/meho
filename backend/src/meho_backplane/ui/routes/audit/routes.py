@@ -838,7 +838,7 @@ async def _my_recent_handler(
     """``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.
 
     Returns the calling operator's last-24h rows
-    (``principal=session.operator_sub``) rendered through the same row
+    (``principal_sub=session.operator_sub``, exact match) rendered through the same row
     partial as the T1 result list, so each row opens the T2 detail
     drawer. ``OPERATOR``-self-scoped: a second operator's activity is
     never reachable here. HTMX-only fragment (no full-page chrome).

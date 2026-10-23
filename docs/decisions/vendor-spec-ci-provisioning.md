@@ -690,6 +690,31 @@ secret for fork PRs or Dependabot).
 The lane passed against the pinned files before this change was opened (one
 test per version, none skipped).
 
+### Extension: vcf-installer-9.0 (#4467)
+
+This change checks out one more shelf folder, `vcf-installer-9.0`. The
+installer reconcile lane now also checks every path MEHO calls against the
+9.0 installer file. The verify step requires that file, so the 9.0 case of the
+lane cannot skip in CI.
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcf-installer-9.0` | `vcf-installer-9.0/vcf-installer-openapi.json` | `backend/tests/test_connectors_vcf_installer_spec_reconcile.py` |
+
+- **`vcf-installer-9.0`** (~0.3 MB). The VCF Installer 9.0 OpenAPI 3.0.1 file
+  from the **public, Apache-2.0**
+  [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+  (tag `9.0.0.0`, pinned at `85151f6b`). Byte for byte the vendor file.
+  Provenance and sha256: the `installer-9.0` entry of
+  `docs/compatibility/vcf-api-contract-manifest.yaml` and the shelf's
+  `vcf-installer-9.0/MANIFEST.md`. No attestation is needed.
+- The same rules apply: read-only checkout, the runner is deleted when the
+  job ends, never committed, never in artifacts or logs, no secret for fork
+  PRs or Dependabot.
+
+The lane passed against both pinned installer files before this change was
+opened (5 tests, none skipped).
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

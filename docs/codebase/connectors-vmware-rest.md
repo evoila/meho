@@ -734,8 +734,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     same-origin redirect by itself). A `3xx` returns `redirect_path`; a
     `401`, `403`, `404` or `5xx` returns its `status` with no text.
   - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-    `size` (bytes), `sha256` (of the file bytes), `imports`, `parts`,
-    `text_parts`, `version`, `build`, `version_error`. `imports` lists the
+    `size` (bytes of the checked copy), `sha256` (of the checked copy),
+    `secrets_replaced`, `imports`, `parts`, `text_parts`, `version`,
+    `build`, `version_error`. `imports` lists the
     `location` / `schemaLocation` values of `wsdl:import`, `xsd:import` and
     `xsd:include`, as written, parsed with `defusedxml`; a file that is not
     XML gives `[]`. Only UTF-8 text comes back; other content is refused and
@@ -747,10 +748,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     failures that happen before any request goes out: no credentials for
     the target, access denied, or a credential store that cannot be reached
     (`CredentialsReadError`, `VaultClientError`).
+  - **The file is checked before it is cut.** The read runs the shared
+    API file secret check (`connectors/_shared/api_file_secrets.py`, see
+    `connectors-shared-api-file-secrets.md`) on the whole file: the file
+    is parsed (XML for a WSDL or XSD file), every value under a secret
+    name is replaced with `[REDACTED:param_name]`, and the file is
+    written back from the parsed copy with its namespace prefixes as
+    declared. A file that does not parse is refused with the reason.
+    `secrets_replaced` counts the replaced values; `size` and `sha256`
+    describe the checked copy. A redirect path gets the same check on its
+    query string.
   - **How to rebuild the file.** `text_parts` is a list of
     `{index, text}`, each at most 64 KiB of UTF-8, cut only between
     characters. Join the `text` of all parts in `index` order and encode as
-    UTF-8; the SHA-256 of the result equals `sha256`. A part is a fixed byte
+    UTF-8; the SHA-256 of the result equals `sha256` and the result is the
+    checked copy. A part is a fixed byte
     size, not a line, because a served file can be one long line. The answer
     has two lists (`imports` and `text_parts`), so JSONFlux keeps a large
     answer whole as a document record behind a result handle; the inline
@@ -761,18 +773,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
     stored JSON) stops with an error that names its size; the read never
     returns a cut file.
-  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+  - **Redaction keeps the copy whole.** MEHO redacts secret-shaped text in
     every stored result (the dispatcher runs
     `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
-    that fires on the file text would rewrite a part, and the joined parts
+    that fires on the text would rewrite a part, and the joined parts
     would no longer match `sha256`. So the read runs the same middleware, with
     the same connector, tenant and operation labels, on the text parts and on
-    the whole file text before it returns. The whole-file pass matters: a
+    the whole copy before it returns. The whole-file pass matters: a
     secret that the part cut splits in two matches in no single part, so the
     dispatcher's own redaction would store it in clear text. When the text
     would change, the read stops with an error that names the rule and the
     place (a part, or `file_text` for the whole file), and returns no file.
-    Redaction itself stays on. The default policy's `strip-api-key` rule fires
+    Redaction itself stays on; its `api_key` rule skips the placeholder the
+    file check writes. The default policy's `strip-api-key` rule fires
     on text such as
     `type="token:SecurityToken"`; a redaction policy registered for this
     operation changes what the check accepts, because both use the same

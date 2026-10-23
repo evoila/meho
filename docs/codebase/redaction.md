@@ -128,6 +128,15 @@ production traffic cannot reach that branch.
 | `ipv6` | Full + compressed RFC 5952 forms |
 | `fqdn` | ≥2 labels with non-numeric TLD start |
 
+The `api_key` rule skips a value that already is a complete
+`[REDACTED:...]` placeholder (`password: [REDACTED:param_name]`), so an
+earlier pass (the engine itself, or the shared API file check of
+`connectors-shared-api-file-secrets.md`) is not redacted a second time
+and loses its label. Only a complete placeholder is skipped: a name
+between `[REDACTED:` and `]`, and the value ends there. A value that
+only starts like one (`[REDACTED:made-up`) or goes on after the `]`
+(`[REDACTED:x]made-up`) is redacted whole.
+
 The secret-*value* part of `authorization_header`, `bearer_token`,
 and `api_key` consumes any non-whitespace, non-quote byte
 (`patterns.py::_VALUE_CHARS`, bounded by `_VALUE_MAX`): the value is

@@ -11,8 +11,8 @@ The steps are called directly, with an ``httpx.MockTransport``:
   members decode whole, a cut stream or bytes after a deflate stream stop
   with an error, and an encoding the read cannot bound is refused;
 * the parts keep characters whole and join back to the file;
-* text checks, the stored-record check, the redaction check and the
-  redirect path.
+* text checks, the stored-record check, the one redaction pass over the
+  whole text, the redaction check and the redirect path.
 
 Fixture values are made up.
 """
@@ -38,6 +38,7 @@ from meho_backplane.connectors._shared.api_file_read import (
     assert_not_redacted,
     decode_text,
     fetch_without_redirects,
+    redact_text,
     redirect_target,
     split_parts,
     text_items,
@@ -230,6 +231,29 @@ def test_text_the_redaction_rules_would_change_stops_without_the_value() -> None
         )
     assert "strip-authorization-header" in str(caught.value)
     assert "made-up-token-value" not in str(caught.value)
+
+
+def test_redact_text_replaces_matches_once_and_counts_them() -> None:
+    clean, count = redact_text(
+        "openapi: 3.0.1\n", _operator(), connector_id="made-rest-1.0", op_id="made.up.get"
+    )
+    assert (clean, count) == ("openapi: 3.0.1\n", 0)
+    text = (
+        "Example:\nAuthorization: Basic bWFkZS11cDpleGFtcGxl\n"
+        "Also: Authorization: Bearer made-up-token-value-0123456789\n"
+    )
+    redacted, count = redact_text(
+        text, _operator(), connector_id="made-rest-1.0", op_id="made.up.get"
+    )
+    assert count == 2
+    assert redacted.count("[REDACTED:authorization_header]") == 2
+    assert "bWFkZS11cDpleGFtcGxl" not in redacted
+    assert "made-up-token-value" not in redacted
+    # The redacted copy passes the final check, so the read returns it.
+    answer = {"path": "/f.yaml", "items": text_items(redacted.encode())}
+    assert_not_redacted(
+        answer, redacted, _operator(), connector_id="made-rest-1.0", op_id="made.up.get"
+    )
 
 
 @pytest.mark.parametrize(

@@ -7,8 +7,8 @@ Broadcom does not publish the SRM 8.8 and Live Site Recovery 9.0 API
 files as downloads; a running appliance serves them. This read fetches
 one of two files and returns its path, HTTP status, content type, size,
 SHA-256 and the SRM version and build, with the text in parts behind a
-result handle. Joining the parts in order gives the exact file, so the
-vendor API files can be pinned and compared.
+result handle. Joining the parts in order gives the checked copy of the
+file, so the vendor API files can be pinned and compared.
 
 The two files (input ``file``):
 
@@ -21,10 +21,19 @@ No other path can be read: the input is a name, not a path. The read
 sends one ``GET`` to the target's own address with the target's own
 login and does not follow a redirect (``redirect_to`` carries the path).
 Only UTF-8 text comes back. The body is decoded and measured in bounded
-steps; a file too big for one result handle stops with its size; a file
-that MEHO's secret-redaction rules would change stops too, so the read
-never claims an exact file it cannot return. These steps live in
-:mod:`meho_backplane.connectors._shared.api_file_read`.
+steps; a file too big for one result handle stops with its size.
+
+The file is parsed and written back by
+:func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`,
+which replaces every value under a secret name (``[REDACTED:param_name]``)
+and refuses a file that does not parse. Then MEHO's general
+secret-redaction rules run once over the whole copy
+(:func:`~meho_backplane.connectors._shared.api_file_read.redact_text`):
+the SRM file has ``Authorization: Basic ...`` examples in its description
+text, and these come back as ``[REDACTED:authorization_header]``.
+``size``, ``sha256`` and the parts describe this final copy;
+``secrets_replaced`` counts every replaced value. A copy that the rules
+would still change stops, so ``sha256`` always names what the caller gets.
 """
 
 from __future__ import annotations
@@ -40,9 +49,11 @@ from meho_backplane.connectors._shared.api_file_read import (
     assert_not_redacted,
     decode_text,
     fetch_without_redirects,
+    redact_text,
     redirect_target,
     text_items,
 )
+from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
 from meho_backplane.connectors.srm.session import SrmTargetLike
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.settings import get_settings
@@ -110,21 +121,27 @@ async def srm_api_file_get_impl(
     if response.status_code == httpx.codes.UNAUTHORIZED:
         response.raise_for_status()
 
-    text = decode_text(response, path)
-    body = response.content
+    content_type = response.headers.get("content-type")
+    checked = check_api_file(decode_text(response, path), content_type=content_type, path=path)
+    text, redactions = redact_text(
+        checked.text, operator, connector_id=SRM_CONNECTOR_ID, op_id=_OP_ID
+    )
+    body = text.encode("utf-8")
     items = text_items(body)
+    redirect_to, redirect_replaced = _redirect(response)
     version = await connector.server_version(target, operator)
     answer: dict[str, Any] = {
         "file": name,
         "path": path,
         "status": response.status_code,
-        "content_type": response.headers.get("content-type"),
+        "content_type": content_type,
         "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
+        "secrets_replaced": checked.secrets_replaced + redactions + redirect_replaced,
         "version": version.version,
         "build": version.build,
         "version_error": version.error,
-        "redirect_to": redirect_target(response.headers.get("location"), response.request.url),
+        "redirect_to": redirect_to,
         "parts": len(items),
     }
     assert_fits_result_handle(
@@ -133,3 +150,11 @@ async def srm_api_file_get_impl(
     answer["items"] = items
     assert_not_redacted(answer, text, operator, connector_id=SRM_CONNECTOR_ID, op_id=_OP_ID)
     return answer
+
+
+def _redirect(response: httpx.Response) -> tuple[str | None, int]:
+    """The redirect path with any secret-named query value replaced, and the count."""
+    target = redirect_target(response.headers.get("location"), response.request.url)
+    if target is None:
+        return None, 0
+    return scrub_query_string(target)

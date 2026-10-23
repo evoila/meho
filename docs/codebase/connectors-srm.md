@@ -26,7 +26,7 @@ Package: `backend/src/meho_backplane/connectors/srm/`.
 | Operation | What it does | Vendor call | Risk | Versions |
 |---|---|---|---|---|
 | `srm.about` | SRM server name, status, version, build and the paired vCenter, plus a short view of the certificates. MEHO uses the same call to detect the version. | `GET /api/rest/srm/v2/server/info` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
-| `srm.api_file.get` | Read one API description file the appliance serves (the SRM API or the appliance setup API). Returns size, SHA-256 and the SRM version; the text is in parts behind a result handle. | `GET /api/rest/srm/v2/open-api.yaml`, `GET /api/rest/configure/v2/open-api.yaml` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.api_file.get` | Read one API description file the appliance serves (the SRM API or the appliance setup API). Returns a checked copy (secret values replaced) with its size, SHA-256 and the SRM version; the text is in parts behind a result handle. | `GET /api/rest/srm/v2/open-api.yaml`, `GET /api/rest/configure/v2/open-api.yaml` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 
 Both operations exist on every covered version, so neither needs a
 version check yet. The Tasks that add 9.x-only operations add that check.
@@ -76,8 +76,10 @@ other modes raise `NotImplementedError`.
 - `srm_api_file_get_impl`, `API_FILES` (`api_file.py`) -- the read's body
   and the two files it can fetch.
 - `connectors/_shared/api_file_read.py` -- the vendor-neutral steps of an
-  API file read (bounded fetch, text check, parts, size and redaction
-  checks). See "The read" below.
+  API file read (bounded fetch, text check, parts, size check, one
+  redaction pass over the whole text). See "The read" below.
+- `connectors/_shared/api_file_secrets.py` -- `check_api_file` parses the
+  file and replaces secret values (`docs/codebase/connectors-shared-api-file-secrets.md`).
 
 ## Control flow
 
@@ -145,8 +147,18 @@ They are the same steps the `fleet.api_file.get` read uses
 - the text is cut into parts of at most 64 KiB, on character boundaries;
 - a file whose stored record does not fit in one result handle stops
   with an error that names its size;
-- a file that MEHO's secret-redaction rules would change stops with an
-  error that names the rules and the number of places, never the text.
+- the file is parsed and written back by `check_api_file`
+  (`connectors/_shared/api_file_secrets.py`): every value under a secret
+  name becomes `[REDACTED:param_name]`. A file that does not parse stops
+  with the reason;
+- `redact_text` then runs MEHO's general secret-redaction rules once over
+  the whole copy. Text they match, such as an `Authorization: Basic ...`
+  example in a description, becomes a placeholder like
+  `[REDACTED:authorization_header]`;
+- `size`, `sha256` and the parts are built from this final copy. If the
+  rules would still change the answer, the read stops with an error that
+  names the rules and the number of places, never the text. So `sha256`
+  always names what the caller gets.
 
 The answer:
 
@@ -156,8 +168,9 @@ The answer:
 | `path` | The path that was read. |
 | `status` | The HTTP status. |
 | `content_type` | The `Content-Type` header. |
-| `size` | Size of the file in bytes. |
-| `sha256` | SHA-256 of the file, hex. |
+| `size` | Size of the checked copy in bytes. |
+| `sha256` | SHA-256 of the checked copy, hex. |
+| `secrets_replaced` | How many values were replaced in the copy (secret-named values, text the redaction rules match, and secret-named query values in `redirect_to`). |
 | `version`, `build` | SRM version and build from `server/info`. |
 | `version_error` | Why the version read failed; `null` when it worked. The file still comes back. |
 | `redirect_to` | Path of a redirect answer; `null` otherwise. |
@@ -166,7 +179,9 @@ The answer:
 
 A long file is stored behind a result handle; read the parts with
 `result_query` in `index` order and join the `text` fields. The SHA-256
-of the joined text equals `sha256`.
+of the joined text equals `sha256`. The copy is not byte for byte the
+vendor file: it is the parsed file written back, with secrets replaced.
+Pin and compare the copy.
 
 ### Shutdown
 
@@ -187,10 +202,12 @@ call is sent.
 ## Tests
 
 - `backend/tests/test_connectors_srm.py` -- login, both reads through
-  `dispatch()`, two targets on one address, a `401` that ends only one
-  target's session, registration shape, fingerprint.
+  `dispatch()`, replaced and counted secrets, two targets on one address,
+  a `401` that ends only one target's session, registration shape,
+  fingerprint. One test reads the pinned 9.1 files through
+  `srm.api_file.get`; it runs only when the spec shelf is present.
 - `backend/tests/test_connectors_shared_api_file_read.py` -- the shared
-  read steps.
+  read steps, including `redact_text`.
 - `backend/tests/test_connectors_srm_spec_reconcile.py` -- the login and
   `server/info` paths against the pinned 9.1 file
   (`vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml` on the spec
@@ -198,15 +215,16 @@ call is sent.
 
 ## Known issues
 
-- **The real 9.1 files stop at the redaction check.** The vendor's SRM
-  file has a "getting started" text with an example `Authorization:
-  Basic ...` header, and both files have a `password` schema property.
-  MEHO's secret-redaction rules match both, so `srm.api_file.get` stops
-  with the redaction error on the 9.1 files instead of returning them.
-  The 8.8 and 9.0 files likely hold the same text. Until a decision is
-  made on how an API file read returns such a file, the lab cannot pin
-  these files through MEHO. The same check applies to
-  `hcx.api_file.get` and `fleet.api_file.get`.
+- **The copy is not the vendor file byte for byte.** The SRM file has
+  a "getting started" text with example `Authorization: Basic ...`
+  headers, and both files have `password` schema properties. The read
+  returns them replaced (`[REDACTED:authorization_header]`,
+  `[REDACTED:param_name]`) and counts them in `secrets_replaced`; the
+  pinned 9.1 `recovery-srm-v2.yaml` comes back with 6 values replaced.
+  The copy is also the parsed file written back, so its layout differs
+  from the vendor's. Pin and compare the copy, not the vendor bytes.
+  `hcx.api_file.get` and `fleet.api_file.get` do not run the extra
+  redaction pass yet, so a file like this still stops there.
 - The 8.8 and 9.0 calls follow the 9.1 file and the vendor documentation.
   Their first live use is the pinning of the 8.8 and 9.0 files. If a call
   differs there, fix the call and the table above.

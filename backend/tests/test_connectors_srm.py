@@ -16,8 +16,10 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
   product's target stay as they were;
 * ``srm.api_file.get`` for both files: status, size, SHA-256, version,
   parts; an unknown file name sends no HTTP request; a 404 and a redirect
-  reach the answer; a failed version read still returns the file; a file
-  the redaction rules would change stops; a file too big stops;
+  reach the answer; a failed version read still returns the file; a
+  secret-named value, an ``Authorization`` example and a secret-named
+  redirect query value come back replaced and counted; a file that does
+  not parse stops; a file too big stops;
 * no password or session id in a result; registration shape; fingerprint.
 
 Fixture values are made up; no real host, user or id appears here.
@@ -73,6 +75,7 @@ from meho_backplane.operations._handler_resolve import (
     reset_handler_cache,
 )
 from meho_backplane.settings import get_settings
+from tests._spec_shelf import require_shelf_spec
 
 _HOST = "srm-typed.test.invalid"
 _BASE_URL = f"https://{_HOST}"
@@ -477,7 +480,8 @@ async def test_404_and_redirect_reach_the_answer(
 
     assert missing.status == "ok", missing.error
     assert missing.result["status"] == 404
-    assert missing.result["items"] == [{"index": 0, "text": "not here"}]
+    # The body is checked as YAML (the path ends in .yaml) and written back.
+    assert missing.result["items"] == [{"index": 0, "text": "not here\n"}]
     assert redirect.status == "ok", redirect.error
     assert redirect.result["status"] == 302
     assert redirect.result["redirect_to"] == "/ui/login?next=x"
@@ -521,26 +525,105 @@ async def test_version_read_failure_still_returns_the_file(
 
 
 @pytest.mark.asyncio
-async def test_file_the_redaction_rules_would_change_stops_with_an_error(
+async def test_secret_values_and_authorization_examples_come_back_replaced_and_counted(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
-    """A documentation example that looks like a secret cannot come back as an exact file."""
+    """A password value and an ``Authorization`` example are replaced; size and hash fit."""
     await _register_and_resolve(_stub_embedding)
     text = (
         "openapi: 3.0.1\ninfo:\n  description: |-\n"
         "    Authorization: Basic bWFkZS11cDpleGFtcGxlLXZhbHVl\n"
+        "components:\n  examples:\n    login:\n      value:\n"
+        "        password: made-up-example-password\n"
     )
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_login_and_info(mock)
         mock.get(_SRM_FILE).respond(200, text=text, headers={"Content-Type": "application/yaml"})
         result = await _dispatch("srm.api_file.get", {"file": "srm"})
 
-    assert result.status == "error"
-    message = result.extras["exception_message"]
-    assert "strip-authorization-header" in message
-    assert "exact file cannot be returned" in message
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    assert "[REDACTED:authorization_header]" in joined
+    assert "[REDACTED:param_name]" in joined
+    assert body["secrets_replaced"] == 2
+    assert body["size"] == len(joined.encode())
+    assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
     rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
     assert "bWFkZS11cDpleGFtcGxlLXZhbHVl" not in rendered
+    assert "made-up-example-password" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_secret_named_query_value_in_a_redirect_is_replaced_and_counted(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_SRM_FILE).respond(
+            302, headers={"Location": "/ui/login?licenseKey=made-up-licence&next=x"}, text=""
+        )
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "ok", result.error
+    assert "made-up-licence" not in result.result["redirect_to"]
+    assert result.result["redirect_to"].startswith("/ui/login?licenseKey=")
+    assert result.result["secrets_replaced"] == 1
+
+
+@pytest.mark.asyncio
+async def test_file_that_does_not_parse_stops_with_an_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    text = "openapi: [3.0.1\npassword: made-up-example-password\n"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_SRM_FILE).respond(200, text=text, headers={"Content-Type": "application/yaml"})
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "error"
+    assert "not well-formed YAML" in result.extras["exception_message"]
+    rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
+    assert "made-up-example-password" not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "spec_file", "expected_replaced"),
+    [("srm", "recovery-srm-v2.yaml", 6), ("configure", "appliance-configure-v2.yaml", 10)],
+)
+async def test_pinned_vendor_file_comes_back_through_the_read(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    name: str,
+    spec_file: str,
+    expected_replaced: int,
+) -> None:
+    """The pinned 9.1 vendor files come back, with their example secrets replaced.
+
+    Runs only when the spec shelf is present. The SRM file has
+    ``Authorization: Basic ...`` examples in its description text; the read
+    must return them replaced instead of stopping.
+    """
+    spec_path = require_shelf_spec("vcf-protection-and-recovery-9.1", spec_file)
+    content = spec_path.read_bytes()
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(API_FILES[name]).respond(
+            200, content=content, headers={"Content-Type": "application/yaml"}
+        )
+        result = await _dispatch("srm.api_file.get", {"file": name})
+
+    assert result.status == "ok", result.error
+    body = result.result
+    assert body["secrets_replaced"] == expected_replaced
+    assert [item["index"] for item in body["items"]] == list(range(body["parts"]))
+    joined = "".join(item["text"] for item in body["items"]).encode()
+    assert body["size"] == len(joined)
+    assert body["sha256"] == hashlib.sha256(joined).hexdigest()
 
 
 @pytest.mark.asyncio

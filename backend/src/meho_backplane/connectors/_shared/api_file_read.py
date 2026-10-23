@@ -21,9 +21,15 @@ This module holds the steps that do not depend on the vendor:
   at most :data:`PART_BYTES`, on character boundaries.
 * :func:`assert_fits_result_handle` stops when the stored record would
   not fit in one result handle: the read returns every part or none.
-* :func:`assert_not_redacted` stops when MEHO's secret-redaction rules
-  would change the file, so the read never claims an exact file it
-  cannot return. The error names the rules, never the matched text.
+* :func:`redact_text` runs MEHO's general secret-redaction rules once
+  over the whole text and returns the changed copy and how many places
+  changed. A read calls it on the checked copy from
+  :func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`,
+  so a documentation example such as ``Authorization: Basic ...`` comes
+  back as a placeholder instead of stopping the read.
+* :func:`assert_not_redacted` stops when the rules would still change the
+  answer, so ``size`` and ``sha256`` always describe the returned copy.
+  The error names the rules, never the matched text.
 * :func:`redirect_target` turns a ``Location`` header into the path the
   caller should read next.
 
@@ -54,6 +60,7 @@ __all__ = [
     "assert_not_redacted",
     "decode_text",
     "fetch_without_redirects",
+    "redact_text",
     "redirect_target",
     "split_parts",
     "text_items",
@@ -355,6 +362,32 @@ def assert_fits_result_handle(
         )
 
 
+def redact_text(
+    text: str,
+    operator: Operator,
+    *,
+    connector_id: str,
+    op_id: str,
+) -> tuple[str, int]:
+    """Run the general secret-redaction rules once over the whole *text*.
+
+    Returns the changed text and how many places changed. The rules and
+    labels are the ones the dispatcher uses on the answer, and the text
+    sits under the same ``text`` key as in a part, so the dispatcher finds
+    nothing more to change. Running on the whole text, not part by part,
+    also catches a secret whose label ends one part and whose value starts
+    the next. Build ``size``, ``sha256`` and the parts from the returned
+    text, so they describe what the caller gets.
+    """
+    tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
+    outcome = apply_connector_boundary_redaction(
+        {"text": text}, connector_id=connector_id, tenant=tenant, op=op_id
+    )
+    if outcome.redacted == outcome.raw:
+        return text, 0
+    return outcome.redacted["text"], sum(entry.count for entry in outcome.manifest)
+
+
 def assert_not_redacted(
     answer: dict[str, Any],
     text: str,
@@ -365,12 +398,12 @@ def assert_not_redacted(
 ) -> None:
     """Stop when the shared redaction step would change the file's text.
 
-    The dispatcher redacts every answer before the caller sees it. A file
-    that holds, for example, an ``Authorization`` header as a documentation
-    example would come back changed while ``sha256`` still names the
-    original. Running the same rules here, with the same labels, finds that
-    case before the answer leaves the read. Redaction stays on; the error
-    names the rules and the places, never the matched text.
+    The dispatcher redacts every answer before the caller sees it. If it
+    changed the text, ``sha256`` would no longer name what the caller
+    gets. A read that ran :func:`redact_text` first passes this check; it
+    stays as a guard. Running the same rules here, with the same labels,
+    finds such a change before the answer leaves the read. Redaction stays
+    on; the error names the rules and the places, never the matched text.
 
     The rules run twice: on the whole *text*, because a secret whose label
     ends one part and whose value starts the next is not seen in either

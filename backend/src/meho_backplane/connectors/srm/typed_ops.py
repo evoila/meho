@@ -62,9 +62,9 @@ SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     _GROUP_API_DOCS: (
         "Use to read an API description file that a running Site Recovery Manager "
         "appliance serves: the Site Recovery API file or the appliance setup API "
-        "file (srm.api_file.get). The read returns the file's size, SHA-256 and the "
-        "SRM version, with the text in parts behind a result handle, so a vendor "
-        "API file can be pinned and compared. One read."
+        "file (srm.api_file.get). The read returns a checked copy of the file with "
+        "its size, SHA-256 and the SRM version, with the text in parts behind a "
+        "result handle, so a vendor API file can be pinned and compared. One read."
     ),
 }
 
@@ -191,8 +191,9 @@ _API_FILE_GET = SrmTypedOp(
     summary="Read one API description file the Site Recovery Manager appliance serves.",
     description=(
         "Reads the Site Recovery API file or the appliance setup API file from the "
-        "appliance and returns its path, HTTP status, content type, size, SHA-256 "
-        "and the SRM version. The text comes back in parts behind a result handle."
+        "appliance and returns a checked copy: secret values are replaced. The answer "
+        "has the path, HTTP status, content type, size, SHA-256 and the SRM version. "
+        "The text comes back in parts behind a result handle."
     ),
     parameter_schema={
         "type": "object",
@@ -221,8 +222,17 @@ _API_FILE_GET = SrmTypedOp(
                 "type": ["string", "null"],
                 "description": "Content-Type header of the answer.",
             },
-            "size": {"type": "integer", "description": "Size of the file in bytes."},
-            "sha256": {"type": "string", "description": "SHA-256 of the file, hex."},
+            "size": {"type": "integer", "description": "Size of the checked copy in bytes."},
+            "sha256": {"type": "string", "description": "SHA-256 of the checked copy, hex."},
+            "secrets_replaced": {
+                "type": "integer",
+                "description": (
+                    "How many values were replaced in the copy: values under a secret name "
+                    "(password, token, ...) by [REDACTED:param_name], and text that MEHO's "
+                    "secret-redaction rules match (for example an Authorization header "
+                    "example) by a [REDACTED:<kind>] placeholder."
+                ),
+            },
             "version": {
                 "type": ["string", "null"],
                 "description": "SRM version as the server reports it.",
@@ -242,7 +252,9 @@ _API_FILE_GET = SrmTypedOp(
             "parts": {"type": "integer", "description": "How many text parts there are."},
             "items": {
                 "type": "array",
-                "description": "The text parts, in order. Joined, they are the exact file.",
+                "description": (
+                    "The text parts of the checked copy, in order. Joined, they are the copy."
+                ),
                 "items": _PART_ITEM_SCHEMA,
             },
         },
@@ -258,18 +270,22 @@ _API_FILE_GET = SrmTypedOp(
             "API calls a version serves."
         ),
         "output_shape": (
-            "{file, path, status, content_type, size, sha256, version, build, "
-            "version_error, redirect_to, parts, items: [{index, text}]}. items hold the "
-            "text in parts of at most 64 KiB, in order; a long file is behind a result "
-            "handle. Join the parts in order to rebuild the exact file; its SHA-256 "
-            "equals sha256."
+            "{file, path, status, content_type, size, sha256, secrets_replaced, version, "
+            "build, version_error, redirect_to, parts, items: [{index, text}]}. items hold "
+            "the checked copy of the file in parts of at most 64 KiB, in order; a long file "
+            "is behind a result handle. The copy is the parsed file written back as YAML or "
+            "JSON, with every value under a secret name replaced by [REDACTED:param_name] "
+            "and text that MEHO's secret-redaction rules match (such as an Authorization "
+            "header example) replaced by a [REDACTED:<kind>] placeholder; secrets_replaced "
+            "counts them. Join the parts in order to rebuild the copy; its SHA-256 equals "
+            "sha256."
         ),
         "next_step": (
             "If status is not 200, read the text for the appliance's message. To "
             "rebuild the file, page the result handle with result_query in index order "
-            "and join the text fields. A read that stops because the secret-redaction "
-            "rules would change the file cannot return that file exactly; report it "
-            "instead of retrying."
+            "and join the text fields. A file that does not parse is refused; report it "
+            "instead of retrying. A read that stops because the secret-redaction rules "
+            "would still change the copy cannot return it; report it instead of retrying."
         ),
         "result_scalars": {
             "keys": [
@@ -279,6 +295,7 @@ _API_FILE_GET = SrmTypedOp(
                 "content_type",
                 "size",
                 "sha256",
+                "secrets_replaced",
                 "version",
                 "build",
                 "version_error",

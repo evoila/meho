@@ -11,9 +11,13 @@ All code that touches the new password is in this module:
   under the identity of the person whose call runs (after an approval: the
   approver). The password is never an operation parameter. The Keycloak and
   VCF Automation user writes use the same seam.
-* :func:`password_refusal` turns vCenter's refusal into an error that cannot
-  hold the password: it passes on the vAPI error type and messages, and drops
-  all vendor text when any of it contains the password.
+* :func:`change_error` turns a vCenter error answer to either change (the
+  password change and the expiry change) into an error with no raw vendor
+  bytes: no original response, no original request, and not the original
+  error as its context. It passes on the vAPI error type and messages, and
+  drops all vendor text when any of it contains the password. A 401 stays an
+  ``httpx.HTTPStatusError`` with status 401 (:func:`sanitized_status_error`),
+  so the dispatcher still logs in again and retries once.
 * :func:`password_set_preview` is the approval preview. The op is pinned as
   ``credential_write`` in :mod:`meho_backplane.broadcast.events` (so the flight
   recorder keeps no body of the call, the broadcast carries no params, and a
@@ -38,7 +42,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_param_secret_data,
     strip_credential_value,
 )
-from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -49,9 +53,11 @@ __all__ = [
     "DEFAULT_PASSWORD_KEY",
     "PASSWORD_SET_OP_ID",
     "LocalAccountPasswordSecretError",
-    "password_refusal",
+    "change_error",
     "password_set_preview",
     "read_new_password",
+    "safe_vendor_text",
+    "sanitized_status_error",
     "vapi_error",
 ]
 
@@ -170,26 +176,88 @@ def _mentions_secret(texts: Iterable[str], secret: str) -> bool:
     return any(form in text for text in texts for form in forms if form)
 
 
-def password_refusal(
-    exc: httpx.HTTPStatusError, *, username: str, password: str
-) -> ConnectorUpstreamError:
-    """Turn vCenter's refusal of a new password into an error that cannot hold the password.
+def safe_vendor_text(
+    response: httpx.Response, secrets: Iterable[str] = ()
+) -> tuple[str | None, list[str]]:
+    """The vAPI error type and messages of *response*, or nothing when a secret is in them.
 
-    The error carries the HTTP status, the vAPI error type and the vendor's
-    messages (for example a password-rule message). When the answer holds the
-    password in any common form, all vendor text is dropped. A 403 also names
-    the SSO group the service account needs.
+    Checks the raw body and the parsed texts against each secret, as is,
+    JSON-escaped, URL-encoded and HTML-escaped. When any vendor text holds a
+    secret, all of it is dropped. Empty secrets are ignored.
     """
-    response = exc.response
-    status = response.status_code
     error_type, messages = vapi_error(response)
-    if _mentions_secret([_response_text(response), error_type or "", *messages], password):
-        error_type, messages = None, []
+    texts = [_response_text(response), error_type or "", *messages]
+    if any(_mentions_secret(texts, secret) for secret in secrets if secret):
+        return None, []
+    return error_type, messages
+
+
+def sanitized_status_error(
+    exc: httpx.HTTPStatusError, *, secrets: Iterable[str] = ()
+) -> httpx.HTTPStatusError:
+    """A copy of *exc* with the same class and status, and no raw vendor bytes.
+
+    The dispatcher's error handling reads the status (a 401 starts its login
+    retry) and the response body (copied into the result and the audit row).
+    So the copy's response holds only :func:`safe_vendor_text`, and its request
+    is built from the method and the URL alone: it has neither the session
+    header nor the body (the new password).
+    """
+    status = exc.response.status_code
+    request = httpx.Request(exc.request.method, exc.request.url)
+    error_type, messages = safe_vendor_text(exc.response, secrets)
+    body: dict[str, Any] = {}
+    if error_type:
+        body["error_type"] = error_type
+    if messages:
+        body["messages"] = [{"default_message": message} for message in messages]
+    response = (
+        httpx.Response(status, json=body, request=request)
+        if body
+        else httpx.Response(status, request=request)
+    )
+    return httpx.HTTPStatusError(
+        f"vCenter answered HTTP {status} for {request.method} {request.url.path}",
+        request=request,
+        response=response,
+    )
+
+
+def change_error(
+    exc: httpx.HTTPStatusError,
+    *,
+    op_id: str,
+    action: str,
+    username: str,
+    secrets: Iterable[str] = (),
+) -> Exception:
+    """The error a change raises for a vCenter error answer; it holds no raw vendor bytes.
+
+    * 404: :class:`~meho_backplane.connectors.base.ConnectorResourceNotFoundError`
+      (the dispatcher answers ``not_found``).
+    * 401: :func:`sanitized_status_error`, so the dispatcher still logs in
+      again and retries once.
+    * Any other status: :class:`~meho_backplane.connectors.base.ConnectorUpstreamError`
+      with the status and :func:`safe_vendor_text`. A 403 also names the SSO
+      group the service account needs.
+
+    The caller raises the result after its ``except`` block, so the new error
+    does not keep the original one (its response and its request) as context.
+    """
+    secrets = tuple(secrets)
+    status = exc.response.status_code
+    if status == 404:
+        return ConnectorResourceNotFoundError(
+            [username], f"vCenter has no local account named {username!r}"
+        )
+    if status == 401:
+        return sanitized_status_error(exc, secrets=secrets)
+    error_type, messages = safe_vendor_text(exc.response, secrets)
     detail = "; ".join(part for part in (error_type, *messages) if part) or None
     hint = _PERMISSION_HINT if status == 403 else ""
     return ConnectorUpstreamError(
-        f"{PASSWORD_SET_OP_ID}: vCenter refused the new password for {username!r} "
-        f"(HTTP {status}).{hint}",
+        f"{op_id}: vCenter answered HTTP {status} when MEHO tried to {action} for "
+        f"{username!r}.{hint}",
         http_status=status,
         upstream_message=detail,
     )

@@ -289,3 +289,75 @@ async def test_password_change_waits_for_approval_and_the_password_stays_in_the_
     )
     _assert_no_password("the structlog events", json.dumps(logs, default=str))
     _assert_no_password("the stdlib log records", caplog.text)
+
+
+@pytest.mark.asyncio
+async def test_two_401_answers_that_echo_the_password_leak_nothing(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """vCenter answers 401 twice and echoes the password; MEHO logs in again once and leaks nothing.
+
+    The first 401 makes the dispatcher drop the session, log in again and run
+    the change once more. The second 401 becomes ``connector_auth_failed``.
+    The status and the error class must survive the handler (or the retry
+    would not run), and the echoed password must not reach the result, the
+    audit rows, the flight recorder or the logs.
+    """
+    await register_vmware_typed_operations(embedding_service=stub_embedding_service)
+    _two_path_vault(monkeypatch)
+    spans = _keep_flight_recorder_spans(monkeypatch)
+    target = await _persist_target()
+    params = {"username": "root", "password_secret_ref": _NEW_PASSWORD_REF}
+    echo = {
+        "error_type": "UNAUTHENTICATED",
+        "messages": [
+            {"default_message": f"session rejected for {_NEW_PASSWORD}", "args": [_NEW_PASSWORD]}
+        ],
+        "message": f"password {_NEW_PASSWORD} rejected",
+    }
+
+    caplog.set_level(logging.DEBUG)
+    with capture_logs() as logs:
+        async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+            session_route = mock.post("/api/session").respond(200, json=_SESSION_TOKEN)
+            mock.delete("/api/session").respond(204)
+            patch_route = mock.patch(_ROOT_PATH).respond(401, json=echo)
+            result = await dispatch(
+                operator=_person("ops-approver"),
+                connector_id=_CONNECTOR_ID,
+                op_id=PASSWORD_SET_OP_ID,
+                target=target,
+                params=params,
+                _approved=True,
+            )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["http_status"] == 401
+    assert result.extras["cause"] == "session_dispatch_401_after_relogin"
+    assert patch_route.call_count == 2, "the login retry did not run"
+    assert session_route.call_count == 2
+
+    async with get_sessionmaker()() as s:
+        audit_rows = (await s.execute(select(AuditLog))).scalars().all()
+    assert audit_rows, "the dispatch wrote no audit rows"
+    _assert_no_password("the result", result.model_dump_json())
+    _assert_no_password(
+        "the audit rows",
+        json.dumps(
+            [
+                {column.name: getattr(row, column.name) for column in AuditLog.__table__.columns}
+                for row in audit_rows
+            ],
+            default=str,
+        ),
+    )
+    _assert_no_password(
+        "the flight-recorder spans",
+        json.dumps([dataclasses.asdict(span) for span in spans], default=str),
+    )
+    _assert_no_password("the structlog events", json.dumps(logs, default=str))
+    _assert_no_password("the stdlib log records", caplog.text)

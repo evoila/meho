@@ -19,15 +19,19 @@ the connector's own session, so they need no spec ingest:
   the pinned 8.0 and 9.0 ``vcenter.yaml`` files declare it for ``/api``.
 
 The new password is never an operation parameter; how it stays secret is in
-:mod:`.appliance_local_account_password`.
+:mod:`.appliance_local_account_password`. Every vCenter error answer to the
+two changes goes through
+:func:`~.appliance_local_account_password.change_error` before it leaves the
+handler, so no raw vendor bytes reach the result, the audit row or a log line.
 """
 
 from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
@@ -37,9 +41,9 @@ import structlog
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.vmware_rest.appliance_local_account_password import (
     PASSWORD_SET_OP_ID,
-    password_refusal,
+    change_error,
     read_new_password,
-    vapi_error,
+    safe_vendor_text,
 )
 
 if TYPE_CHECKING:
@@ -188,18 +192,38 @@ def _account_path(username: str) -> str:
     return _ACCOUNT_PATH.format(username=quote(username, safe="@"))
 
 
-def _raise_if_not_found(exc: httpx.HTTPStatusError, username: str) -> None:
-    """Raise the ``not_found`` error when vCenter answered 404 for *username*."""
-    if exc.response.status_code == 404:
-        raise ConnectorResourceNotFoundError(
-            [username], f"vCenter has no local account named {username!r}"
-        ) from None
+async def _vendor_call(
+    call: Awaitable[Any], on_error: Callable[[httpx.HTTPStatusError], Exception]
+) -> Any:
+    """Await one vendor call; on an HTTP error answer, raise ``on_error(error)`` instead.
+
+    The new error is raised after the ``except`` block, so it does not keep the
+    original error (its raw response and its request) as its context.
+    """
+    try:
+        return await call
+    except httpx.HTTPStatusError as exc:
+        error = on_error(exc)
+    raise error
 
 
-def _failure_text(exc: Exception) -> str:
-    """A short reason for a failed account read, for ``read_note``."""
+def _read_error(username: str) -> Callable[[httpx.HTTPStatusError], Exception]:
+    """The read rule: a 404 is ``not_found``; any other error answer is raised as it is."""
+
+    def convert(exc: httpx.HTTPStatusError) -> Exception:
+        if exc.response.status_code == 404:
+            return ConnectorResourceNotFoundError(
+                [username], f"vCenter has no local account named {username!r}"
+            )
+        return exc
+
+    return convert
+
+
+def _failure_text(exc: Exception, secrets: tuple[str, ...] = ()) -> str:
+    """A short reason for a failed account read, for ``read_note``; it holds no secret."""
     if isinstance(exc, httpx.HTTPStatusError):
-        error_type, _ = vapi_error(exc.response)
+        error_type, _ = safe_vendor_text(exc.response, secrets)
         suffix = f" ({error_type})" if error_type else ""
         return f"HTTP {exc.response.status_code}{suffix}"
     if isinstance(exc, ConnectorResourceNotFoundError):
@@ -283,14 +307,19 @@ async def _read_account(
     operator: Operator,
     target: VsphereTargetLike,
     username: str,
+    *,
+    on_error: Callable[[httpx.HTTPStatusError], Exception] | None = None,
 ) -> dict[str, Any]:
-    """``GET /appliance/local-accounts/{username}`` as one account row; 404 is not_found."""
+    """``GET /appliance/local-accounts/{username}`` as one account row.
+
+    *on_error* turns an error answer into the error to raise; the default is the
+    read rule (:func:`_read_error`: a 404 is ``not_found``).
+    """
     path = await connector.mount_op_path(target, _account_path(username), operator)
-    try:
-        info = await connector._get_json(target, path, operator=operator)
-    except httpx.HTTPStatusError as exc:
-        _raise_if_not_found(exc, username)
-        raise
+    info = await _vendor_call(
+        connector._get_json(target, path, operator=operator),
+        on_error or _read_error(username),
+    )
     return account_row(username, info, now=_now())
 
 
@@ -299,14 +328,16 @@ async def _read_after(
     operator: Operator,
     target: VsphereTargetLike,
     username: str,
+    *,
+    secrets: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Read the account after a change. Best effort: the change is already done."""
     try:
         return await _read_account(connector, operator, target, username), None
     except (httpx.HTTPError, ConnectorResourceNotFoundError) as exc:
         return None, (
-            f"the change is done, but the read after it failed: {_failure_text(exc)}. "
-            f"Read the account with {GET_OP_ID}."
+            "the change is done, but the read after it failed: "
+            f"{_failure_text(exc, secrets)}. Read the account with {GET_OP_ID}."
         )
 
 
@@ -369,22 +400,27 @@ async def local_account_password_set_impl(
 
     Reads the password from Vault first, so a missing secret stops the call
     before vCenter is reached. After the change, one best-effort read gives the
-    new expiry date. A 401 (the vCenter session ended) is raised unchanged, so
-    the dispatcher logs in again and retries once.
+    new expiry date. An error answer goes through ``change_error``: a 401 (the
+    vCenter session ended) stays a 401, so the dispatcher logs in again and
+    retries once, but without the vendor text or the request.
     """
     username = _checked_username(params)
     password = await read_new_password(operator, target, params)
+    secrets = (password,)
     path = await connector.mount_op_path(target, _account_path(username), operator)
-    try:
-        await connector._post_json(
+    await _vendor_call(
+        connector._post_json(
             target, path, operator=operator, verb="PATCH", json={"password": password}
-        )
-    except httpx.HTTPStatusError as exc:
-        _raise_if_not_found(exc, username)
-        if exc.response.status_code == 401:
-            raise
-        raise password_refusal(exc, username=username, password=password) from None
-    after, note = await _read_after(connector, operator, target, username)
+        ),
+        partial(
+            change_error,
+            op_id=PASSWORD_SET_OP_ID,
+            action="set the new password",
+            username=username,
+            secrets=secrets,
+        ),
+    )
+    after, note = await _read_after(connector, operator, target, username, secrets=secrets)
     _log.info("vmware_appliance_local_account_password_set", target=target.name, username=username)
     return {
         "username": username,
@@ -421,17 +457,25 @@ async def local_account_policy_set_impl(
     """``vmware.appliance.local_account.policy.set``: read, ``PATCH`` the expiry fields, read.
 
     The first read finds a missing account (``not_found``) before any change
-    and gives the values before. Only the fields the call sets are sent.
+    and gives the values before. Only the fields the call sets are sent. An
+    error answer to the first read or to the change goes through
+    ``change_error``, as for the password change.
     """
     username = _checked_username(params)
     body = policy_body(params)
-    before = await _read_account(connector, operator, target, username)
+    on_error = partial(change_error, op_id=POLICY_SET_OP_ID, username=username)
+    before = await _read_account(
+        connector,
+        operator,
+        target,
+        username,
+        on_error=partial(on_error, action="read the account before the change"),
+    )
     path = await connector.mount_op_path(target, _account_path(username), operator)
-    try:
-        await connector._post_json(target, path, operator=operator, verb="PATCH", json=body)
-    except httpx.HTTPStatusError as exc:
-        _raise_if_not_found(exc, username)
-        raise
+    await _vendor_call(
+        connector._post_json(target, path, operator=operator, verb="PATCH", json=body),
+        partial(on_error, action="change the expiry rules"),
+    )
     after, note = await _read_after(connector, operator, target, username)
     _log.info(
         "vmware_appliance_local_account_policy_set",

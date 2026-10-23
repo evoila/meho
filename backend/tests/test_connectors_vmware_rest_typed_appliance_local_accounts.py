@@ -31,8 +31,9 @@ from meho_backplane.connectors.vmware_rest import appliance_local_accounts as ac
 from meho_backplane.connectors.vmware_rest.appliance_local_account_password import (
     PASSWORD_SET_OP_ID,
     LocalAccountPasswordSecretError,
-    password_refusal,
+    change_error,
     password_set_preview,
+    sanitized_status_error,
 )
 from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
     ACCOUNT_FIELDS,
@@ -170,6 +171,16 @@ def _vault(monkeypatch: pytest.MonkeyPatch, data: dict[str, Any]) -> list[dict[s
 
 def _op(op_id: str) -> Any:
     return next(op for op in APPLIANCE_LOCAL_ACCOUNTS_OPS if op.op_id == op_id)
+
+
+def _password_change_error(exc: httpx.HTTPStatusError) -> Exception:
+    return change_error(
+        exc,
+        op_id=PASSWORD_SET_OP_ID,
+        action="set the new password",
+        username="root",
+        secrets=(_NEW_PASSWORD,),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -401,17 +412,59 @@ async def test_policy_set_on_a_missing_account_changes_nothing() -> None:
     assert [call[0] for call in connector.calls] == ["GET"]
 
 
+@pytest.mark.parametrize("status", [400, 401, 403, 500])
 @pytest.mark.asyncio
-async def test_policy_set_passes_a_vendor_refusal_on() -> None:
-    refusal = _http_error(400, "PATCH", _ROOT, {"error_type": "INVALID_ARGUMENT"})
-    connector = _FakeConnector(answers={("GET", _ROOT): _ROOT_INFO, ("PATCH", _ROOT): refusal})
-    with pytest.raises(httpx.HTTPStatusError):
+async def test_policy_set_errors_hold_no_raw_vendor_bytes(status: int) -> None:
+    body = {
+        "error_type": "INVALID_ARGUMENT",
+        "messages": [{"default_message": "Value out of range."}],
+        "message": "raw vendor text",
+    }
+    original = _http_error(status, "PATCH", _ROOT, body)
+    connector = _FakeConnector(answers={("GET", _ROOT): _ROOT_INFO, ("PATCH", _ROOT): original})
+    with pytest.raises((httpx.HTTPStatusError, ConnectorUpstreamError)) as caught:
         await local_account_policy_set_impl(
             connector,  # type: ignore[arg-type]
             _operator(),
             _Target(),
             {"username": "root", "min_days_between_password_change": 1},
         )
+    error = caught.value
+    assert error is not original
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert "raw vendor text" not in str(error)
+    if status == 401:
+        # Still an HTTPStatusError with status 401, so the dispatcher logs in again.
+        assert isinstance(error, httpx.HTTPStatusError)
+        assert error.response.status_code == 401
+        assert error.response.json() == {
+            "error_type": "INVALID_ARGUMENT",
+            "messages": [{"default_message": "Value out of range."}],
+        }
+        assert error.request.content == b""
+    else:
+        assert isinstance(error, ConnectorUpstreamError)
+        assert error.http_status == status
+        assert error.upstream_message == "INVALID_ARGUMENT; Value out of range."
+        assert "change the expiry rules" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_policy_set_with_a_refused_first_read_sends_no_change() -> None:
+    refusal = _http_error(403, "GET", _ROOT, {"error_type": "UNAUTHORIZED"})
+    connector = _FakeConnector(answers={("GET", _ROOT): refusal})
+    with pytest.raises(ConnectorUpstreamError) as caught:
+        await local_account_policy_set_impl(
+            connector,  # type: ignore[arg-type]
+            _operator(),
+            _Target(),
+            {"username": "root", "password_expires": False},
+        )
+    assert "read the account before the change" in str(caught.value)
+    assert "SystemConfiguration.BashShellAdministrators" in str(caught.value)
+    assert caught.value.__context__ is None
+    assert [call[0] for call in connector.calls] == ["GET"]
 
 
 def test_policy_body_refuses_an_empty_call_and_days_out_of_range() -> None:
@@ -515,11 +568,13 @@ async def test_password_set_of_a_missing_account_is_not_found(
 
 
 @pytest.mark.asyncio
-async def test_password_set_raises_401_unchanged_so_the_dispatcher_logs_in_again(
+async def test_password_set_401_stays_a_401_without_the_vendor_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _vault(monkeypatch, {"password": _NEW_PASSWORD})
-    connector = _FakeConnector(answers={("PATCH", _ROOT): _http_error(401, "PATCH", _ROOT)})
+    echo = {"error_type": "UNAUTHENTICATED", "message": f"bad password {_NEW_PASSWORD}"}
+    original = _http_error(401, "PATCH", _ROOT, echo)
+    connector = _FakeConnector(answers={("PATCH", _ROOT): original})
     with pytest.raises(httpx.HTTPStatusError) as caught:
         await local_account_password_set_impl(
             connector,  # type: ignore[arg-type]
@@ -527,7 +582,52 @@ async def test_password_set_raises_401_unchanged_so_the_dispatcher_logs_in_again
             _Target(),
             {"username": "root", "password_secret_ref": _REF},
         )
-    assert caught.value.response.status_code == 401
+    error = caught.value
+    assert error is not original
+    assert error.response.status_code == 401
+    assert error.response.content == b""  # vendor text held the password: all of it dropped
+    assert error.request.content == b""
+    assert error.__context__ is None
+    assert _NEW_PASSWORD not in str(error)
+
+
+def test_sanitized_401_drops_the_session_header_the_body_and_the_vendor_text() -> None:
+    request = httpx.Request(
+        "PATCH",
+        f"https://vc.test.invalid{_ROOT}",
+        headers={"vmware-api-session-id": "session-token-canary"},
+        json={"password": _NEW_PASSWORD},
+    )
+    response = httpx.Response(
+        401,
+        json={"error_type": "UNAUTHENTICATED", "message": f"bad {_NEW_PASSWORD}"},
+        request=request,
+    )
+    original = httpx.HTTPStatusError("HTTP 401", request=request, response=response)
+
+    error = sanitized_status_error(original, secrets=(_NEW_PASSWORD,))
+
+    assert type(error) is httpx.HTTPStatusError
+    assert error.response.status_code == 401
+    assert error.request.method == "PATCH"
+    assert error.request.url == request.url
+    assert error.request.content == b""
+    assert "vmware-api-session-id" not in error.request.headers
+    assert error.response.content == b""
+    assert _NEW_PASSWORD not in str(error)
+
+
+def test_sanitized_401_without_a_secret_keeps_only_the_vapi_error() -> None:
+    body = {
+        "error_type": "UNAUTHENTICATED",
+        "messages": [{"default_message": "The session expired."}],
+        "message": "raw vendor text",
+    }
+    error = sanitized_status_error(_http_error(401, "PATCH", _ROOT, body))
+    assert error.response.json() == {
+        "error_type": "UNAUTHENTICATED",
+        "messages": [{"default_message": "The session expired."}],
+    }
 
 
 @pytest.mark.asyncio
@@ -551,7 +651,7 @@ async def test_password_set_refusal_never_carries_the_password(
     assert error.http_status == 400
     assert error.upstream_message is None
     assert error.__cause__ is None
-    assert error.__suppress_context__ is True
+    assert error.__context__ is None
     for text in (str(error), repr(error.args)):
         assert _NEW_PASSWORD not in text
         assert json.dumps(_NEW_PASSWORD)[1:-1] not in text
@@ -562,7 +662,8 @@ async def test_password_set_read_after_failure_still_reports_the_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _vault(monkeypatch, {"password": _NEW_PASSWORD})
-    connector = _FakeConnector(answers={("GET", _ROOT): _http_error(500, "GET", _ROOT)})
+    failure = _http_error(500, "GET", _ROOT, {"error_type": f"ERROR {_NEW_PASSWORD}"})
+    connector = _FakeConnector(answers={("GET", _ROOT): failure})
     result = await local_account_password_set_impl(
         connector,  # type: ignore[arg-type]
         _operator(),
@@ -571,30 +672,31 @@ async def test_password_set_read_after_failure_still_reports_the_change(
     )
     assert result["password_set"] is True
     assert result["password_expires_at"] is None
-    assert result["read_note"].startswith("the change is done, but the read after it failed")
+    assert result["read_note"] == (
+        "the change is done, but the read after it failed: HTTP 500. "
+        "Read the account with vmware.appliance.local_account.get."
+    )
 
 
 @pytest.mark.parametrize(
     "echo_form",
     [_NEW_PASSWORD, json.dumps(_NEW_PASSWORD)[1:-1], "Neu-Pa%22ss%2Fw0rd%2B%26%3Cx%3E"],
 )
-def test_password_refusal_drops_every_vendor_text_that_holds_the_password(echo_form: str) -> None:
+def test_change_error_drops_every_vendor_text_that_holds_the_password(echo_form: str) -> None:
     body = {"error_type": "INVALID_ARGUMENT", "messages": [{"default_message": f"x {echo_form}"}]}
-    error = password_refusal(
-        _http_error(400, "PATCH", _ROOT, body), username="root", password=_NEW_PASSWORD
-    )
+    error = _password_change_error(_http_error(400, "PATCH", _ROOT, body))
+    assert isinstance(error, ConnectorUpstreamError)
     assert error.upstream_message is None
     assert echo_form not in str(error)
 
 
-def test_password_refusal_keeps_the_vendor_reason() -> None:
+def test_change_error_keeps_the_vendor_reason() -> None:
     body = {
         "error_type": "INVALID_ARGUMENT",
         "messages": [{"default_message": "The password does not meet the password rules."}],
     }
-    error = password_refusal(
-        _http_error(400, "PATCH", _ROOT, body), username="root", password=_NEW_PASSWORD
-    )
+    error = _password_change_error(_http_error(400, "PATCH", _ROOT, body))
+    assert isinstance(error, ConnectorUpstreamError)
     assert error.http_status == 400
     assert error.upstream_message == (
         "INVALID_ARGUMENT; The password does not meet the password rules."
@@ -602,23 +704,21 @@ def test_password_refusal_keeps_the_vendor_reason() -> None:
     assert "'root'" in str(error)
 
 
-def test_password_refusal_403_names_the_sso_group() -> None:
+def test_change_error_403_names_the_sso_group() -> None:
     body = {"error_type": "UNAUTHORIZED", "messages": []}
-    error = password_refusal(
-        _http_error(403, "PATCH", _ROOT, body), username="root", password=_NEW_PASSWORD
-    )
+    error = _password_change_error(_http_error(403, "PATCH", _ROOT, body))
+    assert isinstance(error, ConnectorUpstreamError)
     assert "SystemConfiguration.BashShellAdministrators" in str(error)
     assert error.upstream_message == "UNAUTHORIZED"
 
 
-def test_password_refusal_reads_the_legacy_rest_error_shape() -> None:
+def test_change_error_reads_the_legacy_rest_error_shape() -> None:
     body = {
         "type": "com.vmware.vapi.std.errors.invalid_argument",
         "value": {"messages": [{"default_message": "Password was used before."}]},
     }
-    error = password_refusal(
-        _http_error(400, "PATCH", _ROOT, body), username="root", password=_NEW_PASSWORD
-    )
+    error = _password_change_error(_http_error(400, "PATCH", _ROOT, body))
+    assert isinstance(error, ConnectorUpstreamError)
     assert error.upstream_message == (
         "com.vmware.vapi.std.errors.invalid_argument; Password was used before."
     )

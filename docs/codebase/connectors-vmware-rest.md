@@ -869,11 +869,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     - Because of the pin, the generic params echo does not reach the approver.
       A preview builder shows the account, `password_source: vault` and the
       Vault path, never the password.
-    - When vCenter refuses the password (for example a password rule), the
-      error carries the HTTP status, the vAPI error type and the vendor
-      messages. When any of that text holds the password (as is, JSON-escaped,
-      URL-encoded or HTML-escaped), all vendor text is dropped. A 401 is raised
-      unchanged, so the dispatcher logs in again and retries once.
+    - Every vCenter error answer to the two changes (also to the first read
+      of the policy change) goes through one rule, `change_error`, before it
+      leaves the handler. A 404 answers `not_found`. A 401 stays an
+      `httpx.HTTPStatusError` with status 401, so the dispatcher still logs in
+      again and retries once; but its response holds only the vAPI error type
+      and messages, and its request has neither the session header nor the
+      body. Any other status becomes `ConnectorUpstreamError` with the HTTP
+      status and the same safe text (a 403 also names the SSO group the
+      service account needs). When any vendor text holds the password (as is,
+      JSON-escaped, URL-encoded or HTML-escaped), all vendor text is dropped.
+      The new error is raised after the `except` block, so it does not keep
+      the original error (raw response and request) as its context. A failed
+      read after a change gives a `read_note` with the same safe text.
     - The result is `{username, password_set, password_expires_at,
       read_note}`.
   - **The service account of the target needs an appliance role.** The vendor
@@ -892,12 +900,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     small.
   - **Tests.** `tests/test_connectors_vmware_rest_typed_appliance_local_accounts.py`
     (rows and expiry, refused names and values, `not_found`, the Vault read,
-    the refusal text, the approval preview, the flight-recorder span);
-    `tests/test_connectors_vmware_rest_appliance_password_e2e.py` (one
-    password change through the dispatcher, the approval queue and the real
-    connector over respx: the password is in the `PATCH` body and not in the
-    params, the approval request, the audit rows, the result, the
-    flight-recorder spans or the logs); and the reconcile lane
+    the error rule for every status, the approval preview, the
+    flight-recorder span); `tests/test_connectors_vmware_rest_appliance_password_e2e.py`
+    (one password change through the dispatcher, the approval queue and the
+    real connector over respx: the password is in the `PATCH` body and not in
+    the params, the approval request, the audit rows, the result, the
+    flight-recorder spans or the logs; and two 401 answers that echo the
+    password: the login retry runs once and nothing leaks); and the reconcile lane
     `tests/test_connectors_vmware_rest_appliance_local_accounts_reconcile.py`
     (the three paths in the pinned 8.0 and 9.0 `vcenter.yaml`, and the flat
     `UpdateConfig` body in the 9.0 file).

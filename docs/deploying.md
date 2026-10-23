@@ -91,6 +91,59 @@ in one namespace, and nothing more:
   resources. Check before the install, for example
   `kubectl auth can-i create externalsecrets -n <namespace>`.
 
+### Install with no internet
+
+A site with no internet copies MEHO's images into its own image registry.
+Two settings then make every pod pull from there (#4100):
+
+- **`global.imageRegistry`**: your registry, for example
+  `harbor.example.com/meho`. It replaces the registry host of every image.
+  The path, the tag and the digest stay. An image with no host is a Docker
+  Hub image: `valkey/valkey` becomes `harbor.example.com/meho/valkey/valkey`,
+  and `busybox` becomes `harbor.example.com/meho/library/busybox`.
+- **`global.imagePullSecrets`**: the login for your registry. Every pod
+  gets it, in the chart and in every subchart. The older `imagePullSecrets`
+  setting still works, but reaches only the pods of the main chart.
+
+The steps:
+
+1. List the images, with the values file you will install with:
+
+   ```bash
+   helm template meho oci://ghcr.io/evoila/meho-chart --version <version> -f values.yaml \
+     | awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }' | sort -u
+   ```
+
+2. Copy each image into your registry. Leave out the registry host of the
+   source, and write `library/<name>` for a one-word Docker Hub name.
+   `--all` copies every CPU type. `--preserve-digests` keeps the digest, so
+   the chart's `@sha256:` addresses still work, even though you copy to a
+   tag:
+
+   ```bash
+   skopeo copy --all --preserve-digests \
+     docker://quay.io/keycloak/keycloak@sha256:<digest> \
+     docker://harbor.example.com/meho/keycloak/keycloak:<tag>
+   ```
+
+3. Create the login and install:
+
+   ```bash
+   kubectl create secret docker-registry registry-login -n <namespace> \
+     --docker-server=harbor.example.com --docker-username=<user> --docker-password=<password>
+   helm install meho oci://ghcr.io/evoila/meho-chart --version <version> -n <namespace> -f values.yaml \
+     --set global.imageRegistry=harbor.example.com/meho \
+     --set 'global.imagePullSecrets[0].name=registry-login'
+   ```
+
+4. Check that no pod waits for an image, and that every image comes from
+   your registry:
+
+   ```bash
+   kubectl get pods -n <namespace>     # no ErrImagePull or ImagePullBackOff
+   kubectl get pods -n <namespace> -o jsonpath='{..image}' | tr ' ' '\n' | sort -u
+   ```
+
 ## Install paths
 
 Two credential-backend shapes are supported. Both use the same chart; they

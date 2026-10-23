@@ -39,11 +39,15 @@ spec:
       # No `<SERVICE>_PORT` variables from other Services in the namespace:
       # a Service named `vault` would otherwise set `VAULT_PORT` here.
       enableServiceLinks: false
+      {{- with include "meho.core.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
       containers:
         - name: {{ .Values.binary }}
-          image: {{ include "meho.core.image" .Values.image | quote }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # The image's start script turns off core dumps and adds
           # `-config=<home>/config`.

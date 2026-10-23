@@ -462,6 +462,23 @@
         "openshift": {
           "type": "boolean",
           "description": "Set to true on OpenShift. The built-in core parts then leave out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
+        },
+        "imageRegistry": {
+          "type": "string",
+          "pattern": "^([^/\\s]+(/[^/\\s]+)*)?$",
+          "description": "Your own image registry, for an install with no internet. It replaces the registry host of every image; the path, the tag and the digest stay. An image with no host counts as Docker Hub (`busybox` becomes `<registry>/library/busybox`). May hold a path, with no `/` at the start or the end. Empty = images are pulled from where they are published."
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "description": "Pull secrets for every pod of the chart and its subcharts. The parent chart's own `imagePullSecrets` are added too.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 }
+            }
+          }
         }
       }
     },

@@ -33,9 +33,9 @@ spec:
     spec:
       serviceAccountName: {{ include "meho.serviceAccountName" . }}
       automountServiceAccountToken: false
-      {{- with .Values.imagePullSecrets }}
+      {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -66,11 +66,7 @@ spec:
           # checks the signature against. `tag` stays the human-readable label
           # of that release; the digest takes precedence in the rendered
           # reference. With no digest set, fall back to the schema-required tag.
-          {{- if .Values.image.digest }}
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
-          {{- else }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          {{- end }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http

@@ -193,6 +193,16 @@ deployment path. Consumers mirroring through a private registry override
 `image.repository` to point at their mirror and (if needed) populate
 `imagePullSecrets`.
 
+For an install with no internet, two global settings reach every pod of
+the chart and its subcharts, the `helm test` pods too (#4100):
+`global.imageRegistry` replaces the registry host of every image, and
+`global.imagePullSecrets` is added to every pod (with the parent's own
+`imagePullSecrets`). Every image line uses the helper `meho.core.image`
+and every pod uses `meho.core.imagePullSecrets` (both in
+`templates/_core-postgres-helpers.tpl`); a new pod must use both, or
+`backend/tests/test_chart_image_registry.py` fails. The recipe is in
+[`../deploying.md`](../deploying.md#install-with-no-internet).
+
 ### Probes
 
 The Deployment renders `startupProbe`, `livenessProbe`, and

@@ -23,6 +23,19 @@ global:
   # id from the project's range (it refuses a fixed one outside it). On
   # other clusters keep false: the pods run with fixed, non-root user ids.
   openshift: false
+  # -- Your own image registry, for an install with no internet (#4100).
+  # Every pod of the chart then pulls from it. It replaces the registry host
+  # of each image and keeps the path, the tag and the digest:
+  # `quay.io/keycloak/keycloak@sha256:…` -> `<registry>/keycloak/keycloak@sha256:…`.
+  # An image with no host is a Docker Hub image: `valkey/valkey` ->
+  # `<registry>/valkey/valkey`, `busybox` -> `<registry>/library/busybox`.
+  # It may hold a path, for example `harbor.example.com/meho`. Empty = every
+  # image is pulled from where it is published.
+  imageRegistry: ""
+  # -- Pull secrets (the login for your registry) for every pod of the
+  # chart, written as `[{name: <secret>}]`. The parent chart's own
+  # `imagePullSecrets` below are added too.
+  imagePullSecrets: []
 
 # -- Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2.
 replicaCount: 1

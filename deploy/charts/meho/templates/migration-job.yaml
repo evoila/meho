@@ -88,9 +88,9 @@ spec:
       # the running Deployment, and any hook-delete-policy would delete it
       # out from under that Deployment.
       automountServiceAccountToken: false
-      {{- with .Values.imagePullSecrets }}
+      {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -105,11 +105,7 @@ spec:
           # digest pin (#284): when `image.digest` is set the Job runs the
           # same content-addressed digest the Deployment does, not a tag
           # that could resolve to different bytes.
-          {{- if .Values.image.digest }}
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
-          {{- else }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          {{- end }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # The runner takes no CLI flags by design — its contract is
           # `alembic upgrade head` against the env-supplied DATABASE_URL.

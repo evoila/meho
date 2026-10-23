@@ -30,7 +30,10 @@ than "appropriate for this target's guest", so the supplied reference
 must fall under a per-target **allowed prefix**:
 
 * by default, the parent namespace of the target's own ``secret_ref``
-  (``targets/vc-01`` allows ``targets/<anything>``);
+  (``targets/vc-01`` allows ``targets/<anything>``). The namespace comes
+  from the secret's identity only: a ``#field`` selector and a GSM
+  ``/versions/<n>`` pin are dropped first, so ``gsm:proj/vc/versions/4``
+  allows ``gsm:proj/<anything>``, not just other versions of ``vc``;
 * optionally replaced by the per-target ``extras["guest_secret_prefix"]``
   setting, which an operator uses to widen or narrow the namespace.
 
@@ -115,6 +118,22 @@ def _split(ref: str) -> tuple[str, str]:
     return split_credential_ref(ref, default_backend=default_backend)
 
 
+def _secret_identity(kind: str, store_ref: str) -> str:
+    """Return the store path that names the secret itself.
+
+    Drops the ``#field`` selector every backend accepts and, for ``gsm``,
+    the ``/versions/<n>`` pin (``proj/secret/versions/4#pw`` becomes
+    ``proj/secret``). Neither part changes *which* secret the target uses,
+    so neither may change the namespace derived from it.
+    """
+    path = store_ref.rpartition("#")[0] if "#" in store_ref else store_ref
+    if kind == "gsm":
+        segments = path.split("/")
+        if len(segments) == 4 and segments[2] == "versions":
+            path = "/".join(segments[:2])
+    return path
+
+
 def _parent_namespace(store_ref: str) -> str | None:
     """Return the parent namespace of *store_ref* with a trailing slash, or ``None``."""
     head, sep, _tail = store_ref.rpartition("/")
@@ -127,8 +146,10 @@ def allowed_guest_secret_prefix(target: Any) -> tuple[str, str] | None:
     """Return the ``(kind, store prefix)`` a ``guest_secret_ref`` must fall under.
 
     ``extras["guest_secret_prefix"]`` wins when set to a non-empty string;
-    otherwise the parent namespace of the target's own ``secret_ref``.
-    ``None`` means no prefix is resolvable -- the caller rejects.
+    otherwise the parent namespace of the target's own ``secret_ref``,
+    taken from the secret's identity (no ``#field`` selector, no GSM
+    version pin). ``None`` means no prefix is resolvable -- the caller
+    rejects.
     """
     extras = getattr(target, "extras", None)
     setting = extras.get(GUEST_SECRET_PREFIX_EXTRA) if isinstance(extras, dict) else None
@@ -142,7 +163,7 @@ def allowed_guest_secret_prefix(target: Any) -> tuple[str, str] | None:
     if not isinstance(secret_ref, str) or not secret_ref.strip():
         return None
     kind, store_ref = _split(secret_ref.strip())
-    parent = _parent_namespace(store_ref)
+    parent = _parent_namespace(_secret_identity(kind, store_ref))
     return None if parent is None else (kind, parent)
 
 

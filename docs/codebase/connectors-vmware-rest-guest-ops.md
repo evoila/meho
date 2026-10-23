@@ -256,13 +256,13 @@ shared `_guest_auth` helper):
 - **A reference, never a value.** `guest_secret_ref` is a credential
   reference in the same forms a target `secret_ref` accepts (schemeless,
   `vault:`, `gsm:`). The credential value is read in-process and lives
-  only in the ephemeral `NamePasswordAuthentication` object; it never
+  only in the temporary `NamePasswordAuthentication` object; it never
   enters params, the result, the audit row, the broadcast event (the ops
   are pinned aggregate-only anyway), the approval preview, or a log line.
-  The sub-op gate params and the park previews are unchanged.
+  The sub-op gate params and the approval previews are unchanged.
 - **Read under the operator's identity.** The read goes through
-  `load_param_secret_data` (the same scheme-dispatched backend seam as the
-  keycloak `password_secret_ref`), forwarding the operator's JWT. Vault
+  `load_param_secret_data` (the same shared credential reader the keycloak
+  `password_secret_ref` uses), forwarding the operator's JWT. Vault
   RBAC and Vault audit still gate it per operator. A denied or unreadable
   reference raises `SecretRefReadError`, which the dispatcher reports as
   `vault_credentials_read_error` naming the `guest_secret_ref` param and
@@ -275,7 +275,10 @@ shared `_guest_auth` helper):
   whether it holds a valid guest credential. So the reference must fall
   under the target's allowed prefix:
   - by default the parent namespace of the target's own `secret_ref`
-    (`targets/vc-01` allows `targets/<anything>`, same backend kind);
+    (`targets/vc-01` allows `targets/<anything>`, same backend kind). The
+    namespace comes from the secret's identity only: a `#field` selector
+    and a GSM `/versions/<n>` pin are dropped first, so
+    `gsm:proj/vc/versions/4` allows `gsm:proj/<anything>`;
   - or the per-target setting `extras["guest_secret_prefix"]`, which an
     operator sets to widen or narrow that namespace.
   A reference outside the prefix, a backend-kind mismatch, a `.` / `..` /

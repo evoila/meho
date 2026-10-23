@@ -88,6 +88,9 @@ class _StoreRecorder:
         (_Target(secret_ref="targets/vc"), ("vault", "targets/")),
         (_Target(secret_ref="vault:tenants/acme/vc-01"), ("vault", "tenants/acme/")),
         (_Target(secret_ref="gsm:proj/vc-secret#password"), ("gsm", "proj/")),
+        (_Target(secret_ref="gsm:proj/vc-secret/versions/4"), ("gsm", "proj/")),
+        (_Target(secret_ref="gsm:proj/vc-secret/versions/4#password"), ("gsm", "proj/")),
+        (_Target(secret_ref="vault:tenants/acme/vc-01#password"), ("vault", "tenants/acme/")),
         (
             _Target(secret_ref="targets/vc", extras={"guest_secret_prefix": "guests/vc"}),
             ("vault", "guests/vc/"),
@@ -137,6 +140,28 @@ def test_check_accepts_refs_under_the_default_prefix(ref: str) -> None:
 def test_check_rejects_refs_outside_the_default_prefix(ref: str) -> None:
     with pytest.raises(mod.GuestSecretRefScopeError, match="outside the allowed"):
         mod.check_guest_secret_ref(ref, _Target())
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "gsm:proj/app-vm-01",
+        "gsm:proj/app-vm-01#password",
+        "gsm:proj/app-vm-01/versions/2",
+        "gsm:proj/app-vm-01/versions/2#password",
+    ],
+)
+def test_version_pinned_gsm_target_allows_the_whole_project(ref: str) -> None:
+    """A ``/versions/<n>`` pin on the target secret must not narrow the namespace."""
+    pinned = _Target(secret_ref="gsm:proj/vc-secret/versions/4")
+    mod.check_guest_secret_ref(ref, pinned)
+
+
+@pytest.mark.parametrize("ref", ["gsm:other/app-vm-01", "proj/app-vm-01"])
+def test_version_pinned_gsm_target_still_rejects_other_namespaces(ref: str) -> None:
+    pinned = _Target(secret_ref="gsm:proj/vc-secret/versions/4")
+    with pytest.raises(mod.GuestSecretRefScopeError, match="outside the allowed"):
+        mod.check_guest_secret_ref(ref, pinned)
 
 
 def test_check_rejects_when_no_prefix_is_resolvable() -> None:

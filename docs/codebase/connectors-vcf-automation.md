@@ -98,8 +98,9 @@ flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
 the 9.1 appliance-served IaaS document above would qualify, and none is
 pinned.
 
-**Operation contracts.** The 16 typed ops (the seven reads above and the
-nine provisioning ops below) meet the VMware operation-contract check
+**Operation contracts.** The 29 typed ops (the seven reads above, the
+nine provisioning ops, the four image ops and the nine network and deploy ops
+below) meet the VMware operation-contract check
 (`backend/tests/test_vmware_operation_contracts.py`) and have no entry in its
 gap list:
 
@@ -224,11 +225,124 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   failure. If `/iaas/api/login` refuses a tenant-org token too, the
   `/oauth/tenant/<org>/token` exchange is a follow-up, not implemented.
 
+**Image ops (image profiles).** A cloud template asks for an image by
+name (for example "RHEL 9"). The org's image profile maps each name to a
+vCenter template (a *fabric image*); there is one profile per region.
+Four typed ops in `image_ops.py` (metadata) with handlers and the
+approval preview in `_images.py`, all on the tenant plane, in the group
+`vcfa-tenant-images`. Every call sends `apiVersion=2021-07-15`.
+
+| op_id | risk / approval | wire |
+|---|---|---|
+| `vcfa.tenant.image_profile.list` | safe | `GET /iaas/api/image-profiles` |
+| `vcfa.tenant.fabric_image.list` | safe | `GET /iaas/api/fabric-images` (`$filter`, `$top`, `$skip`) |
+| `vcfa.tenant.cloud_account.enumerate_images` | safe | `POST /iaas/api/cloud-accounts/{id}/private-image-enumeration`, then `GET /iaas/api/request-tracker/{id}` until it ends |
+| `vcfa.tenant.image_profile.mapping.update` | caution, approval | `GET /iaas/api/image-profiles/{id}` + `GET /iaas/api/fabric-images/{id}`, then `PATCH /iaas/api/image-profiles/{id}` |
+
+- **The enumeration** only reads vCenter, so it is `safe`. It waits up to
+  60 seconds for the request (a lab run took 5). A request still running
+  then is the result `in_progress`; a `FAILED` request is the result
+  `failed`. Both are results, not op errors.
+- **The name change** takes `profile_id`, `image_name` and either
+  `fabric_image_id` (add or re-point) or `remove: true`. The `PATCH`
+  replaces the whole mapping, so the handler reads the profile first and
+  sends every other name back as `{id, constraints?, cloudConfig?}` (the
+  shape the vendor's Terraform provider sends). A re-pointed name keeps
+  its constraints and cloud config. The region is the profile's own,
+  from `_links.region.href`, never the first region of the org; with no
+  region link, no `regionId` is sent.
+- **Envelope.** `{status, profile: {id, name, region_id}, change:
+  {image_name, action, old_target, new_target}, other_names, guidance}`.
+  `status` is `updated`, `unchanged` (the name already gives that
+  template, or a removed name does not exist; nothing written) or
+  `invalid_request` (both or neither of `fabric_image_id` / `remove`, an
+  unknown fabric image, or a template of another region; checked before
+  any write). A template of another cloud account is refused too: the
+  profile's `cloudAccountId` must be in the image's `cloudAccountIds`,
+  because a vSphere region id is unique only inside one vCenter. When the
+  `PATCH` answer lacks a name that was sent, `guidance` names it; an
+  answer with an empty mapping is checked the same way, and an answer
+  without any mapping gets a `guidance` to read the profile again.
+- **One change at a time per profile.** Two changes that read the same
+  profile would each send the whole mapping back, and the second write
+  would drop the first name. So the handler holds a lock for the profile
+  from the read to the write: an `asyncio.Lock` for calls in this
+  process and a PG advisory lock (`db/advisory.py`, keyed by tenant,
+  target and profile id) for calls in other workers. A second call waits
+  up to 30 seconds for the lock, then fails without writing. The wait
+  covers only taking the lock. A call that holds the lock runs its reads
+  and its write to the end, however long they take.
+- **Approval card.** The preview builder reads the profile and the fabric
+  image at park time and shows the old and the new template plus the
+  other names. Without a connector (`preview_operation`) it only echoes
+  the request; a failed read gives `read: failed`.
+
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
-`__init__.py`) upserts the seven read descriptors plus the nine
-provisioning descriptors on startup — the same argocd / bind9 /
-Kubernetes typed-registrar shape.
+`__init__.py`) upserts the seven read descriptors, the nine
+provisioning descriptors, the four image descriptors and the nine network and
+deploy descriptors on startup — the same argocd / bind9 / Kubernetes
+typed-registrar shape.
+
+**A project's own network and its first deployment.** With an org, a
+tenant login and a project in place, these nine tenant-plane ops cover the
+rest of "one more project for one more team": give the project its own
+network, a quota and a network rule, then deploy a first VM from a cloud
+template and undo it. Metadata is in `network_ops.py` / `deploy_ops.py`,
+handlers in `_network.py` / `_deploy.py`, paths in `_paths.py`:
+
+| op_id | risk level / approval | wire |
+|---|---|---|
+| `vcfa.tenant.fabric_network.list` | safe | `GET /iaas/api/fabric-networks-vsphere` |
+| `vcfa.tenant.fabric_compute.list` | safe | `GET /iaas/api/fabric-computes` |
+| `vcfa.tenant.region.list` | safe | `GET /iaas/api/regions` (the `region_id` of a network profile) |
+| `vcfa.tenant.zone.list` | safe | `GET /iaas/api/zones` (the `zone_id` of a project quota) |
+| `vcfa.tenant.fabric_network.update` | caution, approval | `GET` then `PATCH /iaas/api/fabric-networks-vsphere/{id}` |
+| `vcfa.tenant.network_profile.create` | caution, approval | `GET` (name check) then `POST /iaas/api/network-profiles` |
+| `vcfa.tenant.blueprint_request.create` | caution, approval | `POST /blueprint/api/blueprint-requests` (`plan: true` is the dry run) |
+| `vcfa.tenant.blueprint_request.get` | safe | `GET /blueprint/api/blueprint-requests/{requestId}` |
+| `vcfa.tenant.deployment.delete` | dangerous, approval | `DELETE /deployment/api/deployments/{deploymentId}` |
+
+`vcfa.tenant.project.create` also takes `zones` (each a `zone_id` with a
+priority and limits for VMs, vCPUs, memory and storage, sent as
+`zoneAssignmentConfigurations`) and `network_constraints` (tag rules such as
+`project:<name>`, sent as `constraints.network`, `mandatory` defaults to
+true).
+
+- **`apiVersion`.** Every `/iaas/api` call of these ops sends
+  `apiVersion=2021-07-15` (`TENANT_IAAS_API_VERSION`). The older reads
+  (`project.list`, `deployment.list` / `.get`) still send none.
+- **One tenant login for three APIs.** `plane_for_path` sends
+  `/iaas/api/*`, `/blueprint/api/*` and `/deployment/api/*` to the tenant
+  plane: the bearer from `POST /iaas/api/login` works on all three, as on
+  Aria Automation 8 (`connectors/vra8/_paths.py`).
+- **Safe to run twice.** `fabric_network.update` reads the network first and
+  sends only the fields that differ (`unchanged` when none do).
+  `add_tags` is added to the tags the network has; the `PATCH` sends the
+  whole tag list back, so no tag is lost and none is removed.
+  `network_profile.create` answers `unchanged` for an existing name. A real
+  `blueprint_request.create` whose `deployment_name` already names a
+  deployment in the same project (`name` and `projectId` both match)
+  answers `unchanged` and requests nothing; the same name in another
+  project does not count. `deployment.delete` answers `unchanged` on a
+  `404`; its approval preview reads the deployment with
+  `apiVersion=2021-07-15`.
+- **Two traps in the guidance.** A plan (`plan: true`) only checks the
+  template and its inputs; it does not find placement errors (no fitting
+  zone, network or quota) — only a real request does. VCF Automation reads
+  new vCenter objects on its own schedule (2 to 12 minutes were measured),
+  so a new port group may be missing from `fabric_network.list` for a while.
+- **Waiting.** A deploy request and a delete run in the background. The
+  agent or runbook reads `blueprint_request.get` until `status` is
+  `FINISHED`, `FAILED` or `CANCELLED`, and `deployment.get` until it answers
+  not found. No op waits by itself.
+- **Delete.** `deployment.delete` is `dangerous` (the person who asks cannot
+  approve it alone), like `argocd.app.delete`. Its park-time preview reads
+  the deployment once so the approver sees its name and project
+  (`_provisioning_preview.py`).
+- **Spec check.** The reconcile lane checks the new paths against
+  `vra-iaas.json`, `vra-blueprint.json` and `vra-catalog-deployment.json`
+  of the pinned `vra-sdk-go` v0.6.5 shelf.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
@@ -280,12 +394,18 @@ domains.
   deployment list #2839; tenant deployment get #2960) and the four
   per-plane groups (`vcfa-provider-reads`, `vcfa-tenant-reads`, and the
   #3890 `vcfa-provider-writes`, `vcfa-tenant-writes`).
+- **`VCFA_NETWORK_OPS`** (`network_ops.py`) / **`VCFA_DEPLOY_OPS`**
+  (`deploy_ops.py`) — the six network ops and the three deploy ops (see
+  **A project's own network and its first deployment** above), checked by
+  the same `validate_typed_ops()`.
 - **`VCFA_PROVISIONING_OPS`** (`provisioning_ops.py`) — the nine #3890
   provisioning ops (see **Provisioning ops** above), validated by the
   same `validate_typed_ops()`. Each `VcfaTypedOp` carries a `plane` + `path`;
   the module's `validate_typed_ops()` cross-checks them at import
   so a declared-plane / path drift fails the import rather than
   surfacing as a misrouted 401.
+- **`VCFA_IMAGE_OPS`** (`image_ops.py`) — the four image ops (see **Image
+  ops** above), validated by the same `validate_typed_ops()`.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
   `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the
   registry key `VcfAutomationConnector.product` was unified to `"vcfa"`,
@@ -311,8 +431,10 @@ domains.
    idempotency check (in `ensure_connector_class_registered`) no-ops on
    subsequent ingests against the same triple.
 4. `run_typed_op_registrars()` (lifespan) invokes the registrar, which
-   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors plus the nine
-   `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890) — no ingest needed, so
+   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors, the nine
+   `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890), the four
+   `image_ops.VCFA_IMAGE_OPS` and the nine
+   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS` — no ingest needed, so
    the audited read surface and the provisioning writes work on a fresh
    boot.
 
@@ -368,7 +490,7 @@ before resolving headers.
 
 Plane classification (`_plane_for_path`):
 
-- `/iaas/api/*` → tenant plane.
+- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*` → tenant plane.
 - Everything else (`/cloudapi/*`, `/api/*`) → provider plane.
 
 The provider plane Bearer JWT authenticates both `/cloudapi/*` and the

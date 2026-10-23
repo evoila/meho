@@ -234,6 +234,7 @@ async def test_call_with_a_key_held_by_another_call_is_refused(embedding: list[f
             .all()
         )
     assert [row.status_code for row in denied_rows] == [403]
+    assert other["audit_id"] == str(denied_rows[0].id)
 
 
 # ---------------------------------------------------------------------------

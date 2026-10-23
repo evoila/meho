@@ -112,7 +112,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 import structlog
@@ -164,6 +164,9 @@ _VERSIONS_CURRENT_PATH = "/suite-api/api/versions/current"
 _ALERTS_PATH = "/suite-api/api/alerts"
 _RESOURCES_QUERY_PATH = "/suite-api/api/resources/query"
 _RESOURCES_STATS_LATEST_PATH = "/suite-api/api/resources/stats/latest"
+_RESOURCE_KIND_PROPERTIES_PATH = (
+    "/suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/{resourceKindKey}/properties"
+)
 _LICENSING_EDITION_PATH = "/suite-api/api/product/licensing/edition"
 _LICENSING_INFO_PATH = "/suite-api/api/product/licensing/info"
 
@@ -622,6 +625,46 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         return await self._get_json(
             target, _RESOURCES_STATS_LATEST_PATH, operator=operator, params=query
         )
+
+    async def resource_kind_properties(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.resource_kind.properties`` — the properties one resource kind has.
+
+        Reads ``GET /suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/
+        {resourceKindKey}/properties``. Both keys are required by the schema and
+        are percent-encoded into the path, so a key with a space or a slash
+        stays one path segment. A key of ``.`` or ``..`` is refused here as
+        well as by the schema, because it would not stay one path segment.
+        When ``keyContains`` is set, only the rows whose ``key`` or ``name``
+        contains that text (case-insensitive) are kept.
+        """
+        for name in ("adapterKindKey", "resourceKindKey"):
+            if params[name] in (".", ".."):
+                raise ValueError(f"{name} must not be '.' or '..'")
+        path = _RESOURCE_KIND_PROPERTIES_PATH.format(
+            adapterKindKey=quote(params["adapterKindKey"], safe=""),
+            resourceKindKey=quote(params["resourceKindKey"], safe=""),
+        )
+        payload = await self._get_json(target, path, operator=operator)
+        needle = params.get("keyContains")
+        rows = payload.get("resourceTypeAttributes")
+        if needle and isinstance(rows, list):
+            needle = needle.casefold()
+            payload["resourceTypeAttributes"] = [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and any(
+                    needle in value.casefold()
+                    for value in (row.get("key"), row.get("name"))
+                    if isinstance(value, str)
+                )
+            ]
+        return payload
 
     async def license_info(
         self,

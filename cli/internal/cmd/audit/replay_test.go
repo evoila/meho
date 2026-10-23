@@ -369,6 +369,36 @@ func TestRunReplay403SurfacesInsufficientRole(t *testing.T) {
 
 // TestPrintReplayTreeEmpty — the empty forest renders the helper line
 // (covered indirectly above, pinned here directly for the renderer).
+// TestPrintReplayTreeLooseRowNote — the loose-row count prints one note
+// after the tree when it is above zero, and nothing when it is zero.
+func TestPrintReplayTreeLooseRowNote(t *testing.T) {
+	fixture := twoLevelReplay(t)
+	var quiet bytes.Buffer
+	printReplayTree(&quiet, &fixture, defaultReplayMaxDepth)
+	if strings.Contains(quiet.String(), "loose row") {
+		t.Errorf("zero loose rows must print no note; got:\n%s", quiet.String())
+	}
+
+	fixture.LooseRowCount = 1
+	var one bytes.Buffer
+	printReplayTree(&one, &fixture, defaultReplayMaxDepth)
+	if !strings.Contains(one.String(), "1 loose row: the parent row does not exist") {
+		t.Errorf("expected singular loose-row note; got:\n%s", one.String())
+	}
+	// The operation saves its own row last, so the note must leave both
+	// cases open: still running, or stopped before that save.
+	if !strings.Contains(one.String(), "may still be running, or it stopped before its own row was saved") {
+		t.Errorf("loose-row note must not claim the operation stopped; got:\n%s", one.String())
+	}
+
+	fixture.LooseRowCount = 3
+	var many bytes.Buffer
+	printReplayTree(&many, &fixture, defaultReplayMaxDepth)
+	if !strings.Contains(many.String(), "3 loose rows: the parent row does not exist") {
+		t.Errorf("expected plural loose-row note; got:\n%s", many.String())
+	}
+}
+
 func TestPrintReplayTreeEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	printReplayTree(&buf, &api.AuditReplayResult{Root: []api.ReplayNode{}}, defaultReplayMaxDepth)

@@ -319,7 +319,10 @@ A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)
 rather than publish a schema its payloads violate. `call_operation` exposes an
 `audit_id` only after its dispatcher audit row commits; a null value promises no
-audit receipt. Its nullable `delivery` is about response shaping, not how much
+audit receipt. This holds for every answer that has a row: a completed call, a
+failed call, and a call MEHO refused before it ran (a deny grant, the announce
+gate, a rate limit, a target version the catalog does not serve, a refused
+approval request; #4669). Its nullable `delivery` is about response shaping, not how much
 upstream data a result handle retained: `complete` means the shaped response was
 delivered, `unavailable` means execution completed but shaping failed and callers
 must inspect audit/status evidence without re-invoking it, and `partial` means
@@ -447,7 +450,11 @@ shape what the caller sees and how it reads more:
   `audit_id` only after the dispatch audit row commits (`delivery` is
   explained above, under "Response wire ceiling"). If the operation ran but its result could
   not be shaped, the call stays `ok` with `delivery="unavailable"` and
-  the `audit_id`, so the caller knows not to run it again.
+  the `audit_id`, so the caller knows not to run it again. A failed call
+  (#3864) and a refused call (#4669) return the id of their `error` or
+  `denied` row the same way, so an agent can link a refusal to its audit
+  row without searching the audit log. `audit_id` is `null` only when no
+  row was written or the write failed.
 
 The full rules, bounds, and errors are in
 [`result-spill.md`](result-spill.md). Tests:
@@ -968,7 +975,7 @@ the default-allow immediate branch. `requires_approval=True` would park
 humans too; `safety_level="dangerous"` would deny agents rather than
 park them.
 
-Three synthetic connectors follow this mould (natural key
+Four synthetic connectors follow this mould (natural key
 `(product, "1.x", impl_id)` → wire `connector_id`):
 
 | Wire `connector_id` | Op | MCP front | Since |
@@ -976,6 +983,7 @@ Three synthetic connectors follow this mould (natural key
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+| `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last

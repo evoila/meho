@@ -226,6 +226,19 @@ registrar is queued via `register_typed_op_registrar` in the package
   (which filters resources by *whether* they report a stat), this op returns
   the stat's **value**; the handler passes the payload through unparsed so
   the vendor's `stats-of-resources` field names stay out of executable code.
+- **`vrops.resource_kind.properties`** —
+  `GET /suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/{resourceKindKey}/properties`.
+  Lists which properties one resource kind of one adapter kind has (for
+  example `VirtualMachine` of `VMWARE`): one row per property under
+  `resourceTypeAttributes`, with `key`, `name`, `description`, `dataType2`
+  and `unit`. An agent uses it to find the exact property key before it
+  reads the value. Both keys are required and are percent-encoded into the
+  path. The optional `keyContains` text keeps only the rows whose `key` or
+  `name` contains it (not case-sensitive); MEHO filters the rows after the
+  call, because the vendor's own `properties` filter takes exact names only.
+  This op is **9.x only**: it sits in `VROPS_9_ONLY_TYPED_OPS`, not in
+  `VROPS_TYPED_OPS`, because the 8.x connector reuses `VROPS_TYPED_OPS`. The
+  metric keys of a resource kind (`.../statkeys`) are not covered.
 - **`vrops.license.info`** — `GET /suite-api/api/product/licensing/edition`
   and `GET /suite-api/api/product/licensing/info`. The edition and the
   licence of this VCF Operations instance in one object:
@@ -241,21 +254,22 @@ registrar is queued via `register_typed_op_registrar` in the package
   connector reuses `VROPS_TYPED_OPS`. The licence management calls
   (licence servers, assigning licences) are a separate piece of work.
 
-All five are `safety_level="safe"`, `requires_approval=False`,
+All six are `safety_level="safe"`, `requires_approval=False`,
 read-only. Each rides the connector's `OpsToken` session; `authSource`
 federation lives in the acquire body, not on the reads. `vrops.resource.query`
 encodes its `page`/`pageSize` pagination onto the request path (the base
 `_post_json` takes no `params` mapping); `vrops.resource.stats` threads its
 `resourceId` / `statKey` / `currentOnly` through the base `_get_json`
 `params` mapping (httpx serialises a list value to repeated pairs). Large
-stat / alert / resource sets reduce to a JSONFlux handle at the dispatch
+stat / alert / resource / property sets reduce to a JSONFlux handle at the dispatch
 layer.
 
-**Operation contracts.** The five ops meet the VMware operation-contract check
+**Operation contracts.** The six ops meet the VMware operation-contract check
 (`backend/tests/test_vmware_operation_contracts.py`). Their response schemas
 live in `_response_schemas.py` and use the field names of the pinned
 `vcf-operations-9.0` Suite API file (`version`, `alerts`, `resources`,
-`stats-of-resources`, `product-licensing`, `LicenseInfo`; note the stats rows sit under `stat-list.stat[]`). Each
+`stats-of-resources`, `resource-kind-attributes`, `product-licensing`,
+`LicenseInfo`; note the stats rows sit under `stat-list.stat[]`). Each
 parameter schema has one example call under `examples`, and each
 `llm_instructions` blob has `when_to_call`, `output_shape` and `next_step`. The
 `resourceState`, `resourceStatus` and `resourceHealth` filters of
@@ -272,7 +286,7 @@ symptoms, recommendations, super metrics) stay browsable until Initiative
 #2266 T7 retires the apparatus.
 
 **Spec-reconcile lane (#2984).** Every hand-coded `METHOD:/path` above — the
-six typed-read paths (the licence read uses two of them) plus the session mint
+seven typed-read paths (the licence read uses two of them) plus the session mint
 (`POST /suite-api/api/auth/token/acquire`) — is asserted against the pinned
 `vcf-operations-9.0` shelf spec by
 [`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_operations_spec_reconcile.py)

@@ -6,7 +6,9 @@
 #
 # What the subchart renders when `enabled: true`:
 # - a StatefulSet `<release>-vault` with one OpenBao server, raft storage on
-#   its own disk, started from our own config file (a ConfigMap);
+#   its own disk, started from our own config file (a ConfigMap), and the
+#   `unseal` helper container that unseals it after a restart while the
+#   Secret `<release>-core-vault-unseal` exists;
 # - two Services, both reaching a locked ("sealed") pod: `<release>-vault`
 #   on port 8200 (plain HTTP inside the namespace) and the headless
 #   `<release>-vault-internal` for the pod's own DNS name;
@@ -85,6 +87,23 @@ resources:
     cpu: 100m
     memory: 256Mi
     ephemeral-storage: 64Mi
+
+# The `unseal` helper container. It needs no setting to work: whether it
+# unseals depends only on whether the Secret `<release>-core-vault-unseal`
+# exists. Delete the Secret and restart OpenBao for a keyholder at every
+# restart.
+unseal:
+  # -- Resources of the helper. It starts the `bao` program twice every
+  # 5 seconds at most; measured peak on RKE2: 12 MB.
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+      ephemeral-storage: 16Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+      ephemeral-storage: 8Mi
 
 service:
   # -- Service port. Pods reach OpenBao at `http://<release>-vault:<port>`.

@@ -660,6 +660,36 @@ in CI.
 The lane passed against the pinned files before this change was opened
 (10 tests, none skipped).
 
+### Extension: vcf-automation-9.0-reference, vcf-automation-9.1 and vcf-automation-9.1.1 (#4604)
+
+This change checks out three more shelf folders. The VCF Automation
+reconcile lane now checks that the region list path MEHO picks for each
+version is in that version's list of provider operations. The same
+secret-gated checkout and the same rules apply (read-only, the runner is
+deleted when the job ends, never committed, never in artifacts or logs, no
+secret for fork PRs or Dependabot).
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcf-automation-9.0-reference` | `vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv` | `backend/tests/test_connectors_vcf_automation_spec_reconcile.py` (`test_region_path_is_in_the_reference_list_of_each_version`) |
+| `vcf-automation-9.1` | `vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv` | same test |
+| `vcf-automation-9.1.1` | `vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv` | same test |
+
+- **Size:** about 0.4 MB per folder.
+- **What the files are:** each TSV file is a list of operations (method and
+  path, one per line). It was made from the vendor's public Provider
+  Infrastructure API reference pages for that version. Provenance note of
+  record: each folder's `MANIFEST.md` on the shelf.
+- **Licence:** these lists come from vendor documentation pages with no
+  explicit open licence, pinned on the operator's shelf for a reconcile
+  lane. So this extension records a reference to the **wave-3 blanket
+  determination** in the NSX section above
+  (<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>),
+  the same way the `vks-9.0` entry does. No new attestation is needed.
+
+The lane passed against the pinned files before this change was opened (one
+test per version, none skipped).
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

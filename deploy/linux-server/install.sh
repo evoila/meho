@@ -267,7 +267,7 @@ main() {
 
     step "Step 4: install the MEHO core"
     if [[ -z $FIRST_TENANT_ID ]]; then
-        FIRST_TENANT_ID=$(new_tenant_id)
+        FIRST_TENANT_ID=$(tenant_id)
     fi
     write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" "$CLUSTER_CIDR"
     install_core "$DOWNLOAD_DIR"

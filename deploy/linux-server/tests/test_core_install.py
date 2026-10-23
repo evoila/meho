@@ -58,7 +58,8 @@ def place_values(
           firstLogin:
             adminUsername: "{admin}"
             approverUsername: "{approver}"
-        # The pod range, so MEHO may reach the built-in PostgreSQL and OpenBao.
+        # Until the chart knows its built-in parts: the pod range, so MEHO may
+        # reach the built-in PostgreSQL and OpenBao.
         networkPolicy:
           postgresCIDR: "{pod_range}"
           vaultCIDR: "{pod_range}"
@@ -100,7 +101,8 @@ class CoreInstallTests(InstallTestCase):
 
         result = self.machine.run()
 
-        self.assert_fails_once(result, "Helm could not install the MEHO core.", HINT)
+        line = self.assert_fails_once(result, "Helm could not install the MEHO core.", HINT)
+        self.assertNotIn("run install.sh again", line)
         self.assertIn("Error: INSTALLATION FAILED: timed out waiting", result.stderr)
         for path in (FIRST_LOGIN_FILE, UNSEAL_KEY_FILE, CLI_PATH, INSTALL_RECORD):
             with self.subTest(path=path):
@@ -134,6 +136,18 @@ class CoreInstallTests(InstallTestCase):
             pod_range="172.30.0.0/16",
         )
         self.assertEqual(expected, self.machine.host_path(PLACE_VALUES).read_text())
+
+    def test_a_second_run_keeps_the_tenant_id(self) -> None:
+        self.assert_succeeds(self.machine.run())
+        self.machine.host_file(
+            "/proc/sys/kernel/random/uuid", "0e2b4d6f-8a1c-4e3d-9b5f-7a9c1e3b5d7f\n"
+        )
+
+        self.assert_succeeds(self.machine.run("--from-disk"))
+
+        self.assertEqual(place_values(), self.machine.host_path(PLACE_VALUES).read_text())
+        record = json.loads(self.machine.host_path(INSTALL_RECORD).read_text())
+        self.assertEqual(TENANT_ID, record["options"]["first_tenant_id"])
 
     def test_bad_place_options_are_wrong_usage(self) -> None:
         cases = {

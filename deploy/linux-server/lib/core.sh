@@ -47,13 +47,26 @@ read_download_version() {
     ok "the download holds MEHO $MEHO_VERSION, the chart $CHART_VERSION and RKE2 $RKE2_VERSION"
 }
 
-# The kernel gives a new random UUID every time this file is read.
-new_tenant_id() {
-    cat "${HOST_ROOT}/proc/sys/kernel/random/uuid"
+# tenant_id: the id in an existing values-place.yaml, so a second run keeps
+# the id Keycloak already uses; on a fresh machine, a new one. The kernel
+# gives a new random UUID every time its uuid file is read.
+tenant_id() {
+    local file="${HOST_ROOT}${MEHO_PLACE_VALUES}" stored=""
+    if [[ -f $file ]]; then
+        stored=$(awk -F'"' '$1 == "  firstTenantId: " { print $2; exit }' "$file")
+    fi
+    if [[ -n $stored ]]; then
+        printf '%s\n' "$stored"
+    else
+        cat "${HOST_ROOT}/proc/sys/kernel/random/uuid"
+    fi
 }
 
 # render_place_values <hostname> <tenant id> <admin user> <approver user> <pod range>:
 # print the answers of this place as Helm values (form-2 design, section 6).
+# shortcut: the two network-policy ranges are wiring, not a place answer,
+# until the chart derives them from its built-in parts (#4047); drop them
+# then, and the update (#4736) removes them from existing place files.
 render_place_values() {
     local hostname=$1 tenant_id=$2 admin_user=$3 approver_user=$4 pod_range=$5
     cat <<EOF
@@ -67,7 +80,8 @@ coreKeycloak:
   firstLogin:
     adminUsername: "${admin_user}"
     approverUsername: "${approver_user}"
-# The pod range, so MEHO may reach the built-in PostgreSQL and OpenBao.
+# Until the chart knows its built-in parts: the pod range, so MEHO may
+# reach the built-in PostgreSQL and OpenBao.
 networkPolicy:
   postgresCIDR: "${pod_range}"
   vaultCIDR: "${pod_range}"
@@ -99,7 +113,7 @@ write_place_values() {
 # messages are shown.
 install_core() {
     local download_dir=$1
-    note "installing the MEHO core, at most $HELM_TIMEOUT"
+    note "installing the MEHO core. Each part of it may take up to ${HELM_TIMEOUT%m} minutes."
     "$download_dir/$HELM_FILE" upgrade --install "$HELM_RELEASE" "$download_dir/$CHART_FILE" \
         --kubeconfig "${HOST_ROOT}${RKE2_KUBECONFIG}" \
         --namespace "$HELM_NAMESPACE" --create-namespace \
@@ -108,7 +122,7 @@ install_core() {
         -f "$download_dir/$SINGLE_NODE_VALUES" \
         -f "${HOST_ROOT}${MEHO_PLACE_VALUES}" >/dev/null ||
         fail "Helm could not install the MEHO core. Its message is above." \
-            "correct the cause and run install.sh again. For help, run 'meho-host support-bundle' and send the file to support."
+            "run 'meho-host support-bundle' and send the file to support."
     ok "the MEHO core runs: Helm release $HELM_RELEASE in namespace $HELM_NAMESPACE"
 }
 
@@ -136,6 +150,9 @@ copy_first_login() {
 # copy_unseal_key: false, with a warning, when the Secret does not exist.
 # Without the Secret, OpenBao is in keyholder mode (a person unseals it
 # after every restart), and there is no key to copy.
+# shortcut: a missing Secret is only a warning, because nothing on main
+# makes it yet (#4044 part 2, #4046); make it a [FAIL] when the OpenBao
+# setup Job lands, since the Secret then always exists after a fresh install.
 copy_unseal_key() {
     if ! write_secret_file "$HELM_RELEASE-core-vault-unseal" "$UNSEAL_KEY_TEMPLATE" "$MEHO_UNSEAL_KEY_FILE"; then
         warn "The Secret $HELM_RELEASE-core-vault-unseal does not exist, so no unseal-key file was written. OpenBao then needs a keyholder at every restart."

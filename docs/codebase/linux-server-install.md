@@ -148,9 +148,13 @@ command that shows RKE2's log.
 section 6): the host name as `ingress.host` and `coreKeycloak.hostname`,
 the first tenant's id, the two user names, and the pod range as the two
 network-policy ranges, so MEHO may reach the built-in PostgreSQL and
-OpenBao. Without `--first-tenant-id`, the id is a new UUID read once from
-`/proc/sys/kernel/random/uuid`; the file keeps it, so a later run reuses
-it. The file holds no secret.
+OpenBao. Without `--first-tenant-id`, the id comes from an existing
+`values-place.yaml`, so a second run keeps the id Keycloak already uses;
+on a fresh machine it is a new UUID read once from
+`/proc/sys/kernel/random/uuid`. The two network-policy ranges are wiring
+until the chart derives them from its built-in parts (#4047), not a place
+answer; the update (#4736) removes them from existing place files. The
+file holds no secret.
 
 `install_core` runs the download's Helm:
 
@@ -191,7 +195,9 @@ own messages are dropped, so a failure shows only the script's line.
 The first-login Secret must exist; the script stops otherwise. The unseal
 Secret may be missing: without it OpenBao is in keyholder mode (a person
 unseals it after every restart), so the script prints one `[WARN]` line,
-writes no key file and goes on.
+writes no key file and goes on. This is a shortcut until the OpenBao setup
+Job lands (#4044): the Secret then always exists after a fresh install,
+and a missing one becomes a `[FAIL]`.
 
 ### Step 6: the `meho` command, the install record and the result
 
@@ -332,7 +338,8 @@ checked by the same job.
   the chart's own wiring of the built-in parts (#4047; three keys in
   `values-single-node.yaml` do it by hand until then), and
   `meho status --first-start` (#4042; the result names the list as missing).
-- **The Helm time limit is 15 minutes,** the same as the RKE2 wait. The
+- **The Helm time limit is 15 minutes per operation:** the wait for the
+  pods, and each hook Job, so the whole install may take longer. The
   week-4 install (#4741) shows whether a 4-processor machine needs more.
 - **The disk check counts free space.** A machine with an 80 GB disk has
   less than 80 GB free after the OS install, so it fails. The design calls

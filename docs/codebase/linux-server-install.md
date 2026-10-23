@@ -79,6 +79,7 @@ about names that another file defines.
 | ranges | the pod and service ranges do not overlap each other, the machine's addresses or its routes (the default route is left out) | `ip -4 -o addr show`, `ip -4 route show` |
 | nftables | `nft` is on the machine and can read the kernel's tables | `command -v nft`, `nft list tables` |
 | admin network | SSH stays possible for the admin after the install; see [The admin network](#the-admin-network) | `--admin-network`, `SSH_CONNECTION` |
+| join and firewall | with `--join-address`, a `[WARN]` that the rules block a join until both machines accept the other node | `--join-address` |
 
 **Why DNS needs care.** On Ubuntu, `systemd-resolved` answers from
 `/etc/hosts` too, also through its stub at 127.0.0.53. So when
@@ -384,7 +385,9 @@ this folder are checked by the same job.
 - **More nodes later.** The rules drop RKE2's ports from every other
   machine, the VXLAN port 8472/UDP too. A join (`--join-address`) needs
   rules that open them to the other nodes' addresses (ADR 0009). That comes
-  with the high-availability work.
+  with the high-availability work. Until then, step 1 prints a `[WARN]`
+  when `--join-address` is given: the admin adds accept rules for the
+  other node's address on both machines by hand.
 
 ## References
 

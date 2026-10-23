@@ -187,6 +187,16 @@ check_ssh_from_range() {
     fi
 }
 
+# check_join_firewall <join address or "">: the rules drop RKE2's ports when
+# they come from another machine, so a join cannot work with them as they
+# are. The rules for other nodes come with the high-availability work
+# (ADR 0009). Until then, the admin adds them by hand on both machines.
+check_join_firewall() {
+    local join_address=$1
+    [[ -n $join_address ]] || return 0
+    warn "--join-address is given, but the MEHO firewall drops RKE2's ports when they come from another machine. The join works only after both machines accept the other node's address: add accept rules to the chain prerouting in $MEHO_FIREWALL_FILE on each machine, then run: systemctl reload $MEHO_FIREWALL_UNIT"
+}
+
 # render_firewall_rules <SSH range, address or ""> <note> <pod range> <service range>:
 # print the MEHO nftables file. The nft manual (nft(8), "CHAINS") and the
 # nftables wiki ("Netfilter hooks") give the priorities: conntrack -200,

@@ -429,6 +429,27 @@ class AdminNetworkCheckTests(FirewallTestCase):
             "[WARN] --admin-network 0.0.0.0/0 allows SSH from every address.", result.stderr
         )
 
+    def test_the_join_options_warn_that_the_firewall_blocks_a_join(self) -> None:
+        token_file = self.machine.home / "join-token"
+        token_file.write_text("K10test-token\n")
+
+        joined = self.machine.run(
+            *ADMIN_NETWORK, "--join-address", "10.0.0.20", "--join-token-file", str(token_file)
+        )
+        alone = self.machine.run(*ADMIN_NETWORK)
+
+        self.assert_succeeds(joined)
+        warning = (
+            "[WARN] --join-address is given, but the MEHO firewall drops RKE2's ports when they"
+            " come from another machine. The join works only after both machines accept the"
+            " other node's address: add accept rules to the chain prerouting in"
+            " /etc/meho/firewall.nft on each machine, then run:"
+            " systemctl reload meho-firewall.service"
+        )
+        self.assertIn(warning, joined.stderr)
+        self.assert_succeeds(alone)
+        self.assertNotIn("--join-address", alone.stderr)
+
     def test_under_sudo_the_session_is_found_in_a_parent_process(self) -> None:
         # sudo resets the environment, so install.sh itself has no
         # SSH_CONNECTION. Its parent process (this test) and the processes

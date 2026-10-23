@@ -194,6 +194,7 @@ check_machine() {
     check_ranges "$CLUSTER_CIDR" "$SERVICE_CIDR"
     check_nftables
     check_admin_network "$ADMIN_NETWORK"
+    check_join_firewall "$JOIN_ADDRESS"
 }
 
 prepare_machine() {

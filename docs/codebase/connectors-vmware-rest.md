@@ -2724,6 +2724,8 @@ Per file, one at a time:
 3. Stream the `GET` into a `PUT` of `<name>.meho-partial`, in chunks of at
    most 8 MiB, counting bytes and computing SHA-256. It stops at the per-file
    or total size limit, on a size that does not match, or on an error answer.
+   The `GET` sends `Accept-Encoding: identity`, so vCenter sends the raw
+   bytes and `Content-Length` is the size the copy counts.
 4. `MOVE` the partial file to its final name. A destination without `MOVE`
    (`405` / `501`) keeps the temporary name and the row says `partial`.
 

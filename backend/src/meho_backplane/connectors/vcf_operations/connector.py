@@ -617,9 +617,14 @@ class VcfOperationsConnector(HttpConnector):
         Reads ``GET /suite-api/api/adapterkinds/{adapterKindKey}/resourcekinds/
         {resourceKindKey}/properties``. Both keys are required by the schema and
         are percent-encoded into the path, so a key with a space or a slash
-        stays one path segment. When ``keyContains`` is set, only the rows whose
-        ``key`` or ``name`` contains that text (case-insensitive) are kept.
+        stays one path segment. A key of ``.`` or ``..`` is refused here as
+        well as by the schema, because it would not stay one path segment.
+        When ``keyContains`` is set, only the rows whose ``key`` or ``name``
+        contains that text (case-insensitive) are kept.
         """
+        for name in ("adapterKindKey", "resourceKindKey"):
+            if params[name] in (".", ".."):
+                raise ValueError(f"{name} must not be '.' or '..'")
         path = _RESOURCE_KIND_PROPERTIES_PATH.format(
             adapterKindKey=quote(params["adapterKindKey"], safe=""),
             resourceKindKey=quote(params["resourceKindKey"], safe=""),

@@ -589,11 +589,13 @@ VROPS_RESOURCE_KIND_PROPERTIES_OP = VropsTypedOp(
             "adapterKindKey": {
                 "type": "string",
                 "minLength": 1,
+                "not": {"enum": [".", ".."]},
                 "description": "The adapter kind key, e.g. 'VMWARE'.",
             },
             "resourceKindKey": {
                 "type": "string",
                 "minLength": 1,
+                "not": {"enum": [".", ".."]},
                 "description": (
                     "The resource kind key, e.g. 'VirtualMachine', 'HostSystem' or 'Datastore'."
                 ),

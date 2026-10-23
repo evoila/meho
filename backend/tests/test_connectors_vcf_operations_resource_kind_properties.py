@@ -273,6 +273,48 @@ async def test_missing_resource_kind_key_is_rejected_before_the_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"adapterKindKey": "VMWARE", "resourceKindKey": ".."},
+        {"adapterKindKey": ".", "resourceKindKey": "VirtualMachine"},
+    ],
+)
+async def test_dot_only_key_is_rejected_before_the_call(
+    params: dict[str, Any],
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key of '.' or '..' is refused; no vendor route is called."""
+    await register_vcf_operations_typed_operations(embedding_service=_stub_embedding)
+    install_fake_client(monkeypatch, secret={"username": "svc-vrops", "password": "pw"})
+
+    async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        any_route = mock.route().respond(200, json=_PROPERTIES_RESPONSE)
+        result = await _dispatch(params)
+
+    assert result.status != "ok"
+    assert not any_route.called
+
+
+@pytest.mark.parametrize("key", ["adapterKindKey", "resourceKindKey"])
+@pytest.mark.parametrize("value", [".", ".."])
+@pytest.mark.asyncio
+async def test_handler_refuses_dot_only_key(
+    key: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler refuses a dot-only key even if schema checks are skipped."""
+    connector = VcfOperationsConnector()
+    get_json = AsyncMock(return_value={"resourceTypeAttributes": []})
+    monkeypatch.setattr(connector, "_get_json", get_json)
+    params = {"adapterKindKey": "VMWARE", "resourceKindKey": "VirtualMachine", key: value}
+    with pytest.raises(ValueError):
+        await connector.resource_kind_properties(_make_operator(), _Target(), params)
+    get_json.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_is_safe_and_needs_no_approval(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:

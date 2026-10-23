@@ -6,6 +6,8 @@
 # the form-2 install. chart/values-single-node.yaml of the download comes
 # after this file, so its settings count too. The other values are
 # placeholders that the chart's schema requires; they change no image.
+# keycloak.issuer and config.keycloakIssuerUrl stay unset: with the built-in
+# Keycloak on, the chart sets the issuer and stops the render when one is set.
 ingress:
   host: meho.invalid
   tls:
@@ -14,10 +16,7 @@ postgres:
   credentialsSecret: meho-postgres
 vault:
   address: https://vault.invalid
-keycloak:
-  issuer: https://meho.invalid/auth/realms/meho
 config:
-  keycloakIssuerUrl: https://meho.invalid/auth/realms/meho
   keycloakAudience: meho-backplane
   vaultAddr: https://vault.invalid
 networkPolicy:

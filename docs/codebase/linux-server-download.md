@@ -51,7 +51,7 @@ test keeps the two in step.
 | `packaging/common.sh` | The pinned versions and checksums, output helpers, the size check and the layout check. |
 | `packaging/images.sh` | The image list, the digests, the fetch into one OCI image layout, and the archive check. |
 | `packaging/parts.sh` | One function per part of the download, and the licence `README.txt`. |
-| `packaging/render-values.yaml` | Values for `helm template`: the core on, and placeholders the chart's schema requires. |
+| `packaging/render-values.yaml` | Values for `helm template`: the core on, and placeholders the chart's schema requires. No issuer: the built-in Keycloak sets it. |
 | `packaging/image-sources.txt` | The licence and the source of each image repository. The build stops when an image has no line. |
 | `packaging/licenses/*.txt` | Licence texts of the images that are not under Apache-2.0, as their projects publish them. |
 | `values-single-node.yaml` | The values for one node, shipped as `chart/values-single-node.yaml`. |
@@ -247,9 +247,11 @@ sha256sum -c SHA256SUMS-linux
   the design.
 - **`images.txt`.** Until #4050 adds it, the image list comes from
   `helm template`.
-- **The first tag run.** The release path (call from `cli-release.yml`,
-  `publish`) runs for the first time on the next `v*` tag. A manual run on
-  main covers the build and the checks before that.
+- **The first tag run.** The first tag run, v0.36.0, stopped at the chart
+  render, because `render-values.yaml` set the issuer and the chart refuses
+  it with the built-in Keycloak on (#4820). So the release path (the call
+  from `cli-release.yml`, then `publish`) has not finished in CI yet. A
+  manual run on main covers the build and the checks before the next tag.
 
 ## Testing
 
@@ -270,6 +272,14 @@ sizes), the image references and the lock, the licence table, the layout
 check (missing and extra files, owner, modes, links) and the archive check
 (`docker save` format, wrong digest, missing or extra image, changed or
 missing blob, other platform, decoder memory).
+
+The `validate` job of `.github/workflows/chart.yml` renders the chart
+source the way `chart_image_refs` does:
+`render-values.yaml`, then `values-single-node.yaml`, and
+`--set image.tag=test`. It runs in the merge queue, and on a pull request
+that changes `deploy/charts/meho/`, `chart.yml` or one of these two values
+files. So a chart rule that the values break fails on the pull request, not
+on the release tag (#4820).
 
 A full build needs the network (about 2 GB of downloads):
 

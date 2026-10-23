@@ -46,13 +46,17 @@ metadata:
 spec:
   restartPolicy: Never
   serviceAccountName: {{ include "meho.serviceAccountName" . }}
+  {{- with include "meho.core.imagePullSecrets" . }}
+  imagePullSecrets:
+    {{- . | nindent 4 }}
+  {{- end }}
   # The PostgreSQL image has no USER, so name its `postgres` user (999)
   # here; `global.openshift: true` leaves the ids to OpenShift.
   securityContext:
     {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.corePostgres.podSecurityContext "global" .Values.global) | nindent 4 }}
   containers:
     - name: pgvector-check
-      image: {{ include "meho.core.image" .Values.corePostgres.image | quote }}
+      image: {{ include "meho.core.image" (dict "image" .Values.corePostgres.image "global" .Values.global) | quote }}
       imagePullPolicy: {{ .Values.corePostgres.image.pullPolicy }}
       env:
         - name: PGURL

@@ -10,7 +10,7 @@
     },
     "global": {
       "type": "object",
-      "description": "Helm's shared values. The subchart reads `global.openshift`."
+      "description": "Helm's shared values. The subchart reads `global.openshift`, `global.imageRegistry` and `global.imagePullSecrets`."
     },
     "image": {
       "type": "object",

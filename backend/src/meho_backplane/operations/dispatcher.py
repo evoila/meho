@@ -380,6 +380,7 @@ from meho_backplane.operations.dispatch_limits import (
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
+    full_result_capture_var,
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
@@ -2432,6 +2433,13 @@ async def _reduce_or_error(
         target=target,
         audit_id=audit_id,
     )
+    # #4117: the sensor runner asks for the full redacted payload beside the
+    # shortened result. Filled before the reduce so a reducer failure still
+    # leaves the capture usable; every other caller leaves the var unset.
+    capture = full_result_capture_var.get()
+    if capture is not None:
+        capture.payload = raw
+        capture.captured = True
     try:
         return await _DEFAULT_REDUCER.reduce(
             raw,

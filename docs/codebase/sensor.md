@@ -159,6 +159,53 @@ history and projection can never diverge. The row records the *observed*
 outcome of each evaluation (committed, soft/pending, or re-confirmed), so a
 flapping reading that never commits still lands in history.
 
+### The rule runs over the full result (#4117)
+
+MEHO shortens an operation answer that is over 50 rows or over 4 KB. The
+caller gets a short summary and a handle to the stored full result (see
+[`result-spill.md`](result-spill.md)). A long list keeps only counts
+(`row_count`, `total`, ...). A big object with no top-level list keeps
+only its small top-level values; nested objects such as a Prometheus
+answer's `data` are gone (#4119).
+
+The runner does not check its rule against that summary. Around its own
+dispatch it sets `full_result_capture_var`
+(`operations/reducer.py`), and the dispatcher fills the capture with the
+full redacted payload just before the reduce. So the runner has two
+views of one call: the normal shortened result, and the full payload
+every other caller would read back through `result_query`. The
+redaction and the credential scrub have already run on both, so the
+check never sees a secret value. The store is not read: a sensor on a
+deployment without a reachable result store evaluates the same way.
+
+`_evaluate_result` (`checks/runner.py`) then decides:
+
+- Not shortened (no handle): the result is the whole payload. Checked as
+  before.
+- Shortened: the rule runs over the full payload. A rule on the rows
+  (`$.hosts[*].connected`, `all`) or on a nested list
+  (`$.data.result[*].value_num`, `max`) reads `ok` / `degraded` /
+  `critical` as it would on a small answer.
+- The full payload cannot answer the rule (for example `missing key
+  'row_count'`) but the summary can: the summary's outcome wins and the
+  evidence carries `checked: "summary"`. This keeps a rule that reads the
+  summary on purpose working. When neither view can answer, the evidence
+  reason is the full payload's (the vendor data), not the summary's.
+- The reducer refused the payload under its admission work limit
+  (`RESULT_REDUCTION_MAX_*`; the handle's drill-in reason is
+  `admission_limit_exceeded`): the answer is too big to check and the
+  sensor reads `unknown` with `reason: result_too_large` plus the handle
+  id and `total_rows`.
+
+The evidence stays small: a breaching aggregate samples at most 5 rows,
+as before (next section). The runner never evaluates the stored rows
+through the handle, so the spill caps (`RESULT_HANDLE_MAX_SPILL_ROWS`,
+`RESULT_HANDLE_MAX_RECORD_BYTES`) do not bound the check: the capture is
+the payload as the handler returned it.
+
+Tests: `tests/test_sensor_runner_full_result.py` drives the real
+dispatcher with the production reducer and an in-memory store.
+
 ### Aggregate offender sample (#2976)
 
 An aggregate assertion (`count` / `sum` / `max` / `min` / `any` / `all`)
@@ -252,6 +299,9 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
   `0071_create_sensor_results.py` (`down_revision="0070"`, #2756 history table).
 - **#2756** (Initiative #2780) — per-tick evidence retention + trend query;
   the retention sweeper reuses the #2547 announcement-sweeper mould.
+- `meho_backplane.operations.reducer` — `FullResultCapture` /
+  `full_result_capture_var`, the seam the runner uses to read the full
+  result of its own dispatch (#4117).
 
 ## Known issues / boundaries
 

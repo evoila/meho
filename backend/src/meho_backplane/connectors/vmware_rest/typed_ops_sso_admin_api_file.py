@@ -20,13 +20,19 @@ The read is narrow on purpose:
   login header: a WSDL holds no data, and the SSO Admin service has its
   own login (a SAML token) that MEHO does not have.
 * It does not follow a redirect. The answer names the redirect's path.
-* The file comes back as text parts of at most 64 KiB each. Joining the
-  parts in order gives the exact file; ``sha256`` is the hash of the
-  file bytes. A file that does not fit in one stored result is refused
-  with its size, never cut.
+* The file is checked before it is cut into parts: MEHO parses it (XML
+  for a WSDL or XSD file; JSON, YAML or HTML as well) and replaces every
+  value under a secret name with a placeholder
+  (:mod:`meho_backplane.connectors._shared.api_file_secrets`). A file
+  that does not parse, or whose format is unknown, is refused with the
+  reason. The checked copy comes back as text parts of at most 64 KiB
+  each. Joining the parts in order gives the copy; ``sha256`` is the
+  hash of the copy and ``secrets_replaced`` counts the replaced values.
+  A file that does not fit in one stored result is refused with its
+  size, never cut.
 * MEHO redacts secret-shaped text in every stored result. The read runs
-  the same redaction rules the dispatcher will apply, on the whole file
-  text and on each part, and refuses a file whose text they would
+  the same redaction rules the dispatcher will apply, on the whole copy
+  and on each part, and refuses a copy whose text they would still
   change, naming the rule. So the stored parts always match ``sha256``,
   no secret that a part cut would hide gets through, and redaction
   stays active.
@@ -51,6 +57,11 @@ from defusedxml import DefusedXmlException
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.api_file_secrets import (
+    ApiFileFormatError,
+    check_api_file,
+    scrub_query_string,
+)
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp
@@ -287,22 +298,28 @@ async def _read_version(
 
 
 def _file_fields(path: str, content_type: str | None, body: bytes) -> dict[str, Any]:
-    """Decode a ``2xx`` body and build the file fields of the answer."""
+    """Decode a ``2xx`` body, check it, and build the file fields of the answer."""
     if not _is_text(content_type):
         raise SsoAdminApiFileError(
             f"{path!r} is {content_type!r}, not text. This read returns only UTF-8 text."
         )
     try:
-        body.decode("utf-8")
+        text = body.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SsoAdminApiFileError(
             f"{path!r} ({content_type or 'no content type'}) is not UTF-8 text: {exc.reason}."
         ) from exc
-    parts = split_text_parts(body)
+    try:
+        checked = check_api_file(text, content_type=content_type, path=path)
+    except ApiFileFormatError as exc:
+        raise SsoAdminApiFileError(str(exc)) from exc
+    copy = checked.text.encode("utf-8")
+    parts = split_text_parts(copy)
     return {
-        "size": len(body),
-        "sha256": hashlib.sha256(body).hexdigest(),
-        "imports": find_imports(body),
+        "size": len(copy),
+        "sha256": hashlib.sha256(copy).hexdigest(),
+        "secrets_replaced": checked.secrets_replaced,
+        "imports": find_imports(copy),
         "parts": len(parts),
         "text_parts": [{"index": index, "text": text} for index, text in enumerate(parts)],
     }
@@ -322,16 +339,18 @@ def _check_fits(answer: dict[str, Any], max_record_bytes: int) -> None:
 def _check_redaction_keeps_text(
     answer: dict[str, Any], connector: VmwareRestConnector, operator: Operator
 ) -> None:
-    """Refuse a file whose text the stored-result redaction would change.
+    """Refuse a checked copy whose text the stored-result redaction would still change.
 
     The dispatcher redacts every result with the policy for this
     (connector, tenant, operation) before it stores the result. A rule
-    that fires on the file text would rewrite a part, and the joined parts
+    that fires on the text would rewrite a part, and the joined parts
     would no longer match ``sha256``. This runs the same middleware with
     the same labels on the text parts, so the check and the real
-    redaction cannot disagree, and on the whole file text as well: a
-    secret that a part cut splits in two is invisible to the per-part
-    check, and the dispatcher would store it in clear text.
+    redaction cannot disagree, and on the whole text as well: a secret
+    that a part cut splits in two is invisible to the per-part check, and
+    the dispatcher would store it in clear text. The rules skip the
+    placeholder the file check writes, so a replaced value does not set
+    them off.
     """
     probe = {
         "text_parts": answer["text_parts"],
@@ -353,8 +372,7 @@ def _check_redaction_keeps_text(
     )
     raise SsoAdminApiFileError(
         f"{answer['path']!r} holds text that MEHO's secret redaction would change: {where}. "
-        "The stored parts would no longer match sha256, so the file was not returned. "
-        "This read never returns a changed file."
+        "The stored parts would no longer match sha256, so the file was not returned."
     )
 
 
@@ -368,9 +386,11 @@ async def sso_admin_api_file_get_impl(
 
     1. Check the path (no request goes out for a refused path).
     2. ``GET`` the file without login, without following a redirect.
-    3. Read the vCenter version and build (best effort).
-    4. Refuse a file that does not fit in one stored result, or whose
-       text the stored-result redaction would change.
+    3. Parse the file and replace every value under a secret name; refuse
+       a file that does not parse.
+    4. Read the vCenter version and build (best effort).
+    5. Refuse a file that does not fit in one stored result, or whose
+       text the stored-result redaction would still change.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -379,13 +399,17 @@ async def sso_admin_api_file_get_impl(
     max_record_bytes = get_settings().result_handle_max_record_bytes
 
     fetched = await _fetch_file(connector, target, path, max_record_bytes)
+    redirect, redirect_replaced = (
+        scrub_query_string(fetched["redirect"]) if fetched["redirect"] else (None, 0)
+    )
     answer: dict[str, Any] = {
         "path": path,
         "status": fetched["status"],
         "content_type": fetched["content_type"],
-        "redirect_path": fetched["redirect"],
+        "redirect_path": redirect,
         "size": None,
         "sha256": None,
+        "secrets_replaced": redirect_replaced,
         "imports": [],
         "parts": 0,
         "text_parts": [],
@@ -450,11 +474,18 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "size": {
             "type": ["integer", "null"],
-            "description": "File size in bytes; null when the status is not 2xx.",
+            "description": "Size of the checked copy in bytes; null when the status is not 2xx.",
         },
         "sha256": {
             "type": ["string", "null"],
-            "description": "SHA-256 (hex) of the file bytes; null when the status is not 2xx.",
+            "description": "SHA-256 (hex) of the checked copy; null when the status is not 2xx.",
+        },
+        "secrets_replaced": {
+            "type": "integer",
+            "description": (
+                "How many values under a secret name (password, token, licence key, ...) "
+                "were replaced by [REDACTED:param_name] in the copy."
+            ),
         },
         "imports": {
             "type": "array",
@@ -475,7 +506,9 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 },
                 "required": ["index", "text"],
             },
-            "description": "The file text, in order. Joining all parts gives the exact file.",
+            "description": (
+                "The checked copy of the file, in order. Joining all parts gives the copy."
+            ),
         },
         "version": {
             "type": ["string", "null"],
@@ -490,7 +523,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "Why version or build is empty; null when the read worked.",
         },
     },
-    "required": ["path", "status", "imports", "parts", "text_parts"],
+    "required": ["path", "status", "secrets_replaced", "imports", "parts", "text_parts"],
 }
 
 #: Group text: says what the group holds, makes no claim for other ops.
@@ -531,12 +564,14 @@ VCENTER_SSO_ADMIN_API_FILE_GET_OP = VmwareTypedOp(
             ),
         },
         "output_shape": (
-            "{path, status, content_type, redirect_path, size, sha256, imports: [str], "
-            "parts, text_parts: [{index, text}], version, build, version_error}. A large "
-            "answer comes back as a result handle: read '/imports' and '/text_parts' with "
-            "result_query (query {'path': '/text_parts'}, a small limit such as 2). Join "
-            "the text of all parts in index order to get the exact file; its SHA-256 "
-            "equals sha256."
+            "{path, status, content_type, redirect_path, size, sha256, secrets_replaced, "
+            "imports: [str], parts, text_parts: [{index, text}], version, build, "
+            "version_error}. text_parts hold the checked copy of the file: the parsed "
+            "file written back with every value under a secret name replaced by "
+            "[REDACTED:param_name]; secrets_replaced counts them. A large answer comes "
+            "back as a result handle: read '/imports' and '/text_parts' with result_query "
+            "(query {'path': '/text_parts'}, a small limit such as 2). Join the text of "
+            "all parts in index order to get the copy; its SHA-256 equals sha256."
         ),
         "next_step": (
             "Read each name in 'imports' next with this same operation (a relative name "

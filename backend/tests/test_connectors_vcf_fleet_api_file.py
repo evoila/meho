@@ -12,8 +12,8 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
   ``Location`` is resolved against the path that was read;
 * a 401 on the read is an error, and the appliance is not asked again with
   the same login;
-* a one-line minified JSON file of a few MB and a file of more than
-  10,000 lines: the joined parts give the exact file (same SHA-256);
+* a one-line minified JSON file of a few MB and a JSON file of more than
+  10,000 lines: the joined parts give the checked copy (same SHA-256);
 * a file too big for one result handle stops with an error naming its size,
   also when the body is compressed and only the decoded file is too big;
   a streamed gzip or deflate body that would decode to many MiB is
@@ -24,6 +24,8 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
   stream, stop with an error and never pass as the complete file;
 * the whole stored record is measured: a file that passes the check is read
   back from the result store with every part, through ``dispatch()``;
+* a file with a password comes back with the placeholder and the count; a
+  file that does not parse is refused;
 * a page the secret-redaction rules would change stops with an error, also
   when the secret's label ends one part and its value starts the next;
 * content that is not text is refused with its content type;
@@ -54,6 +56,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_secrets import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.vcf_fleet import (
@@ -338,12 +341,12 @@ async def test_404_status_reaches_the_answer(
     await _register_and_resolve(_stub_embedding)
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
-        mock.get("/api/swagger-ui/missing.json").respond(404, text="not found")
+        mock.get("/api/swagger-ui/missing.json").respond(404, json={"error": "not found"})
         result = await _dispatch("/api/swagger-ui/missing.json")
 
     assert result.status == "ok", result.error
     assert result.result["status"] == 404
-    assert result.result["items"] == [{"index": 0, "text": "not found"}]
+    assert result.result["items"] == [{"index": 0, "text": '{"error":"not found"}'}]
 
 
 @pytest.mark.asyncio
@@ -356,7 +359,9 @@ async def test_redirect_is_reported_and_not_followed(
         first = mock.get("/api/swagger-ui.html").respond(
             301, headers={"Location": f"{_BASE_URL}{_LIFECYCLE_DOCS}"}
         )
-        second = mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML)
+        second = mock.get(_LIFECYCLE_DOCS).respond(
+            200, text=_HTML, headers={"Content-Type": "text/html"}
+        )
         result = await _dispatch("/api/swagger-ui.html")
 
     assert result.status == "ok", result.error
@@ -422,7 +427,7 @@ async def test_401_on_the_read_is_an_error_and_drops_the_cached_login(
 
 
 # ---------------------------------------------------------------------------
-# Big files: the joined parts give the exact file
+# Big files: the joined parts give the checked copy
 # ---------------------------------------------------------------------------
 
 
@@ -436,19 +441,20 @@ def _minified_json_of_a_few_mb() -> bytes:
     return data
 
 
-def _text_with_more_than_10000_lines() -> bytes:
-    return "".join(f"line {i}: Ünïcödé text for a long file\n" for i in range(12_345)).encode()
+def _json_with_more_than_10000_lines() -> bytes:
+    rows = [f"line {i}: Ünïcödé text for a long file" for i in range(12_345)]
+    return json.dumps(rows, indent=2, ensure_ascii=False).encode()
 
 
 @pytest.mark.parametrize(
     ("content_type", "data"),
     [
         ("application/json", _minified_json_of_a_few_mb()),
-        ("text/plain; charset=utf-8", _text_with_more_than_10000_lines()),
+        ("text/plain; charset=utf-8", _json_with_more_than_10000_lines()),
     ],
 )
 @pytest.mark.asyncio
-async def test_joined_parts_give_the_exact_file(
+async def test_joined_parts_give_the_checked_copy(
     _stub_embedding: AsyncMock, session: AsyncSession, content_type: str, data: bytes
 ) -> None:
     instance, _ = await _register_and_resolve(_stub_embedding)
@@ -462,12 +468,14 @@ async def test_joined_parts_give_the_exact_file(
             _make_operator(), target, {"path": "/api/swagger-ui/big.json"}
         )
 
-    assert answer["size"] == len(data)
+    copy = json.dumps(json.loads(data), ensure_ascii=False, separators=(",", ":")).encode()
+    assert answer["size"] == len(copy)
+    assert answer["secrets_replaced"] == 0
     assert answer["parts"] == len(answer["items"]) > 1
     assert [item["index"] for item in answer["items"]] == list(range(answer["parts"]))
     assert all(len(item["text"].encode()) <= PART_BYTES for item in answer["items"])
     joined = "".join(item["text"] for item in answer["items"]).encode()
-    assert joined == data
+    assert joined == copy
     assert hashlib.sha256(joined).hexdigest() == answer["sha256"]
 
 
@@ -546,14 +554,14 @@ async def test_parts_that_do_not_fit_as_rows_stop_with_the_size(
     monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "1000")
     get_settings.cache_clear()
     await _register_and_resolve(_stub_embedding)
-    data = b'"' * 990
+    data = b'"' + b'\\"' * 494 + b'"'
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
         mock.get("/api/swagger-ui/quotes.json").respond(200, content=data)
         result = await _dispatch("/api/swagger-ui/quotes.json")
 
     assert result.status == "error"
-    assert "file of 990 bytes" in result.extras["exception_message"]
+    assert f"file of {len(data)} bytes" in result.extras["exception_message"]
 
 
 @pytest.mark.asyncio
@@ -564,7 +572,7 @@ async def test_compressed_body_is_measured_after_decoding(
     monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "4096")
     get_settings.cache_clear()
     await _register_and_resolve(_stub_embedding)
-    small = b"x" * 1000
+    small = b'{"x":"' + b"x" * 990 + b'"}'
     bomb = b"x" * 1_000_000
     assert len(gzip.compress(bomb)) < 2048
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
@@ -670,7 +678,7 @@ async def test_gzip_body_of_several_members_gives_the_whole_file_under_the_limit
     monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", str(limit))
     get_settings.cache_clear()
     await _register_and_resolve(_stub_embedding)
-    first, second = b'{"a": "' + b"a" * 500 + b'", ', b'"b": "' + b"b" * 500 + b'"}'
+    first, second = b'{"a":"' + b"a" * 500 + b'",', b'"b":"' + b"b" * 500 + b'"}'
     whole = first + second
     joined = gzip.compress(first) + gzip.compress(second)
     over = gzip.compress(b"x" * 3000) + gzip.compress(b"y" * 3000)
@@ -765,10 +773,11 @@ def _largest_file_that_passes_the_check(limit: int) -> bytes:
         "lcm_api_version": None,
         "redirect_to": None,
         "parts": 0,
+        "secrets_replaced": 0,
     }
     size = limit
     while size > 0:
-        data = b"x" * size
+        data = b'"' + b"x" * (size - 2) + b'"'
         items = [{"index": i, "text": p.decode()} for i, p in enumerate(split_parts(data))]
         answer.update(size=size, sha256=hashlib.sha256(data).hexdigest(), parts=len(items))
         try:
@@ -803,7 +812,7 @@ async def test_every_part_of_a_file_that_passes_the_check_is_read_back_from_stor
             200, content=data, headers={"Content-Type": "application/json"}
         )
         mock.get("/api/swagger-ui/over.json").respond(
-            200, content=data + b"x" * 200, headers={"Content-Type": "application/json"}
+            200, content=data[:-1] + b"x" * 200 + b'"', headers={"Content-Type": "application/json"}
         )
         result = await dispatch(
             operator=operator,
@@ -855,7 +864,7 @@ async def test_page_the_redaction_rules_would_change_stops_with_an_error(
     message = result.extras["exception_message"]
     assert "strip-authorization-header" in message
     assert "1 place(s)" in message
-    assert "exact file cannot be returned" in message
+    assert "the file cannot be returned" in message
     assert "example-token-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
     )
@@ -888,11 +897,69 @@ async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
 
     assert result.status == "error"
     message = result.extras["exception_message"]
-    assert "exact file cannot be returned" in message
+    assert "the file cannot be returned" in message
     assert "1 place(s)" in message
     assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
         result.extras, default=str
     )
+
+
+@pytest.mark.asyncio
+async def test_file_with_a_password_comes_back_with_the_placeholder_and_the_count(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """The file is parsed; every value under a secret name is replaced before the parts are cut."""
+    await _register_and_resolve(_stub_embedding)
+    spec = {
+        "swagger": "2.0",
+        "paths": {"/login": {"post": {"x-example": {"user": "admin", "password": "made-up-1"}}}},
+        "definitions": {"Login": {"properties": {"password": {"type": "string"}}}},
+    }
+    copy = {
+        "swagger": "2.0",
+        "paths": {"/login": {"post": {"x-example": {"user": "admin", "password": REDACTED}}}},
+        "definitions": {"Login": {"properties": {"password": REDACTED}}},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/api/swagger-ui/login.json").respond(
+            200, text=json.dumps(spec, indent=2), headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch("/api/swagger-ui/login.json")
+
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    assert json.loads(joined) == copy
+    assert body["secrets_replaced"] == 2
+    assert body["size"] == len(joined.encode())
+    assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
+    assert "made-up-1" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_file_that_does_not_parse_is_refused_with_the_reason(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/api/swagger-ui/broken.json").respond(
+            200, text='{"password": "made-up-2"', headers={"Content-Type": "application/json"}
+        )
+        mock.get("/api/swagger-ui/app.js").respond(
+            200, text='var password = "made-up-3";', headers={"Content-Type": "text/javascript"}
+        )
+        broken = await _dispatch("/api/swagger-ui/broken.json")
+        script = await _dispatch("/api/swagger-ui/app.js")
+
+    assert broken.status == "error"
+    assert "not well-formed JSON" in broken.extras["exception_message"]
+    assert script.status == "error"
+    assert "no known format" in script.extras["exception_message"]
+    for result in (broken, script):
+        rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
+        assert "made-up-" not in rendered
 
 
 @pytest.mark.asyncio
@@ -923,7 +990,9 @@ async def test_version_read_500_still_returns_the_file_with_the_header(
     await _register_and_resolve(_stub_embedding)
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         about = mock.get(_ABOUT).respond(500, json={"errorCode": "LCMCOMMON", "errorMessage": "x"})
-        mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML, headers=_LCM_HEADER)
+        mock.get(_LIFECYCLE_DOCS).respond(
+            200, text=_HTML, headers={"Content-Type": "text/html", **_LCM_HEADER}
+        )
         result = await _dispatch(_LIFECYCLE_DOCS)
 
     assert result.status == "ok", result.error
@@ -949,7 +1018,9 @@ async def test_version_read_bad_gzip_still_returns_the_file(
             stream=_ChunkedStream(b"\x1f\x8b\x08\x00not-gzip-at-all", 4096),
             headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
         )
-        mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML, headers=_LCM_HEADER)
+        mock.get(_LIFECYCLE_DOCS).respond(
+            200, text=_HTML, headers={"Content-Type": "text/html", **_LCM_HEADER}
+        )
         result = await _dispatch(_LIFECYCLE_DOCS)
 
     assert result.status == "ok", result.error
@@ -971,7 +1042,9 @@ async def test_version_read_redirect_loop_still_returns_the_file(
     await _register_and_resolve(_stub_embedding)
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         about = mock.get(_ABOUT).respond(302, headers={"Location": _ABOUT})
-        mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML, headers=_LCM_HEADER)
+        mock.get(_LIFECYCLE_DOCS).respond(
+            200, text=_HTML, headers={"Content-Type": "text/html", **_LCM_HEADER}
+        )
         result = await _dispatch(_LIFECYCLE_DOCS)
 
     assert result.status == "ok", result.error
@@ -1012,7 +1085,7 @@ async def test_result_holds_no_password(_stub_embedding: AsyncMock, session: Asy
     await _register_and_resolve(_stub_embedding)
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
-        mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML)
+        mock.get(_LIFECYCLE_DOCS).respond(200, text=_HTML, headers={"Content-Type": "text/html"})
         result = await _dispatch(_LIFECYCLE_DOCS)
 
     assert result.status == "ok", result.error

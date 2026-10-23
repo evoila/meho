@@ -4273,6 +4273,13 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
                 },
             },
         },
+        "tasks_error": {
+            "type": ["string", "null"],
+            "description": (
+                "On ``result_unknown``: why the running tasks could not be read, else "
+                "``null``. ``vm_question`` is still valid when only the task read failed."
+            ),
+        },
         "vm_question": {
             "type": ["object", "null"],
             "description": (

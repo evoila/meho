@@ -278,8 +278,10 @@ _RESULT_SCALARS_CONTEXT_KEY = "result_scalars"
 #: register ``llm_instructions["result_objects"] = {"objects": {"leaf":
 #: ["subject", "san"]}}`` when a reduced collection has one small identity
 #: object a caller still needs inline. Unlike ``result_scalars``, this is
-#: deliberately narrow: only named direct children are copied and a fixed
-#: byte budget prevents an op hint from reintroducing a large envelope.
+#: deliberately narrow: only named direct children are copied (scalars, short
+#: scalar lists, and short lists of flat scalar objects such as a question's
+#: ``choices``) and a fixed byte budget prevents an op hint from
+#: reintroducing a large envelope.
 _RESULT_OBJECTS_CONTEXT_KEY = "result_objects"
 
 #: ``context`` key carrying the op's row-digest hint (#3122). Extends the
@@ -1362,10 +1364,13 @@ def _preserved_objects(
     response such as a TLS chain: reducing ``chain[]`` must not discard the
     leaf's subject, SAN, and fingerprint, but copying the full leaf would also
     copy its PEM. The hint is intentionally generic and opt-in, accepts only
-    direct object children, and keeps only scalar values or short scalar lists.
-    Whole objects, nested maps, and values outside the fixed byte budget stay
-    in the handle spill. Invalid hints are logged and ignored; reduction must
-    never turn an otherwise successful connector read into an error.
+    direct object children, and keeps only scalar values, short scalar lists,
+    and short lists of flat objects whose values are scalars (a VM question's
+    ``choices: [{key, label}]``, which the caller needs to answer it). Nested
+    maps, deeper lists, and values outside the fixed byte budget are left out
+    (a list is cut and flagged under ``result_object_truncations``). Invalid
+    hints are logged and ignored; reduction must never turn an otherwise
+    successful connector read into an error.
     """
     if not context:
         return {}
@@ -1401,14 +1406,7 @@ def _preserved_objects(
         projected: dict[str, Any] = {}
         for field in fields[:_MAX_RESULT_OBJECT_FIELDS]:
             child = value.get(field)
-            if (
-                child is None
-                or isinstance(child, _SCALAR_VALUE_TYPES)
-                or (
-                    isinstance(child, list)
-                    and all(item is None or isinstance(item, _SCALAR_VALUE_TYPES) for item in child)
-                )
-            ):
+            if child is None or isinstance(child, _SCALAR_VALUE_TYPES) or _is_flat_list(child):
                 candidate = child
             else:
                 continue
@@ -1425,6 +1423,21 @@ def _preserved_objects(
     if truncations:
         preserved[_RESULT_OBJECT_TRUNCATIONS_KEY] = truncations
     return preserved
+
+
+def _is_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, _SCALAR_VALUE_TYPES)
+
+
+def _is_flat_list(value: Any) -> bool:
+    """True for a list of scalars, or of flat objects whose values are scalars."""
+    if not isinstance(value, list):
+        return False
+    return all(
+        _is_scalar(item)
+        or (isinstance(item, dict) and all(_is_scalar(child) for child in item.values()))
+        for item in value
+    )
 
 
 def _bounded_object_value(value: Any) -> tuple[Any, bool]:

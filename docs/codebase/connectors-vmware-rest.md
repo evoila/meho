@@ -671,8 +671,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     `Task.info` read of those tasks (only when there are any). Returns
     `{vm, name, pending, question: {id, text, choices: [{key, label,
     summary}], default_choice, messages} | null, running_tasks: [{task,
-    operation, state, progress, start_time}]}`; `running_tasks` keeps only
-    `queued` and `running` tasks.
+    operation, state, progress, start_time}], tasks_error}`;
+    `running_tasks` keeps only `queued` and `running` tasks.
+    - The question read must succeed. When vCenter could not read
+      `runtime.question` (a `missingSet` fault, for example no permission),
+      the read raises and names the fault type, so a read failure never
+      looks like "no question".
+    - The task read is best effort. When `recentTask` was unreadable or the
+      `Task.info` read fails, `running_tasks` is empty and `tasks_error`
+      says why; the question is still returned.
+    - When a long `running_tasks` list makes JSONFlux reduce the result to
+      a handle, the `result_objects` hint keeps the whole `question` (`id`,
+      `text`, `choices`, `default_choice`, `messages`) inline, so the caller
+      still has what it needs to answer.
   - **Answer** (`dangerous`, waits for approval). Params `vm` (moid only,
     checked against `[A-Za-z0-9-]+` because it goes into the URL path, and
     percent-encoded), `question_id` and `answer` (a choice key). It reads
@@ -683,10 +694,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     base `/sdk/vim25/{release}` through `_post_vmomi_json` (the ingested
     `/api/VirtualMachine/...` form 404s on vCenter 9.x). A
     `ConcurrentAccess` or `InvalidArgument` fault means someone closed the
-    question in the meantime and also returns `question_gone`.
+    question in the meantime and also returns `question_gone`. A question
+    vCenter could not read raises before anything is sent; a failed task
+    read does not stop the answer.
   - **Approval preview.** A preview builder shows the approver the
     question text, the label of the chosen answer, whether the question
-    is still open and the running tasks.
+    is still open, the running tasks and `tasks_error`.
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input
@@ -1656,9 +1669,10 @@ a host-pinning ISO:
   timeout: vCenter may still run the change, often because it waits on a
   question in the VM (for example a locked CD-ROM door). The result names
   the VM's queued or running tasks and the pending question, read with
-  `vm_wait_state.read_vm_wait_state` (best effort), and carries an
-  `error` issue, so the call is recorded as failed. Answer the question
-  with `vmware.vm.question.answer`.
+  `vm_wait_state.read_vm_wait_state` (best effort: when only the task
+  read fails, the question is kept and `tasks_error` says what could not
+  be read), and carries an `error` issue, so the call is recorded as
+  failed. Answer the question with `vmware.vm.question.answer`.
 
 All three register a live-read **from->to** preview builder in
 `_write_preview.py`, so the parked approval row names the current state

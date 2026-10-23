@@ -395,8 +395,8 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "output_shape": (
             "{status: removed|updated|disconnected|invalid_request|result_unknown, vm, "
             "cdrom, action, current_backing: {type, iso_file, ...}, state, "
-            "requested_backing, guidance}. On result_unknown also running_tasks and "
-            "vm_question."
+            "requested_backing, guidance}. On result_unknown also running_tasks, "
+            "tasks_error and vm_question."
         ),
         "next_step": (
             "Check the VM with vmware.vm.info. On result_unknown the change may still run: "

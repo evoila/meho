@@ -11,7 +11,10 @@ into a ``result_unknown`` answer that names the running tasks and the
 question, so the caller does not start the same change again.
 
 Both reads use ``RetrievePropertiesEx`` on the VI-JSON base through
-:meth:`VmwareRestConnector._post_vmomi_json`.
+:meth:`VmwareRestConnector._post_vmomi_json`. The question read must succeed:
+a property vCenter could not read (a ``missingSet`` fault) raises, so a read
+failure is never reported as "no question". The task read is best effort: when
+it fails, the result says so in ``tasks_error`` and keeps the question.
 """
 
 from __future__ import annotations
@@ -29,9 +32,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import _extract_vm_props
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
 )
+from meho_backplane.operations._preview import preview_failure_reason
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -91,6 +96,27 @@ def _moids(raw: Any) -> list[str]:
     return found
 
 
+def _unreadable_props(retrieve_result: Any) -> dict[str, str]:
+    """``{property path: fault type name}`` from the ``missingSet`` entries.
+
+    The HTTP call succeeds while vCenter still could not read a property (no
+    permission, a system error). Such a property is not in ``propSet``; it is
+    in the object's ``missingSet`` with a fault. A property that is simply
+    unset has no ``missingSet`` entry. Only the fault type name is kept, never
+    the fault text, which can echo a private identifier (#3708).
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    unreadable: dict[str, str] = {}
+    for obj in objects if isinstance(objects, list) else []:
+        if not isinstance(obj, dict):
+            continue
+        for entry in obj.get("missingSet") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                unreadable[entry["path"]] = fault_type_name(entry.get("fault")) or "unknown fault"
+    return unreadable
+
+
 def _task_infos(retrieve_result: Any) -> dict[str, dict[str, Any]]:
     payload = _unwrap_value(retrieve_result)
     objects = payload.get("objects", []) if isinstance(payload, dict) else payload
@@ -120,23 +146,67 @@ async def read_vm_wait_state(
     their ``Task.info`` and keeps the ``queued`` and ``running`` ones. An unset
     ``runtime.question`` is left out of the answer by vCenter, so it reads as
     ``None``.
+
+    When vCenter could not read ``runtime.question`` (a ``missingSet`` fault,
+    for example no permission), this raises :class:`RuntimeError`: the caller
+    must not take a read failure for "no question". The task read is best
+    effort. When ``recentTask`` was unreadable or the ``Task.info`` read fails,
+    ``running_tasks`` is empty and ``tasks_error`` says why; the question is
+    still returned.
     """
-    props = _extract_vm_props(
-        await connector._post_vmomi_json(
-            target,
-            _RETRIEVE_PROPERTIES_PATH,
-            operator=operator,
-            json=retrieve_properties_body(
-                _VIRTUAL_MACHINE_MO_TYPE,
-                [vm_moid],
-                (_PROP_NAME, _PROP_QUESTION, _PROP_RECENT_TASK),
-            ),
-            promote_managed_object_not_found=True,
-        )
+    vm_result = await connector._post_vmomi_json(
+        target,
+        _RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _VIRTUAL_MACHINE_MO_TYPE,
+            [vm_moid],
+            (_PROP_NAME, _PROP_QUESTION, _PROP_RECENT_TASK),
+        ),
+        promote_managed_object_not_found=True,
     )
-    running: list[dict[str, Any]] = []
-    task_moids = _moids(props.get(_PROP_RECENT_TASK))
-    if task_moids:
+    unreadable = _unreadable_props(vm_result)
+    if _PROP_QUESTION in unreadable:
+        raise RuntimeError(
+            f"vCenter could not read {_PROP_QUESTION} of {vm_moid} "
+            f"({unreadable[_PROP_QUESTION]}); whether the VM waits on a question is unknown"
+        )
+    props = _extract_vm_props(vm_result)
+    tasks_error: str | None = None
+    if _PROP_RECENT_TASK in unreadable:
+        fault = unreadable[_PROP_RECENT_TASK]
+        tasks_error = f"vCenter could not read {_PROP_RECENT_TASK} ({fault})"
+    running, task_error = await _read_running_tasks(
+        connector, operator, target, _moids(props.get(_PROP_RECENT_TASK))
+    )
+    tasks_error = tasks_error or task_error
+    if tasks_error is not None:
+        _log.warning("vmware_vm_tasks_read_failed", target=target.name, vm=vm_moid)
+    question = _parse_question(props.get(_PROP_QUESTION))
+    return {
+        "vm": vm_moid,
+        "name": props.get(_PROP_NAME),
+        "pending": question is not None,
+        "question": question,
+        "running_tasks": running,
+        "tasks_error": tasks_error,
+    }
+
+
+async def _read_running_tasks(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    task_moids: list[str],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """``(running tasks, error)``: the queued and running ones of *task_moids*.
+
+    Best effort: when the ``Task.info`` read fails, the list is empty and the
+    error names why (redacted and shortened like a preview read error).
+    """
+    if not task_moids:
+        return [], None
+    try:
         infos = _task_infos(
             await connector._post_vmomi_json(
                 target,
@@ -145,26 +215,22 @@ async def read_vm_wait_state(
                 json=build_task_info_retrieve_params(task_moids),
             )
         )
-        for moid in task_moids:
-            info = infos.get(moid, {})
-            if info.get("state") in _RUNNING_STATES:
-                running.append(
-                    {
-                        "task": moid,
-                        "operation": info.get("descriptionId"),
-                        "state": info.get("state"),
-                        "progress": _int_or_none(info.get("progress")),
-                        "start_time": info.get("startTime"),
-                    }
-                )
-    question = _parse_question(props.get(_PROP_QUESTION))
-    return {
-        "vm": vm_moid,
-        "name": props.get(_PROP_NAME),
-        "pending": question is not None,
-        "question": question,
-        "running_tasks": running,
-    }
+    except Exception as exc:
+        return [], f"the task read failed: {preview_failure_reason(exc)}"
+    running: list[dict[str, Any]] = []
+    for moid in task_moids:
+        info = infos.get(moid, {})
+        if info.get("state") in _RUNNING_STATES:
+            running.append(
+                {
+                    "task": moid,
+                    "operation": info.get("descriptionId"),
+                    "state": info.get("state"),
+                    "progress": _int_or_none(info.get("progress")),
+                    "start_time": info.get("startTime"),
+                }
+            )
+    return running, None
 
 
 async def device_change_result_unknown(
@@ -178,15 +244,24 @@ async def device_change_result_unknown(
     vCenter may still run the change, often because it waits on a question in
     the VM. A plain timeout made the next try collide with the running task, so
     the result names the VM's running tasks and its pending question. The read
-    is best effort: when it fails, the result still says the outcome is unknown.
-    The ``error`` issue makes the dispatcher record the call as failed.
+    is best effort: when it fails, the result still says the outcome is unknown,
+    and ``tasks_error`` says what could not be read. When only the task read
+    failed, the question is kept. The ``error`` issue makes the dispatcher
+    record the call as failed.
     """
     try:
         state = await read_vm_wait_state(connector, operator, target, vm_moid)
     except Exception as exc:
         _log.warning("vmware_vm_wait_state_read_failed", vm=vm_moid, error_type=type(exc).__name__)
-        state = {"question": None, "running_tasks": []}
-    tasks = ", ".join(t["task"] for t in state["running_tasks"]) or "none found"
+        state = {
+            "question": None,
+            "running_tasks": [],
+            "tasks_error": f"the VM read failed: {preview_failure_reason(exc)}",
+        }
+    if state["tasks_error"] is not None:
+        tasks = f"unknown, {state['tasks_error']}"
+    else:
+        tasks = ", ".join(t["task"] for t in state["running_tasks"]) or "none found"
     guidance = (
         f"The change did not answer in time and may still run (vCenter tasks: {tasks}). "
         "Do not start it again yet."
@@ -201,6 +276,7 @@ async def device_change_result_unknown(
     return {
         "status": "result_unknown",
         "running_tasks": state["running_tasks"],
+        "tasks_error": state["tasks_error"],
         "vm_question": state["question"],
         "guidance": guidance,
         "issues": [

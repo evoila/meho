@@ -1064,6 +1064,41 @@ def test_preserved_objects_rejects_nested_values_and_obeys_byte_budget() -> None
     assert preserved["result_object_truncations"] == {"leaf": ["san"]}
 
 
+def test_preserved_objects_keeps_a_short_list_of_flat_objects() -> None:
+    """A VM question's ``choices`` (flat scalar objects) rides inline; deeper nesting does not."""
+    payload = {
+        "question": {
+            "id": "_vmx1",
+            "choices": [{"key": "0", "label": "Yes"}, {"key": "1", "label": "No"}],
+            "deep": [{"key": "0", "detail": {"nested": True}}],
+        },
+        "running_tasks": [],
+    }
+    context = {"result_objects": {"objects": {"question": ["id", "choices", "deep"]}}}
+
+    preserved = _preserved_objects(payload, "running_tasks", context)
+    assert preserved == {
+        "question": {
+            "id": "_vmx1",
+            "choices": [{"key": "0", "label": "Yes"}, {"key": "1", "label": "No"}],
+        }
+    }
+
+
+def test_preserved_objects_cuts_a_long_list_of_flat_objects_and_says_so() -> None:
+    payload = {
+        "question": {"choices": [{"key": str(i), "label": "x" * 100} for i in range(40)]},
+        "running_tasks": [],
+    }
+    context = {"result_objects": {"objects": {"question": ["choices"]}}}
+
+    preserved = _preserved_objects(payload, "running_tasks", context)
+    kept = preserved["question"]["choices"]
+    assert 0 < len(kept) < 40
+    assert kept[0] == {"key": "0", "label": "x" * 100}
+    assert preserved["result_object_truncations"] == {"question": ["choices"]}
+
+
 def test_preserved_objects_keeps_normal_leaf_identity_and_marks_huge_values() -> None:
     """Normal 1 KiB SANs stay verbatim; exceptional values remain recoverable."""
     normal_san = "dns:" + "a" * 990

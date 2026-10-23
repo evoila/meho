@@ -12,6 +12,7 @@ connector records the calls, so no vCenter is needed.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -36,6 +37,8 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (
 )
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.settings import get_settings
 
 _QUESTION = {
     "_typeName": "VirtualMachineQuestionInfo",
@@ -73,15 +76,21 @@ class _Target:
     tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
-def _vm_result(props: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "objects": [
-            {
-                "obj": {"type": "VirtualMachine", "value": "vm-42"},
-                "propSet": [{"name": k, "val": v} for k, v in props.items()],
-            }
-        ]
+def _vm_result(props: dict[str, Any], missing: dict[str, str] | None = None) -> dict[str, Any]:
+    obj: dict[str, Any] = {
+        "obj": {"type": "VirtualMachine", "value": "vm-42"},
+        "propSet": [{"name": k, "val": v} for k, v in props.items()],
     }
+    if missing:
+        obj["missingSet"] = [
+            {
+                "_typeName": "MissingProperty",
+                "path": path,
+                "fault": {"_typeName": "LocalizedMethodFault", "fault": {"_typeName": fault}},
+            }
+            for path, fault in missing.items()
+        ]
+    return {"objects": [obj]}
 
 
 def _tasks_result(infos: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -109,11 +118,15 @@ class _FakeConnector:
         tasks: dict[str, dict[str, Any]] | None = None,
         answer_error: Exception | None = None,
         write_error: Exception | None = None,
+        task_read_error: Exception | None = None,
+        missing: dict[str, str] | None = None,
     ) -> None:
         self.question = question
         self.tasks = tasks or {}
         self.answer_error = answer_error
         self.write_error = write_error
+        self.task_read_error = task_read_error
+        self.missing = missing
         self.vmomi_calls: list[tuple[str, dict[str, Any] | None]] = []
         self.write_calls: list[str] = []
 
@@ -144,6 +157,8 @@ class _FakeConnector:
             return None
         prop_spec = json["specSet"][0]["propSet"][0]
         if prop_spec["type"] == "Task":
+            if self.task_read_error is not None:
+                raise self.task_read_error
             return _tasks_result(self.tasks)
         props: dict[str, Any] = {"name": "rhel-1"}
         if self.question is not None:
@@ -153,7 +168,7 @@ class _FakeConnector:
                 "_typeName": "ArrayOfManagedObjectReference",
                 "_value": [{"type": "Task", "value": m} for m in self.tasks],
             }
-        return _vm_result(props)
+        return _vm_result(props, self.missing)
 
 
 _RUNNING = {"state": "running", "descriptionId": "VirtualMachine.reconfigure", "progress": 10}
@@ -204,8 +219,82 @@ async def test_get_without_question_or_tasks_makes_one_read() -> None:
         "pending": False,
         "question": None,
         "running_tasks": [],
+        "tasks_error": None,
     }
     assert len(conn.vmomi_calls) == 1
+
+
+@pytest.fixture
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The reducer reads its size limits from settings, which need these env vars."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_settings_env")
+async def test_get_over_4kb_keeps_the_whole_question_inline_through_the_reducer() -> None:
+    """A long task list reduces the result to a handle; the question survives.
+
+    Runs the real JSONFlux reducer with the op's ``result_objects`` hint, as
+    the dispatcher does. Without the hint the reducer keeps only the scalar
+    siblings of ``running_tasks`` and drops ``question``.
+    """
+    tasks = {f"task-{i}": {**_RUNNING, "startTime": "2026-10-24T10:00:00Z"} for i in range(40)}
+    conn = _FakeConnector(tasks=tasks)
+    out = await vm_question_get_impl(conn, _operator(), _Target(), {"vm": "vm-42"})  # type: ignore[arg-type]
+    assert len(json.dumps(out)) > 4096
+    assert len(out["running_tasks"]) == 40
+
+    context = {
+        "op_id": VMWARE_VM_QUESTION_GET_OP.op_id,
+        "result_objects": VMWARE_VM_QUESTION_GET_OP.llm_instructions["result_objects"],  # type: ignore[index]
+    }
+    reduced, handle = await JsonFluxReducer(sample_size=5).reduce(out, None, context)
+
+    assert handle is not None
+    assert reduced["row_count"] == 40
+    assert reduced["question"] == out["question"]
+    assert reduced["pending"] is True
+    assert reduced["vm"] == "vm-42"
+    assert reduced["tasks_error"] is None
+    assert "result_object_truncations" not in reduced
+
+
+@pytest.mark.asyncio
+async def test_get_keeps_the_question_when_only_the_task_read_fails() -> None:
+    conn = _FakeConnector(tasks={"task-7": _RUNNING}, task_read_error=httpx.ConnectError("down"))
+    out = await vm_question_get_impl(conn, _operator(), _Target(), {"vm": "vm-42"})  # type: ignore[arg-type]
+
+    assert out["pending"] is True
+    assert out["question"]["id"] == "_vmx1"
+    assert out["running_tasks"] == []
+    assert out["tasks_error"] is not None
+    assert "ConnectError" in out["tasks_error"]
+    assert len(conn.vmomi_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_reports_an_unreadable_task_list_without_a_second_read() -> None:
+    conn = _FakeConnector(missing={"recentTask": "NoPermission"})
+    out = await vm_question_get_impl(conn, _operator(), _Target(), {"vm": "vm-42"})  # type: ignore[arg-type]
+
+    assert out["question"]["id"] == "_vmx1"
+    assert out["running_tasks"] == []
+    assert out["tasks_error"] == "vCenter could not read recentTask (NoPermission)"
+    assert len(conn.vmomi_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_fails_when_vcenter_cannot_read_the_question() -> None:
+    """An unreadable ``runtime.question`` is a failure, not ``pending=false``."""
+    conn = _FakeConnector(question=None, missing={"runtime.question": "NoPermission"})
+    with pytest.raises(RuntimeError, match=r"runtime\.question .*NoPermission"):
+        await vm_question_get_impl(conn, _operator(), _Target(), {"vm": "vm-42"})  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -224,6 +313,33 @@ async def test_answer_sends_answervm_on_the_vijson_path() -> None:
         "/VirtualMachine/vm-42/AnswerVM",
         {"questionId": "_vmx1", "answerChoice": "0"},
     )
+
+
+@pytest.mark.asyncio
+async def test_answer_still_answers_when_only_the_task_read_fails() -> None:
+    conn = _FakeConnector(tasks={"task-7": _RUNNING}, task_read_error=httpx.ConnectError("down"))
+    out = await vm_question_answer_impl(
+        conn,  # type: ignore[arg-type]
+        _operator(),
+        _Target(),
+        {"vm": "vm-42", "question_id": "_vmx1", "answer": "0"},
+    )
+
+    assert out["status"] == "answered"
+    assert conn.vmomi_calls[-1][0] == "/VirtualMachine/vm-42/AnswerVM"
+
+
+@pytest.mark.asyncio
+async def test_answer_sends_nothing_when_vcenter_cannot_read_the_question() -> None:
+    conn = _FakeConnector(question=None, missing={"runtime.question": "NoPermission"})
+    with pytest.raises(RuntimeError, match=r"runtime\.question"):
+        await vm_question_answer_impl(
+            conn,  # type: ignore[arg-type]
+            _operator(),
+            _Target(),
+            {"vm": "vm-42", "question_id": "_vmx1", "answer": "0"},
+        )
+    assert not any(path.endswith("/AnswerVM") for path, _ in conn.vmomi_calls)
 
 
 @pytest.mark.asyncio
@@ -324,7 +440,20 @@ async def test_preview_shows_the_question_and_the_answer_label() -> None:
     assert preview["answer_label"] == "Yes"
     assert "Yes" in preview["summary"] and "CD-ROM door" in preview["summary"]
     assert [t["task"] for t in preview["running_tasks"]] == ["task-7"]
+    assert preview["tasks_error"] is None
     assert _PREVIEW_BUILDERS[VMWARE_VM_QUESTION_ANSWER_OP.op_id] is vm_question_answer_preview
+
+
+@pytest.mark.asyncio
+async def test_preview_still_shows_the_question_when_the_task_read_fails() -> None:
+    conn = _FakeConnector(tasks={"task-7": _RUNNING}, task_read_error=httpx.ConnectError("down"))
+    preview = await vm_question_answer_preview(
+        _preview_ctx(conn, {"vm": "vm-42", "question_id": "_vmx1", "answer": "0"})
+    )
+    assert preview is not None
+    assert preview["question_still_open"] is True
+    assert preview["running_tasks"] == []
+    assert "ConnectError" in preview["tasks_error"]
 
 
 @pytest.mark.asyncio
@@ -367,11 +496,35 @@ async def test_cdrom_change_that_times_out_says_the_result_is_unknown() -> None:
 
     assert out["status"] == "result_unknown"
     assert [t["task"] for t in out["running_tasks"]] == ["task-7"]
+    assert out["tasks_error"] is None
     assert out["vm_question"]["id"] == "_vmx1"
     assert "task-7" in out["guidance"]
     assert "vmware.vm.question.answer" in out["guidance"]
     assert [i["severity"] for i in out["issues"]] == ["error"]
     assert out["current_backing"] == {"type": "ISO_FILE", "iso_file": "[ds1] a.iso"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_gate")
+async def test_cdrom_timeout_keeps_the_question_when_only_the_task_read_fails() -> None:
+    conn = _FakeConnector(
+        tasks={"task-7": _RUNNING},
+        write_error=httpx.ReadTimeout("timed out"),
+        task_read_error=httpx.ConnectError("down"),
+    )
+    out = await vm_device_cdrom_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "cdrom": "16000", "action": "remove"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert out["status"] == "result_unknown"
+    assert out["vm_question"]["id"] == "_vmx1"
+    assert out["running_tasks"] == []
+    assert "ConnectError" in out["tasks_error"]
+    assert "unknown" in out["guidance"]
+    assert "vmware.vm.question.answer" in out["guidance"]
 
 
 @pytest.mark.asyncio
@@ -392,7 +545,8 @@ async def test_cdrom_timeout_still_says_unknown_when_the_follow_up_read_fails() 
     assert out["status"] == "result_unknown"
     assert out["running_tasks"] == []
     assert out["vm_question"] is None
-    assert "none found" in out["guidance"]
+    assert "ConnectError" in out["tasks_error"]
+    assert "unknown" in out["guidance"]
 
 
 def test_both_ops_are_registered_with_the_right_safety() -> None:

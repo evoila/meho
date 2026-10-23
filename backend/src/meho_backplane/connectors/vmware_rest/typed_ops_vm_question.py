@@ -9,7 +9,8 @@ Disconnect anyway and override the lock?". The change waits until someone
 answers. Two typed operations cover this:
 
 * ``vmware.vm.question.get`` (``safe``) reads ``VirtualMachine.runtime.question``
-  and the VM's running tasks.
+  and the VM's running tasks. The question read must succeed; the task read
+  is best effort and reports its failure in ``tasks_error``.
 * ``vmware.vm.question.answer`` (``dangerous``, waits for approval) calls
   ``VirtualMachine.AnswerVM``. It only answers the question the approver saw:
   it reads the question again and stops when the question id changed or the
@@ -92,6 +93,7 @@ async def vm_question_get_impl(
         vm=vm_moid,
         pending=state["pending"],
         running_tasks=len(state["running_tasks"]),
+        tasks_read=state["tasks_error"] is None,
     )
     return state
 
@@ -127,6 +129,8 @@ async def vm_question_answer_impl(
     Reads the question again before the answer. A different question id, or
     no question, returns ``question_gone``; an answer that is not one of the
     choice keys returns ``invalid_answer``. In both cases nothing is sent.
+    A question vCenter could not read raises, so nothing is sent either. A
+    failed task read does not stop the answer.
     ``AnswerVM`` returns no data (HTTP 204). A ``ConcurrentAccess`` or
     ``InvalidArgument`` fault means the question closed in the meantime, so
     it also returns ``question_gone``.
@@ -207,6 +211,7 @@ async def vm_question_answer_preview(ctx: PreviewContext) -> dict[str, Any] | No
         "answer": ctx.params.get("answer"),
         "answer_label": label,
         "running_tasks": state["running_tasks"],
+        "tasks_error": state["tasks_error"],
     }
 
 
@@ -295,11 +300,27 @@ _GET_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
         "question": _QUESTION_SCHEMA,
         "running_tasks": {
             "type": "array",
-            "description": "Queued or running vCenter tasks on this VM.",
+            "description": (
+                "Queued or running vCenter tasks on this VM. Empty when tasks_error is set."
+            ),
             "items": _TASK_ROW_SCHEMA,
         },
+        "tasks_error": {
+            "type": ["string", "null"],
+            "description": (
+                "Why the running tasks could not be read; null when they were read. "
+                "The question is still valid."
+            ),
+        },
     },
-    "required": ["vm", "pending", "question", "running_tasks"],
+    "required": ["vm", "pending", "question", "running_tasks", "tasks_error"],
+}
+
+#: Fields of ``question`` that stay inline when a long ``running_tasks`` list
+#: makes JSONFlux reduce the result to a handle. Without this the caller would
+#: lose the question id and choices it needs for ``vmware.vm.question.answer``.
+_GET_RESULT_OBJECTS: Final[dict[str, Any]] = {
+    "objects": {"question": ["id", "text", "choices", "default_choice", "messages"]}
 }
 
 _ANSWER_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
@@ -365,7 +386,8 @@ VMWARE_VM_QUESTION_GET_OP = VmwareTypedOp(
     description=(
         "Reads the pending question of one VM (runtime.question) with its possible "
         "answers, and the queued or running vCenter tasks on the VM. By moid (vm) or "
-        "name. Read-only."
+        "name. Read-only. Fails when vCenter cannot read the question; a failed task "
+        "read is reported in tasks_error."
     ),
     parameter_schema=_GET_PARAMETER_SCHEMA,
     response_schema=_GET_RESPONSE_SCHEMA,
@@ -383,13 +405,16 @@ VMWARE_VM_QUESTION_GET_OP = VmwareTypedOp(
         "output_shape": (
             "{vm, name, pending, question: {id, text, choices: [{key, label, summary}], "
             "default_choice, messages: [{id, text}]} | null, running_tasks: [{task, "
-            "operation, state, progress, start_time}]}."
+            "operation, state, progress, start_time}], tasks_error: string | null}."
         ),
         "next_step": (
             "When pending is true, show the question text and choices to the user, then "
             "call vmware.vm.question.answer with question.id and the chosen key. Do not "
-            "start the same change again while running_tasks is not empty."
+            "start the same change again while running_tasks is not empty. When "
+            "tasks_error is set, the running tasks are unknown: treat the change as "
+            "still running."
         ),
+        "result_objects": _GET_RESULT_OBJECTS,
     },
 )
 

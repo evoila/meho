@@ -61,7 +61,10 @@ with the same version rule as the 9.1 login: version 9.1 or newer gets
 `v1/`. Anything else gets `vcf/`: version 9.0, no version, or a label
 that is not a product version (the fingerprint can record the
 `2021-07-15` API date). 9.1 still answers the `vcf/` path, so such a
-target keeps working. Set the target's version to get the `v1/` path.
+target keeps working. The version comes from the probe first, and from
+the operator's `version` value only when the probe recorded none. Today
+the probe records the API date, so a probed target keeps the `vcf/`
+path; the 9.1 login has the same limit.
 The `Accept` header stays `application/json;version=9.0.0` on every
 version: the reference says the call was added in 9.0.0, and a client
 may pick an older API version. Every hand-coded `METHOD:/path` in

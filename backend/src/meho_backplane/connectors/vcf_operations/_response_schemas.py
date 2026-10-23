@@ -11,8 +11,10 @@ payload through as it is.
 Field names come from the pinned VCF Operations 9.0 Suite API file
 (``vcf-operations-openapi.ingestable.json``, ``components.schemas``:
 ``version``, ``alerts`` / ``alert``, ``resources`` / ``resource``,
-``stats-of-resources`` / ``stats``). The 8.x connector shares these
-operations; no 8.x Suite API file is on the spec shelf.
+``stats-of-resources`` / ``stats``, ``resource-kind-attributes`` /
+``resource-kind-attribute``). The 8.x connector shares these operations,
+except the resource kind properties read, which is 9.x only; no 8.x Suite
+API file is on the spec shelf.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from typing import Any
 __all__ = [
     "VROPS_ALERT_LIST_RESPONSE",
     "VROPS_LIVENESS_RESPONSE",
+    "VROPS_RESOURCE_KIND_PROPERTIES_RESPONSE",
     "VROPS_RESOURCE_QUERY_RESPONSE",
     "VROPS_RESOURCE_STATS_RESPONSE",
 ]
@@ -204,6 +207,31 @@ VROPS_RESOURCE_STATS_RESPONSE: dict[str, Any] = _object(
                             },
                         ),
                     },
+                ),
+            },
+        ),
+    },
+)
+
+VROPS_RESOURCE_KIND_PROPERTIES_RESPONSE: dict[str, Any] = _object(
+    "The properties one resource kind has (vendor resource-kind-attributes object).",
+    {
+        "resourceTypeAttributes": _list_of(
+            "One row per property.",
+            {
+                "key": _field("string", "The property key, e.g. config|guestFullName."),
+                "name": _field("string", "The display name of the property."),
+                "description": _field("string", "What the property holds."),
+                "dataType2": _field(
+                    "string",
+                    "The data type: STRING, INTEGER, HOST, IP, ENUM, PASSWORD, BOOLEAN, "
+                    "FLOAT or UNKNOWN.",
+                ),
+                "dataType": _field("string", "The old data type field (deprecated)."),
+                "unit": _field("string", "The unit of the value, if any."),
+                "property": _field("boolean", "True when the row is a property."),
+                "defaultMonitored": _field(
+                    "boolean", "True when the property is collected by default."
                 ),
             },
         ),

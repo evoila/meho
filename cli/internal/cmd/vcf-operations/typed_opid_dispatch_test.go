@@ -68,10 +68,11 @@ var ingestedDispatchCases = []struct {
 // typed op that is not classified here — the "typed op ⇒ repoint the
 // CLI verb ⇒ pin it" contract (#2942).
 var typedOpCLICoverage = map[string]string{
-	"vrops.liveness":       "about",
-	"vrops.alert.list":     "alert list",
-	"vrops.resource.query": "", // agent surface only (POST query; `resource list` is the plain GET list)
-	"vrops.resource.stats": "", // agent surface only
+	"vrops.liveness":                 "about",
+	"vrops.alert.list":               "alert list",
+	"vrops.resource.query":           "", // agent surface only (POST query; `resource list` is the plain GET list)
+	"vrops.resource.stats":           "", // agent surface only
+	"vrops.resource_kind.properties": "", // no verb; use `operation call vrops.resource_kind.properties`
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed vROps

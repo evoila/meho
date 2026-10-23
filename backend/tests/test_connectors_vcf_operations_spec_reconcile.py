@@ -13,13 +13,14 @@ lives in the required unit sweep per the lane-placement rule in
 the shelf is unconfigured (``tests/_spec_shelf.py`` contract).
 
 The declared set is introspected from the connector's live constants
-(the #2944 pattern — never a hardcoded mirror): the five ``_*_PATH``
+(the #2944 pattern — never a hardcoded mirror): the six ``_*_PATH``
 module constants of
 :mod:`~meho_backplane.connectors.vcf_operations.connector` — the
 session mint (``POST /suite-api/api/auth/token/acquire``, issued by the
 shared ``vcf_session_login`` helper's ``client.post``), the
 version/liveness surface ``fingerprint`` / ``probe`` / ``vrops.liveness``
-all read, and the three remaining typed reads (#2303 / #2838). The HTTP
+all read, the three remaining typed reads (#2303 / #2838), and the
+resource kind properties read. The HTTP
 method cannot be introspected from a bare path string, so
 :data:`_METHOD_BY_CONSTANT` declares it per constant and a guard test
 pins the constant-name set — a new or renamed ``_*_PATH`` constant
@@ -52,7 +53,7 @@ ingest fails identically. The shelf therefore pins
 the three empty arrays dropped (a semantic no-op), deterministic recipe
 + sha256 in the shelf's ``MANIFEST.md`` — and this lane parses that
 file, byte-for-byte what an operator ingest consumes (the nsx-9.0
-derived-artifact precedent). All five op_ids are served; no path
+derived-artifact precedent). All six op_ids are served; no path
 repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -80,6 +81,7 @@ _METHOD_BY_CONSTANT: dict[str, str] = {
     "_ALERTS_PATH": "GET",
     "_RESOURCES_QUERY_PATH": "POST",
     "_RESOURCES_STATS_LATEST_PATH": "GET",
+    "_RESOURCE_KIND_PROPERTIES_PATH": "GET",
 }
 
 
@@ -112,6 +114,7 @@ def test_path_constants_are_all_discovered_and_method_mapped() -> None:
             "_ALERTS_PATH",
             "_RESOURCES_QUERY_PATH",
             "_RESOURCES_STATS_LATEST_PATH",
+            "_RESOURCE_KIND_PROPERTIES_PATH",
             "_SESSION_ACQUIRE_PATH",
             "_VERSIONS_CURRENT_PATH",
         ]

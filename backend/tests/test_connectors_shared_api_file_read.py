@@ -27,6 +27,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+import yaml
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.api_file_read import (
@@ -38,11 +39,12 @@ from meho_backplane.connectors._shared.api_file_read import (
     assert_not_redacted,
     decode_text,
     fetch_without_redirects,
-    redact_text,
     redirect_target,
     split_parts,
     text_items,
+    text_redactor,
 )
+from meho_backplane.connectors._shared.api_file_secrets import check_api_file
 from meho_backplane.settings import get_settings
 
 _BASE = "https://files.test.invalid"
@@ -233,18 +235,14 @@ def test_text_the_redaction_rules_would_change_stops_without_the_value() -> None
     assert "made-up-token-value" not in str(caught.value)
 
 
-def test_redact_text_replaces_matches_once_and_counts_them() -> None:
-    clean, count = redact_text(
-        "openapi: 3.0.1\n", _operator(), connector_id="made-rest-1.0", op_id="made.up.get"
-    )
-    assert (clean, count) == ("openapi: 3.0.1\n", 0)
+def test_text_redactor_replaces_matches_in_one_value_and_counts_them() -> None:
+    rule = text_redactor(_operator(), connector_id="made-rest-1.0", op_id="made.up.get")
+    assert rule("openapi: 3.0.1\n") == ("openapi: 3.0.1\n", 0)
     text = (
         "Example:\nAuthorization: Basic bWFkZS11cDpleGFtcGxl\n"
         "Also: Authorization: Bearer made-up-token-value-0123456789\n"
     )
-    redacted, count = redact_text(
-        text, _operator(), connector_id="made-rest-1.0", op_id="made.up.get"
-    )
+    redacted, count = rule(text)
     assert count == 2
     assert redacted.count("[REDACTED:authorization_header]") == 2
     assert "bWFkZS11cDpleGFtcGxl" not in redacted
@@ -254,6 +252,17 @@ def test_redact_text_replaces_matches_once_and_counts_them() -> None:
     assert_not_redacted(
         answer, redacted, _operator(), connector_id="made-rest-1.0", op_id="made.up.get"
     )
+
+
+def test_text_redactor_as_the_text_rule_keeps_the_file_format() -> None:
+    """A plain YAML scalar that becomes a placeholder is written back quoted."""
+    rule = text_redactor(_operator(), connector_id="made-rest-1.0", op_id="made.up.get")
+    document = "info:\n  note: Bearer made-up-token-value-0123456789\n  count: 3\n"
+    checked = check_api_file(
+        document, content_type="application/yaml", path="/f.yaml", text_rule=rule
+    )
+    assert checked.secrets_replaced == 1
+    assert yaml.safe_load(checked.text) == {"info": {"note": "[REDACTED:bearer_token]", "count": 3}}
 
 
 @pytest.mark.parametrize(

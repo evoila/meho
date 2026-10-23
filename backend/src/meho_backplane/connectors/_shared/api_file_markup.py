@@ -38,6 +38,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
     ApiFileFormatError,
     Scrubber,
+    TextRule,
     dump_json,
 )
 
@@ -80,7 +81,7 @@ _Declaration = tuple[str, str]
 # ---------------------------------------------------------------------------
 
 
-def check_xml(text: str, path: str) -> tuple[str, int]:
+def check_xml(text: str, path: str, text_rule: TextRule | None = None) -> tuple[str, int]:
     declared_on: dict[int, list[_Declaration]] = {}
     pending: list[_Declaration] = []
     try:
@@ -100,7 +101,7 @@ def check_xml(text: str, path: str) -> tuple[str, int]:
         raise ApiFileFormatError(
             f"{path} is XML that MEHO refuses to parse ({type(exc).__name__}); not returned"
         ) from None
-    writer = _XmlWriter(declared_on)
+    writer = _XmlWriter(declared_on, text_rule)
     out: list[str] = []
     writer.element(root, out, ())
     return "".join(out), writer.scrubber.count
@@ -128,8 +129,10 @@ class _XmlWriter:
     the file made on it, in order.
     """
 
-    def __init__(self, declared_on: dict[int, list[_Declaration]]) -> None:
-        self.scrubber = Scrubber()
+    def __init__(
+        self, declared_on: dict[int, list[_Declaration]], text_rule: TextRule | None = None
+    ) -> None:
+        self.scrubber = Scrubber(text_rule=text_rule)
         self._declared_on = declared_on
 
     def element(self, el: Any, out: list[str], outer: tuple[list[_Declaration], ...]) -> None:
@@ -335,11 +338,11 @@ class _HtmlTree(HTMLParser):
         self._open[-1].children.append(_HtmlNode("!", [], [decl]))
 
 
-def check_html(text: str, _path: str) -> tuple[str, int]:
+def check_html(text: str, _path: str, text_rule: TextRule | None = None) -> tuple[str, int]:
     parser = _HtmlTree()
     parser.feed(text)
     parser.close()
-    scrubber = Scrubber()
+    scrubber = Scrubber(text_rule=text_rule)
     out: list[str] = []
     _html_children(parser.root, out, scrubber)
     return "".join(out), scrubber.count

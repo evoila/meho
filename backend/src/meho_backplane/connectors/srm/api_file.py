@@ -26,14 +26,16 @@ steps; a file too big for one result handle stops with its size.
 The file is parsed and written back by
 :func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`,
 which replaces every value under a secret name (``[REDACTED:param_name]``)
-and refuses a file that does not parse. Then MEHO's general
-secret-redaction rules run once over the whole copy
-(:func:`~meho_backplane.connectors._shared.api_file_read.redact_text`):
+and refuses a file that does not parse. MEHO's general secret-redaction
+rules run on every parsed text value before the file is written back
+(:func:`~meho_backplane.connectors._shared.api_file_read.text_redactor`):
 the SRM file has ``Authorization: Basic ...`` examples in its description
-text, and these come back as ``[REDACTED:authorization_header]``.
-``size``, ``sha256`` and the parts describe this final copy;
-``secrets_replaced`` counts every replaced value. A copy that the rules
-would still change stops, so ``sha256`` always names what the caller gets.
+text, and these come back as ``[REDACTED:authorization_header]``. Because
+the rules see the values and not the written file, the copy keeps its
+format and every value keeps its type. ``size``, ``sha256`` and the parts
+describe this final copy; ``secrets_replaced`` counts every replaced
+value. A copy that the rules would still change stops, so ``sha256``
+always names what the caller gets.
 """
 
 from __future__ import annotations
@@ -49,9 +51,9 @@ from meho_backplane.connectors._shared.api_file_read import (
     assert_not_redacted,
     decode_text,
     fetch_without_redirects,
-    redact_text,
     redirect_target,
     text_items,
+    text_redactor,
 )
 from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
 from meho_backplane.connectors.srm.session import SrmTargetLike
@@ -122,10 +124,13 @@ async def srm_api_file_get_impl(
         response.raise_for_status()
 
     content_type = response.headers.get("content-type")
-    checked = check_api_file(decode_text(response, path), content_type=content_type, path=path)
-    text, redactions = redact_text(
-        checked.text, operator, connector_id=SRM_CONNECTOR_ID, op_id=_OP_ID
+    checked = check_api_file(
+        decode_text(response, path),
+        content_type=content_type,
+        path=path,
+        text_rule=text_redactor(operator, connector_id=SRM_CONNECTOR_ID, op_id=_OP_ID),
     )
+    text = checked.text
     body = text.encode("utf-8")
     items = text_items(body)
     redirect_to, redirect_replaced = _redirect(response)
@@ -137,7 +142,7 @@ async def srm_api_file_get_impl(
         "content_type": content_type,
         "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
-        "secrets_replaced": checked.secrets_replaced + redactions + redirect_replaced,
+        "secrets_replaced": checked.secrets_replaced + redirect_replaced,
         "version": version.version,
         "build": version.build,
         "version_error": version.error,

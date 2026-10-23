@@ -21,17 +21,22 @@ Every API file read uses this helper (#4780): `fleet.api_file.get`,
 `hcx.api_file.get` and `vcenter.sso_admin.api_file.get` on main, and the
 reads of #4690 (VCF Operations) and #4731 (Aria Automation 8) after it.
 New API file reads use it from the start; `srm.api_file.get` does. That
-read also runs the general redaction rules once over the checked copy
-(`redact_text` in `connectors/_shared/api_file_read.py`), so text they
-match comes back as a placeholder instead of stopping the read.
+read also gives the helper MEHO's general redaction rules as a text rule
+(`text_redactor` in `connectors/_shared/api_file_read.py`), so text they
+match comes back as a placeholder instead of stopping the read. The rule
+runs on each parsed text value before the copy is written back, so the
+copy keeps its format and every value keeps its type.
 
 ## Key types
 
-- `check_api_file(text, *, content_type, path) -> CheckedApiFile` — the
-  entry point. Returns the checked copy (`text`) and the number of
-  replaced values (`secrets_replaced`). Raises `ApiFileFormatError` when
-  the format is unknown or the file does not parse. An empty file comes
-  back empty.
+- `check_api_file(text, *, content_type, path, text_rule=None) ->
+  CheckedApiFile` — the entry point. Returns the checked copy (`text`)
+  and the number of replaced values (`secrets_replaced`). Raises
+  `ApiFileFormatError` when the format is unknown or the file does not
+  parse. An empty file comes back empty. `text_rule` is an optional
+  function for one text value: it returns the changed value and how many
+  places changed. It runs on every text value that is not replaced
+  whole, in every format, and its count joins `secrets_replaced`.
 - `detect_format(content_type, path)` — `json`, `yaml`, `xml`, `html` or
   `None`. The content type decides. When it is `text/plain` or missing,
   the file ending decides (`.json`, `.yaml`, `.yml`, `.xml`, `.wsdl`,
@@ -132,7 +137,8 @@ The size limit stays as before: a file too big for one stored result is
 refused with its size, before parsing. The last check stays too: the
 read stops when MEHO's general redaction rules (`redaction/patterns.py`)
 would still change the copy, for example an `Authorization` header line
-in free text. The `api_key` rule skips a value that already is a
+in free text. A read that gives those rules as `text_rule` has already
+replaced such text, value by value, so this check passes. The `api_key` rule skips a value that already is a
 complete `[REDACTED:...]` placeholder, so a replaced value does not set
 it off.
 

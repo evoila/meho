@@ -21,12 +21,14 @@ This module holds the steps that do not depend on the vendor:
   at most :data:`PART_BYTES`, on character boundaries.
 * :func:`assert_fits_result_handle` stops when the stored record would
   not fit in one result handle: the read returns every part or none.
-* :func:`redact_text` runs MEHO's general secret-redaction rules once
-  over the whole text and returns the changed copy and how many places
-  changed. A read calls it on the checked copy from
-  :func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`,
-  so a documentation example such as ``Authorization: Basic ...`` comes
-  back as a placeholder instead of stopping the read.
+* :func:`text_redactor` gives MEHO's general secret-redaction rules as a
+  rule for one text value. A read passes it to
+  :func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`
+  as ``text_rule``, so a documentation example such as
+  ``Authorization: Basic ...`` comes back as a placeholder instead of
+  stopping the read. The rules run on each parsed value before the file
+  is written back, so the written file keeps its format and every value
+  keeps its type.
 * :func:`assert_not_redacted` stops when the rules would still change the
   answer, so ``size`` and ``sha256`` always describe the returned copy.
   The error names the rules, never the matched text.
@@ -47,6 +49,7 @@ from typing import Any
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.api_file_values import TextRule
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
@@ -60,10 +63,10 @@ __all__ = [
     "assert_not_redacted",
     "decode_text",
     "fetch_without_redirects",
-    "redact_text",
     "redirect_target",
     "split_parts",
     "text_items",
+    "text_redactor",
 ]
 
 
@@ -362,30 +365,30 @@ def assert_fits_result_handle(
         )
 
 
-def redact_text(
-    text: str,
-    operator: Operator,
-    *,
-    connector_id: str,
-    op_id: str,
-) -> tuple[str, int]:
-    """Run the general secret-redaction rules once over the whole *text*.
+def text_redactor(operator: Operator, *, connector_id: str, op_id: str) -> TextRule:
+    """Return a rule that runs the general secret-redaction rules on one text value.
 
-    Returns the changed text and how many places changed. The rules and
-    labels are the ones the dispatcher uses on the answer, and the text
-    sits under the same ``text`` key as in a part, so the dispatcher finds
-    nothing more to change. Running on the whole text, not part by part,
-    also catches a secret whose label ends one part and whose value starts
-    the next. Build ``size``, ``sha256`` and the parts from the returned
-    text, so they describe what the caller gets.
+    The rule returns the changed value and how many places changed. The
+    rules and labels are the ones the dispatcher uses on the answer, and
+    the value sits under the same ``text`` key as a part does, so the
+    dispatcher finds nothing more to change in a value the rule has seen.
+    Give the rule to ``check_api_file`` as ``text_rule``: it then runs on
+    every parsed text value before the file is written back, and the
+    writer quotes the changed value as the format needs. Build ``size``,
+    ``sha256`` and the parts from the written copy, so they describe what
+    the caller gets.
     """
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
-    outcome = apply_connector_boundary_redaction(
-        {"text": text}, connector_id=connector_id, tenant=tenant, op=op_id
-    )
-    if outcome.redacted == outcome.raw:
-        return text, 0
-    return outcome.redacted["text"], sum(entry.count for entry in outcome.manifest)
+
+    def rule(value: str) -> tuple[str, int]:
+        outcome = apply_connector_boundary_redaction(
+            {"text": value}, connector_id=connector_id, tenant=tenant, op=op_id
+        )
+        if outcome.redacted == outcome.raw:
+            return value, 0
+        return outcome.redacted["text"], sum(entry.count for entry in outcome.manifest)
+
+    return rule
 
 
 def assert_not_redacted(

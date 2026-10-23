@@ -166,6 +166,18 @@ _DIAGNOSTICS_GET = HcxTypedOp(
             "is still going, call again later. If an appliance is named, call "
             "hcx.appliance.list for its state and tunnels. A 404 means the id is unknown."
         ),
+        "result_scalars": {
+            "keys": [
+                "diagId",
+                "serviceMeshId",
+                "status",
+                "message",
+                "reason",
+                "triggeredBy",
+                "startTime",
+                "endTime",
+            ]
+        },
     },
 )
 

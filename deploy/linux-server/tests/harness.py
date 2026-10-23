@@ -13,6 +13,8 @@ network, and they change nothing on the machine that runs them:
 - PATH holds only stub commands and links to the few real tools the script
   needs. Each stub answers from one file in the "fake" folder and writes its
   arguments to calls.log, so a test changes one answer and reads the calls.
+- SSH_CONNECTION says that an admin at 10.0.0.9 runs the script over SSH.
+  A test sets ssh_connection to None for a run on the machine's console.
 
 The default answers describe a healthy Ubuntu 24.04 machine on which RKE2
 gets ready at once.
@@ -64,7 +66,21 @@ STUBS = {
     "systemctl": textwrap.dedent("""\
         case "$1" in
           is-active) grep -qxF -- "$3" "$MEHO_FAKE/active_units" ;;
-          enable) exit "$(cat "$MEHO_FAKE/systemctl_enable_rc")" ;;
+          is-enabled) grep -qxF -- "$3" "$MEHO_FAKE/enabled_units" ;;
+          enable)
+            case "$*" in
+              *rke2-server*) exit "$(cat "$MEHO_FAKE/systemctl_enable_rc")" ;;
+            esac ;;
+          restart) exit "$(cat "$MEHO_FAKE/systemctl_restart_rc")" ;;
+          disable) exit "$(cat "$MEHO_FAKE/systemctl_disable_rc")" ;;
+        esac
+        """),
+    "nft": textwrap.dedent("""\
+        case "$*" in
+          "list tables") exit 0 ;;
+          "list table inet meho") exit "$(cat "$MEHO_FAKE/nft_table_rc")" ;;
+          "-c -f "*) cat "$MEHO_FAKE/nft_check_out"; exit "$(cat "$MEHO_FAKE/nft_check_rc")" ;;
+          *) exit 1 ;;
         esac
         """),
     "resolvectl": 'cat "$MEHO_FAKE/resolvectl_out"; exit "$(cat "$MEHO_FAKE/resolvectl_rc")"',
@@ -119,6 +135,7 @@ DEFAULT_ANSWERS = {
     "ntp_synchronized": "yes",
     "hostname_fqdn": "meho.example.com",
     "active_units": "systemd-resolved\n",
+    "enabled_units": "meho-firewall.service\n",
     "resolvectl_out": "meho.example.com: 10.0.0.5                     -- link: ens18\n",
     "resolvectl_rc": "0",
     "getent_out": "10.0.0.5        STREAM meho.example.com\n10.0.0.5        DGRAM\n",
@@ -134,7 +151,15 @@ DEFAULT_ANSWERS = {
     "kube_deployment": "1",
     "rke2_installer_rc": "0",
     "systemctl_enable_rc": "0",
+    "systemctl_restart_rc": "0",
+    "systemctl_disable_rc": "0",
+    "nft_table_rc": "0",
+    "nft_check_rc": "0",
+    "nft_check_out": "",
 }
+
+# An admin at 10.0.0.9 is logged in over SSH to this machine (10.0.0.5).
+SSH_SESSION = "10.0.0.9 50022 10.0.0.5 22"
 
 DOWNLOAD_PAYLOAD = {
     "rke2/rke2.linux-amd64.tar.gz": "fake RKE2 binaries\n",
@@ -176,6 +201,7 @@ class FakeMachine:
         self.host_file("/etc/os-release", UBUNTU_2404)
         self.host_file("/proc/meminfo", "MemTotal:       16303756 kB\nMemFree:  1000 kB\n")
         self.host_path("/run/systemd/system").mkdir(parents=True)
+        self.ssh_connection: str | None = SSH_SESSION
 
     def close(self) -> None:
         self._tempdir.cleanup()
@@ -231,6 +257,8 @@ class FakeMachine:
             "HOME": str(self.home),
             "LC_ALL": "C",
         }
+        if self.ssh_connection is not None:
+            env["SSH_CONNECTION"] = self.ssh_connection
         return subprocess.run(
             command,
             capture_output=True,

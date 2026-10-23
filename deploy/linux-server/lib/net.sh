@@ -19,6 +19,17 @@ is_ipv4_cidr() {
     [[ $1 == */* ]] && is_ipv4 "${1%/*}" && [[ ${1#*/} =~ $PREFIX_RE ]]
 }
 
+# is_ipv4_network <text>: true for an IPv4 range that starts at its first
+# address, such as 10.0.50.0/24. 10.0.50.7/24 is a range too, but the
+# address part does not name where it starts.
+is_ipv4_network() {
+    is_ipv4_cidr "$1" || return 1
+    local prefix=${1#*/} address
+    local mask=$((prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
+    address=$(ipv4_to_int "${1%/*}")
+    (((address & mask) == address))
+}
+
 ipv4_to_int() {
     local a b c d
     IFS=. read -r a b c d <<<"$1"

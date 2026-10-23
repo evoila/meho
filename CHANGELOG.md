@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- The form-2 install script now sets the host firewall (#4635, ADR 0009:
+  closed by default). It writes one nftables file, `/etc/meho/firewall.nft`,
+  in its own table `inet meho`, and loads it at every start with the new
+  unit `meho-firewall.service`, before RKE2. From another machine only
+  ports 80 and 443 answer, and SSH from the admin network. RKE2's own
+  ports answer only to the machine and its pods. The rules filter before
+  RKE2's port forwarding to Traefik, so the console still loads. The new
+  option `--admin-network <range>` names the addresses that may use SSH.
+  Without it, SSH is allowed only from the address of the SSH session that
+  runs the script; on the machine's console the option is required. The
+  script stops before any change when the admin's own SSH address is
+  outside the range. It turns firewalld or ufw off only after the MEHO
+  rules are loaded. Port 80 of RKE2's Traefik now redirects to 443.
+
 ## [0.36.0] - 2026-10-23
 
 MEHO 0.36.0 makes risky work wait for a second person more often: a VM

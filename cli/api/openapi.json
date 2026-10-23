@@ -21266,7 +21266,7 @@
           "ui-audit"
         ],
         "summary": "Ui Audit My Recent",
-        "description": "``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.\n\nReturns the calling operator's last-24h rows\n(``principal=session.operator_sub``) rendered through the same row\npartial as the T1 result list, so each row opens the T2 detail\ndrawer. ``OPERATOR``-self-scoped: a second operator's activity is\nnever reachable here. HTMX-only fragment (no full-page chrome).",
+        "description": "``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.\n\nReturns the calling operator's last-24h rows\n(``principal_sub=session.operator_sub``, exact match) rendered through the same row\npartial as the T1 result list, so each row opens the T2 detail\ndrawer. ``OPERATOR``-self-scoped: a second operator's activity is\nnever reachable here. HTMX-only fragment (no full-page chrome).",
         "operationId": "ui_audit_my_recent_ui_audit_my_recent_get",
         "responses": {
           "200": {

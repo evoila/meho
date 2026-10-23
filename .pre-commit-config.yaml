@@ -23,14 +23,18 @@ repos:
         # byte-identical to their upstream releases; pinned SHA256s
         # in VENDOR.md cover content authenticity, so any local
         # rewrite (even whitespace stripping) breaks the manifest.
-        # Same shape as the chart-template exclude below.
-        exclude: ^backend/src/meho_backplane/ui/static/src/vendor/.+\.(?:js|css)$
+        # Same shape as the chart-template exclude below. The licence texts
+        # that the form-2 download ships (deploy/linux-server/packaging/licenses/)
+        # stay exactly as their projects publish them; the BusyBox text has
+        # form feeds at line ends.
+        exclude: ^(backend/src/meho_backplane/ui/static/src/vendor/.+\.(?:js|css)|deploy/linux-server/packaging/licenses/.+\.txt)$
       - id: end-of-file-fixer
         # Same reasoning as trailing-whitespace above -- some
         # upstream bundles (e.g. htmx.min.js) don't terminate with a
         # trailing newline, and pinning byte-identical content
-        # means we don't add one.
-        exclude: ^backend/src/meho_backplane/ui/static/src/vendor/.+\.(?:js|css)$
+        # means we don't add one. The OpenBao licence text ends with an
+        # empty line.
+        exclude: ^(backend/src/meho_backplane/ui/static/src/vendor/.+\.(?:js|css)|deploy/linux-server/packaging/licenses/.+\.txt)$
       - id: check-yaml
         # Kubernetes manifests hold several YAML documents in one file
         # (for example deploy/linux-server/storage/local-path-storage.yaml),

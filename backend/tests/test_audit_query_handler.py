@@ -25,6 +25,9 @@ Coverage matrix (G8.1-T1 acceptance criteria):
 * work_ref I1-T3 #1658 — ``work_ref`` exact-match filter narrows to rows whose
   ``work_ref`` matches (excluding different / NULL); ``work_ref`` populates on
   every returned ``AuditEntry``.
+* #4668 — ``principal`` matches part of the user id **or** part of the stored
+  name, case-insensitively, with LIKE metacharacters escaped on both;
+  ``principal_sub`` matches the user id exactly and never the name.
 * :class:`InvalidCursorError` propagates when a tampered cursor is passed.
 * ``target_name`` denormalization via LEFT JOIN works (and is None when the
   audit row has no ``target_id``).
@@ -716,19 +719,25 @@ async def test_audit_id_exact_lookup(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_principal_partial_match(session: AsyncSession) -> None:
-    """``principal="ali"`` matches ``alice`` but not ``bob``."""
+    """``principal="ali"`` matches the user id ``alice`` but not ``bob``.
+
+    Both rows carry a name that does not contain ``ali``, so the match
+    comes from the user id arm alone (#4668 keeps the old behaviour).
+    """
     tenant_id = uuid.uuid4()
     await _seed_audit_row(
         session,
         tenant_id=tenant_id,
         occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
         operator_sub="alice",
+        payload={"principal_name": "Operator One"},
     )
     await _seed_audit_row(
         session,
         tenant_id=tenant_id,
         occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
         operator_sub="bob",
+        payload={"principal_name": "Operator Two"},
     )
     await session.commit()
 
@@ -777,6 +786,122 @@ async def test_principal_escapes_sql_wildcards(session: AsyncSession) -> None:
         session=session,
     )
     assert {entry.principal_sub for entry in result.rows} == {"alice%bob"}
+
+
+@pytest.mark.asyncio
+async def test_principal_matches_name_case_insensitive(session: AsyncSession) -> None:
+    """#4668: part of ``payload['principal_name']`` matches, whatever the case.
+
+    The user ids are UUID-like and share no text with the filter, so the
+    match can only come from the name arm. A row without a name and a row
+    with a different name stay out.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        operator_sub="0f1e2d3c-0000-4000-8000-000000000001",
+        payload={"principal_name": "Ada Lovelace"},
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        operator_sub="0f1e2d3c-0000-4000-8000-000000000002",
+        payload={"principal_name": "Grace Hopper"},
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        operator_sub="0f1e2d3c-0000-4000-8000-000000000003",
+    )
+    await session.commit()
+
+    for value in ("ada love", "LACE", "Ada Lovelace"):
+        result = await query_audit(
+            AuditQueryFilters(principal=value),
+            tenant_id=tenant_id,
+            session=session,
+        )
+        assert [entry.principal_name for entry in result.rows] == ["Ada Lovelace"], value
+
+
+@pytest.mark.asyncio
+async def test_principal_escapes_sql_wildcards_in_name(session: AsyncSession) -> None:
+    """#4668: ``_`` / ``%`` in the filter match the name literally, not as wildcards."""
+    tenant_id = uuid.uuid4()
+    for index, name in enumerate(("agent_ops", "agentXops", "ci%bot", "ciXbot")):
+        await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=datetime(2026, 5, 14, 0, 0, index + 1, tzinfo=UTC),
+            operator_sub=f"0f1e2d3c-0000-4000-8000-00000000001{index}",
+            payload={"principal_name": name},
+        )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(principal="agent_ops"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert {entry.principal_name for entry in result.rows} == {"agent_ops"}
+
+    result = await query_audit(
+        AuditQueryFilters(principal="ci%bot"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert {entry.principal_name for entry in result.rows} == {"ci%bot"}
+
+
+@pytest.mark.asyncio
+async def test_principal_sub_exact_match_never_widens_to_name(session: AsyncSession) -> None:
+    """#4668: ``principal_sub`` matches the user id exactly — not the name, not a part.
+
+    This is the filter the "my recent" views bind to the caller's own
+    user id. A peer whose *name* contains that id, and a user id that
+    merely starts with it, must stay out.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        operator_sub="op-self",
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        operator_sub="op-other",
+        payload={"principal_name": "op-self lookalike"},
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        operator_sub="op-self-2",
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(principal_sub="op-self"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert [entry.principal_sub for entry in result.rows] == ["op-self"]
+
+    # The partial filter with the same value finds all three — which is
+    # exactly why "my recent" must not use it.
+    result = await query_audit(
+        AuditQueryFilters(principal="op-self"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert len(result.rows) == 3
 
 
 @pytest.mark.asyncio

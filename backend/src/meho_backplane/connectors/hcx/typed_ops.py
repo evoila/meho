@@ -3,15 +3,23 @@
 
 """Typed-op metadata + registrar for :class:`HcxConnector`.
 
-One read ships here: ``hcx.api_file.get``, the body of which lives in
-:mod:`meho_backplane.connectors.hcx.api_file`. The dataclass + tuple +
-registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
+``hcx.api_file.get`` is defined here (its body lives in
+:mod:`meho_backplane.connectors.hcx.api_file`); the reads of the manager,
+site pairings, service mesh, jobs, alerts and inventory are defined in
+:mod:`meho_backplane.connectors.hcx.read_ops`,
+:mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
+:mod:`meho_backplane.connectors.hcx.inventory_ops`. The dataclass +
+tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
+
+from meho_backplane.connectors.hcx.diagnostics_ops import HCX_DIAGNOSTICS_OPS
+from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
+from meho_backplane.connectors.hcx.op_types import HcxTypedOp
+from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS, HCX_READ_WHEN_TO_USE_BY_GROUP
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -26,23 +34,6 @@ __all__ = [
 _GROUP_API_DOCS = "hcx-api-docs"
 
 
-@dataclass(frozen=True)
-class HcxTypedOp:
-    """Metadata for one HCX typed op registered at lifespan startup."""
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: Curated ``when_to_use`` text per group. Says what the group holds; it
 #: makes no claim about the safety of the whole group.
 HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
@@ -54,6 +45,7 @@ HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "behind a result handle, so a vendor API file can be pinned and "
         "compared. It refuses every other path."
     ),
+    **HCX_READ_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -185,7 +177,12 @@ _API_FILE_GET = HcxTypedOp(
     },
 )
 
-HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (_API_FILE_GET,)
+HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
+    _API_FILE_GET,
+    *HCX_READ_OPS,
+    *HCX_DIAGNOSTICS_OPS,
+    *HCX_INVENTORY_OPS,
+)
 
 
 async def register_hcx_typed_operations(

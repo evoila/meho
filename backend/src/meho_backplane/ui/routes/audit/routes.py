@@ -249,6 +249,7 @@ def _build_filters(
     cursor: str | None,
     agent_session_id: uuid.UUID | None = None,
     event_class: str = "",
+    principal_sub: str | None = None,
 ) -> AuditQueryFilters:
     """Construct the substrate filter object from the echoed form values.
 
@@ -265,6 +266,11 @@ def _build_filters(
     ``audit_log.agent_session_id = :agent_session_id`` predicate -- making
     ``/ui/audit?agent_session_id=<id>`` a usable session-scoped flat view
     (``query.py:201-202``) rather than the unfiltered tenant-wide page.
+
+    ``principal_sub`` has no form field either: the my-recent quick view
+    sets it to the session's own user id so the query matches that id
+    exactly. The ``principal`` form field matches the user id or the
+    name, partially (#4668), which is too wide for a self-only view.
     """
     now = datetime.now(UTC)
     since_dt = parse_duration(since, now=now) if since else None
@@ -272,6 +278,7 @@ def _build_filters(
     return AuditQueryFilters(
         target=target or None,
         principal=principal or None,
+        principal_sub=principal_sub,
         op_id=op_id or None,
         op_class=op_class or None,
         result_status=result_status or None,
@@ -481,10 +488,10 @@ async def _resolve_deep_link_drawer(
 async def _build_my_recent_context(session: UISessionContext) -> dict[str, object]:
     """Assemble the my-recent quick-view context (operator-self-scoped).
 
-    Binds ``principal=session.operator_sub`` so the query returns only the
-    calling operator's own rows -- a second operator's activity is never
-    surfaced through this route (mirrors the REST ``/api/v1/audit/my-recent``
-    ``principal=operator.sub`` binding, ``audit.py:380``). Reuses the T1 row
+    Binds ``principal_sub=session.operator_sub`` (exact match on the user
+    id) so the query returns only the calling operator's own rows -- a
+    second operator's activity is never surfaced through this route
+    (mirrors the REST ``/api/v1/audit/my-recent`` binding). Reuses the T1 row
     projection so each row renders through the shared row partial and opens
     the same detail drawer. A bad cursor / duration is impossible here (the
     window is the fixed ``_MY_RECENT_SINCE`` shorthand, no operator input).
@@ -492,7 +499,8 @@ async def _build_my_recent_context(session: UISessionContext) -> dict[str, objec
     is_admin = await is_ui_tenant_admin(session)
     filters = _build_filters(
         target="",
-        principal=session.operator_sub,
+        principal="",
+        principal_sub=session.operator_sub,
         op_id="",
         op_class="",
         result_status="",
@@ -830,7 +838,7 @@ async def _my_recent_handler(
     """``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.
 
     Returns the calling operator's last-24h rows
-    (``principal=session.operator_sub``) rendered through the same row
+    (``principal_sub=session.operator_sub``, exact match) rendered through the same row
     partial as the T1 result list, so each row opens the T2 detail
     drawer. ``OPERATOR``-self-scoped: a second operator's activity is
     never reachable here. HTMX-only fragment (no full-page chrome).

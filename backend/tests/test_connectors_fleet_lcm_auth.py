@@ -142,9 +142,9 @@ def test_fleet_lcm_connector_subclasses_http_connector() -> None:
     assert FleetLcmConnector.product == "fleet"
     assert FleetLcmConnector.version == "9.0"
     assert FleetLcmConnector.impl_id == "fleet-lcm"
-    assert FleetLcmConnector.supported_version_range == ">=9.0,<10.0"
+    assert FleetLcmConnector.supported_version_range == ">=9.1,<10.0"
     # Equal to the legacy fleet-rest impl by design — the split is by
-    # version-specificity, not priority.
+    # version range, not priority.
     assert FleetLcmConnector.priority == 1
 
 

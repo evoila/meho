@@ -114,7 +114,7 @@ FLEET_CANARY_BASE_URL: str = "https://fleet-canary.test.invalid"
 FLEET_FORCE_HANDLE_LIST_OP_ID: str = "GET:/lcm/request/api/v2/requests"
 
 #: Persisted as ``Target.fingerprint`` so the resolver binds
-#: :class:`VcfFleetConnector` (``supported_version_range=">=9.0,<10.0"``).
+#: :class:`VcfFleetConnector` (``supported_version_range=">=8.0,<9.1"``).
 #: The probe normally writes this dict at first-probe time; the dispatch
 #: tests seed it directly so the resolver binds without a real probe
 #: round-trip.

@@ -123,7 +123,8 @@ take `event_class` as a required argument.
 | Field | Type | Backend |
 |---|---|---|
 | `target` | `str \| None` | Matched against `targets.name` for the same tenant (alias resolution is the T2 router's job). |
-| `principal` | `str \| None` | `audit_log.operator_sub ILIKE %value%`. |
+| `principal` | `str \| None` | Part of the user id **or** the name: `audit_log.operator_sub ILIKE %value%` OR `payload->>'principal_name' ILIKE %value%` (#4668). `%` and `_` in the value match literally. |
+| `principal_sub` | `str \| None` | `audit_log.operator_sub = value` (exact). Only the "my recent" views set it, from the caller's own token. Not on the REST body or the MCP input schema. |
 | `op_id` | `str \| None` | Glob (`*` ↔ `%`). Matched against `payload->>'op_id'` (MCP rows) **OR** derived `http.<method>:<path>` (HTTP rows). |
 | `op_class` | `str \| None` | Exact match against `payload->>'op_class'`. |
 | `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"` / `"pending"`. Maps to status-code ranges. `pending` (202) is history: the run stopped to wait for approval, and the row stays `pending` after the decision. It matches the `approval.request` row and, since #4275, the stopped operation's own `operation_execution` row; add `event_class` to pick one. To see what waits now, use the approval queue (`meho approvals list`). |
@@ -190,7 +191,8 @@ query_audit(filters, tenant_id, session)
   │       [+ agent_session_id = :agent_session_id]
   │       [+ work_ref = :work_ref]                              ← exact match
   │       [+ event_class = :event_class]                        ← exact match
-  │       [+ operator_sub ILIKE :principal]
+  │       [+ operator_sub ILIKE :principal OR payload->>'principal_name' ILIKE :principal]
+  │       [+ operator_sub = :principal_sub]                     ← exact match
   │       [+ occurred_at >= :since]
   │       [+ occurred_at <= :until]
   │       [+ target_id IN (SELECT id FROM targets WHERE tenant_id = :tenant_id
@@ -320,7 +322,8 @@ how an operator replays it.
   it, and an unpaired service account's rows landed with a NULL
   `agent_session_id`.
 - A call **without** a `work_ref` still lands NULL. There is nothing to group
-  it by. Find those rows by principal (`meho audit query --principal`).
+  it by. Find those rows by principal (`meho audit query --principal`,
+  which matches part of the user id or of the name).
 
 How an operator replays a client-credential run:
 
@@ -350,7 +353,7 @@ tenant-scoping invariant is enforced one layer up.
 | `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
-| `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
+| `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
 | `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace (#3747); any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
@@ -395,9 +398,10 @@ return rows for **every** principal in the calling tenant. Any `operator`
 is **no per-principal role check** on either route, and filtering
 `principal` on another operator's sub is a supported forensic lookup.
 Only `my-recent` stays self-scoped: it binds
-`filters.principal = operator.sub`, so the caller sees their own rows
-only. Cross-**tenant** isolation is unchanged (the substrate's first
-WHERE clause is always `audit_log.tenant_id`; `show` → 404 on a foreign
+`filters.principal_sub = operator.sub` (exact match on the user id), so
+the caller sees their own rows only. Cross-**tenant** isolation is
+unchanged (the substrate's first WHERE clause is always
+`audit_log.tenant_id`; `show` → 404 on a foreign
 `audit_id`, per the module and `show` docstrings in
 `backend/src/meho_backplane/api/v1/audit.py`), and dispatch rows carry
 `payload.params_hash` — a SHA-256 over the canonicalised params

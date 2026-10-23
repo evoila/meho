@@ -6839,7 +6839,7 @@
           "audit"
         ],
         "summary": "My Recent",
-        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": ...}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n:class:`AuditQueryResult` ``{\"rows\": [...]}`` shape onto the\nreference envelope, renaming ``rows`` -> ``items``; the\n``?envelope=v2`` opt-in that bridged the migration was retired),\ncarrying the same forward-only cursor. The sibling audit-query\nendpoints (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep\nthe :class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set.",
+        "description": "Audit rows the calling operator produced within the *since* window.\n\nThe user id is taken from ``operator.sub`` (the JWT subject) and\nmatched exactly, so an operator cannot see another operator's\nrecent activity through this route \u2014 for that, the full POST\nsurface filters on ``principal`` (user id or name, partial match).\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": ...}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n:class:`AuditQueryResult` ``{\"rows\": [...]}`` shape onto the\nreference envelope, renaming ``rows`` -> ``items``; the\n``?envelope=v2`` opt-in that bridged the migration was retired),\ncarrying the same forward-only cursor. The sibling audit-query\nendpoints (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep\nthe :class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set.",
         "operationId": "my_recent_api_v1_audit_my_recent_get",
         "parameters": [
           {
@@ -21266,7 +21266,7 @@
           "ui-audit"
         ],
         "summary": "Ui Audit My Recent",
-        "description": "``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.\n\nReturns the calling operator's last-24h rows\n(``principal=session.operator_sub``) rendered through the same row\npartial as the T1 result list, so each row opens the T2 detail\ndrawer. ``OPERATOR``-self-scoped: a second operator's activity is\nnever reachable here. HTMX-only fragment (no full-page chrome).",
+        "description": "``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.\n\nReturns the calling operator's last-24h rows\n(``principal_sub=session.operator_sub``, exact match) rendered through the same row\npartial as the T1 result list, so each row opens the T2 detail\ndrawer. ``OPERATOR``-self-scoped: a second operator's activity is\nnever reachable here. HTMX-only fragment (no full-page chrome).",
         "operationId": "ui_audit_my_recent_ui_audit_my_recent_get",
         "responses": {
           "200": {

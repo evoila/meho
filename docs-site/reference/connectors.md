@@ -40,6 +40,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `rke2-ssh-1.x` | `rke2` | — | — |
 | `sddc-rest-9.0` | `sddc` | >=9.0,<10.0 | generic |
 | `sddc-vcf5-5.0` | `sddc` | >=5.0,<9.0 | — |
+| `srm-rest-9.1` | `srm` | >=8.8,<10.0 | — |
 | `tempo-api-2.x` | `tempo` | >=2.0,<3.0 | — |
 | `vault-1.x` | `vault` | — | typed |
 | `vcd-rest-10.6` | `vcd` | >=10.0,<11.0 | — |

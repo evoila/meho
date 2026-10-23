@@ -684,6 +684,7 @@ const (
 	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
 	TargetCreateProductRke2       TargetCreateProduct = "rke2"
 	TargetCreateProductSddc       TargetCreateProduct = "sddc"
+	TargetCreateProductSrm        TargetCreateProduct = "srm"
 	TargetCreateProductTempo      TargetCreateProduct = "tempo"
 	TargetCreateProductVault      TargetCreateProduct = "vault"
 	TargetCreateProductVcd        TargetCreateProduct = "vcd"

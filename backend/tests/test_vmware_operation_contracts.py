@@ -75,6 +75,7 @@ VMWARE_CONNECTORS: Final[frozenset[str]] = frozenset(
         "vcd-rest",
         "installer-rest",
         "holodeck-ssh",
+        "srm-rest",
     }
 )
 

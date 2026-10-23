@@ -111,15 +111,19 @@ then `Authorization: OpsToken <token>`). See
 
 ## The usual work
 
-Risk levels: a **read** is `safe` and runs at once for every caller. The one
-**change**, `idb.directory.sync`, is `caution`. What `caution` means depends
-on who calls:
+Risk levels: a **read** is `safe`. The one **change**, `idb.directory.sync`,
+is `caution`. The lines below are the defaults. MEHO also checks the
+caller's role and the caller's grants. For an agent login, two more rules
+apply: an agent with the `read_only` role waits for approval even on a
+`safe` read, and a deny grant refuses the call, whatever the risk level.
 
-- An agent login waits until a person approves. No grant can change that
-  for a `caution` operation.
-- A person runs it at once.
-- A service account waits for approval, unless a standing grant covers it.
-  Then it runs at once.
+- A `safe` read runs at once by default, for every caller.
+- A `caution` change, for an agent login: it waits until a person approves.
+  No grant can let an agent login run a `caution` operation without
+  approval.
+- A `caution` change, for a person: it runs at once.
+- A `caution` change, for a service account: it waits for approval, unless
+  a standing grant covers it. Then it runs at once.
 
 So the risk level alone does not force a second person to approve a sync.
 The full rules are in

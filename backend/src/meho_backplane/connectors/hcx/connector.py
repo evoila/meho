@@ -28,16 +28,18 @@ Version
 ``{"action": "query", "filter": {"local": "true"}}``), the call the vendor
 upgrade guide names for "which version runs now". The first local
 appliance row carries ``version``. The same helper backs
-:meth:`fingerprint` and the ``hcx.api_file.get`` answer; a later Task
-offers it as the operation ``hcx.about``.
+:meth:`fingerprint` and the ``hcx.api_file.get`` answer; the operation
+``hcx.about`` reads the same call through :func:`parse_manager_version`.
 
 Operations
 ----------
 
-One typed read ships here: ``hcx.api_file.get`` (the body lives in
-:mod:`meho_backplane.connectors.hcx.api_file`). It reads the API
+``hcx.api_file.get`` (the body lives in
+:mod:`meho_backplane.connectors.hcx.api_file`) reads the API
 documentation that a running HCX Manager serves, so the vendor API files
-can be pinned. More reads build on this connector later.
+can be pinned. Eight more reads (``hcx.about``, site pairings, service
+meshes, appliances, the service mesh diagnostics, jobs, alerts and the
+inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
 """
 
 from __future__ import annotations
@@ -309,6 +311,70 @@ class HcxConnector(HttpConnector):
         from meho_backplane.connectors.hcx.api_file import hcx_api_file_get_impl
 
         return await hcx_api_file_get_impl(self, operator, target, params)
+
+    async def about(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.about`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_about_impl
+
+        return await hcx_about_impl(self, operator, target, params)
+
+    async def site_pairing_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.site_pairing.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_site_pairing_list_impl
+
+        return await hcx_site_pairing_list_impl(self, operator, target, params)
+
+    async def service_mesh_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_service_mesh_list_impl
+
+        return await hcx_service_mesh_list_impl(self, operator, target, params)
+
+    async def appliance_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.appliance.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_appliance_list_impl
+
+        return await hcx_appliance_list_impl(self, operator, target, params)
+
+    async def service_mesh_diagnose(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.diagnose`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_service_mesh_diagnose_impl
+
+        return await hcx_service_mesh_diagnose_impl(self, operator, target, params)
+
+    async def job_get(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.job.get`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_job_get_impl
+
+        return await hcx_job_get_impl(self, operator, target, params)
+
+    async def alert_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.alert.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_alert_list_impl
+
+        return await hcx_alert_list_impl(self, operator, target, params)
+
+    async def inventory_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.inventory.list`` shim."""
+        from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_list_impl
+
+        return await hcx_inventory_list_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool."""

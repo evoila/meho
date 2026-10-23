@@ -8,25 +8,44 @@ impl_id="hcx-rest")` and as the product wildcard, so a target with no
 version yet still resolves to it. The class pin tracks the VCF 9 line; the
 `>=4.7,<10.0` range keeps HCX 4.x dispatchable through the same class.
 
-Today the connector ships three things:
+Today the connector ships:
 
 - the **login** to an HCX Manager,
-- a **version helper** that reads the Manager version, and
-- one **read**, `hcx.api_file.get`, which fetches the API documentation
-  that a running HCX Manager serves.
+- a **version helper** that reads the Manager version,
+- the **read** `hcx.api_file.get`, which fetches the API documentation
+  that a running HCX Manager serves, and
+- **eight reads** of the usual work: the Manager version and role, site
+  pairings, service meshes, appliances and their tunnels, the service
+  mesh diagnostics, jobs, alerts and the inventory for a migration.
 
-Why this read comes first: Broadcom publishes no file and no versioned
-reference of the main HCX API (`/hybridity/api/...`). Only a running HCX
-Manager serves its documentation. This read is how the vendor API files
-get pinned; the other HCX reads (site pairings, service meshes,
-appliances, jobs, alerts, inventory) are built on this connector after
-the files are pinned and checked.
+Why `hcx.api_file.get` came first: Broadcom publishes no file and no
+versioned reference of the main HCX API (`/hybridity/api/...`). Only a
+running HCX Manager serves its documentation. This read is how the vendor
+API files get pinned.
+
+Where the paths of the eight reads come from: no HCX API file is pinned
+yet. The paths come from Broadcom's public reference "HCX Workload
+Migration APIs", which names no HCX version, and for
+`POST /hybridity/api/service/inventory/cloud/list` from VMware's own
+Terraform provider for HCX. The reconcile lane checks them once the files
+are pinned (see Known issues).
 
 Package: `backend/src/meho_backplane/connectors/hcx/`.
 
 | Operation | What it does | Vendor call | Risk | Versions |
 |---|---|---|---|---|
 | `hcx.api_file.get` | Read one documentation page or API description file the HCX Manager serves. Returns path, HTTP status, content type, size, SHA-256 and the Manager version; the text is in parts behind a result handle. | `GET {path}` | read (`safe`, no approval) | 4.11, 9.0, 9.1 |
+| `hcx.about` | The Manager version, build, system type and role (connector or cloud), and its local site. | `POST /hybridity/api/hcspAppliances`, `POST /hybridity/api/service/inventory/cloud/list` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.site_pairing.list` | The site pairings: one row per paired site with its id, cloud type, address and user. | `GET /hybridity/api/cloudConfigs` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.service_mesh.list` | The service meshes with their state, services, status and last task. | `GET /hybridity/api/interconnect/serviceMesh` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.appliance.list` | The interconnect, network extension and other appliances: state, overall, transport and tunnel status, tunnel counts, version and build. | `GET /hybridity/api/interconnect/appliances` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.service_mesh.diagnose` | Start the diagnostics of one service mesh and return the started task. It changes no configuration. | `POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/diagnose` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.job.get` | One job: done, failed, cancelled, progress and times. | `GET /hybridity/api/jobs/{jobid}` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.alert.list` | The alerts, with an optional filter by severity, state, module, category or object. | `POST /hybridity/api/alerts?action=query` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.inventory.list` | The resource containers (vCenter instances) of the local and the paired sites, for planning a migration. | `POST /hybridity/api/service/inventory/resourcecontainer/list` | read (`safe`, no approval) | 4.11, 9.x |
+
+Every operation in the table exists on every version the connector
+covers, so none stops early with a version message.
 
 ## Key types
 
@@ -45,6 +64,13 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
   `source_kind="typed"` row at start-up.
 - `hcx_api_file_get_impl`, `check_path`, `split_parts` (`api_file.py`) --
   the read's body, the path rule and the part splitter.
+- `HCX_READ_OPS`, `HCX_READ_WHEN_TO_USE_BY_GROUP` (`read_ops.py`) -- the
+  metadata and group texts of the eight reads. `HcxTypedOp` lives in
+  `op_types.py`, so both op modules share it.
+- `typed_reads.py` -- the bodies of the eight reads, `VENDOR_CALLS` (every
+  `(method, path)` they send; the reconcile lane checks them),
+  `rows_of` (takes the rows out of `items` or `data.items`) and
+  `redact_secrets`.
 
 ## Control flow
 
@@ -79,8 +105,8 @@ modes raise `NotImplementedError` at the boundary.
 appliance row that has a `version`. `build` is the row's `buildNumber`
 when present, else the last part of a five-part version string such as
 `4.3.0.0.19064502`. The helper never raises: a failure is named in
-`error`. `fingerprint()` and `probe()` use it; so does the read below. A
-later Task offers the same helper as the operation `hcx.about`.
+`error`. `fingerprint()` and `probe()` use it; so does the read below.
+`hcx.about` reads the same call, but raises a vendor error instead.
 
 ### The read: `hcx.api_file.get`
 
@@ -173,6 +199,59 @@ and the answer's scalars. The read measures that record with
 record does not fit stops with an error that names the file's size and
 the record's size. The read never returns a cut file.
 
+### The eight reads
+
+Groups (the text the agent reads in `list_operation_groups`):
+
+| Group | Reads |
+|---|---|
+| `hcx-manager` | `hcx.about`, `hcx.site_pairing.list` |
+| `hcx-service-mesh` | `hcx.service_mesh.list`, `hcx.appliance.list`, `hcx.service_mesh.diagnose` |
+| `hcx-jobs-alerts` | `hcx.job.get`, `hcx.alert.list` |
+| `hcx-inventory` | `hcx.inventory.list` |
+
+What each read sends and returns:
+
+- `hcx.about` sends the version call (above) and
+  `POST /hybridity/api/service/inventory/cloud/list` with
+  `{"filter": {"local": true, "remote": false}}`. It returns `version`,
+  `build`, `system_type`, `system_name`, `role` and the local site's
+  `local_endpoint_id`, `local_endpoint_name`, `local_endpoint_type`,
+  `local_url`. `role` is `cloud` when `systemType` names "cloud",
+  `connector` when it names "connector", else `unknown`. Unlike the
+  version helper, `hcx.about` raises a vendor error, so a `401` makes a
+  new login.
+- The list reads (`hcx.site_pairing.list`, `hcx.service_mesh.list`,
+  `hcx.appliance.list`, `hcx.alert.list`, `hcx.inventory.list`) return
+  `{"items": [...]}`: one row per vendor object, taken out of the vendor
+  envelope (`items` or `data.items`). The vendor fields stay. MEHO stores
+  a long list behind a result handle; the agent reads it with
+  `result_query`.
+- `hcx.service_mesh.list` adds `last_task_id`, `last_task_type` and
+  `last_task_status` (from `lastTaskDetails`) to each row.
+- `hcx.appliance.list` adds `state`, `overall_status`, `transport_status`,
+  `tunnel_status`, `tunnels_active`, `tunnels_total`, `version`
+  (`major.minor.patch`), `build` and `update_available` to each row.
+- `hcx.service_mesh.diagnose` takes `service_mesh_id` and sends an empty
+  JSON body. The Manager answers `202` with the task id. The read returns
+  `service_mesh_id`, `interconnect_task_id`, `warnings` and `errors`. The
+  run's progress shows as the mesh's last task in `hcx.service_mesh.list`.
+- `hcx.job.get` takes `job_id` and returns the vendor job object
+  (`jobId`, `isDone`, `didFail`, `isCancelled`, `isRolledBack`,
+  `percentComplete`, `startTime`, `endTime`, ...).
+- `hcx.alert.list` sends `?action=query`. Optional `severity` (a list),
+  `state`, `module`, `category` and `entity_id` go into the body's
+  `filter` (`entity_id` as `entityId`); with none set the body is `{}`.
+- `hcx.inventory.list` takes an optional `site`: `local` sends
+  `{"filter": {"cloud": {"local": true, "remote": false}}}`, `remote` the
+  opposite, and no `site` sends `{}`.
+
+Secrets: every read replaces a field whose name says password, secret,
+token, authorization, private key or licence key (any case, with or
+without `_` or `-`) with `***REDACTED***`, at any depth. The key stays,
+so the shape does not change. The dispatcher's own redaction runs after
+that.
+
 ### Shutdown
 
 `aclose()` clears the token cache and closes the HTTP pool. No logout call
@@ -190,6 +269,9 @@ is sent.
 - `redaction/middleware.py`: `apply_connector_boundary_redaction`, the
   rules the read runs on its answer before it returns.
 - `operations/typed_register.py`: the typed-op registrar.
+- Broadcom's "HCX Workload Migration APIs" reference
+  (https://developer.broadcom.com/xapis/hcx-workload-migration-apis/latest/):
+  the paths and fields of the eight reads.
 - `settings.py`: the result-handle limits the read checks against.
 
 ## Known issues
@@ -197,7 +279,23 @@ is sent.
 - The HCX API files are not pinned yet, so the reconcile lane
   (`tests/test_connectors_hcx_spec_reconcile.py`) skips its served check
   until the shelf holds `hcx-4.11/`, `hcx-9.0/` and `hcx-9.1/`. The
-  manifest-pin test runs always.
+  manifest-pin test runs always and lists every call of the eight reads.
+  When the files are pinned, add their folders to the spec-shelf sparse
+  checkout and the required-file list in `.github/workflows/ci.yml`.
+- `hcx.inventory.list` returns the resource containers (vCenter
+  instances) of each site, not single VMs, networks or datastores: that is
+  what `resourcecontainer/list` returns in the vendor reference. A read of
+  the VMs, networks and datastores of a container needs another call,
+  checked against the pinned file.
+- `hcx.service_mesh.diagnose` returns the started task, not the
+  diagnostics findings. The vendor reference has a separate diagnostics
+  summary call (`POST .../serviceMesh/{serviceMeshId}/diagnostics/query`);
+  it is not a MEHO read yet.
+- The vendor reference writes the job path as `/hybridity/api/jobs/{jobid}`
+  (lower-case `id`); the reconcile lane uses that spelling.
+- `role` in `hcx.about` is derived from `systemType`. The vendor upgrade
+  article shows `HCX Cloud`; the value on a connector is confirmed by the
+  live proof.
 - The login, the version call and the documentation path come from the
   vendor's public guides. Their first live use is the pinning of the HCX
   files. If a call differs there, fix the call and the table above.
@@ -209,7 +307,7 @@ is sent.
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
-  #4545 (the reads that build on it); #4395 (the same read for NSX);
+  #4545 (the eight reads that build on it); #4395 (the same read for NSX);
   #4505 (the same shape for Site Recovery Manager).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one

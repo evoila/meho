@@ -17,6 +17,18 @@ recorded-fixture E2E.
 
 Source: `backend/src/meho_backplane/connectors/vcf_fleet/`.
 
+The connector ships three typed reads. **Versions** says where the call
+exists: the product versions of the connector implementation that
+registers it (`fleet-rest`, `>=8.0,<9.1`). An 8.x or 9.0 target resolves
+here; a 9.1 or newer target resolves to `fleet-lcm` (see "Dual
+implementation").
+
+| Operation | What it does | Vendor call | Risk | Versions |
+|---|---|---|---|---|
+| `fleet.about` | Read the appliance's API version, product version and build. | `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
+| `fleet.environment.list` | List the Fleet environments with the products deployed in each. | `GET /lcm/lcops/api/v2/environments` | read (`safe`, no approval) | 8.x, 9.0 |
+| `fleet.api_file.get` | Read one documentation page or API description file the appliance serves (the Lifecycle APIs or the Content Management APIs). Returns path, HTTP status, content type, size, SHA-256 and the version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
+
 VCF Fleet is the rebrand of vRealize Suite Lifecycle Manager (vRSLCM) under
 the VCF 9 umbrella; the appliance still identifies as vRSLCM in its internal
 config and every response carries an `Lcm-API-Version` header.
@@ -31,8 +43,8 @@ sees the difference:
 
 | impl | connector | surface | `supported_version_range` |
 |---|---|---|---|
-| `fleet-rest` (legacy, typed) | `VcfFleetConnector` (this doc) | vRSLCM `/lcm/lcops/api/v2/*` | `>=8.0,<10.0` |
-| `fleet-lcm` (modern, generic/ingested) | [`FleetLcmConnector`](connectors-fleet-lcm.md) | VCF 9 Fleet LCM Service `/v1/*` | `>=9.0,<10.0` |
+| `fleet-rest` (legacy, typed) | `VcfFleetConnector` (this doc) | vRSLCM `/lcm/lcops/api/v2/*` | `>=8.0,<9.1` |
+| `fleet-lcm` (modern, generic/ingested) | [`FleetLcmConnector`](connectors-fleet-lcm.md) | VCF 9 Fleet LCM Service `/v1/*` | `>=9.1,<10.0` |
 
 Both register under `product="fleet"` with distinct `impl_id`s, so the v2
 registry keys `("fleet","9.0","fleet-rest")` and `("fleet","9.0","fleet-lcm")`
@@ -43,29 +55,30 @@ by this legacy package only (a second class on that key would raise at import);
 The [resolver](../../backend/src/meho_backplane/connectors/resolver.py) picks
 the impl per target:
 
-- **8.x target → `fleet-rest`** — the only candidate whose range contains the
-  version (`fleet-lcm`'s `>=9.0,<10.0` excludes 8.x).
-- **9.0 target → `fleet-lcm`** — both ranges contain 9.0, but `fleet-lcm`'s
-  narrower `>=9.0,<10.0` (span 1.0) beats `fleet-rest`'s `>=8.0,<10.0`
-  (span 2.0) at the resolver's **most-specific-version** tie-break (step 2),
-  *before* operator preference (step 3) is consulted. The split is by
-  version-specificity, not `priority` — both impls keep `priority=1`.
+- **8.x or 9.0 target → `fleet-rest`** (`>=8.0,<9.1`). A VCF 9.0 fleet
+  appliance serves only the legacy `/lcm/*` API.
+- **9.1 or newer target → `fleet-lcm`** (`>=9.1,<10.0`). The `/fleet-lcm/v1`
+  API first ships with VCF 9.1: its spec file is in the `9.1.0.0` tag of
+  `vmware/vcf-api-specs`.
+
+The two ranges meet at 9.1 and do not overlap (#4442), so every version has
+exactly one candidate. Before #4442, `fleet-lcm` claimed `>=9.0,<10.0` and
+won a 9.0 target because the narrower range wins. Its reads then called
+paths a 9.0 appliance does not have. The split is by version range, not
+`priority` — both impls keep `priority=1`. Operator preference
+(`preferred_impl_id`) only breaks a tie between in-range candidates, so it
+cannot pick an out-of-range impl.
 
 The split is proven by
-[`backend/tests/test_connectors_fleet_dual_impl_resolution.py`](../../backend/tests/test_connectors_fleet_dual_impl_resolution.py).
-Because specificity precedes operator preference in the ladder, an operator
-**cannot** pin the legacy `/lcm/*` surface on a *9.0* target via
-`preferred_impl_id="fleet-rest"` — the more-specific `fleet-lcm` still wins
-(the resolver's documented, tested ordering; see that test's
-`preferred_impl_id` case).
+[`backend/tests/test_connectors_fleet_dual_impl_resolution.py`](../../backend/tests/test_connectors_fleet_dual_impl_resolution.py)
+(8.5, 8.18, 9.0 and 9.0.2 → `fleet-rest`; 9.1, 9.1.0 and 9.1.1 → `fleet-lcm`).
 
 ## Key types
 
 - **`VcfFleetConnector`** (`connector.py`) — `HttpConnector` subclass.
   Class attributes: `product="fleet"`, `version="9.0"`,
-  `impl_id="fleet-rest"`, `supported_version_range=">=8.0,<10.0"`
-  (re-banded from `">=9.0,<10.0"` in #3037 — see "Dual implementation"
-  below), `priority=1`. The priority outranks a future `GenericRestConnector`
+  `impl_id="fleet-rest"`, `supported_version_range=">=8.0,<9.1"`
+  (8.x and 9.0 — see "Dual implementation" above), `priority=1`. The priority outranks a future `GenericRestConnector`
   auto-shim defensively if both somehow register for the same triple.
 - **`VcfFleetTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`, `host`,
@@ -79,6 +92,14 @@ Because specificity precedes operator preference in the ladder, an operator
   on connector construction (`VcfFleetConnector(credentials_loader=...)`)
   so unit tests, integration tests, and pre-G0.3 production deploys
   override the default Vault loader.
+- **`FleetApplianceVersion`**, **`parse_appliance_version`** (`version.py`)
+  and **`VcfFleetConnector.appliance_version`** (`connector.py`) — the
+  version and build from `GET /lcm/lcops/api/v2/about` as one value:
+  `version`, `build` and `error`. The method never raises; on VCF 9.0
+  builds the call answers HTTP 500 and `error` names it.
+- **`fleet_api_file_get_impl`**, **`check_path`**, **`split_parts`**,
+  **`DOCS_PAGES`**, **`DOCS_FOLDERS`** (`api_file.py`) — the body of
+  `fleet.api_file.get`, the path rule and the part splitter.
 - **`load_credentials_from_vault`** (`session.py`) — default loader,
   stubbed `NotImplementedError` until the live operator-context per-target
   Vault read lands. Mirrors `load_credentials_from_vault` in
@@ -219,6 +240,134 @@ module-level `register_fleet_typed_operations` wrapper is queued via
 `register_typed_op_registrar` in `__init__.py` so the rows land before the
 first dispatch.
 
+### The read: `fleet.api_file.get`
+
+Why it exists: Aria Suite Lifecycle 8.18 publishes no vendor file of its
+`/lcm` API, and the vendor's portal stops at 8.16. Only a running
+appliance serves the API descriptions. This read is how the lab pins
+those files; the reconcile lane below arms itself once they are pinned.
+
+Input: one field, `path`. Before any vendor call the path is checked
+against this rule:
+
+1. allowed: the documentation pages `/api/swagger-ui.html` (Lifecycle
+   APIs) and `/lcm/cms/api/swagger-ui.html` (Content Management APIs),
+   as the 8.12 to 8.18 programming guides name them;
+2. allowed: every path under the folders `/api/swagger-ui/` and
+   `/lcm/cms/api/swagger-ui/` (from 8.18 Patch 3 on the pages live at
+   `index.html` under each folder);
+3. allowed: a Swagger or OpenAPI file at its usual place -- a path with a
+   part named `api-docs`, `swagger-resources` or `swagger-config`, or a
+   path ending in `swagger.json`, `swagger.yaml`, `openapi.json` or
+   `openapi.yaml`;
+4. refused: everything else, and any path with `..`, `//`, `\`, an
+   encoded dot or slash (`%2e`, `%2f`), a semicolon (`;`), a scheme, a
+   host name, a fragment, whitespace or a control character. A query
+   string may hold only `group` and `apiVersion`.
+
+A refused path stops with an error and sends no HTTP request. So an
+agent cannot use this read to fetch `/lcm/locker/...` or any other data
+path.
+
+Then the read sends one `GET` to the target's own address with the
+target's own HTTP Basic login. It does not follow a redirect: a `3xx`
+answer is reported with its status, and `redirect_to` holds the path to
+read next (the same rule applies to that path). A relative `Location`,
+such as `swagger.json` or `?group=x`, is resolved against the path that
+was read, so `redirect_to` is always a full path. A `Location` on another
+host is reported as `scheme://host/path`, so the caller sees it cannot be
+read through this target. Only a `401` is raised, so the dispatcher drops
+the cached login; every other status (for example `404`) is reported in
+`status` with the body as text.
+
+The body is read in a stream. The read asks for `gzip` or `deflate` only
+and decodes the wire chunks itself with `zlib`, in steps that never
+produce more than the room left under the limit. So a small compressed
+answer that decodes to a file over the limit is refused at the limit. The
+read returns the whole file or fails: a body whose compressed stream ends
+early is refused, and so are bytes after a `deflate` stream. A `gzip`
+body made of several members is decoded whole, under the same limit. An
+answer with any other content encoding is refused with the encoding
+named.
+
+Only UTF-8 text comes back. A content type that is not text (anything
+other than `text/*`, JSON, YAML, XML or JavaScript) or a body that is not
+valid UTF-8 is refused, and the error names the content type.
+
+Before the text is cut into parts, the read checks the whole file with
+the shared API file secret check
+(`connectors/_shared/api_file_secrets.py`, see
+`connectors-shared-api-file-secrets.md`). The file is parsed (JSON, YAML,
+XML or HTML; the content type decides, or the file ending when the type
+is `text/plain` or missing), every value under a secret name is replaced
+with `[REDACTED:param_name]`, and the file is written back from the
+parsed copy. A file that does not parse, or whose format is unknown
+(JavaScript, CSS, plain text), is refused with the reason. The answer
+carries the count in `secrets_replaced`; `size` and `sha256` describe the
+checked copy. A redirect path gets the same check on its query string.
+
+The dispatcher runs the shared secret-redaction rules on every answer
+before the caller sees it. A documentation page can still hold free text
+that looks like a secret (for example an `Authorization` header line in
+a text block). Such a page would come back changed while `sha256` names
+the copy as checked. The read runs the same rules first, on the whole
+text and then on its answer, and stops with an error that names the
+rules and the number of places. The whole text is checked because a
+secret whose label ends one part and whose value starts the next is not
+seen in either part alone. The rules skip the placeholder, so a replaced
+value does not set them off. Redaction stays on; the read just never
+claims a file it cannot return.
+
+Version and build come from `GET /lcm/lcops/api/v2/about`, the call of
+`fleet.about`, in one request with no retry. On VCF 9.0 builds that call
+answers HTTP 500 (see "Known issues"): then `version` and `build` are
+`null`, `version_error` names the 500, and `lcm_api_version` still
+carries the `Lcm-API-Version` header the appliance sent with the file.
+A request that fails before a usable answer exists (a connection fault,
+a body that does not decode, a redirect loop) is named the same way.
+The file comes back either way.
+
+The answer:
+
+| Field | Meaning |
+|---|---|
+| `path` | The path that was read, with its query string. |
+| `status` | The HTTP status. |
+| `content_type` | The `Content-Type` header. |
+| `size` | Size of the checked copy in bytes. |
+| `sha256` | SHA-256 of the checked copy, hex. |
+| `secrets_replaced` | How many values under a secret name were replaced in the copy. |
+| `version`, `build` | `productVersion` and `buildNumber` from the about call. |
+| `version_error` | Why the version read failed; `null` when it worked. The file still comes back. |
+| `lcm_api_version` | The `Lcm-API-Version` header the appliance sent with the file; `null` when absent. |
+| `redirect_to` | Path of a redirect answer; `null` otherwise. |
+| `parts` | How many text parts there are. |
+| `items` | The parts, `{index, text}`, at most 64 KiB each, in order. |
+
+### Rebuilding a file from the parts
+
+The checked copy is split on UTF-8 character boundaries into parts of at
+most 64 KiB, so each part decodes on its own. Joining the `text` of every
+part in `index` order gives the copy; the SHA-256 of the joined bytes
+equals `sha256`.
+
+A short page (under about 4 KB and 50 parts) comes back inline. A longer
+file is set-shaped, so MEHO stores the parts behind a result handle and
+keeps the scalar fields (`sha256`, `size`, `version`, ...) inline. Read
+the parts with `result_query` in `index` order and join them.
+
+Why parts and not lines: a served file can be one long line. One result
+handle keeps at most 10,000 rows (`result_handle_max_spill_rows`) and
+16 MiB (`result_handle_max_record_bytes`), and one `result_query` answer
+is at most 256 KiB (`result_query_max_output_bytes`). The byte limit
+applies to the whole stored record: the parts, the record's own fields
+and the answer's scalars. The read measures that record with
+`rows_record_bytes` from the result store before it answers. A file whose
+record does not fit stops with an error that names the file's size and
+the record's size. The read never returns a cut file.
+
+Tests: `backend/tests/test_connectors_vcf_fleet_api_file.py`.
+
 ### Remaining ingested breadth (enabled generically)
 
 The reads outside the audited typed set — datacenters, vcenters, the
@@ -264,6 +413,16 @@ The runbook for end-to-end ingest + enable + verify is
 - **Default Vault loader is a stub.** Until Goal #214 (Connector parity)
   wires the operator-context per-target Vault read, production deploys
   must inject a custom `credentials_loader` on construction.
+- **The `/lcm` API files are not pinned yet.** The reconcile lane
+  (`tests/test_connectors_vcf_fleet_spec_reconcile.py`) skips its served
+  check until the shelf holds `vcf-fleet-9.0/`. The manifest-pin test runs
+  always; it lists the documentation pages and folders of
+  `fleet.api_file.get` as `GET`, marked "documentation path, not in the API
+  file", and keeps them out of the served check.
+- **The documentation paths come from the vendor's guides.** Their first
+  live use is the pinning of the Aria Suite Lifecycle 8.18 files. If a page
+  loads its file from a path the rule refuses, file a bug for this read
+  with the exact path; a small change adds it.
 
 ## References
 
@@ -276,6 +435,8 @@ The runbook for end-to-end ingest + enable + verify is
   in the consumer's private repo.
 - VCF Fleet / vRSLCM API:
   <https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager-api/latest/>
+- The API description read: <https://github.com/evoila/meho/issues/4607>
+  (the same read for NSX: #4395; VCF 9.0 targets on this connector: #4442).
 - Spec-reconcile guard (#2993):
   [`backend/tests/test_connectors_vcf_fleet_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_fleet_spec_reconcile.py)
   asserts every hand-coded `/lcm/*` literal against a pinned vRSLCM 1.3.0 LCM

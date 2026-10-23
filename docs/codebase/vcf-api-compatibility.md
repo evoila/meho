@@ -132,8 +132,10 @@ Operations for Logs uses the same Bearer family across the documented classes,
 but the 9.0 and 9.1 documents are differently named service artifacts, so no
 removal is inferred without lineage evidence.
 
-The Installer currently advertises `>=9.1,<10.0`. A 9.0 spec exists, but that
-does not lower the connector floor until a focused contract test proves it.
+The Installer advertises `>=9.0,<10.0`. Every path it calls is in the pinned
+9.0 installer file, and the 9.0 case of its spec-reconcile lane checks that in
+CI. The [Installer page](connectors-vcf-installer.md#installer-90) lists what
+differs on 9.0.
 VCF Automation Native Public Cloud endpoints in 9.1.1 are disabled by default;
 that is a target capability/configuration gate, not a class fork. VCD API 38.0
 is evidenced only for 10.5/10.6 and needs negotiation or a narrow range.
@@ -282,14 +284,19 @@ shelf) and prints the methods a file lacks. CI requires the three files, so
 this check runs on every CI run. Without the shelf it skips.
 
 A method that a file lacks needs a version gate in the operation, or an entry
-in the lane's exclusion list (`_NOT_IN_8_0_VI_JSON`) with the reason. Today
-one method is in the list:
+in the lane's exclusion list (`_NOT_IN_8_0_VI_JSON`) with the reason. The list
+is empty today: every VI-JSON method MEHO calls on 8.0 is in all three files.
 
-| Method | Missing in | Why it is safe |
-|---|---|---|
-| `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` | 8.0 U1, U2, U3 | It is a vSAN health service method, not a vim25 method; no 8.0 VI/JSON file has the vSAN health service (`VsanVcClusterHealthSystem`) paths. `vmware.host.vsan_health` calls it best-effort and returns `overall_health: null` with a `read_note` when the call fails. |
-
-All other 49 methods are in all three files.
+**vSAN methods on 8.0 (#4441).** No 8.0 VI/JSON file has vSAN paths. So on
+vCenter 8.0 the connector sends vSAN methods as SOAP to `/vsanHealth`, not as
+VI-JSON; on vCenter 9.x it sends them as VI-JSON under `/vsan/...` (see "vSAN
+calls" in [connectors-vmware-rest.md](connectors-vmware-rest.md)). The same
+lane checks every vSAN method MEHO calls against the method lists of the
+vendor's vSAN Management SDK for Python 8.0 U1 and U2
+(`docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt`, `.../8.0u2/...` on the
+shelf). Today that is one method,
+`VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary`, and both lists
+have it.
 
 ## References
 

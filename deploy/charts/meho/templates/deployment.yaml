@@ -151,7 +151,9 @@ spec:
                   name: {{ include "meho.agentSecretName" . | quote }}
                   key: {{ .Values.agent.secretKey | quote }}
             {{- end }}
-            {{- if .Values.keycloakAdmin.enabled }}
+            {{- if or .Values.keycloakAdmin.enabled .Values.coreKeycloak.enabled }}
+            {{- /* With the built-in Keycloak on, all three point at its meho-admin client through the Service (#4591). */}}
+            {{- $kc := include "meho.keycloakSettings" . | fromYaml }}
             # G11.2 (#803) — Keycloak Admin REST API credentials gating
             # agent-principal registration. All three render together
             # (schema requires `url` + `clientId` + `clientSecret` refs
@@ -162,14 +164,14 @@ spec:
             # `503 keycloak_admin_not_configured` (see
             # `meho_backplane.features._agent_runtime_block`).
             - name: KEYCLOAK_ADMIN_URL
-              value: {{ .Values.keycloakAdmin.url | quote }}
+              value: {{ $kc.adminUrl | quote }}
             - name: KEYCLOAK_ADMIN_CLIENT_ID
-              value: {{ .Values.keycloakAdmin.clientId | quote }}
+              value: {{ $kc.adminClientId | quote }}
             - name: KEYCLOAK_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "meho.keycloakAdminSecretName" . | quote }}
-                  key: {{ .Values.keycloakAdmin.clientSecret.secretKey | quote }}
+                  name: {{ $kc.adminSecretName | quote }}
+                  key: {{ $kc.adminSecretKey | quote }}
             {{- end }}
             {{- if .Values.uiConsole.enabled }}
             # #2594 (Goal #336) — operator-console browser BFF confidential

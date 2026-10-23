@@ -115,6 +115,17 @@
 # the merge attempt and defeats the queue's purpose. cancel-in-progress
 # is scoped to pull_request / push refs only so PR force-pushes and rapid
 # main pushes still cancel their predecessors cleanly.
+#
+# Merge-queue watchdog (#4732): the queue drops a group as soon as one of
+# its required checks fails, or when it rebuilds the group behind a pull
+# request it took out, and then deletes the group's branch. GitHub does not
+# stop the group's CI run, so the run's jobs kept waiting for and using
+# runners for up to three hours after the drop. The `merge-queue-watchdog`
+# job (last in this file) runs only on `merge_group` events. It cancels its
+# own run when a job that carries or feeds a required check has not passed,
+# or when the queue branch is gone. It ends quietly once every job that
+# carries or feeds a required check has finished, so a run that passed and
+# merged is never cancelled.
 
 name: CI
 
@@ -549,7 +560,8 @@ jobs:
           # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
           # ~2 MB sddc-manager-9.0 + ~38 MB vcenter-8.0 + ~18 MB
           # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB
-          # vcf-installer-9.1 + ~5 MB vcf-operations-9.0 + ~0.4 MB
+          # vcf-installer-9.0 + ~0.4 MB vcf-installer-9.1 + ~5 MB
+          # vcf-operations-9.0 + ~0.4 MB
           # vks-9.0), not the
           # whole consumer repo. No
           # `ref:` pin — the shelf's default branch IS the
@@ -573,6 +585,7 @@ jobs:
             docs/vcenter-8.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
+            docs/vcf-installer-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
             docs/vks-9.0
@@ -612,9 +625,12 @@ jobs:
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
@@ -624,7 +640,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -859,16 +875,15 @@ jobs:
         # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/4 the
         # tests so its base memory is well under the pod limit even without --cov,
         # and -n 3 stays inside the #1983 heartbeat-safe worker count on the
-        # 6-core cap. History: -n auto was inconsistent on the shared 4-core pool
-        # (cgroup detection drift), so #726 pinned -n 3.
+        # heavy runner's core cap. History: -n auto was inconsistent on the
+        # shared 4-core pool (cgroup detection drift), so #726 pinned -n 3.
         # RULE — pytest-xdist -n vs runner CPU (#1983): -n must stay BELOW
         # the runner container's usable cores, leaving at least one core for
         # the GHA agent + xdist coordinator. The fix for "runner lost
         # communication" / heartbeat starvation is burst headroom on the
-        # pod's CPU *limit* (rke2-ci heavy pool target: request 4000m /
-        # limit 7000m, pending evoila-bosnia/rdc-gitops#70 — currently
-        # 6000m requests=limits), not a smaller -n. Do not raise -n above
-        # the current value to chase wall-clock; raise the CPU *limit* instead.
+        # runner's CPU *limit* (the heavy pool's sizes live outside this
+        # repo), not a smaller -n. Do not raise -n above the current value
+        # to chase wall-clock; raise the CPU *limit* instead.
         # --dist loadscope: a module's tests stay on one worker so
         # module-/session-scoped fixtures (testcontainers PG, embedding
         # service) instantiate per worker, not per test. --maxfail=1
@@ -1847,6 +1862,7 @@ jobs:
             docs/vcenter-8.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
+            docs/vcf-installer-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
             docs/vks-9.0
@@ -1879,9 +1895,12 @@ jobs:
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
@@ -1891,7 +1910,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the
@@ -2379,3 +2398,188 @@ jobs:
             -ignore-missing-schemas \
             -summary \
             /tmp/rendered.yaml
+
+  # ---------------------------------------------------------------------------
+  # Merge-queue watchdog (#4732). Stops a merge-queue CI run as soon as its
+  # result no longer counts, so its runners go back to live runs.
+  #
+  # Why: the queue drops a group when a required check of the group fails,
+  # or when it takes out a pull request ahead of the group and builds the
+  # group again. It then deletes the group's branch. GitHub does not stop
+  # the group's CI run. On 2026-10-21 a broken Go vulnerability scan failed
+  # 31 queue runs in their first minute; the queue dropped every group
+  # within about a minute, but the runs went on for a median of 131 more
+  # minutes and held 73 percent of the heavy runner pool for most of the
+  # morning. Almost half of that day's merge-queue runner time was spent on
+  # runs whose result nobody could use.
+  #
+  # Why not `cancel-in-progress` for merge_group: each group has its own
+  # branch, so a new group never replaces the run of an old group, and a
+  # cancelled live check drops its group (see the `concurrency:` comment).
+  #
+  # What the job does, about once a minute, with 2 API calls per poll (3
+  # on the one poll that finds the branch gone):
+  #   1. Lists this run's jobs. If every job other than this one and the
+  #      `CLI API snapshot freshness` job has finished, it ends with
+  #      success — checked on two polls in a row, because a job that still
+  #      waits on `needs` (the `Python (ruff + mypy + pytest)` fan-in) is
+  #      not listed until its dependencies finish. This check runs BEFORE
+  #      the branch check, so a run that passed and merged (which also
+  #      deletes the queue branch) is never cancelled. The snapshot job is
+  #      left out because the group can merge while it still runs: it is
+  #      not required, so a run that merged with it still open must not be
+  #      cancelled either.
+  #   2. If a job other than `CLI API snapshot freshness` ended in failure,
+  #      cancelled or timed_out, it cancels the run (rule a). Every other
+  #      job of a merge-queue run either carries a required check or feeds
+  #      the required fan-in, so its failure drops the group anyway. The
+  #      snapshot job is not required: its failure alone keeps the group,
+  #      so it must not cancel the run.
+  #   3. Asks GitHub whether this run's queue branch (`github.ref_name`)
+  #      still exists. Only a `404` can cancel the run (rule b). Any other
+  #      answer or error (timeout, 403, 429, 5xx) keeps the run alive.
+  #      Before it cancels, it lists the jobs once more: the last required
+  #      job can pass, and the group can merge, between step 1 and step 3,
+  #      and a merged run has lost its branch too. It cancels only when
+  #      that second look still shows required work open (or a red job).
+  #      If the second look fails, or shows every required job finished,
+  #      the run stays alive.
+  #
+  # It never fails (the runner starts the step with `bash -e`, so every
+  # call is checked; a failed or unreadable call only means "look again
+  # next minute", and no branch check runs while the jobs' state is
+  # unknown), it is not a required check, and
+  # it runs on a GitHub-hosted runner so it never takes a slot from the
+  # jobs it watches. The queue builds at most 4 groups at once, so at most
+  # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
+  # hour that the job token may make per repository, worst case.
+  # ---------------------------------------------------------------------------
+  merge-queue-watchdog:
+    name: Merge queue watchdog
+    # Only merge-queue runs. A pull-request run must still show every failing
+    # job, and a push to `main` has no queue group that can be dropped.
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    # Backstop only: the loop below stops itself, with success, after 170
+    # minutes. A green merge-queue run took at most 78 minutes (#4732), and
+    # the queue itself gives up on a group long before this cap.
+    timeout-minutes: 180
+    # `actions: write` is what cancelling a run needs. Only this job gets it;
+    # the workflow-wide default stays `contents: read`. `contents: read` is
+    # listed again because a job-level block replaces the workflow-wide one.
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Cancel this run once the queue has dropped its group
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_BRANCH: ${{ github.ref_name }}
+          # Must match this job's `name:` above — the jobs API lists display
+          # names, and the loop has to leave itself out of "all other jobs".
+          SELF_NAME: Merge queue watchdog
+          # The one job that is not required and feeds no required fan-in.
+          # Its failure does not drop the group, and the group can merge
+          # while it still runs. Keep in sync with that job's `name:`.
+          HARMLESS_JOB: CLI API snapshot freshness
+        run: |
+          set -uo pipefail
+          api="repos/${GITHUB_REPOSITORY}"
+          interval=60
+          stop_after=$((170 * 60))
+          quiet_polls=0
+
+          cancel_run() {
+            echo "::notice title=Merge queue watchdog::${1} Cancelling run ${GITHUB_RUN_ID}."
+            if timeout 30 gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"; then
+              echo "cancel request accepted; GitHub stops the other jobs and then this one"
+              return 0
+            fi
+            echo "cancel request failed; the run keeps going and the next poll tries again"
+            return 1
+          }
+
+          # Reads this run's jobs into `open` (jobs that carry or feed a
+          # required check and are still queued or running) and `red` (such
+          # jobs that did not pass). Returns 1 when the jobs cannot be listed
+          # or read. The caller must then not cancel: a run that passed and
+          # merged has lost its branch too, so the branch alone proves nothing.
+          read_jobs() {
+            local jobs
+            if ! jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
+              echo "jobs API did not answer (${jobs})"
+              return 1
+            fi
+            # The runner starts this step with `bash -e`, so every jq call is
+            # guarded: an unreadable answer must not end the watchdog.
+            if ! open="$(jq --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
+                  '[.jobs[] | select(.name != $me and .name != $ok and .status != "completed")] | length' <<<"${jobs}")" \
+               || ! red="$(jq -r --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
+                  '[.jobs[] | select(.name != $me and .name != $ok
+                     and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
+                   | .name] | join(", ")' <<<"${jobs}")"; then
+              echo "jobs API answer could not be read"
+              return 1
+            fi
+          }
+
+          echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
+          while [ "${SECONDS}" -lt "${stop_after}" ]; do
+            # 1 + 2: this run's own jobs. Required ones done -> leave. One red -> cancel.
+            # When the jobs cannot be listed or read, this poll ends here: the
+            # branch check below must not run while the jobs' state is unknown.
+            if ! read_jobs; then
+              quiet_polls=0
+              echo "keeping the run alive and looking again next minute"
+              sleep "${interval}"
+              continue
+            fi
+            if [ -n "${red}" ]; then
+              cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
+            elif [ "${open}" -eq 0 ]; then
+              quiet_polls=$((quiet_polls + 1))
+              if [ "${quiet_polls}" -ge 2 ]; then
+                echo "every job that carries or feeds a required check has finished; nothing left to watch"
+                exit 0
+              fi
+              # Do not look at the branch on this poll: with no required job
+              # running there is nothing worth freeing, and a run that just
+              # merged has lost its branch for a good reason.
+              echo "all listed required jobs have finished; one more poll in case a job was still waiting on 'needs'"
+              sleep "${interval}"
+              continue
+            else
+              quiet_polls=0
+              echo "${open} required job(s) still queued or running"
+            fi
+
+            # 3: the queue branch. Only a clear 404 means the group is gone.
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/${api}/branches/${QUEUE_BRANCH}" 2>/dev/null)" || code="000"
+            case "${code}" in
+              200) echo "queue branch still exists" ;;
+              404)
+                # The last required job can pass, and the queue can merge the
+                # group, between the jobs lookup above and this branch lookup.
+                # A merged run has lost its branch too, so read the jobs once
+                # more: only required work that is still open proves a drop.
+                if ! read_jobs; then
+                  quiet_polls=0
+                  echo "the queue branch is gone, but the jobs could not be read again; keeping the run alive and looking again next minute"
+                elif [ -n "${red}" ]; then
+                  cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
+                elif [ "${open}" -eq 0 ]; then
+                  quiet_polls=1
+                  echo "the queue branch is gone, but every required job has finished since the last look, so the group may have merged; not cancelling"
+                else
+                  cancel_run "The queue branch '${QUEUE_BRANCH}' is gone while ${open} required job(s) still run: the queue has dropped this group and this run's result no longer counts." && exit 0
+                fi ;;
+              *)   echo "branch lookup answered '${code}', which is not conclusive; keeping the run alive" ;;
+            esac
+            sleep "${interval}"
+          done
+          echo "stopped watching after $((stop_after / 60)) minutes; the run goes on without a watchdog"
+          exit 0

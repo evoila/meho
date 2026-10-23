@@ -72,14 +72,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
-- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
-  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
-  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+- **Missing managed objects on typed PropertyCollector reads (`#3481`, `#4776`)** — vCenter reports
+  an addressed, deleted vim object as a `ManagedObjectNotFound` fault inside
+  an HTTP 500. On the vCenter VI-JSON transport the fault body is JSON
+  (`{"_typeName": "ManagedObjectNotFound", "obj": {...}}`, the shape the
+  pinned `vi-json.yaml` documents and vCenter 9.1 sends); a standalone ESXi
+  host sends the SOAP-shaped XML fault. The addressed read operations `vmware.vm.info`,
   `vmware.host.usage`, `vmware.host.storage_devices`,
   `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
   into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
-  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
-  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  reads the fault in either form (JSON first, then XML) and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). A JSON fault
+  names the missing object in `obj`; it maps to `not_found` only when that
+  object is one the read asked for (a missing property collector is not a
+  missing VM), and a JSON fault without `obj` reports every addressed
+  object, as the XML form does. The dispatcher
   returns `status="not_found"` with `extras.error_code="not_found"`,
   `extras.resource_ids`, and the singular `extras.resource_id` when one object
   was addressed. A different fault, a non-PropertyCollector vmomi method, or
@@ -127,12 +134,15 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   best-effort (a failed read nulls the network detail with a
   `read_note` rather than sinking the op).
   `vmware.host.vsan_health` (`#2135`) queries the vSAN
-  health-service vmomi method `VsanQueryVcClusterHealthSummary` on the
-  `vsan-cluster-health-system` singleton, scoped to the target
+  health-service method `VsanQueryVcClusterHealthSummary` on the
+  `vsan-cluster-health-system` object, scoped to the target
   cluster's MoRef — the `govc vsan.health.*` equivalent, returning the
   cluster-wide `overall_health` colour plus the health-test `groups`
-  list. It is likewise best-effort (a failed health-service read nulls
-  `groups` / `overall_health` with a `read_note`).
+  list. It is **not** best-effort (`#4441`): when the vSAN call fails,
+  the operation returns an error with vCenter's fault type and text, and
+  a cluster id that does not exist gives `not_found`. It never returns
+  empty health fields that look like a healthy cluster. How the call is
+  sent: see "vSAN calls" below.
 - **Write composites** (`composites/_write.py`) — the module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
@@ -724,8 +734,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     same-origin redirect by itself). A `3xx` returns `redirect_path`; a
     `401`, `403`, `404` or `5xx` returns its `status` with no text.
   - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-    `size` (bytes), `sha256` (of the file bytes), `imports`, `parts`,
-    `text_parts`, `version`, `build`, `version_error`. `imports` lists the
+    `size` (bytes of the checked copy), `sha256` (of the checked copy),
+    `secrets_replaced`, `imports`, `parts`, `text_parts`, `version`,
+    `build`, `version_error`. `imports` lists the
     `location` / `schemaLocation` values of `wsdl:import`, `xsd:import` and
     `xsd:include`, as written, parsed with `defusedxml`; a file that is not
     XML gives `[]`. Only UTF-8 text comes back; other content is refused and
@@ -737,10 +748,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     failures that happen before any request goes out: no credentials for
     the target, access denied, or a credential store that cannot be reached
     (`CredentialsReadError`, `VaultClientError`).
+  - **The file is checked before it is cut.** The read runs the shared
+    API file secret check (`connectors/_shared/api_file_secrets.py`, see
+    `connectors-shared-api-file-secrets.md`) on the whole file: the file
+    is parsed (XML for a WSDL or XSD file), every value under a secret
+    name is replaced with `[REDACTED:param_name]`, and the file is
+    written back from the parsed copy with its namespace prefixes as
+    declared. A file that does not parse is refused with the reason.
+    `secrets_replaced` counts the replaced values; `size` and `sha256`
+    describe the checked copy. A redirect path gets the same check on its
+    query string.
   - **How to rebuild the file.** `text_parts` is a list of
     `{index, text}`, each at most 64 KiB of UTF-8, cut only between
     characters. Join the `text` of all parts in `index` order and encode as
-    UTF-8; the SHA-256 of the result equals `sha256`. A part is a fixed byte
+    UTF-8; the SHA-256 of the result equals `sha256` and the result is the
+    checked copy. A part is a fixed byte
     size, not a line, because a served file can be one long line. The answer
     has two lists (`imports` and `text_parts`), so JSONFlux keeps a large
     answer whole as a document record behind a result handle; the inline
@@ -751,18 +773,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
     stored JSON) stops with an error that names its size; the read never
     returns a cut file.
-  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+  - **Redaction keeps the copy whole.** MEHO redacts secret-shaped text in
     every stored result (the dispatcher runs
     `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
-    that fires on the file text would rewrite a part, and the joined parts
+    that fires on the text would rewrite a part, and the joined parts
     would no longer match `sha256`. So the read runs the same middleware, with
     the same connector, tenant and operation labels, on the text parts and on
-    the whole file text before it returns. The whole-file pass matters: a
+    the whole copy before it returns. The whole-file pass matters: a
     secret that the part cut splits in two matches in no single part, so the
     dispatcher's own redaction would store it in clear text. When the text
     would change, the read stops with an error that names the rule and the
     place (a part, or `file_text` for the whole file), and returns no file.
-    Redaction itself stays on. The default policy's `strip-api-key` rule fires
+    Redaction itself stays on; its `api_key` rule skips the placeholder the
+    file check writes. The default policy's `strip-api-key` rule fires
     on text such as
     `type="token:SecurityToken"`; a redaction policy registered for this
     operation changes what the check accepts, because both use the same
@@ -860,9 +883,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    method the connector calls (from the source) and checks it against the
    vendor VI/JSON files of 8.0 U1, U2 and U3. A method a file lacks needs a
    version gate or an entry with the reason in the lane's exclusion list.
-   Today only the vSAN health method is listed: no 8.0 VI/JSON file has the
-   vSAN health service (`VsanVcClusterHealthSystem`) paths, and
-   `vmware.host.vsan_health` calls it best-effort. See
+   The list is empty today. No 8.0 VI/JSON file has vSAN paths, so on
+   vCenter 8.0 the vSAN methods go as SOAP (`#4441`, see "vSAN calls"
+   below); the same lane checks them against the vendor's vSAN SDK of
+   8.0 U1 and U2 instead. See
    [vcf-api-compatibility.md](vcf-api-compatibility.md).
    **Operation summaries (#4329).** Search and the operation-group step
    read each operation's one-line `summary`. The full vendor specs fall
@@ -3473,10 +3497,10 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   maxSample}]`, the shape the pinned `vi-json.yaml` declares.
 - **VI-JSON mount for vmomi reads *and writes* — `/sdk/vim25/{release}`
   (#2466, mutating writes #2893)** —
-  vmomi (VI-JSON) methods (`RetrievePropertiesEx`,
-  `VsanQueryVcClusterHealthSummary`, `QueryEvents`,
+  vmomi (VI-JSON) methods (`RetrievePropertiesEx`, `QueryEvents`,
   `QueryAvailablePerfMetric`, `QueryPerf`, and now the mutating
-  `ReconfigVM_Task`) are served under the
+  `ReconfigVM_Task`; the vSAN methods have their own path, see "vSAN
+  calls" below) are served under the
   documented release-versioned base
   `/sdk/vim25/{release}/{MoType}/{moId}/{method}` (Broadcom Web Services
   SDK guide, "Building JSON Request URLs"; available since vCenter 8.0U1,
@@ -3506,7 +3530,13 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   `POST:/PropertyCollector/{moId}/RetrievePropertiesEx`, ...) reach the
   wire through `mount_op_path`. It tells them apart from Automation paths
   by the PascalCase managed-object type in the first segment
-  (`_mount.is_vmomi_path`). On a modern vCenter session they mount on
+  (`_mount.is_vmomi_path`). The type may sit behind one of the five
+  service parts the vendor file uses, listed in
+  `_mount.VI_JSON_SERVICE_PREFIXES`: `/vsan` (vSAN management), `/sms`
+  (storage providers), `/pbm` (storage policies), `/eam` (ESX Agent
+  Manager) and `/vslm` (First Class Disks). Before #4775 those paths
+  went to `/api` and answered 404, because their first segment is lower
+  case. On a modern vCenter session they mount on
   `/sdk/vim25/{release}` (release from the same cached `_about_version`).
   Before #3534 they mounted on `/api` and answered a bare 404 on vCenter
   8.0.x. Limits: there is no `/api` 404 fallback on this path (the hook
@@ -3514,6 +3544,42 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   `/api` form; legacy `/rest` (vcsim) and ESXi sessions are unchanged.
   For managed-object property reads, `vmware.object.collect` stays the
   preferred op: it builds the PropertyCollector body for the caller.
+- **vSAN calls — `VmwareRestConnector._post_vsan` (#4441)** — every vSAN
+  operation sends its vSAN method through this one method. The method
+  is a `VsanMethod` constant (`_mount.py`): the vSAN object type, its
+  fixed id on vCenter (for example `vsan-cluster-health-system`), and
+  the method name. How the call is sent depends on the vCenter version
+  the connector detected (the same version that gives `{release}`):
+  - **vCenter 9.x: VI-JSON.** `POST /sdk/vim25/{release}/vsan/{MoType}/{moId}/{method}`,
+    through `_post_vmomi_json`. `_mount.vsan_method_path` builds the
+    `/vsan/...` part; it is the path of the vendor VI/JSON files of 9.0,
+    9.1.0 and 9.1.1. Before #4441 the vSAN health read left out `/vsan`,
+    and vCenter 9.1 answered HTTP 500 `ManagedObjectNotFound` for the
+    vSAN health object.
+  - **vCenter 8.0: SOAP.** The vendor VI/JSON files of 8.0 U1, U2 and U3
+    have no vSAN paths. So the method goes as SOAP to `/vsanHealth`
+    (namespace `urn:vsan`, codec in `soap_vsan.py`). It is authenticated
+    by the `vmware_soap_session` cookie of a vCenter SOAP login on `/sdk`
+    (`_vcenter_soap_login`, the same login the PBM calls use), sent as
+    the HTTP `Cookie`. The `SOAPAction` is `urn:vsan/<version>`, with the
+    version from `/sdk/vsanServiceVersions.xml`. Source: the vendor
+    sample `vsanapiutils.py` of the vSAN Management SDK for Python 8.0.
+    The cookie is kept per target; a `NotAuthenticated` fault (vCenter
+    dropped the idle session) makes the call log in again and retry once.
+    SOAP has no list marker, so a list with one entry comes back as a
+    single dict; the operation turns its list fields back into lists.
+  - An unknown version stays on VI-JSON. A legacy `/rest` session
+    (vcsim) mounts the same `/vsan/...` path on `/rest`.
+
+  Errors are not swallowed. A vSAN fault raises with vCenter's fault
+  type and text (`extras.upstream_fault` in the error answer). When the
+  fault is `ManagedObjectNotFound` for an object the caller sent (such as
+  the `cluster`), the call raises `ConnectorResourceNotFoundError`, so the
+  answer is MEHO's normal `not_found`. A `ManagedObjectNotFound` for the
+  vSAN object itself stays a normal error. The reconcile lanes collect
+  every `VsanMethod` constant: the read lane checks each against the
+  pinned 9.0 `vi-json.yaml`, and the 8.0 lane checks each against the
+  method lists of the vendor's vSAN SDK of 8.0 U1 and U2.
 - **All hand-authored composites shipped** — T5 (#508) ships 5 read;
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6

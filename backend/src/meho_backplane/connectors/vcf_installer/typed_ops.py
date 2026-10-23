@@ -288,7 +288,9 @@ SDDC_SPEC_HINT = (
     "vcf-identity.<dnsSpec.subdomain> — pre-create that DNS record or set "
     "it explicitly. (4) All-flash/nested labs pass the vSAN check via "
     "datastoreSpec.vsanSpec.esaConfig.enabled=false. (5) The ipv4Pool "
-    "ipRange needs >=12 free addresses for a small deployment."
+    "ipRange needs >=12 free addresses for a small deployment. On a 9.0 "
+    "Installer the SddcSpec has no vspClusterSpec or vidbSpec, so rules (1) "
+    "and (3) apply to 9.1 only; build the spec for the Installer's version."
 )
 
 

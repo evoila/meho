@@ -218,14 +218,14 @@ async def _resolve_jwks_uri(settings: Settings) -> str:
     """Fetch the OIDC discovery doc and return the ``jwks_uri`` field.
 
     Keycloak guarantees the well-known endpoint at
-    ``{issuer}/.well-known/openid-configuration``. We deliberately
+    ``{realm}/.well-known/openid-configuration``; ``{realm}`` is
+    ``KEYCLOAK_DISCOVERY_URL`` when set, else the issuer. We deliberately
     re-resolve discovery on every cache miss rather than caching the
     URI long-term; the cost is one extra round trip per cache miss
     (rare), and it lets operators rotate Keycloak realms (and the
     associated ``jwks_uri``) without restarting the backplane.
     """
-    issuer = str(settings.keycloak_issuer_url).rstrip("/")
-    discovery_url = f"{issuer}/.well-known/openid-configuration"
+    discovery_url = f"{settings.keycloak_discovery_base}/.well-known/openid-configuration"
     discovery = await _http_get_json(discovery_url)
     jwks_uri = discovery.get("jwks_uri")
     if not isinstance(jwks_uri, str) or not jwks_uri:
@@ -1593,8 +1593,7 @@ async def keycloak_readiness_probe() -> ProbeResult:
             detail=f"settings_unavailable: {type(exc).__name__}",
         )
 
-    issuer = str(settings.keycloak_issuer_url).rstrip("/")
-    discovery_url = f"{issuer}/.well-known/openid-configuration"
+    discovery_url = f"{settings.keycloak_discovery_base}/.well-known/openid-configuration"
 
     try:
         discovery = await _http_get_json(discovery_url)

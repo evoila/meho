@@ -101,12 +101,14 @@ typed and profiled paths is proven in
   `timestampString`, `fields[]`) come from `events.get.response` in the pinned
   `vcf-operations-for-logs-openapi.json`. Host name and source are rows of
   `fields[]`, not top-level event keys.
-- **`vrli_api_file_get_impl`**, **`check_path`**, **`split_parts`**,
-  **`DOCS_PAGES`**, **`DOCS_FOLDERS`** (`connectors/vcf_logs/api_file.py`)
-  and **`VRLI_API_FILE_GET_OP`** (`connectors/vcf_logs/typed_ops_api_file.py`)
-  — the body, the path rule, the part splitter and the metadata of
-  `vrli.api_file.get`, the second typed read (see "The read:
-  `vrli.api_file.get`" below). The handler is
+- **`vrli_api_file_get_impl`**, **`check_path`**, **`DOCS_PAGES`**,
+  **`DOCS_FOLDERS`** (`connectors/vcf_logs/api_file.py`) and
+  **`VRLI_API_FILE_GET_OP`** (`connectors/vcf_logs/typed_ops_api_file.py`)
+  — the body, the path rule and the metadata of `vrli.api_file.get`, the
+  second typed read (see "The read: `vrli.api_file.get`" below). The
+  fetch, the parts and the secret check are the shared steps in
+  `connectors/_shared/api_file_read.py` and
+  `connectors/_shared/api_file_secrets.py`. The handler is
   `VcfLogsConnector.api_file_get`; the 8.x subclass inherits it.
 - **Re-exports of the shared module**: `VcfCredentialsLoader`,
   `load_credentials_from_vault` (default stub),
@@ -290,7 +292,7 @@ registered on `vrli-rest-9.0` (Logs 9.0) and, through the reused tuple
 | Operation | What it does | Vendor call | Risk | Versions |
 |---|---|---|---|---|
 | `vrli.event.query` | Query raw log events by a constraint chain, with an optional limit. | `GET /api/v2/events/{constraints}` | read (`safe`, no approval) | 8.x, 9.0 |
-| `vrli.api_file.get` | Read one API reference page or API description file the system serves. Returns path, HTTP status, content type, size, SHA-256 and the system version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /api/v2/version` | read (`safe`, no approval) | 8.x, 9.0 |
+| `vrli.api_file.get` | Read one API reference page or API description file the system serves. Returns path, HTTP status, content type, size, SHA-256, the number of replaced secret values and the system version and build; the text of the checked copy is in parts behind a result handle. | `GET {path}`; version and build from `GET /api/v2/version` | read (`safe`, no approval) | 8.x, 9.0 |
 
 ### The read: `vrli.api_file.get`
 
@@ -336,13 +338,14 @@ host is reported as `scheme://host/path`, so the caller sees it cannot be
 read through this target. A `401`, or the system's own `440` ("the
 session has expired"), is raised so the dispatcher drops the cached
 session, logs in once more and asks once more. When the second try fails
-too, the dispatcher copies the body of that answer into the error result
-after the shared redaction rules. Those rules miss the forms listed
-below, so the read checks the body first and withholds it when a form
-matches or the body is not UTF-8 text; the status stays, so the retry
-still runs. Every other status (for example `404`) is reported in
-`status` with the body as text.
+too, the dispatcher copies the body of that answer into the error result.
+So the read checks that body first, the same way as a file (see below):
+the error result gets the checked copy, or no body when it is not UTF-8
+text or does not parse. The status stays, so the retry still runs. Every
+other status (for example `404`) is reported in `status` with the checked
+copy of the body as text.
 
+The fetch is the shared step in `connectors/_shared/api_file_read.py`.
 The body is read in a stream. The read asks for `gzip` or `deflate` only
 and decodes the wire chunks itself with `zlib`, in steps that never
 produce more than the room left under the limit. So a small compressed
@@ -357,45 +360,32 @@ Only UTF-8 text comes back. A content type that is not text (anything
 other than `text/*`, JSON, YAML, XML or JavaScript) or a body that is not
 valid UTF-8 is refused, and the error names the content type.
 
+Secrets: the read gives the whole text to the shared secret check
+(`check_api_file`, see `connectors-shared-api-file-secrets.md`) before it
+cuts the text into parts. The check parses the file as JSON, YAML, XML or
+HTML and replaces every value under a secret name with
+`[REDACTED:param_name]`, at any depth and however it is written (quoted
+or not, with quotes or spaces inside, any length, a YAML `|` or `>`
+block). A secret name is a name like `password`, `token`, `licenseKey`
+or `sessionId` (the login token the session API of this system returns).
+A PEM private key is replaced under any name. A file that does not
+parse, or whose format is unknown (JavaScript, CSS, plain text), is
+refused with the reason and never the text. A redirect's query string
+goes through the same name check. `secrets_replaced` counts every
+replaced value.
+
 The dispatcher runs the shared secret-redaction rules on every answer
-before the caller sees it. A documentation page can hold an example that
+before the caller sees it. A documentation page can hold free text that
 looks like a secret (for example an `Authorization` header line). Such a
-page would come back changed while `sha256` still names the original.
-The read runs the same rules first, on the whole text and then on its
+page would come back changed while `sha256` still names the copy. The
+read runs the same rules first, on the whole text and then on its
 answer, and stops with an error that names the rules and the number of
-places. Redaction stays on; the read just never claims an exact file it
-cannot return.
+places. Redaction stays on; the read just never claims a copy it cannot
+return.
 
-The shared rules see `password=value` and `password: value`, but not
-every form a secret takes in an API file: not a quoted field name, and
-not a value that holds a quote or a space or runs past 4096 characters.
-So the read has checks of its own, run on the whole text (a secret whose
-label ends one part and whose value starts the next is found too). It
-stops, with an error that names the form and the number of places but
-never the value, when the text holds:
-
-- a quoted field named like a secret with a value of 8 or more
-  characters, for example `"password": "..."`, `"sessionToken": "..."`,
-  `"sessionId": "..."` (the login token the session API returns) or
-  `"licenseKey": "..."` (the JSON form an API reference shows in a
-  request example). A quoted value runs to the same quote that opened it
-  or to the end of the line, with no upper length, so it may hold
-  spaces, the other quote (`"it's-secret"`) and escaped characters. A
-  schema entry such as `"password": {"type": "string"}` is not a value
-  and passes; so does a short placeholder like `"string"`;
-- the same field names without quotes, as in YAML, a header line or a
-  query string (`password: "it's-secret"`, `X-Api-Key: ...`,
-  `sessionId: ...`, `session_id=...`, `licenseKey: ...`), with the same
-  value shape. A bare value runs to the next space, so a plain YAML
-  value with a quote inside (`password: it's-secret`) counts too;
-- a bare VMware licence key, five groups of five letters and digits
-  mixed (`AB12C-3D4EF-...`), under any field name, because the Logs
-  licence API names it `key`. A placeholder of only one kind of character
-  (`XXXXX-XXXXX-...`) passes;
-- a PEM private-key block (`-----BEGIN ... PRIVATE KEY-----`).
-
-A vendor page that holds such an example cannot be read through this
-operation; the error says which form stopped it.
+The flight recorder (the trace of each vendor call) gets the checked copy
+of the body, never the body as it came. When the file is refused, the
+recorder gets no body.
 
 Version and build come from the connector's own version detection
 (`fingerprint`, the unauthenticated `GET /api/v2/version`). If that read
@@ -410,20 +400,23 @@ The answer:
 | `path` | The path that was read, with its query string. |
 | `status` | The HTTP status. |
 | `content_type` | The `Content-Type` header. |
-| `size` | Size of the file in bytes. |
-| `sha256` | SHA-256 of the file, hex. |
+| `size` | Size of the checked copy in bytes. |
+| `sha256` | SHA-256 of the checked copy, hex. |
+| `secrets_replaced` | How many values under a secret name were replaced by `[REDACTED:param_name]`. |
 | `version`, `build` | The system version and build, as the fingerprint reports them. |
 | `version_error` | Why the version read failed; `null` when it worked. The file still comes back. |
 | `redirect_to` | Path of a redirect answer; `null` otherwise. |
 | `parts` | How many text parts there are. |
-| `items` | The parts, `{index, text}`, at most 64 KiB each, in order. |
+| `items` | The parts of the checked copy, `{index, text}`, at most 64 KiB each, in order. |
 
 ### Rebuilding a file from the parts
 
-The file is split on UTF-8 character boundaries into parts of at most
-64 KiB, so each part decodes on its own. Joining the `text` of every part
-in `index` order gives the exact file; the SHA-256 of the joined bytes
-equals `sha256`.
+The checked copy is split on UTF-8 character boundaries into parts of at
+most 64 KiB, so each part decodes on its own. Joining the `text` of every
+part in `index` order gives the checked copy; the SHA-256 of the joined
+bytes equals `sha256`. The copy is the parsed file written back: the same
+content without comments, with secret values replaced. JSON comes back
+compact.
 
 A short page (under about 4 KB and 50 parts) comes back inline. A longer
 file is set-shaped, so MEHO stores the parts behind a result handle and
@@ -479,6 +472,11 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   small change adds it. The reconcile lane lists `/rest-api` and
   `/rest-api/` as `GET`, marked "documentation path, not in the API
   file", and keeps them out of the served check.
+- `vrli.api_file.get` replaces values by their name. Free text in a page
+  (prose, a `<pre>` block that is not JSON) is not parsed; only MEHO's
+  general redaction rules check it, and the read stops when they would
+  change it. A licence key under a name that is not a secret name (the
+  Logs licence API calls it `key`) is not replaced.
 - No DELETE-revoke on `aclose()` — a per-target network call during
   lifespan shutdown is more risk than benefit (same posture NSX
   takes). Revoke-on-close is v0.2.next.

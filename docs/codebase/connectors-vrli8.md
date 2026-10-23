@@ -60,7 +60,7 @@ connector implementations that register it.
 | Group | Op | What it does | Endpoint | Versions |
 |---|---|---|---|---|
 | `vrli-events` | `vrli.event.query` | Query raw log events by a constraint chain. | `GET /api/v2/events/{constraints}` | 8.x, 9.0 |
-| `vrli-api-docs` | `vrli.api_file.get` | Read one API reference page or API description file the system serves (`/rest-api`, the pages under `/rest-api/`, the Swagger or OpenAPI files they load). Returns path, HTTP status, content type, size, SHA-256 and the system version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /api/v2/version` | 8.x, 9.0 |
+| `vrli-api-docs` | `vrli.api_file.get` | Read one API reference page or API description file the system serves (`/rest-api`, the pages under `/rest-api/`, the Swagger or OpenAPI files they load). Returns path, HTTP status, content type, size, SHA-256, the number of replaced secret values and the system version and build; the text of the checked copy is in parts behind a result handle. | `GET {path}`; version and build from `GET /api/v2/version` | 8.x, 9.0 |
 
 The op metadata (summary, response schema, example, guidance) is the modern
 connector's; the event-query fields are taken from the 9.0 API file. The

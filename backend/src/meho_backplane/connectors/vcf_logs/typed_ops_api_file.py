@@ -81,8 +81,15 @@ VRLI_API_FILE_GET_OP = VrliTypedOp(
                 "type": ["string", "null"],
                 "description": "Content-Type header of the answer.",
             },
-            "size": {"type": "integer", "description": "Size of the file in bytes."},
-            "sha256": {"type": "string", "description": "SHA-256 of the file, hex."},
+            "size": {"type": "integer", "description": "Size of the checked copy in bytes."},
+            "sha256": {"type": "string", "description": "SHA-256 of the checked copy, hex."},
+            "secrets_replaced": {
+                "type": "integer",
+                "description": (
+                    "How many values under a secret name (password, token, session id, "
+                    "licence key, ...) were replaced by [REDACTED:param_name] in the copy."
+                ),
+            },
             "version": {
                 "type": ["string", "null"],
                 "description": (
@@ -107,7 +114,9 @@ VRLI_API_FILE_GET_OP = VrliTypedOp(
             "parts": {"type": "integer", "description": "How many text parts there are."},
             "items": {
                 "type": "array",
-                "description": "The text parts in order; joining them gives the exact file.",
+                "description": (
+                    "The text parts of the checked copy, in order. Joined, they are the copy."
+                ),
                 "items": _PART_ITEM_SCHEMA,
             },
         },
@@ -131,18 +140,22 @@ VRLI_API_FILE_GET_OP = VrliTypedOp(
             ),
         },
         "output_shape": (
-            "{path, status, content_type, size, sha256, version, build, version_error, "
-            "redirect_to, parts, items: [{index, text}]}. A short page comes back inline; "
-            "a longer file returns a result handle with the scalars inline and the parts "
-            "as rows. Read the rows with result_query in index order and join their text "
-            "to rebuild the exact file; its SHA-256 equals sha256."
+            "{path, status, content_type, size, sha256, secrets_replaced, version, build, "
+            "version_error, redirect_to, parts, items: [{index, text}]}. A short page comes "
+            "back inline; a longer file returns a result handle with the scalars inline and "
+            "the parts as rows. The copy is the parsed file written back (JSON, YAML, XML "
+            "or HTML) with every value under a secret name replaced by "
+            "[REDACTED:param_name]; secrets_replaced counts them. Read the rows with "
+            "result_query in index order and join their text to rebuild the copy; its "
+            "SHA-256 equals sha256."
         ),
         "next_step": (
             "If status is 3xx, read redirect_to next. If status is 404, the page is not "
             "served at this address (the reference is on the web address, not the API "
             "port); say so. If the file is too large for one result handle, the read "
-            "stops with an error that names the size. If version_error is set, the file "
-            "is still complete; report the reason."
+            "stops with an error that names the size. A file that does not parse, or is "
+            "JavaScript, CSS or plain text, is refused; report it instead of retrying. If "
+            "version_error is set, the file is still complete; report the reason."
         ),
     },
 )

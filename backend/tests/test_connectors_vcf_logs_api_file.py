@@ -14,8 +14,8 @@ What is covered, with a respx-mocked Logs system and no ingested catalog:
   ``Location`` is resolved against the path that was read;
 * a 401 or a 440 on the read drops the session: the system is asked once
   more with a fresh login, and a second 401 or 440 is an error;
-* a one-line minified JSON file of a few MB and a file of more than
-  10,000 lines: the joined parts give the exact file (same SHA-256);
+* a one-line minified JSON file of a few MB and a JSON file of more than
+  10,000 lines: the joined parts give the checked copy (same SHA-256);
 * a file too big for one result handle stops with an error naming its size,
   also when the body is compressed and only the decoded file is too big;
   a streamed gzip or deflate body that would decode to many MiB is
@@ -28,13 +28,15 @@ What is covered, with a respx-mocked Logs system and no ingested catalog:
   back from the result store with every part, through ``dispatch()``;
 * a page the secret-redaction rules would change stops with an error, also
   when the secret's label ends one part and its value starts the next;
-* the secret-bearing forms the shared rules leave unchanged (a quoted
-  JSON password or token field, an unquoted YAML or header field whose
-  value holds the other quote, a quoted value longer than the shared
-  rules match, a private-key block, a licence key as a field or as a
-  bare value) stop with an error that never shows the value, also when
-  the form crosses a part boundary, and are withheld from a 401 or 440
-  body; a schema entry or a placeholder named like a secret still passes;
+* every secret form the code reviews found (a JSON value with an
+  apostrophe, ``sessionId``, a long value, a private-key block, an
+  unquoted YAML name, a YAML ``|`` or ``>`` block value) comes back as the
+  placeholder and is counted in ``secrets_replaced``, also across a part
+  boundary and in a redirect query; a file that does not parse is
+  refused without its text;
+* the body of a 401 or 440 is the checked copy, or withheld when it cannot
+  be checked, and the login retry still runs; the flight recorder gets
+  only the checked copy, on success and on a 401 or 440;
 * content that is not text is refused with its content type;
 * the version read fails (HTTP 500, no connection, an answer with no
   version) and the file still comes back with the reason;
@@ -53,6 +55,7 @@ import tracemalloc
 import uuid
 import zlib
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -64,6 +67,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_read import (
+    PART_BYTES,
+    ApiFileTooLargeError,
+    split_parts,
+)
+from meho_backplane.connectors._shared.api_file_secrets import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.vcf_logs import (
@@ -76,14 +85,10 @@ from meho_backplane.connectors.vcf_logs import (
     register_vrli_typed_operations,
 )
 from meho_backplane.connectors.vcf_logs.api_file import (
-    _SECRET_FORMS,
     DOCS_FOLDERS,
     DOCS_PAGES,
-    PART_BYTES,
     VrliApiFilePathError,
-    VrliApiFileTooLargeError,
     check_path,
-    split_parts,
 )
 from meho_backplane.connectors.vrli8 import (
     VRLI8_CONNECTOR_ID,
@@ -94,6 +99,7 @@ from meho_backplane.connectors.vrli8 import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -391,12 +397,12 @@ async def test_404_status_reaches_the_answer(
     await _register_and_resolve(_stub_embedding)
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
-        mock.get("/rest-api/missing.json").respond(404, text="not found")
+        mock.get("/rest-api/missing.json").respond(404, json={"errorMessage": "not found"})
         result = await _dispatch("/rest-api/missing.json")
 
     assert result.status == "ok", result.error
     assert result.result["status"] == 404
-    assert result.result["items"] == [{"index": 0, "text": "not found"}]
+    assert result.result["items"] == [{"index": 0, "text": '{"errorMessage":"not found"}'}]
 
 
 @pytest.mark.asyncio
@@ -491,19 +497,20 @@ def _minified_json_of_a_few_mb() -> bytes:
     return data
 
 
-def _text_with_more_than_10000_lines() -> bytes:
-    return "".join(f"line {i}: Ünïcödé text for a long file\n" for i in range(12_345)).encode()
+def _json_with_more_than_10000_lines() -> bytes:
+    rows = [f"line {i}: Ünïcödé text for a long file" for i in range(12_345)]
+    return json.dumps(rows, indent=2, ensure_ascii=False).encode()
 
 
 @pytest.mark.parametrize(
     ("content_type", "data"),
     [
         ("application/json", _minified_json_of_a_few_mb()),
-        ("text/plain; charset=utf-8", _text_with_more_than_10000_lines()),
+        ("text/plain; charset=utf-8", _json_with_more_than_10000_lines()),
     ],
 )
 @pytest.mark.asyncio
-async def test_joined_parts_give_the_exact_file(
+async def test_joined_parts_give_the_checked_copy(
     _stub_embedding: AsyncMock, session: AsyncSession, content_type: str, data: bytes
 ) -> None:
     instance, _ = await _register_and_resolve(_stub_embedding)
@@ -517,12 +524,14 @@ async def test_joined_parts_give_the_exact_file(
             _make_operator(), target, {"path": "/rest-api/big.json"}
         )
 
-    assert answer["size"] == len(data)
+    copy = json.dumps(json.loads(data), ensure_ascii=False, separators=(",", ":")).encode()
+    assert answer["size"] == len(copy)
+    assert answer["secrets_replaced"] == 0
     assert answer["parts"] == len(answer["items"]) > 1
     assert [item["index"] for item in answer["items"]] == list(range(answer["parts"]))
     assert all(len(item["text"].encode()) <= PART_BYTES for item in answer["items"])
     joined = "".join(item["text"] for item in answer["items"]).encode()
-    assert joined == data
+    assert joined == copy
     assert hashlib.sha256(joined).hexdigest() == answer["sha256"]
 
 
@@ -601,14 +610,14 @@ async def test_parts_that_do_not_fit_as_rows_stop_with_the_size(
     monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "1000")
     get_settings.cache_clear()
     await _register_and_resolve(_stub_embedding)
-    data = b'"' * 990
+    data = b'"' + b'\\"' * 494 + b'"'
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
         mock.get("/rest-api/quotes.json").respond(200, content=data)
         result = await _dispatch("/rest-api/quotes.json")
 
     assert result.status == "error"
-    assert "file of 990 bytes" in result.extras["exception_message"]
+    assert f"file of {len(data)} bytes" in result.extras["exception_message"]
 
 
 @pytest.mark.asyncio
@@ -619,7 +628,7 @@ async def test_compressed_body_is_measured_after_decoding(
     monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "4096")
     get_settings.cache_clear()
     await _register_and_resolve(_stub_embedding)
-    small = b"x" * 1000
+    small = b'{"x":"' + b"x" * 990 + b'"}'
     bomb = b"x" * 1_000_000
     assert len(gzip.compress(bomb)) < 2048
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
@@ -725,7 +734,7 @@ async def test_gzip_body_of_several_members_gives_the_whole_file_under_the_limit
     monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", str(limit))
     get_settings.cache_clear()
     await _register_and_resolve(_stub_embedding)
-    first, second = b'{"a": "' + b"a" * 500 + b'", ', b'"b": "' + b"b" * 500 + b'"}'
+    first, second = b'{"a":"' + b"a" * 500 + b'",', b'"b":"' + b"b" * 500 + b'"}'
     whole = first + second
     joined = gzip.compress(first) + gzip.compress(second)
     over = gzip.compress(b"x" * 3000) + gzip.compress(b"y" * 3000)
@@ -806,7 +815,7 @@ class _FakeValkey:
 
 def _largest_file_that_passes_the_check(limit: int) -> bytes:
     """The largest ``x``-file (in steps of 16 bytes) whose stored record fits *limit*."""
-    import meho_backplane.connectors.vcf_logs.api_file as api_file
+    from meho_backplane.connectors._shared.api_file_read import assert_fits_result_handle
 
     answer = {
         "path": "/rest-api/fit.json",
@@ -818,18 +827,23 @@ def _largest_file_that_passes_the_check(limit: int) -> bytes:
         "build": "21000001",
         "version_error": None,
         "redirect_to": None,
+        "secrets_replaced": 0,
         "parts": 0,
     }
     size = limit
     while size > 0:
-        data = b"x" * size
+        data = b'"' + b"x" * (size - 2) + b'"'
         items = [{"index": i, "text": p.decode()} for i, p in enumerate(split_parts(data))]
         answer.update(size=size, sha256=hashlib.sha256(data).hexdigest(), parts=len(items))
         try:
-            api_file._assert_fits_result_handle(
-                answer, items, operator_sub="op-reads-logs", max_bytes=limit
+            assert_fits_result_handle(
+                answer,
+                items,
+                operator_sub="op-reads-logs",
+                op_id="vrli.api_file.get",
+                max_bytes=limit,
             )
-        except VrliApiFileTooLargeError:
+        except ApiFileTooLargeError:
             size -= 16
             continue
         return data
@@ -857,7 +871,7 @@ async def test_every_part_of_a_file_that_passes_the_check_is_read_back_from_stor
             200, content=data, headers={"Content-Type": "application/json"}
         )
         mock.get("/rest-api/over.json").respond(
-            200, content=data + b"x" * 200, headers={"Content-Type": "application/json"}
+            200, content=data[:-1] + b"x" * 200 + b'"', headers={"Content-Type": "application/json"}
         )
         result = await dispatch(
             operator=operator,
@@ -959,230 +973,375 @@ def _private_key_block(kind: str, body: str) -> str:
 #: Longer than the 4096 characters the shared rules match in one value.
 _LONG_SECRET = "example-secret-value-" + "0123456789" * 420
 
-_SECRET_FORM_PAGES: list[Any] = [
-    (
-        "quoted-secret-field",
-        "<pre>POST /api/v2/sessions\n"
+#: Pages with a secret in every form the code reviews found, in the
+#: formats the read accepts: ``(content type, path, page, secret)``.
+_SECRET_PAGES: list[Any] = [
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        "<pre>POST /api/v2/sessions\n</pre><pre>"
         '{"username": "admin", "password": "example-secret-value-0123456789"}</pre>',
         "example-secret-value-0123456789",
-    ),
-    (
-        "quoted-secret-field",
-        '{"sessionToken": "example-session-token-0123456789"}',
-        "example-session-token-0123456789",
-    ),
-    (
-        "quoted-secret-field",
-        '{"username": "admin", "password": "it\'s-a-secret-0123456789"}',
-        "it's-a-secret-0123456789",
-    ),
-    (
-        "quoted-secret-field",
-        '{"password": "ab\\"cd-secret-value-0123456789"}',
-        "cd-secret-value-0123456789",
-    ),
-    (
-        "quoted-secret-field",
-        "{'password': \"it's a secret with spaces\"}",
-        "it's a secret with spaces",
-    ),
-    (
-        "quoted-secret-field",
-        '{"userId": "u1", "sessionId": "example-session-id-0123456789", "ttl": 1800}',
-        "example-session-id-0123456789",
-    ),
-    (
-        "unquoted-secret-field",
-        "sessionId: example-session-id-0123456789\n",
-        "example-session-id-0123456789",
-    ),
-    (
-        "unquoted-secret-field",
-        "GET /api/v2/events?session_id=example-session-id-0123456789 HTTP/1.1",
-        "example-session-id-0123456789",
-    ),
-    (
-        "unquoted-secret-field",
-        'username: admin\npassword: "it\'s-a-secret-0123456789"\n',
-        "it's-a-secret-0123456789",
-    ),
-    (
-        "unquoted-secret-field",
-        "username: admin\npassword: it's-a-secret-0123456789\n",
-        "it's-a-secret-0123456789",
-    ),
-    (
-        "unquoted-secret-field",
-        'GET /api/v2/events HTTP/1.1\r\nX-Api-Key: "it\'s-a-key-value-0123456789"\r\n',
-        "it's-a-key-value-0123456789",
+        id="json-example-in-an-html-page",
     ),
     pytest.param(
-        "quoted-secret-field",
-        '{"username": "admin", "password": "' + _LONG_SECRET + '"}',
-        _LONG_SECRET,
-        id="quoted-value-longer-than-the-shared-rules-match",
+        "application/json",
+        _API_DOCS,
+        '{"username": "admin", "password": "it\'s-a-secret-0123456789"}',
+        "it's-a-secret-0123456789",
+        id="json-value-with-an-apostrophe",
     ),
-    (
-        "quoted-secret-field",
-        "{'token': 'example token with spaces inside'}",
-        "example token with spaces inside",
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        '{"userId": "u1", "sessionId": "example-session-id-0123456789", "ttl": 1800}',
+        "example-session-id-0123456789",
+        id="json-session-id",
     ),
-    (
-        "quoted-secret-field",
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        '{"sessionToken": "example-session-token-0123456789"}',
+        "example-session-token-0123456789",
+        id="json-session-token",
+    ),
+    pytest.param(
+        "application/json",
+        _API_DOCS,
         '{"licenseKey": "example-licence-key-value-0123456789"}',
         "example-licence-key-value-0123456789",
+        id="json-licence-key",
     ),
-    (
-        "unquoted-secret-field",
-        "license_key: example-licence-key-value-0123456789\n",
-        "example-licence-key-value-0123456789",
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        '{"username": "admin", "password": "' + _LONG_SECRET + '"}',
+        _LONG_SECRET,
+        id="json-value-longer-than-the-shared-rules-match",
     ),
-    (
-        "licence-key-value",
-        '{"key": "AAAA1-AAAA1-AAAA1-AAAA1-AAAA1"}',
-        "AAAA1-AAAA1-AAAA1-AAAA1-AAAA1",
-    ),
-    (
-        "private-key-block",
-        _private_key_block("RSA", "example-private-key-body"),
+    pytest.param(
+        "application/json",
+        _API_DOCS,
+        json.dumps({"example": _private_key_block("RSA", "example-private-key-body")}),
         "example-private-key-body",
+        id="json-private-key-block",
     ),
-    (
-        "private-key-block",
-        _private_key_block("", "example-private-key-body"),
-        "example-private-key-body",
+    pytest.param(
+        "application/yaml",
+        "/rest-api/openapi.yaml",
+        'username: admin\npassword: "it\'s-a-secret-0123456789"\n',
+        "it's-a-secret-0123456789",
+        id="yaml-unquoted-name",
+    ),
+    pytest.param(
+        "application/yaml",
+        "/rest-api/openapi.yaml",
+        "sessionId: example-session-id-0123456789\n",
+        "example-session-id-0123456789",
+        id="yaml-session-id",
+    ),
+    pytest.param(
+        "application/yaml",
+        "/rest-api/openapi.yaml",
+        "username: admin\npassword: |\n  example-block-secret-0123456789\n",
+        "example-block-secret-0123456789",
+        id="yaml-literal-block",
+    ),
+    pytest.param(
+        "application/yaml",
+        "/rest-api/openapi.yaml",
+        "username: admin\npassword: >\n  example-folded-secret\n  0123456789\n",
+        "example-folded-secret",
+        id="yaml-folded-block",
     ),
 ]
 
 
-@pytest.mark.parametrize(("form", "page", "secret"), _SECRET_FORM_PAGES)
+def _rendered(result: Any) -> str:
+    return (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+
+
+@pytest.mark.parametrize(("content_type", "path", "page", "secret"), _SECRET_PAGES)
 @pytest.mark.asyncio
-async def test_secret_form_the_shared_rules_leave_unchanged_stops_with_an_error(
-    _stub_embedding: AsyncMock, session: AsyncSession, form: str, page: str, secret: str
-) -> None:
-    """The shared rules do not change these pages; the read's own checks refuse them."""
-    await _register_and_resolve(_stub_embedding)
-    set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
-    shared = apply_connector_boundary_redaction(
-        {"text": page}, connector_id=VRLI_CONNECTOR_ID, tenant=None, op="vrli.api_file.get"
-    )
-    assert shared.redacted == shared.raw, "the shared rules must not see this form; the gap is real"
-
-    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
-        _mock_version(mock)
-        mock.get("/rest-api/example.html").respond(
-            200, text=page, headers={"Content-Type": "text/html"}
-        )
-        result = await _dispatch("/rest-api/example.html")
-
-    assert result.status == "error"
-    message = result.extras["exception_message"]
-    assert form in message
-    assert "1 place(s)" in message
-    assert "the read stopped" in message
-    assert secret not in json.dumps(result.result) + json.dumps(result.extras, default=str)
-
-
-@pytest.mark.parametrize("status", [401, 440])
-@pytest.mark.parametrize(("form", "page", "secret"), _SECRET_FORM_PAGES)
-@pytest.mark.asyncio
-async def test_session_expiry_body_with_a_secret_is_withheld_and_the_retry_still_runs(
+async def test_secret_comes_back_as_the_placeholder_and_is_counted(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
-    status: int,
-    form: str,
+    content_type: str,
+    path: str,
     page: str,
     secret: str,
 ) -> None:
-    """The dispatcher copies the 401 or 440 body into the error result; no secret may go with it."""
-    _, loader = await _register_and_resolve(_stub_embedding)
-    body = '{"errorMessage": "session expired"}\n' + page
-    shared = apply_connector_boundary_redaction(
-        {"text": body}, connector_id=VRLI_CONNECTOR_ID, tenant=None, op="vrli.api_file.get"
-    )
-    assert shared.redacted == shared.raw, "the shared rules must not see this form; the gap is real"
-    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
-        login = _mock_login(mock)
-        mock.get(_VERSION).respond(200, json=_VERSION_PAYLOAD)
-        docs = mock.get(_REFERENCE).respond(
-            status, content=body.encode(), headers={"Content-Type": "text/plain"}
-        )
-        result = await _dispatch(_REFERENCE)
-
-    assert result.status == "error"
-    assert str(status) in (result.error or "")
-    assert docs.call_count == 2
-    assert login.call_count == 2
-    assert loader.calls == 1
-    rendered = (
-        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
-    )
-    assert secret not in rendered
-    assert "session expired" not in rendered, "the whole body is withheld, not only the secret"
-
-
-@pytest.mark.asyncio
-async def test_quoted_secret_field_that_crosses_a_part_boundary_stops_with_an_error(
-    _stub_embedding: AsyncMock, session: AsyncSession
-) -> None:
-    """``"password": "`` ends the first part and the value starts the second."""
+    """The file is parsed; every value under a secret name is replaced before the parts are cut."""
     await _register_and_resolve(_stub_embedding)
-    set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
-    label = b'{"password": "'
-    page = b"x" * (PART_BYTES - len(label)) + label + b'example-secret-value-0123456789"}\n'
-    parts = [part.decode() for part in split_parts(page)]
-    assert parts[0].endswith('"password": "')
-    assert parts[1].startswith("example-secret-value")
-    for text in parts:
-        assert not any(pattern.search(text) for pattern in _SECRET_FORMS.values()), (
-            "a part alone must not match; the gap is real"
-        )
-
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
-        mock.get("/rest-api/split.html").respond(
-            200, content=page, headers={"Content-Type": "text/html"}
-        )
-        result = await _dispatch("/rest-api/split.html")
+        mock.get(path).respond(200, text=page, headers={"Content-Type": content_type})
+        result = await _dispatch(path)
 
-    assert result.status == "error"
-    message = result.extras["exception_message"]
-    assert "quoted-secret-field" in message
-    assert "1 place(s)" in message
-    assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
-        result.extras, default=str
-    )
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    assert REDACTED in joined
+    assert body["secrets_replaced"] >= 1
+    assert body["size"] == len(joined.encode())
+    assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
+    assert secret not in _rendered(result)
 
 
-@pytest.mark.parametrize(
-    "page",
-    [
-        '{"password": {"type": "string", "format": "password", "description": "The password"}}',
-        '{"username": "string", "password": "string"}',
-        '{"sessionId": {"type": "string", "description": "The session id"}, "ttl": 1800}',
-        '{"userId": "string", "sessionId": "string", "ttl": 0}',
-        '{"info": {"license": {"name": "Apache 2.0"}}}',
-        "licenseKey:\n  type: string\n  description: The licence key of the system\n",
-        "password:\n  type: string\n  format: password\n  description: The login password\n",
-        'username: "string"\npassword: "string"\n',
-        '{"key": "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"}',
-        '{"required": ["password", "token"], "token": null}',
-        "-----BEGIN CERTIFICATE-----\nMIIEexample\n-----END CERTIFICATE-----\n",
-    ],
-)
 @pytest.mark.asyncio
-async def test_schema_entries_and_placeholders_named_like_a_secret_still_come_back(
-    _stub_embedding: AsyncMock, session: AsyncSession, page: str
+async def test_spec_with_secrets_keeps_its_shape_and_counts_each_value(
+    _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
-    """A field named ``password`` with a schema or a placeholder as its value is not a secret."""
     await _register_and_resolve(_stub_embedding)
+    spec = {
+        "swagger": "2.0",
+        "paths": {"/api/v2/sessions": {"post": {"x-example": {"password": "made-up-1"}}}},
+        "definitions": {"Session": {"properties": {"sessionId": {"type": "string"}}}},
+    }
+    copy = {
+        "swagger": "2.0",
+        "paths": {"/api/v2/sessions": {"post": {"x-example": {"password": REDACTED}}}},
+        "definitions": {"Session": {"properties": {"sessionId": REDACTED}}},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(_API_DOCS).respond(
+            200, text=json.dumps(spec, indent=2), headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch(_API_DOCS)
+
+    assert result.status == "ok", result.error
+    assert json.loads("".join(item["text"] for item in result.result["items"])) == copy
+    assert result.result["secrets_replaced"] == 2
+
+
+@pytest.mark.asyncio
+async def test_secret_that_crosses_a_part_boundary_comes_back_replaced(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """The whole file is checked before it is cut, so a part boundary cannot hide a value."""
+    await _register_and_resolve(_stub_embedding)
+    label = '{"filler": "'
+    page = label + "x" * (PART_BYTES - len(label) - 2) + '", "password": "made-up-secret-1"}'
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
         mock.get(_API_DOCS).respond(200, text=page, headers={"Content-Type": "application/json"})
         result = await _dispatch(_API_DOCS)
 
     assert result.status == "ok", result.error
-    assert "".join(item["text"] for item in result.result["items"]) == page
+    assert result.result["parts"] == 2
+    assert result.result["secrets_replaced"] == 1
+    assert "made-up-secret-1" not in _rendered(result)
+
+
+@pytest.mark.asyncio
+async def test_file_that_does_not_parse_is_refused_with_the_reason(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/rest-api/broken.json").respond(
+            200, text='{"password": "made-up-2"', headers={"Content-Type": "application/json"}
+        )
+        mock.get("/rest-api/app.js").respond(
+            200, text='var password = "made-up-3";', headers={"Content-Type": "text/javascript"}
+        )
+        broken = await _dispatch("/rest-api/broken.json")
+        script = await _dispatch("/rest-api/app.js")
+
+    assert broken.status == "error"
+    assert "not well-formed JSON" in broken.extras["exception_message"]
+    assert script.status == "error"
+    assert "no known format" in script.extras["exception_message"]
+    for result in (broken, script):
+        assert "made-up-" not in _rendered(result)
+
+
+@pytest.mark.asyncio
+async def test_secret_in_the_redirect_query_is_replaced_and_counted(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(_REFERENCE).respond(
+            302, headers={"Location": "/rest-api/?group=a&sessionId=made-up-session-4"}
+        )
+        result = await _dispatch(_REFERENCE)
+
+    assert result.status == "ok", result.error
+    assert result.result["redirect_to"] == f"/rest-api/?group=a&sessionId={REDACTED}"
+    assert result.result["secrets_replaced"] == 1
+    assert "made-up-session-4" not in _rendered(result)
+
+
+# ---------------------------------------------------------------------------
+# The body of a 401 or 440 answer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [401, 440])
+@pytest.mark.parametrize(("content_type", "path", "page", "secret"), _SECRET_PAGES)
+@pytest.mark.asyncio
+async def test_session_expiry_body_is_checked_and_the_retry_still_runs(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    content_type: str,
+    path: str,
+    page: str,
+    secret: str,
+) -> None:
+    """The dispatcher copies the 401 or 440 body into the error result; only a checked copy."""
+    _, loader = await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = _mock_login(mock)
+        mock.get(_VERSION).respond(200, json=_VERSION_PAYLOAD)
+        docs = mock.get(path).respond(status, text=page, headers={"Content-Type": content_type})
+        result = await _dispatch(path)
+
+    assert result.status == "error"
+    assert str(status) in (result.error or "")
+    assert docs.call_count == 2
+    assert login.call_count == 2
+    assert loader.calls == 1
+    assert secret not in _rendered(result)
+
+
+@pytest.mark.parametrize("status", [401, 440])
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [
+        ("text/plain", "session expired; password=it's-a-secret-0123456789"),
+        ("application/json", '{"errorMessage": "session expired", "password": "made-up-5"'),
+    ],
+    ids=["plain-text", "json-that-does-not-parse"],
+)
+@pytest.mark.asyncio
+async def test_session_expiry_body_that_cannot_be_checked_is_withheld(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    content_type: str,
+    body: str,
+) -> None:
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        docs = mock.get(_API_DOCS).respond(
+            status, text=body, headers={"Content-Type": content_type}
+        )
+        result = await _dispatch(_API_DOCS)
+
+    assert result.status == "error"
+    assert docs.call_count == 2
+    rendered = _rendered(result)
+    assert "it's-a-secret-0123456789" not in rendered and "made-up-5" not in rendered
+    assert "session expired" not in rendered, "the whole body is withheld, not only the secret"
+
+
+# ---------------------------------------------------------------------------
+# The flight recorder gets the checked copy only
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _recording() -> Iterator[flight_recorder_capture._CaptureScope]:
+    """Turn the flight recorder on for this task, with the op context the dispatcher sets."""
+    scope = flight_recorder_capture._CaptureScope(
+        audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None
+    )
+    op = flight_recorder_capture._OpContext(
+        op_id="vrli.api_file.get",
+        connector_id=VRLI_CONNECTOR_ID,
+        impl_id=VRLI_IMPL_ID,
+        product=VRLI_PRODUCT,
+        tags=("read-only",),
+        body_paths=(),
+        delete_shaped_patterns=(),
+    )
+    token = flight_recorder_capture._active_capture_var.set(scope)
+    op_token = flight_recorder_capture._op_context_var.set(op)
+    try:
+        yield scope
+    finally:
+        flight_recorder_capture._op_context_var.reset(op_token)
+        flight_recorder_capture._active_capture_var.reset(token)
+
+
+def _recorded_call(scope: flight_recorder_capture._CaptureScope, path: str) -> dict[str, Any]:
+    spans = [span for span in scope.spans if span.name.endswith(path)]
+    assert len(spans) == 1, [span.name for span in scope.spans]
+    return dict(spans[0].attributes or {})
+
+
+@pytest.mark.parametrize(("content_type", "path", "page", "secret"), _SECRET_PAGES)
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_the_checked_copy_of_the_file(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    content_type: str,
+    path: str,
+    page: str,
+    secret: str,
+) -> None:
+    instance, _ = await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(path).respond(200, text=page, headers={"Content-Type": content_type})
+        with _recording() as scope:
+            answer = await instance.api_file_get(_make_operator(), _LogsTarget(), {"path": path})
+
+    recorded = _recorded_call(scope, path)
+    assert secret not in json.dumps(recorded, default=str)
+    joined = "".join(item["text"] for item in answer["items"])
+    recorded_body = recorded["response_body"]
+    if isinstance(recorded_body, (dict, list)):
+        assert recorded_body == json.loads(joined), "the recorder holds the checked copy"
+    else:
+        assert recorded_body in (joined, "[MEHO-OMITTED:redaction-uncertain]")
+
+
+@pytest.mark.parametrize("status", [401, 440])
+@pytest.mark.parametrize(("content_type", "path", "page", "secret"), _SECRET_PAGES)
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_the_checked_copy_of_a_session_expiry_body(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    content_type: str,
+    path: str,
+    page: str,
+    secret: str,
+) -> None:
+    instance, _ = await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(path).respond(status, text=page, headers={"Content-Type": content_type})
+        with _recording() as scope, pytest.raises(httpx.HTTPStatusError) as raised:
+            await instance.api_file_get(_make_operator(), _LogsTarget(), {"path": path})
+
+    assert raised.value.response.status_code == status
+    assert secret not in raised.value.response.text
+    assert secret not in json.dumps(_recorded_call(scope, path), default=str)
+
+
+@pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    instance, _ = await _register_and_resolve(_stub_embedding)
+    path = "/rest-api/app.js"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get(path).respond(
+            200, text='var password = "made-up-6";', headers={"Content-Type": "text/javascript"}
+        )
+        with _recording() as scope, pytest.raises(ValueError, match="no known format"):
+            await instance.api_file_get(_make_operator(), _LogsTarget(), {"path": path})
+
+    assert "made-up-6" not in json.dumps(_recorded_call(scope, path), default=str)
 
 
 @pytest.mark.asyncio
@@ -1213,7 +1372,7 @@ async def test_version_read_500_still_returns_the_file(
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_login(mock)
         version = mock.get(_VERSION).respond(500, json={"errorMessage": "x"})
-        mock.get(_REFERENCE).respond(200, text=_HTML)
+        mock.get(_REFERENCE).respond(200, text=_HTML, headers={"Content-Type": "text/html"})
         result = await _dispatch(_REFERENCE)
 
     assert result.status == "ok", result.error
@@ -1233,7 +1392,7 @@ async def test_version_read_connection_error_still_returns_the_file(
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_login(mock)
         mock.get(_VERSION).mock(side_effect=httpx.ConnectError("refused"))
-        mock.get(_REFERENCE).respond(200, text=_HTML)
+        mock.get(_REFERENCE).respond(200, text=_HTML, headers={"Content-Type": "text/html"})
         result = await _dispatch(_REFERENCE)
 
     assert result.status == "ok", result.error
@@ -1252,7 +1411,7 @@ async def test_version_answer_without_a_version_still_returns_the_file(
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_login(mock)
         mock.get(_VERSION).respond(200, json={"releaseName": "no version key"})
-        mock.get(_REFERENCE).respond(200, text=_HTML)
+        mock.get(_REFERENCE).respond(200, text=_HTML, headers={"Content-Type": "text/html"})
         result = await _dispatch(_REFERENCE)
 
     assert result.status == "ok", result.error
@@ -1274,7 +1433,7 @@ async def test_result_holds_no_password_or_session_token(
     await _register_and_resolve(_stub_embedding)
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _mock_version(mock)
-        mock.get(_REFERENCE).respond(200, text=_HTML)
+        mock.get(_REFERENCE).respond(200, text=_HTML, headers={"Content-Type": "text/html"})
         result = await _dispatch(_REFERENCE)
 
     assert result.status == "ok", result.error

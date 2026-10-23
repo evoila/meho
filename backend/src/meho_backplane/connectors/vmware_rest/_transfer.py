@@ -462,20 +462,18 @@ async def copy_files(
     overwrite: bool = False,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
-    destination_client: httpx.AsyncClient | None = None,
 ) -> TransferResult:
     """Copy *files* one at a time to *destination*; see the module docstring.
 
     *source_client* is the connector's pooled client (its vCenter TLS trust);
-    *source_headers* carry the vCenter session. *destination_client* is for
-    tests; by default the helper builds its own client with the address
-    screen. Raises :class:`TransferError`
+    *source_headers* carry the vCenter session. The helper builds its own
+    destination client with the address screen. Raises :class:`TransferError`
     with the rows so far when the copy stops. *cleanup* always runs.
     """
     rows: list[FileResult] = []
     result = TransferResult(files=rows)
     heartbeat = asyncio.create_task(_keep_alive_loop(keep_alive))
-    client = destination_client or httpx.AsyncClient(
+    client = httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=False,
         transport=build_pinned_async_transport(screen_and_resolve),
@@ -525,7 +523,6 @@ async def copy_files(
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
-        if destination_client is None:
-            await client.aclose()
+        await client.aclose()
         await _run_cleanup(cleanup)
     return result

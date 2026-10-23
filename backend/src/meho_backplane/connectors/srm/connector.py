@@ -27,8 +27,11 @@ Version
 
 ``GET /api/rest/srm/v2/server/info`` returns the server's ``version`` and
 ``build_number``. :meth:`server_version` reads them and never raises; it
-backs :meth:`fingerprint` and the ``srm.api_file.get`` answer. The
-operation ``srm.about`` returns the whole server summary.
+backs :meth:`fingerprint` and the ``srm.api_file.get`` answer. A ``401``
+on this read drops this target's cached session, as the dispatcher would
+for an operation, so the next call logs in again instead of sending the
+rejected session once more. The operation ``srm.about`` returns the whole
+server summary.
 
 Operations
 ----------
@@ -252,7 +255,8 @@ class SrmConnector(HttpConnector):
         """Read the SRM version and build. Never raises: a failure is named in ``error``.
 
         One ``GET`` with no retry, so a failed version read never costs the
-        caller its own answer for long.
+        caller its own answer for long. A ``401`` drops this target's
+        cached session, so the next call logs in again.
         """
         try:
             headers = await self.auth_headers(target, operator)
@@ -272,6 +276,8 @@ class SrmConnector(HttpConnector):
         flight_recorder_capture.record_vendor_call(
             span, method="GET", request_headers=headers, response=resp
         )
+        if resp.status_code == httpx.codes.UNAUTHORIZED:
+            await self.invalidate_session(target)
         try:
             resp.raise_for_status()
             payload = resp.json()

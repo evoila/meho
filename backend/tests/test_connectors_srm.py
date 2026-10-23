@@ -18,8 +18,10 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
   parts; an unknown file name sends no HTTP request; a 404 and a redirect
   reach the answer; a failed version read still returns the file; a
   secret-named value, an ``Authorization`` example and a secret-named
-  redirect query value come back replaced and counted; a file that does
-  not parse stops; a file too big stops;
+  redirect query value come back replaced and counted; the replaced copy
+  still parses and every value keeps its type; a ``401`` on the version
+  read ends only that target's session; a file that does not parse
+  stops; a file too big stops;
 * no password or session id in a result; registration shape; fingerprint.
 
 Fixture values are made up; no real host, user or id appears here.
@@ -38,6 +40,7 @@ from uuid import UUID
 import httpx
 import pytest
 import respx
+import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -552,6 +555,120 @@ async def test_secret_values_and_authorization_examples_come_back_replaced_and_c
     rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
     assert "bWFkZS11cDpleGFtcGxlLXZhbHVl" not in rendered
     assert "made-up-example-password" not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content_type", "text", "load"),
+    [
+        pytest.param(
+            "application/yaml",
+            "info:\n"
+            "  note: Bearer made-up-token-value-0123456789\n"
+            '  description: "line one\\nAuthorization: Basic bWFkZS11cDpleGFtcGxl"\n'
+            "  count: 3\n"
+            "  flag: true\n"
+            "responses:\n"
+            "  200:\n"
+            "    description: ok\n",
+            yaml.safe_load,
+            id="yaml",
+        ),
+        pytest.param(
+            "application/json",
+            json.dumps(
+                {
+                    "info": {
+                        "note": "Bearer made-up-token-value-0123456789",
+                        "description": "line one\nAuthorization: Basic bWFkZS11cDpleGFtcGxl",
+                        "count": 3,
+                        "flag": True,
+                    },
+                    "responses": {"200": {"description": "ok"}},
+                }
+            ),
+            json.loads,
+            id="json",
+        ),
+    ],
+)
+async def test_replaced_copy_still_parses_and_every_value_keeps_its_type(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    content_type: str,
+    text: str,
+    load: Any,
+) -> None:
+    """The rules run on the parsed values, so a placeholder never changes the file's shape.
+
+    A plain YAML scalar that becomes ``[REDACTED:bearer_token]`` would read
+    as a list if the rules ran on the written text; a quoted value with a
+    line break would lose its quote. Here the copy is parsed again and
+    compared value by value.
+    """
+    await _register_and_resolve(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_SRM_FILE).respond(200, text=text, headers={"Content-Type": content_type})
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    parsed = load(joined)
+    assert parsed["info"] == {
+        "note": "[REDACTED:bearer_token]",
+        "description": "line one\n[REDACTED:authorization_header]",
+        "count": 3,
+        "flag": True,
+    }
+    (status_key,) = parsed["responses"]
+    assert status_key == (200 if content_type == "application/yaml" else "200")
+    assert body["secrets_replaced"] == 2
+    assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_401_on_the_version_read_ends_only_that_targets_session(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """The file comes back, but ``server/info`` rejects the session.
+
+    The version read never raises, so the dispatcher's own ``401`` retry
+    does not run. The connector drops the rejected session itself: the
+    next read of that target logs in again, and the other target keeps
+    its session.
+    """
+    await _register_and_resolve(_stub_embedding)
+    first = _Target()
+    second = _Target()
+
+    def _info(request: httpx.Request) -> httpx.Response:
+        if request.headers["x-dr-session"] == "srm-a-1":
+            return httpx.Response(401)
+        return httpx.Response(200, json=_INFO_PAYLOAD)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("srm-a-1"), _login("srm-b-1"), _login("srm-a-2")]
+        mock.get(_INFO).mock(side_effect=_info)
+        file_route = mock.get(_SRM_FILE).respond(
+            200, text=_YAML, headers={"Content-Type": "application/yaml"}
+        )
+        rejected = await _dispatch("srm.api_file.get", {"file": "srm"}, first)
+        other = await _dispatch("srm.api_file.get", {"file": "srm"}, second)
+        retried = await _dispatch("srm.api_file.get", {"file": "srm"}, first)
+        other_again = await _dispatch("srm.api_file.get", {"file": "srm"}, second)
+
+    assert rejected.status == "ok", rejected.error
+    assert rejected.result["version"] is None
+    assert "401" in rejected.result["version_error"]
+    for outcome in (other, retried, other_again):
+        assert outcome.status == "ok", outcome.error
+        assert outcome.result["version"] == "9.1.1.0"
+    assert login.call_count == 3
+    sent = [call.request.headers["x-dr-session"] for call in file_route.calls]
+    assert sent == ["srm-a-1", "srm-b-1", "srm-a-2", "srm-b-1"]
 
 
 @pytest.mark.asyncio

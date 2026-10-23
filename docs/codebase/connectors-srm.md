@@ -109,6 +109,11 @@ dispatch. No spec ingest is needed.
 `server_version(target, operator)` reads `GET /api/rest/srm/v2/server/info`
 and takes `version` and `build_number`. It never raises: a failure is
 named in `error`. `fingerprint()`, `probe()` and `srm.api_file.get` use it.
+A `401` on this read drops this target's cached session, as the
+dispatcher would for an operation. The next call logs in again; other
+targets keep their sessions. Without this, a read whose file request
+worked but whose version read was rejected would keep sending the
+rejected session and come back without a version every time.
 
 ### `srm.about`
 
@@ -151,10 +156,15 @@ They are the same steps the `fleet.api_file.get` read uses
   (`connectors/_shared/api_file_secrets.py`): every value under a secret
   name becomes `[REDACTED:param_name]`. A file that does not parse stops
   with the reason;
-- `redact_text` then runs MEHO's general secret-redaction rules once over
-  the whole copy. Text they match, such as an `Authorization: Basic ...`
-  example in a description, becomes a placeholder like
-  `[REDACTED:authorization_header]`;
+- the read gives `check_api_file` MEHO's general secret-redaction rules
+  as its text rule (`text_redactor` in `connectors/_shared/api_file_read.py`).
+  They run on every parsed text value before the file is written back.
+  Text they match, such as an `Authorization: Basic ...` example in a
+  description, becomes a placeholder like `[REDACTED:authorization_header]`.
+  Because the rules see the values and not the written text, the copy
+  keeps its format: a placeholder that starts with `[` is written quoted,
+  not as a YAML list, and numbers, booleans and numeric keys stay as they
+  are;
 - `size`, `sha256` and the parts are built from this final copy. If the
   rules would still change the answer, the read stops with an error that
   names the rules and the number of places, never the text. So `sha256`
@@ -202,12 +212,13 @@ call is sent.
 ## Tests
 
 - `backend/tests/test_connectors_srm.py` -- login, both reads through
-  `dispatch()`, replaced and counted secrets, two targets on one address,
-  a `401` that ends only one target's session, registration shape,
-  fingerprint. One test reads the pinned 9.1 files through
+  `dispatch()`, replaced and counted secrets, a replaced copy that still
+  parses with every value type kept, two targets on one address, a `401`
+  on an operation or on the version read that ends only one target's
+  session, registration shape, fingerprint. One test reads the pinned 9.1 files through
   `srm.api_file.get`; it runs only when the spec shelf is present.
 - `backend/tests/test_connectors_shared_api_file_read.py` -- the shared
-  read steps, including `redact_text`.
+  read steps, including `text_redactor`.
 - `backend/tests/test_connectors_srm_spec_reconcile.py` -- the login and
   `server/info` paths against the pinned 9.1 file
   (`vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml` on the spec

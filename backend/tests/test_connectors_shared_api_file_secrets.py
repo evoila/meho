@@ -99,6 +99,7 @@ def test_a_file_that_does_not_parse_is_refused_without_its_text() -> None:
     cases = [
         ('{"password": "' + _SECRET, _JSON, "not well-formed JSON"),
         (f"password: [{_SECRET}\n", _YAML, "not well-formed YAML"),
+        (f"x: !{_SECRET} 1\n", _YAML, r"YAML \(ConstructorError at line 1, column 4\)"),
         (f"<a><password>{_SECRET}</a>", _XML, "not well-formed XML"),
         (f'<!DOCTYPE a [<!ENTITY x "{_SECRET}">]><a>&x;</a>', _XML, "refuses to parse"),
     ]
@@ -163,6 +164,13 @@ def test_json_text_value_that_is_itself_json_is_checked() -> None:
     text, count = _check(json.dumps({"description": sample}), _JSON)
     assert json.loads(json.loads(text)["description"]) == {"user": "admin", "password": REDACTED}
     assert count == 1
+
+
+def test_json_text_value_that_is_json_with_a_repeated_key_comes_back_parsed() -> None:
+    sample = '{"a": {"password": "' + _SECRET + '"}, "a": {}}'
+    text, count = _check(json.dumps({"description": sample}), _JSON)
+    assert json.loads(text) == {"description": '{"a":{}}'}
+    assert count == 0
 
 
 def test_json_pem_private_key_under_any_name_is_replaced() -> None:
@@ -373,6 +381,20 @@ def test_xml_default_namespace_is_declared_where_it_starts_and_ends() -> None:
     assert count == 0
 
 
+def test_xml_prefix_bound_again_in_a_child_keeps_its_meaning_there() -> None:
+    document = '<a xmlns:p="urn:one"><p:x/><b xmlns:p="urn:two"><p:y type="p:t"/></b><p:z/></a>'
+    text, count = _check(document, _XML)
+    assert text == document
+    assert count == 0
+
+
+def test_xml_attribute_prefix_declared_on_a_child_is_declared_there() -> None:
+    document = '<root xmlns="urn:one"><child xmlns:p="urn:one" p:attr="1"/></root>'
+    text, count = _check(document, _XML)
+    assert text == document
+    assert count == 0
+
+
 def test_xml_element_named_secret_by_its_type_attribute_loses_its_other_values() -> None:
     document = f'<r><field type="password" label="Secret" value="{_SECRET}">{_SECRET}</field></r>'
     text, count = _check(document, _XML)
@@ -405,12 +427,26 @@ def test_xml_special_characters_are_written_back_escaped() -> None:
         pytest.param(f'<form><input type="password" value="{_SECRET}"></form>', id="type"),
         pytest.param(f'<div password="{_SECRET}"></div>', id="attribute"),
         pytest.param(f'<meta name="csrf-token" content="{_SECRET}">', id="meta"),
+        pytest.param(f'<a licenseKey="{_SECRET}"></a>', id="camel-case-attribute"),
+        pytest.param(f'<input name="licenseKey" value="{_SECRET}">', id="camel-case-name"),
+        pytest.param(f'<input name="password" name="normal" value="{_SECRET}">', id="repeated"),
+        pytest.param(
+            f'<input value="{_SECRET}" name="normal" name="password">', id="repeated-last"
+        ),
     ],
 )
 def test_html_secret_attribute_value_is_replaced(document: str) -> None:
     text, count = _check(document, _HTML)
     assert f'="{REDACTED}"' in text
     assert count == 1
+
+
+def test_html_camel_case_element_is_secret_although_the_parser_lowercases_it() -> None:
+    text, count = _check(
+        f"<licenseKey>{_SECRET}</licenseKey><clientSecret>{_SECRET}</clientSecret>", _HTML
+    )
+    assert text == f"<licensekey>{REDACTED}</licensekey><clientsecret>{REDACTED}</clientsecret>"
+    assert count == 2
 
 
 def test_html_gt_inside_a_quoted_attribute_does_not_end_the_tag() -> None:

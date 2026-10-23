@@ -75,7 +75,12 @@ class Scrubber:
         return node
 
     def text(self, value: str) -> str:
-        """Check one text value: a PEM private key, or JSON inside the text."""
+        """Check one text value: a PEM private key, or JSON inside the text.
+
+        JSON inside the text always comes back written from the parsed
+        copy, also when nothing was replaced: the original text can hold
+        a repeated key the parser dropped, and its value with it.
+        """
         if _PEM_PRIVATE_KEY.search(value):
             self.count += 1
             return REDACTED
@@ -88,6 +93,4 @@ class Scrubber:
             return value
         if not isinstance(parsed, (dict, list)):
             return value
-        before = self.count
-        checked = self.tree(parsed, {})
-        return value if self.count == before else dump_json(checked)
+        return dump_json(self.tree(parsed, {}))

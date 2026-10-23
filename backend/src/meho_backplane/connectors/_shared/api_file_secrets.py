@@ -243,12 +243,17 @@ def _check_yaml(text: str, path: str) -> tuple[str, int]:
 
 
 def _yaml_reason(exc: yaml.YAMLError) -> str:
-    """The reason of a YAML error without the line it quotes."""
+    """The kind of YAML error and where it is, never what the file says there.
+
+    PyYAML's ``problem`` text can quote the file (an unknown tag names the
+    tag), so only the error class and the position are returned.
+    """
+    kind = type(exc).__name__
     if isinstance(exc, yaml.MarkedYAMLError):
-        mark = exc.problem_mark
-        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
-        return f"{exc.problem or type(exc).__name__}{where}"
-    return type(exc).__name__
+        mark = exc.problem_mark or exc.context_mark
+        if mark is not None:
+            return f"{kind} at line {mark.line + 1}, column {mark.column + 1}"
+    return kind
 
 
 def _redact_yaml_nodes(root: yaml.Node) -> int:

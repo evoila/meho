@@ -69,7 +69,9 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
 1. Pick the parser from the content type, or from the file ending.
 2. Parse. JSON with `json`; YAML with PyYAML's safe loader; XML with
    `defusedxml` (a file that declares entities is refused); HTML with
-   `html.parser`.
+   `html.parser`. A parse error names the kind of error and the line
+   and column, never the text there (a YAML error message would quote
+   an unknown tag).
 3. Replace:
    - JSON and YAML: the whole value of every secret-named key, at any
      depth, also inside lists, whatever it is (text, number, list,
@@ -82,23 +84,33 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      `key` or `type` attribute is a secret name (`<input type="password"
      value="...">`) loses its content and the values of its other
      attributes; the naming attributes stay, so `<xsd:element
-     name="password" type="xsd:string"/>` comes back as written.
+     name="password" type="xsd:string"/>` comes back as written. Every
+     attribute the parser saw is checked, so a repeated attribute name
+     (`name="password" name="normal"`) cannot hide the first one. The
+     HTML parser lowercases element and attribute names, so `licenseKey`
+     arrives as `licensekey`; HTML names go through
+     `is_secret_param_name_lowercased`, which asks whether any casing of
+     the name is a secret name. It matches a few more names than the
+     exact rule (`passwordless`), which only replaces more.
    - HTML `<script>` blocks: JSON content is checked like a JSON file.
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it. `<style>` content is
      free text.
    - Any text value that is itself a JSON object or list (a sample
      request in a description, a `<pre>` block) is parsed and checked
-     the same way.
+     the same way, and always written back from the parsed copy, also
+     when nothing was replaced: the original text can hold a repeated
+     key the parser dropped, and its value with it.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is
    compact (no spaces), close to the minified form appliances serve.
-   YAML comes from the safe dumper, keys in order. XML keeps the
-   namespace prefixes as declared, because WSDL and XSD files use them
-   inside attribute values (`type="xsd:string"`); comments, the XML
-   declaration and CDATA markers do not come back. HTML comes back
-   without comments.
+   YAML comes from the safe dumper, keys in order. XML keeps every
+   namespace declaration on the element that declared it, with the
+   prefixes as declared, because WSDL and XSD files use them inside
+   attribute values (`type="xsd:string"`) and a child can bind a prefix
+   to another namespace; comments, the XML declaration and CDATA markers
+   do not come back. HTML comes back without comments.
 5. Count every placeholder written.
 
 ## What the reads do with it

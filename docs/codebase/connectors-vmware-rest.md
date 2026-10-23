@@ -3483,14 +3483,25 @@ flight-recorder span holds a full key.**
   shows the asset's licence now and the one it would get, both masked, plus
   the `outcome`. The parameter schema has `additionalProperties: false`, so a
   key cannot be passed in.
-- **Vendor faults.** A fault of `UpdateAssignedLicense` can echo the key (the
-  vSphere `InvalidLicense` fault has a `licenseContent` field). The handler
-  raises a new `RuntimeError` from the fault type and text, with every key in
-  it masked by `hide_license_keys` (the given key, and any value in the 5x5
-  key shape). It raises outside the `except` block, so the vendor error,
-  whose answer may hold the key, is not chained, and the dispatcher's
-  `connector_error` never reads that answer. Login faults
-  (`SessionLoginError`) pass through unchanged.
+- **Errors of the write.** A fault of `UpdateAssignedLicense` can echo the
+  key (the vSphere `InvalidLicense` fault has a `licenseContent` field), and
+  the dispatcher copies text out of an error into the result and the audit
+  row. So `_hide_key_in_error` masks the key in place in everything the error
+  carries, and then the same error is raised again:
+  - its message;
+  - the vendor answer of an HTTP error, also when that error is the cause of
+    a `ConnectorAuthError` (the VI-JSON `NoPermission` / `InvalidLogin` /
+    `NotAuthenticated` path, whose answer the `connector_auth_failed` result
+    shows);
+  - the SOAP fault the single-host path attaches;
+  - the text a JSON parse error keeps.
+
+  It also drops the request body (it held the key) from every HTTP error,
+  keeping the method, URL and timeouts. Masking uses `hide_license_keys`
+  (the key itself, and any value in the 5x5 key shape). The class, the
+  status and the auth fields stay, so the dispatcher sorts the error as
+  before: `connector_auth_failed`, a new login and one retry on a 401, the
+  403 and 429 results, `connector_error` with the masked `upstream_fault`.
 - **Assign flow.** One property read (inventory and
   `LicenseAssignmentManager`); pick the licence (`license_not_found`, or
   `license_ambiguous` with the masked `candidates`); `QueryAssignedLicenses`

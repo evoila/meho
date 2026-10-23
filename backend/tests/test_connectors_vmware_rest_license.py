@@ -38,7 +38,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vmware_rest import (
     VmwareRestConnector,
@@ -65,6 +65,7 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     mask_license_key,
     query_assigned_licenses,
 )
+from meho_backplane.connectors.vmware_rest.soap import SoapFault, attach_soap_fault, soap_fault_of
 from meho_backplane.connectors.vmware_rest.typed_ops_license import (
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
     VMWARE_LICENSE_LIST_OP,
@@ -77,6 +78,7 @@ from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescript
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder import capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations._errors import result_connector_auth_failed
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations._validate import validate_params
@@ -84,6 +86,7 @@ from meho_backplane.operations.approval_queue import approve_request
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from meho_backplane.settings import get_settings
 from tests.test_connectors_vmware_rest_composites_write_e2e import (
+    _clear_requires_approval,
     _FakeVmwareTarget,
     _seed_connector,
 )
@@ -645,38 +648,159 @@ async def test_assign_returns_the_gate_and_sends_nothing_when_it_must_wait(
     assert conn.calls_to("UpdateAssignedLicense") == []
 
 
-def _vi_json_fault(type_name: str, faultstring: str, **fields: Any) -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/8.0.3.0/x")
+_UPDATE_URL = (
+    "https://vc.test.invalid/sdk/vim25/8.0.3.0/LicenseAssignmentManager/"
+    "LicenseAssignmentManager/UpdateAssignedLicense"
+)
+_TIMEOUTS = {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 5.0}
+_MASKED_ENT = "*****-*****-*****-*****-AB12C"
+
+
+def _key_bearing_request() -> httpx.Request:
+    """The request a real write sends: the full key in its JSON body."""
+    return httpx.Request(
+        "POST",
+        _UPDATE_URL,
+        json={"entity": "host-12", "licenseKey": _KEY_ENT},
+        extensions={"timeout": _TIMEOUTS},
+    )
+
+
+def _vi_json_fault(
+    status: int, type_name: str, faultstring: str, **fields: Any
+) -> httpx.HTTPStatusError:
+    """An HTTP error whose answer is a VI-JSON fault that echoes the key."""
+    request = _key_bearing_request()
     body = {"_typeName": type_name, "faultstring": faultstring, **fields}
-    response = httpx.Response(500, json=body, request=request)
-    return httpx.HTTPStatusError("Server error '500'", request=request, response=response)
+    response = httpx.Response(status, json=body, request=request)
+    return httpx.HTTPStatusError(f"Server error '{status}'", request=request, response=response)
 
 
-async def test_assign_vendor_fault_reaches_the_error_without_the_key(gate: _GateRecorder) -> None:
+def _auth_error(cause: httpx.HTTPStatusError) -> ConnectorAuthError:
+    """A VI-JSON permission fault as the connector raises it: the vendor answer is the cause."""
+    error = ConnectorAuthError(
+        "vmware vi-json POST /LicenseAssignmentManager/LicenseAssignmentManager/"
+        "UpdateAssignedLicense on target 'test-vcenter' was rejected with vim fault NoPermission",
+        status_code=500,
+        cause="vim_fault_NoPermission",
+        target_name="test-vcenter",
+        stage="call",
+    )
+    error.__cause__ = cause  # what ``raise ... from exc`` sets
+    error.__context__ = cause
+    return error
+
+
+def _assert_http_error_hides_the_key(err: httpx.HTTPStatusError) -> None:
+    _assert_no_full_key(err.response.text)
+    _assert_no_full_key(str(err))
+    assert err.request.content == b"", "the request body held the key"
+    assert err.response.request is err.request
+    assert err.request.extensions["timeout"] == _TIMEOUTS
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+async def test_assign_http_error_keeps_its_class_and_status_but_not_the_key(
+    gate: _GateRecorder, status: int
+) -> None:
     fault = _vi_json_fault(
+        status,
         "InvalidLicense",
         f"The license key {_KEY_ENT} is not valid for this host",
         licenseContent=_KEY_ENT,
     )
     conn = _FakeVcenter(update_error=fault)
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(httpx.HTTPStatusError) as raised:
         await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
-    message = str(raised.value)
-    assert "InvalidLicense" in message
-    assert "is not valid for this host" in message
-    assert "*****-*****-*****-*****-AB12C" in message
-    _assert_no_full_key(message)
-    # The vendor error, whose body holds the key, is not chained.
-    assert raised.value.__cause__ is None
-    assert raised.value.__context__ is None
+    # The same error and status, so the dispatcher sorts it as before (a 401
+    # still leads to a new login and one retry).
+    assert raised.value is fault
+    assert raised.value.response.status_code == status
+    body = raised.value.response.json()
+    assert body["_typeName"] == "InvalidLicense"
+    assert body["faultstring"] == f"The license key {_MASKED_ENT} is not valid for this host"
+    assert body["licenseContent"] == _MASKED_ENT
+    _assert_http_error_hides_the_key(raised.value)
 
 
-async def test_assign_single_host_fault_text_is_masked(gate: _GateRecorder) -> None:
-    conn = _FakeVcenter(update_error=RuntimeError(f"InvalidLicense: {_KEY_ENT} refused"))
-    with pytest.raises(RuntimeError) as raised:
+async def test_assign_auth_fault_keeps_its_class_but_masks_the_attached_answer(
+    gate: _GateRecorder,
+) -> None:
+    cause = _vi_json_fault(
+        500,
+        "NoPermission",
+        f"Permission to assign {_KEY_ENT} was denied",
+        privilegeId="Global.Licenses",
+    )
+    auth = _auth_error(cause)
+    conn = _FakeVcenter(update_error=auth)
+    with pytest.raises(ConnectorAuthError) as raised:
         await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
-    _assert_no_full_key(str(raised.value))
-    assert "AB12C" in str(raised.value)
+    # Class and classification fields stay, so the dispatcher still answers
+    # connector_auth_failed.
+    assert raised.value is auth
+    assert (auth.stage, auth.cause, auth.status_code) == ("call", "vim_fault_NoPermission", 500)
+    assert auth.__cause__ is cause
+    assert f"Permission to assign {_MASKED_ENT} was denied" in cause.response.text
+    _assert_http_error_hides_the_key(cause)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError(
+            f"vmware vim UpdateAssignedLicense failed: vim fault InvalidLicense: {_KEY_ENT}"
+        ),
+        ConnectorAuthError(
+            "vmware vim UpdateAssignedLicense failed on target 'test-esx'",
+            status_code=401,
+            cause="session_establish_NoPermission",
+        ),
+    ],
+    ids=["write-fault", "auth-fault"],
+)
+async def test_assign_single_host_fault_keeps_its_class_but_masks_the_attached_fault(
+    gate: _GateRecorder, error: RuntimeError
+) -> None:
+    attach_soap_fault(
+        error,
+        SoapFault(
+            faultcode="ServerFaultCode",
+            faultstring=f"License key {_KEY_ENT} is not valid",
+            fault_type="InvalidLicense",
+        ),
+    )
+    conn = _FakeVcenter(update_error=error)
+    with pytest.raises(type(error)) as raised:
+        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
+    assert raised.value is error
+    fault = soap_fault_of(error)
+    assert fault is not None
+    assert fault.faultstring == f"License key {_MASKED_ENT} is not valid"
+    assert fault.fault_type == "InvalidLicense"
+    _assert_no_full_key(str(error))
+
+
+async def test_assign_timeout_keeps_its_class_and_timeouts_but_drops_the_request_body(
+    gate: _GateRecorder,
+) -> None:
+    timeout = httpx.ReadTimeout("timed out", request=_key_bearing_request())
+    conn = _FakeVcenter(update_error=timeout)
+    with pytest.raises(httpx.ReadTimeout) as raised:
+        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
+    assert raised.value is timeout
+    assert timeout.request.content == b""
+    assert timeout.request.extensions["timeout"] == _TIMEOUTS
+
+
+async def test_assign_parse_error_masks_the_answer_it_keeps(gate: _GateRecorder) -> None:
+    parse_error = json.JSONDecodeError("Expecting value", f'{{"licenseKey": "{_KEY_ENT}", ', 32)
+    conn = _FakeVcenter(update_error=parse_error)
+    with pytest.raises(json.JSONDecodeError) as raised:
+        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
+    assert raised.value is parse_error
+    _assert_no_full_key(parse_error.doc)
+    assert _MASKED_ENT in parse_error.doc
 
 
 async def test_assign_login_fault_passes_through(gate: _GateRecorder) -> None:
@@ -1033,3 +1157,62 @@ async def test_assign_waits_for_a_second_person_and_no_row_holds_a_key(
     rows_text = await _db_rows_text()
     assert "AB12C" in rows_text, "the masked key should be in the stored rows"
     _assert_no_full_key(rows_text)
+
+
+async def _dispatch_failing_assign(error: BaseException, embedding_service: AsyncMock) -> Any:
+    """Run the assign through the dispatcher with *error* raised by the write."""
+    fake = _FakeVcenter(update_error=error)
+    _seed_connector(fake)  # type: ignore[arg-type]
+    await register_vmware_composite_operations(embedding_service=embedding_service)
+    # The approval path is proven above; here the call runs at once.
+    await _clear_requires_approval({_ASSIGN_OP}, fake)  # type: ignore[arg-type]
+    return await dispatch(
+        operator=_make_e2e_operator(sub="licence-requester", principal_kind=PrincipalKind.USER),
+        connector_id="vmware-rest-9.0",
+        op_id=_ASSIGN_OP,
+        target=_FakeVmwareTarget(),
+        params={"entity_id": "host-12", "license_name": "vSphere 8 Enterprise Plus"},
+    )
+
+
+async def test_dispatch_of_an_auth_fault_stays_auth_failed_and_no_row_holds_a_key(
+    _clean_registry: None,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    def answer() -> httpx.HTTPStatusError:
+        return _vi_json_fault(500, "NoPermission", f"Permission to assign {_KEY_ENT} was denied")
+
+    # Control: the dispatcher's formatter reads the attached answer, so an
+    # unmasked one would put the key into the result.
+    unmasked = result_connector_auth_failed(_ASSIGN_OP, _auth_error(answer()), None, 1.0)
+    assert _KEY_ENT in unmasked.model_dump_json()
+
+    result = await _dispatch_failing_assign(_auth_error(answer()), stub_embedding_service)
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert _MASKED_ENT in result.extras["upstream_message"]
+    _assert_no_full_key(result.model_dump_json())
+    rows = await _db_rows_text()
+    assert "AB12C" in rows
+    _assert_no_full_key(rows)
+
+
+async def test_dispatch_of_a_vendor_fault_shows_the_fault_and_no_row_holds_a_key(
+    _clean_registry: None,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    fault = _vi_json_fault(
+        500,
+        "InvalidLicense",
+        f"The license key {_KEY_ENT} is not valid for this host",
+        licenseContent=_KEY_ENT,
+    )
+    result = await _dispatch_failing_assign(fault, stub_embedding_service)
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["upstream_fault"] == {
+        "type": "InvalidLicense",
+        "faultstring": f"The license key {_MASKED_ENT} is not valid for this host",
+    }
+    _assert_no_full_key(result.model_dump_json())
+    _assert_no_full_key(await _db_rows_text())

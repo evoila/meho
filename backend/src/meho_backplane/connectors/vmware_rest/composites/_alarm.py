@@ -34,6 +34,17 @@ Flow of both handlers, on the connector session:
 
 Both are safe to run twice: an alarm that is already acknowledged, or no
 matching triggered alarm, gives ``unchanged`` and sends no change.
+
+When vCenter cannot give the list of triggered alarms
+(:class:`~meho_backplane.connectors.vmware_rest.alarm_state.AlarmStateUnreadableError`,
+for example a ``NoPermission`` fault on the property), the read before the
+change fails the call and nothing is changed; the read after the change gives
+``not_verified``, never "cleared".
+
+The approval previews read vCenter, so they run only at park time, when the
+dispatcher passes the connector. ``preview_operation`` passes none: the
+builders then decline, and the preview says that the plan is shown on the
+approval request.
 """
 
 from __future__ import annotations
@@ -172,8 +183,9 @@ async def alarm_acknowledge_composite(
     Otherwise sends ``AcknowledgeAlarm`` through the governed write seam (a
     parked or denied gate comes back as is), reads again and returns
     ``acknowledged`` with who and when, or ``not_verified`` (with an error
-    issue) when the read does not show it acknowledged. A vendor fault on the
-    change raises, and the dispatcher reports it as ``connector_error``.
+    issue) when the read fails or does not show it acknowledged. A vendor
+    fault on the change, or a failed read before it, raises, and the
+    dispatcher reports it as ``connector_error``.
     """
     alarm_id = str(params["alarm_id"])
     entity_id = str(params["entity_id"])
@@ -206,13 +218,18 @@ async def alarm_acknowledge_composite(
     if gate is not None:
         return gate
 
-    after = await _root_alarms(connector, target, operator, root_folder, with_names=False)
+    try:
+        after = await _root_alarms(connector, target, operator, root_folder, with_names=False)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        after, read_failure = [], f" ({type(exc).__name__})"
+    else:
+        read_failure = ""
     after_row = _find(after, alarm_id, entity_id)
     if after_row is None or not after_row["acknowledged"]:
         return _error(
             "not_verified",
             f"MEHO sent the acknowledge for alarm {alarm_id} on {entity_id}, but a new "
-            "read does not show it acknowledged; the change is not confirmed",
+            f"read{read_failure} does not show it acknowledged; the change is not confirmed",
             "Call vmware.alarm.triggered.list to see the state now.",
             alarm=row,
         )
@@ -228,20 +245,21 @@ async def alarm_acknowledge_composite(
 async def alarm_acknowledge_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview for the approver: the alarm as it is now (live read).
 
-    Echoes the two ids when no connector is resolved. ``alarm`` is ``None``
+    Declines (``None``) without a connector, as in ``preview_operation``: the
+    alarm can only be shown after a read of vCenter. ``alarm`` is ``None``
     when the alarm is not triggered now (the call will then change nothing).
     """
     alarm_id = ctx.params.get("alarm_id")
     entity_id = ctx.params.get("entity_id")
     if not isinstance(alarm_id, str) or not isinstance(entity_id, str):
         return None
+    if ctx.connector_instance is None:
+        return None
     preview: dict[str, Any] = {
         "action": "acknowledge_alarm",
         "alarm_id": alarm_id,
         "entity_id": entity_id,
     }
-    if ctx.connector_instance is None:
-        return preview
     connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
     root_folder, _ = await read_service_content_refs(connector, ctx.target, ctx.operator)
     rows = await _root_alarms(connector, ctx.target, ctx.operator, root_folder)
@@ -384,12 +402,16 @@ async def alarm_reset_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview for the approver: the filter and the triggered alarms it matches now.
 
     Lists at most :data:`_PREVIEW_CAP` matching alarms; ``total_matching`` has
-    the full count. Echoes only the filter when no connector is resolved.
+    the full count. Declines (``None``) without a connector, as in
+    ``preview_operation``: the matching alarms can only be shown after a read
+    of vCenter.
     """
     try:
         reset_filter = _reset_filter(ctx.params)
         _filter_spec(reset_filter)
     except (KeyError, TypeError):
+        return None
+    if ctx.connector_instance is None:
         return None
     preview: dict[str, Any] = {
         "action": "reset_alarms_to_green",
@@ -399,8 +421,6 @@ async def alarm_reset_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             "An alarm that is reset hides its problem until the alarm fires again."
         ),
     }
-    if ctx.connector_instance is None:
-        return preview
     connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
     root_folder, _ = await read_service_content_refs(connector, ctx.target, ctx.operator)
     rows = await _root_alarms(connector, ctx.target, ctx.operator, root_folder)

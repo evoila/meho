@@ -35,6 +35,7 @@ from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.alarm_state import (
     ALARMS_GROUP_KEY,
     ALARMS_WHEN_TO_USE,
+    AlarmStateUnreadableError,
     trigger_kind,
 )
 from meho_backplane.connectors.vmware_rest.composites import _alarm, _write
@@ -68,6 +69,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._composite_preview import PLAN_NOT_SHOWN_NOTE
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
@@ -75,7 +77,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
-from meho_backplane.operations.meta_tools import call_operation
+from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
 from tests.test_operation_contracts import OperationContract, check_operation
 
@@ -137,6 +139,14 @@ def _state(
     return state
 
 
+def _no_permission(path: str) -> dict[str, Any]:
+    """A ``missingSet`` entry in the 9.x shape: the fault inside a ``LocalizedMethodFault``."""
+    return {
+        "path": path,
+        "fault": {"_typeName": "LocalizedMethodFault", "fault": {"_typeName": "NoPermission"}},
+    }
+
+
 def _vendor_trigger_match(type_trigger: str, kind: str | None) -> bool:
     if type_trigger == "triggerTypeAll":
         return True
@@ -160,6 +170,14 @@ class _AlarmVim:
         self.fail: dict[str, Exception] = {}
         #: Raise on a triggeredAlarmState read once a change was sent.
         self.fail_read_after_change = False
+        #: How the triggeredAlarmState read answers: "normal", "fault" (the
+        #: property in missingSet with NoPermission), "no_object" (no entry for
+        #: the object) or "unset" (the object without the property).
+        self.alarm_list_answer = "normal"
+        #: The same, for the reads after a change was sent (None: as above).
+        self.alarm_list_answer_after_change: str | None = None
+        #: Object types whose name read comes back in missingSet.
+        self.unreadable_names: set[str] = set()
         self.apply_changes = True
         self.missing: set[str] = set()
         self._changed = False
@@ -218,6 +236,19 @@ class _AlarmVim:
                 if promote:
                     raise ConnectorResourceNotFoundError([moid], f"{moid} not found")
                 raise RuntimeError(f"ManagedObjectNotFound: {moid}")
+            answer = self.alarm_list_answer
+            if self._changed and self.alarm_list_answer_after_change is not None:
+                answer = self.alarm_list_answer_after_change
+            if answer == "fault":
+                return {
+                    "objects": [
+                        {"obj": moref(mo_type, moid), "missingSet": [_no_permission(path_set[0])]}
+                    ]
+                }
+            if answer == "no_object":
+                return {"objects": []}
+            if answer == "unset":
+                return {"objects": [{"obj": moref(mo_type, moid)}]}
             states = [s for s in self.states if moid == _ROOT or s["entity"]["value"] == moid]
             val = {"_typeName": "ArrayOfAlarmState", "_value": copy.deepcopy(states)}
             return {
@@ -234,6 +265,11 @@ class _AlarmVim:
                 props = [{"name": "info.name", "val": _boxed(name)}]
                 if rule is not None:
                     props.append({"name": "info.expression", "val": copy.deepcopy(rule)})
+            elif mo_type in self.unreadable_names:
+                objects.append(
+                    {"obj": moref(mo_type, moid), "missingSet": [_no_permission("name")]}
+                )
+                continue
             else:
                 props = [{"name": "name", "val": _boxed(self.names[(mo_type, moid)])}]
             objects.append({"obj": moref(mo_type, moid), "propSet": props})
@@ -486,6 +522,36 @@ async def test_an_entry_without_an_object_type_is_skipped() -> None:
     assert out["alarms"] == []
 
 
+@pytest.mark.parametrize("answer", ["fault", "no_object"])
+async def test_list_fails_when_vcenter_does_not_give_the_alarm_list(answer: str) -> None:
+    """A property fault or a missing entry is an error, never an empty list."""
+    vim = _seeded()
+    vim.alarm_list_answer = answer
+    with pytest.raises(AlarmStateUnreadableError) as raised:
+        await _list(vim)
+    expected = "triggeredAlarmState (NoPermission)" if answer == "fault" else "no entry"
+    assert expected in str(raised.value)
+    assert "Folder group-d1" in str(raised.value)
+
+
+async def test_an_unset_alarm_list_means_no_triggered_alarms() -> None:
+    vim = _seeded()
+    vim.alarm_list_answer = "unset"
+    out = await _list(vim)
+    assert out["alarms"] == []
+    assert out["read_note"] is None
+
+
+async def test_list_notes_the_names_vcenter_could_not_read() -> None:
+    vim = _seeded()
+    vim.unreadable_names.add("HostSystem")
+    out = await _list(vim)
+    assert out["read_note"] == "HostSystem names not read for 2 of 2 objects (NoPermission)"
+    hosts = [row for row in out["alarms"] if row["entity_type"] == "HostSystem"]
+    assert [row["entity_name"] for row in hosts] == [None, None]
+    assert {row["entity_name"] for row in out["alarms"]} == {None, "Datacenters", "vm-c"}
+
+
 @pytest.mark.parametrize(
     ("rule", "expected"),
     [
@@ -609,6 +675,30 @@ async def test_acknowledge_on_a_target_without_alarm_manager_fails(gate: _GateRe
     assert vim.methods() == ["RetrieveServiceContent"]
 
 
+async def test_acknowledge_with_an_unreadable_alarm_list_fails_before_any_change(
+    gate: _GateRecorder,
+) -> None:
+    vim = _seeded()
+    vim.alarm_list_answer = "fault"
+    with pytest.raises(AlarmStateUnreadableError):
+        await _ack(vim, "alarm-101", "host-201")
+    assert vim.calls_to("AcknowledgeAlarm") == []
+    assert gate.calls == []
+
+
+@pytest.mark.parametrize("answer", ["fault", "no_object"])
+async def test_acknowledge_with_an_unreadable_list_after_the_call_is_not_verified(
+    gate: _GateRecorder, answer: str
+) -> None:
+    vim = _seeded()
+    vim.alarm_list_answer_after_change = answer
+    out = await _ack(vim, "alarm-101", "host-201")
+    assert out["status"] == "not_verified"
+    assert out["issues"][0]["severity"] == "error"
+    assert "AlarmStateUnreadableError" in out["issues"][0]["message"]
+    assert len(vim.calls_to("AcknowledgeAlarm")) == 1
+
+
 def test_acknowledge_example_validates_and_both_ids_are_required() -> None:
     schema = ALARM_ACKNOWLEDGE_PARAMETER_SCHEMA
     assert validate_params(schema, schema["examples"][0]) == []
@@ -715,6 +805,45 @@ async def test_reset_passes_a_vendor_fault_on(gate: _GateRecorder) -> None:
         await _reset(vim, ["red"], "all", "all")
 
 
+async def test_reset_with_an_unreadable_alarm_list_fails_before_any_change(
+    gate: _GateRecorder,
+) -> None:
+    vim = _seeded()
+    vim.alarm_list_answer = "fault"
+    with pytest.raises(AlarmStateUnreadableError):
+        await _reset(vim, ["red"], "all", "all")
+    assert vim.calls_to("ClearTriggeredAlarms") == []
+    assert gate.calls == []
+
+
+@pytest.mark.parametrize("answer", ["fault", "no_object"])
+async def test_reset_with_an_unreadable_list_after_the_call_is_not_verified(
+    gate: _GateRecorder, answer: str
+) -> None:
+    """An unreadable list after the reset never reports the alarms as cleared."""
+    vim = _seeded()
+    vim.apply_changes = False  # nothing was cleared in fact
+    vim.alarm_list_answer_after_change = answer
+    out = await _reset(vim, ["red"], "all", "all")
+    assert out["status"] == "not_verified"
+    assert out["cleared"] is None
+    assert out["still_triggered"] is None
+    assert out["issues"][0]["severity"] == "error"
+    assert "AlarmStateUnreadableError" in out["issues"][0]["message"]
+    assert len(vim.calls_to("ClearTriggeredAlarms")) == 1
+
+
+async def test_reset_that_clears_every_alarm_reads_an_unset_list_as_empty(
+    gate: _GateRecorder,
+) -> None:
+    vim = _seeded()
+    vim.alarm_list_answer_after_change = "unset"
+    out = await _reset(vim, ["red", "yellow"], "all", "all")
+    assert out["status"] == "reset"
+    assert len(out["cleared"]) == 4
+    assert out["still_triggered"] == []
+
+
 @pytest.mark.parametrize(
     "params",
     [
@@ -761,8 +890,11 @@ async def test_acknowledge_preview_shows_the_alarm_as_it_is_now() -> None:
     assert out["alarm"]["entity_name"] == "host-a"
     assert vim.calls_to("AcknowledgeAlarm") == []
 
-    echo = await alarm_acknowledge_preview(_ctx({"alarm_id": "alarm-1", "entity_id": "x"}, None))
-    assert echo == {"action": "acknowledge_alarm", "alarm_id": "alarm-1", "entity_id": "x"}
+    # Without a connector (as in preview_operation) the builder declines.
+    assert (
+        await alarm_acknowledge_preview(_ctx({"alarm_id": "alarm-1", "entity_id": "x"}, None))
+        is None
+    )
     assert await alarm_acknowledge_preview(_ctx({"alarm_id": 5}, vim)) is None
 
 
@@ -791,17 +923,11 @@ async def test_reset_preview_lists_the_matching_alarms_with_a_cap() -> None:
     assert len(capped["matching_now"]) == _alarm._PREVIEW_CAP
 
 
-async def test_reset_preview_without_a_connector_echoes_the_filter() -> None:
+async def test_reset_preview_without_a_connector_declines() -> None:
+    """As in preview_operation: no connector, so no read of vCenter and no plan."""
     params = {"status": ["yellow", "red"], "object_kind": "vm", "trigger_kind": "metric"}
-    out = await alarm_reset_preview(_ctx(params, None))
-    assert out is not None
-    assert out["filter"] == {
-        "status": ["red", "yellow"],
-        "object_kind": "vm",
-        "trigger_kind": "metric",
-    }
-    assert "matching_now" not in out
-    assert await alarm_reset_preview(_ctx({"status": ["red"]}, None)) is None
+    assert await alarm_reset_preview(_ctx(params, None)) is None
+    assert await alarm_reset_preview(_ctx({"status": ["red"]}, _seeded())) is None
 
 
 def test_both_changes_have_a_preview_builder_and_a_child_op_list() -> None:
@@ -916,6 +1042,7 @@ async def _bootstrap(vim: _AlarmVim) -> None:
     )
     _CONNECTOR_INSTANCE_CACHE[VmwareRestConnector] = vim  # type: ignore[assignment]
     await register_vmware_composite_operations(embedding_service=_embedding_stub())
+    await register_vmware_typed_operations(embedding_service=_embedding_stub())
     async with get_sessionmaker()() as s:
         s.add(
             TargetORM(
@@ -993,3 +1120,52 @@ async def test_an_agent_acknowledge_waits_for_approval() -> None:
     )
     assert call["status"] == "awaiting_approval", call
     assert vim.calls_to("AcknowledgeAlarm") == []
+
+
+@pytest.mark.usefixtures("_db_env")
+async def test_an_unreadable_alarm_list_is_an_error_through_the_dispatcher() -> None:
+    vim = _seeded()
+    vim.alarm_list_answer = "fault"
+    await _bootstrap(vim)
+    # The dispatcher binds a typed handler only to a real connector object, so
+    # give it one whose VI-JSON seam is the fake.
+    connector = object.__new__(VmwareRestConnector)
+    connector._post_vmomi_json = vim._post_vmomi_json  # type: ignore[method-assign]
+    _CONNECTOR_INSTANCE_CACHE[VmwareRestConnector] = connector
+    call = await call_operation(
+        _operator(),
+        {"connector_id": "vmware-rest-9.0", "op_id": _LIST_OP, "target": _TARGET_NAME},
+    )
+    assert call["status"] == "error", call
+    assert call["extras"]["error_code"] == "connector_error"
+    assert call["extras"]["exception_class"] == "AlarmStateUnreadableError", call
+
+
+@pytest.mark.usefixtures("_db_env")
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        (_ACK_OP, {"alarm_id": "alarm-101", "entity_id": "host-201"}),
+        (_RESET_OP, {"status": ["red"], "object_kind": "host", "trigger_kind": "event"}),
+    ],
+)
+async def test_the_cli_preview_says_the_plan_is_on_the_approval_request(
+    op_id: str, params: dict[str, Any]
+) -> None:
+    """preview_operation reads no vCenter, so it must not claim to show the plan."""
+    vim = _seeded()
+    await _bootstrap(vim)
+    preview = await preview_operation(
+        _operator(),
+        {
+            "connector_id": "vmware-rest-9.0",
+            "op_id": op_id,
+            "target": _TARGET_NAME,
+            "params": params,
+        },
+    )
+    assert preview["status"] == "ok", preview
+    assert preview["plan_shown"] is False
+    assert preview["plan_note"] == PLAN_NOT_SHOWN_NOTE
+    assert "proposed_effect" not in preview
+    assert vim.calls == []

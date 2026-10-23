@@ -23,6 +23,14 @@ All three need the same facts, so the reads live here, once:
   (``ManagedEntity.name``). These name reads are best effort: when one fails,
   the rows keep their ids and ``read_note`` says what is missing.
 
+A ``RetrievePropertiesEx`` call can succeed while vCenter still could not
+read a property: the property is then in the object's ``missingSet``, usually
+with a fault such as ``NoPermission``. For ``triggeredAlarmState`` that is
+never read as "no triggered alarms": :func:`read_triggered_alarms` raises
+:class:`AlarmStateUnreadableError`, and it does the same when the answer has
+no entry for the object. An unset property has no ``missingSet`` entry and
+means no triggered alarms.
+
 Every call goes through
 :meth:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector._post_vmomi_json`
 (VI-JSON on vCenter 8.0 U1 and newer). This module imports nothing from the
@@ -36,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
 )
@@ -49,6 +58,7 @@ __all__ = [
     "ALARMS_GROUP_KEY",
     "ALARMS_WHEN_TO_USE",
     "ALARM_ENTITY_TYPES",
+    "AlarmStateUnreadableError",
     "alarm_key",
     "read_service_content_refs",
     "read_triggered_alarms",
@@ -123,6 +133,15 @@ def _moref_value(ref: Any) -> str | None:
 
 def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+class AlarmStateUnreadableError(RuntimeError):
+    """vCenter answered, but did not give the list of triggered alarms.
+
+    The ``triggeredAlarmState`` property is in the answer's ``missingSet`` (for
+    example ``NoPermission``), or the answer has no entry for the object. The
+    message names the property and the fault type, never the fault text.
+    """
 
 
 def alarm_key(row: dict[str, Any]) -> tuple[str, str]:
@@ -212,6 +231,27 @@ def _props_by_moid(retrieve_result: Any) -> dict[str, dict[str, Any]]:
     return found
 
 
+def _unreadable_by_moid(retrieve_result: Any) -> dict[str, dict[str, str]]:
+    """Map each object's moid to ``{property path: fault type}`` from its ``missingSet``.
+
+    A property vCenter could not read is not in ``propSet``; it is in the
+    object's ``missingSet``, usually with a fault. An unset property has no
+    entry. Only the fault type name is kept (``unknown fault`` when there is
+    none), never the fault text, which can echo a private value.
+    """
+    found: dict[str, dict[str, str]] = {}
+    for obj in _objects(retrieve_result):
+        moid = _moref_value(obj.get("obj"))
+        if moid is None:
+            continue
+        for entry in obj.get("missingSet", []) or []:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, str):
+                fault_type = fault_type_name(entry.get("fault")) or "unknown fault"
+                found.setdefault(moid, {})[path] = fault_type
+    return found
+
+
 def _state_row(state: Any) -> dict[str, Any] | None:
     """Turn one ``AlarmState`` into a flat row.
 
@@ -261,6 +301,10 @@ async def read_triggered_alarms(
     skips the name reads (a read-back after a change only needs the ids).
     ``promote_missing=True`` turns a missing object into MEHO's normal
     ``not_found`` answer.
+
+    Raises :class:`AlarmStateUnreadableError` when vCenter could not read the
+    list (a ``missingSet`` entry) or sent no entry for the object, so a
+    caller never takes an unreadable list for an empty one.
     """
     result = await connector._post_vmomi_json(
         target,
@@ -269,7 +313,20 @@ async def read_triggered_alarms(
         json=retrieve_properties_body(mo_type, [moid], [_PROP_TRIGGERED]),
         promote_managed_object_not_found=promote_missing,
     )
-    states = _props_by_moid(result).get(moid, {}).get(_PROP_TRIGGERED)
+    unreadable = _unreadable_by_moid(result).get(moid)
+    if unreadable:
+        detail = ", ".join(f"{path} ({fault})" for path, fault in sorted(unreadable.items()))
+        raise AlarmStateUnreadableError(
+            f"vCenter could not read {detail} of {mo_type} {moid}; "
+            "the triggered alarms are not known"
+        )
+    props = _props_by_moid(result).get(moid)
+    if props is None:
+        raise AlarmStateUnreadableError(
+            f"vCenter's answer has no entry for {mo_type} {moid}; "
+            "the triggered alarms are not known"
+        )
+    states = props.get(_PROP_TRIGGERED)
     rows = [row for row in (_state_row(s) for s in states or []) if row is not None]
     note = await _add_names(connector, target, operator, rows) if with_names and rows else None
     rows.sort(key=lambda row: row["time"] or "", reverse=True)
@@ -332,4 +389,11 @@ async def _read_props(
     except (httpx.HTTPError, RuntimeError) as exc:
         notes.append(f"{mo_type} names not read ({type(exc).__name__})")
         return {}
+    unreadable = _unreadable_by_moid(result)
+    if unreadable:
+        faults = sorted({fault for paths in unreadable.values() for fault in paths.values()})
+        notes.append(
+            f"{mo_type} names not read for {len(unreadable)} of {len(moids)} objects "
+            f"({', '.join(faults)})"
+        )
     return _props_by_moid(result)

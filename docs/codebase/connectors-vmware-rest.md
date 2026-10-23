@@ -3405,9 +3405,21 @@ manager; their ids are read, never guessed. vCenter copies every triggered
 alarm up the inventory tree, so the root folder's `triggeredAlarmState` holds
 the triggered alarms of the whole vCenter. Each entry names the object the
 alarm is triggered on. Two more reads add the alarm names and rules and the
-object names. When one of them fails, the rows keep their ids and
-`read_note` says which read failed. A long list is stored behind a result
-handle, like every other list.
+object names. When one of them fails, or vCenter could not read some names
+(a `missingSet` fault), the rows keep their ids and `read_note` says which
+read failed. A long list is stored behind a result handle, like every other
+list.
+
+**An unreadable list is never an empty list.** vCenter can answer a
+`RetrievePropertiesEx` call and still not give a property: the property is
+then in the object's `missingSet`, usually with a fault such as
+`NoPermission`. When that happens to `triggeredAlarmState`, or the answer has
+no entry for the object, the read raises `AlarmStateUnreadableError`. The
+list operation then fails (`connector_error`), and so do acknowledge and
+reset before they change anything. The read after a change gives
+`not_verified`, so a reset never reports alarms as cleared that it could not
+read. An unset property has no `missingSet` entry and means no triggered
+alarms.
 
 **Trigger kind.** Each row has `trigger_kind`, from the alarm rule
 (`Alarm.info.expression`): `event` (only event conditions), `metric` (only
@@ -3434,14 +3446,16 @@ and after the call:
 - `still_triggered`: matching alarms that are still triggered. Their cause
   is still there, or vCenter did not count them under this trigger kind.
 - `unchanged`, and no call to vCenter, when no triggered alarm matches.
-  `not_verified`, with an error issue, when the read after the call fails.
+  `not_verified`, with an error issue, when the read after the call fails
+  or vCenter cannot give the list.
 
 **Acknowledge.** Takes `alarm_id` and `entity_id` from a list row. The
 handler checks that the alarm is triggered on that object (else
 `not_triggered`, with an error issue), does nothing for an acknowledged
 alarm (`unchanged`), sends `AcknowledgeAlarm` with the two object
 references, and reads again: `acknowledged` with who and when, or
-`not_verified` with an error issue.
+`not_verified` with an error issue when the read fails or does not show it
+acknowledged.
 
 **Risk and approval.** Both changes are `caution` with
 `requires_approval=True`, like every other VMware write composite; the
@@ -3451,9 +3465,13 @@ operation contract check requires the flag for every operation that is not
 (`APPROVAL_ALLOW_SELF_APPROVAL`); else a second person approves. An agent's
 call waits too. Inside the composite, the one change goes through the shared
 write seam (`_write_vmomi_sub_op`) like in the other composites, and the
-child-op list is in `composites/_governed_subops.py`. The approval preview
-reads the alarm (acknowledge) or the triggered alarms the filter matches now,
-at most 25 (reset).
+child-op list is in `composites/_governed_subops.py`. The approval request
+shows the alarm (acknowledge) or the triggered alarms the filter matches at
+that time, at most 25 (reset): the preview builders read vCenter when the call
+waits for approval. `preview_operation` (the CLI `meho operation preview`)
+does not contact vCenter, so both builders decline there, and the preview
+answers `plan_shown: false` with a note that the plan is shown on the
+approval request.
 
 **Not covered.** A standalone ESXi host target (not tested; the changes
 answer `no_alarm_manager` when the ServiceContent has no alarm manager).
@@ -3461,7 +3479,8 @@ vCenter 7.0 (no `vmware-rest` catalog, and VI-JSON starts at 8.0 U1). Alarm
 definitions, and reading or cancelling one task, are the rest of `#4383`.
 
 **Tests.** `tests/test_connectors_vmware_rest_alarms.py` (a fake VI-JSON
-seam: the read, both changes, the previews, the rows on both catalogs, the
+seam: the read, both changes, an unreadable list before and after a
+change, the previews, `preview_operation`, the rows on both catalogs, the
 contract rules, and a reset that waits for approval and then runs once).
 `tests/test_connectors_vmware_rest_alarms_reconcile.py` checks the methods,
 the filter enum values and the object types against the pinned 9.0

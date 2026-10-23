@@ -11,8 +11,11 @@ payload through as it is.
 Field names come from the pinned VCF Operations 9.0 Suite API file
 (``vcf-operations-openapi.ingestable.json``, ``components.schemas``:
 ``version``, ``alerts`` / ``alert``, ``resources`` / ``resource``,
-``stats-of-resources`` / ``stats``). The 8.x connector shares these
-operations; no 8.x Suite API file is on the spec shelf.
+``stats-of-resources`` / ``stats``, ``resource-kind-attributes`` /
+``resource-kind-attribute``, ``product-licensing``, ``LicenseInfo``). The 8.x
+connector shares these operations, except the resource kind properties read
+and the licence read, which are 9.x only; no 8.x Suite API file is on the
+spec shelf.
 """
 
 from __future__ import annotations
@@ -21,7 +24,12 @@ from typing import Any
 
 __all__ = [
     "VROPS_ALERT_LIST_RESPONSE",
+    "VROPS_LICENSE_INFO_RESPONSE",
+    "VROPS_LICENSING_ENTITLEMENT_QUERY_RESPONSE",
+    "VROPS_LICENSING_PAYLOAD_RESPONSE",
+    "VROPS_LICENSING_VCENTER_QUERY_RESPONSE",
     "VROPS_LIVENESS_RESPONSE",
+    "VROPS_RESOURCE_KIND_PROPERTIES_RESPONSE",
     "VROPS_RESOURCE_QUERY_RESPONSE",
     "VROPS_RESOURCE_STATS_RESPONSE",
 ]
@@ -207,5 +215,146 @@ VROPS_RESOURCE_STATS_RESPONSE: dict[str, Any] = _object(
                 ),
             },
         ),
+    },
+)
+
+VROPS_RESOURCE_KIND_PROPERTIES_RESPONSE: dict[str, Any] = _object(
+    "The properties one resource kind has (vendor resource-kind-attributes object).",
+    {
+        "resourceTypeAttributes": _list_of(
+            "One row per property.",
+            {
+                "key": _field("string", "The property key, e.g. config|guestFullName."),
+                "name": _field("string", "The display name of the property."),
+                "description": _field("string", "What the property holds."),
+                "dataType2": _field(
+                    "string",
+                    "The data type: STRING, INTEGER, HOST, IP, ENUM, PASSWORD, BOOLEAN, "
+                    "FLOAT or UNKNOWN.",
+                ),
+                "dataType": _field("string", "The old data type field (deprecated)."),
+                "unit": _field("string", "The unit of the value, if any."),
+                "property": _field("boolean", "True when the row is a property."),
+                "defaultMonitored": _field(
+                    "boolean", "True when the property is collected by default."
+                ),
+            },
+        ),
+    },
+)
+
+VROPS_LICENSE_INFO_RESPONSE: dict[str, Any] = _object(
+    "The edition and the licence of this instance (vendor product-licensing and "
+    "LicenseInfo objects in one object).",
+    {
+        "productLicensingEdition": _field(
+            "string",
+            "The licensed edition: NOT_LICENSED, CORE, STANDARD, ADVANCED, ENTERPRISE or UNKNOWN.",
+        ),
+        "licensed": _field("boolean", "True when the instance has a valid licence."),
+        "licenseName": _field("string", "The licence name."),
+        "expirationDate": _field("integer", "When the licence expires, in epoch milliseconds."),
+        "licenseKey": _field(
+            "string",
+            "The licence key, masked by MEHO: only the last 5 characters show. For VCF "
+            "licences the vendor puts the licence name here.",
+        ),
+    },
+)
+
+
+# ---------------------------------------------------------------------------
+# Licence management (VCF 9 licences, ``/suite-api/internal/extension/...``).
+#
+# VCF Operations does not publish these calls; they are not in the pinned
+# Suite API file. The field names below come from the community PowerShell
+# module ``lamw/Broadcom.Community.VCFLicensing`` (Get-VcfOperationsEntitlements,
+# Get-VcfOperationsVcenters2) and from live reads against VCF Operations 9.1.
+# ---------------------------------------------------------------------------
+
+VROPS_LICENSING_ENTITLEMENT_QUERY_RESPONSE = _object(
+    "The licences VCF Operations holds. Not published by the vendor.",
+    {
+        "entitlementWithVcentersDetails": _list_of(
+            "One entry per licence.",
+            {
+                "entitlementInfo": _object(
+                    "The licence.",
+                    {
+                        "id": _field("string", "The licence id. Pass it to the assign call."),
+                        "name": _field("string", "The licence name."),
+                        "productDisplayName": _field("string", "The product the licence is for."),
+                        "type": _field("string", "The licence type."),
+                        "usage": _field("number", "The capacity in use."),
+                        "capacity": _field("number", "The capacity the licence gives."),
+                    },
+                ),
+            },
+        ),
+        "totalCount": _field("integer", "The number of licences. 0 means the store is empty."),
+    },
+)
+
+VROPS_LICENSING_VCENTER_QUERY_RESPONSE = _object(
+    "The licence state of each vCenter. Not published by the vendor.",
+    {
+        "vcenterSystems": _list_of(
+            "One entry per vCenter. Some builds use an older shape: id, host and "
+            "vcfAdapterName sit under vcenterInfo instead of at the top of the entry.",
+            {
+                "vcenterInfo": _object(
+                    "Older shape only: the vCenter id, address and VCF instance.",
+                    {
+                        "id": _field("string", "The vCenter id. Pass it to the assign call."),
+                        "host": _field(
+                            "string", "The vCenter address. Pass it to the assign call."
+                        ),
+                        "vcfAdapterName": _field(
+                            "string", "The VCF instance that manages the vCenter."
+                        ),
+                    },
+                ),
+                "id": _field("string", "The vCenter id. Pass it to the assign call."),
+                "host": _field("string", "The vCenter address. Pass it to the assign call."),
+                "vcfAdapterName": _field("string", "The VCF instance that manages the vCenter."),
+                "version": _field("string", "The vCenter version."),
+                "state": _field("string", "The licence state, e.g. EVALUATION or LICENSED."),
+                "expirationTimestamp": _field(
+                    ["integer", "string"], "When the evaluation or the licence ends."
+                ),
+                "productFamilies": _list_of(
+                    "One entry per product family, e.g. vSphere (cores) or vSAN (TiB).",
+                    {
+                        "productFamily": _field("string", "The product family."),
+                        "type": _field("string", "The licence type of the family."),
+                        "licensedUsage": _field("number", "The capacity that is licensed."),
+                        "unlicensedUsage": _field(
+                            "number", "The capacity with no licence. 0 means fully licensed."
+                        ),
+                        "licenses": _list_of(
+                            "The licences assigned to this family.",
+                            {
+                                "allocationId": _field("string", "The id of the assignment."),
+                                "name": _field("string", "The licence name."),
+                            },
+                        ),
+                    },
+                ),
+            },
+        ),
+    },
+)
+
+#: The shape of the licence calls whose answer the vendor does not describe
+#: anywhere: MEHO returns the vendor answer as it is under ``payload``.
+VROPS_LICENSING_PAYLOAD_RESPONSE = _object(
+    "The vendor answer, unchanged, under payload.",
+    {
+        # No "type": the answer can be any JSON value.
+        "payload": {
+            "description": (
+                "The answer of VCF Operations, as it is. The vendor does not publish its fields."
+            ),
+        },
     },
 )

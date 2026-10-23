@@ -34,6 +34,7 @@ import os
 import secrets
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,7 +42,9 @@ import httpx
 import pytest
 import yaml
 
+from meho_backplane.auth.agent_token import get_client_credentials_token
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
+from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
@@ -98,8 +101,8 @@ def _bootstrap_headers(kc: _Keycloak) -> dict[str, str]:
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 
 
-@pytest.fixture(scope="module")
-def keycloak() -> Iterator[_Keycloak]:
+@contextmanager
+def _run_keycloak(**extra_env: str) -> Iterator[_Keycloak]:
     """Start Keycloak with the subchart's realm file imported."""
     if not DOCKER_AVAILABLE:
         pytest.skip(SKIP_REASON)
@@ -120,9 +123,8 @@ def keycloak() -> Iterator[_Keycloak]:
         },
     )
     # Same values the StatefulSet sets, except the database (the built-in
-    # dev store is enough here) and the fixed public hostname: without
-    # KC_HOSTNAME the issuer follows the URL the test calls, so the
-    # backplane's JWT check can fetch the keys from it.
+    # dev store is enough here) and, unless *extra_env* sets them, the
+    # fixed public hostname.
     container = (
         DockerContainer(image)
         .with_command("start-dev --import-realm")
@@ -137,6 +139,8 @@ def keycloak() -> Iterator[_Keycloak]:
         .with_volume_mapping(str(_SUBCHART / "files"), "/opt/keycloak/data/import", "ro")
         .with_exposed_ports(8080)
     )
+    for name, value in extra_env.items():
+        container = container.with_env(name, value)
     try:
         container.start()
     except Exception as exc:
@@ -154,6 +158,27 @@ def keycloak() -> Iterator[_Keycloak]:
         )
     finally:
         container.stop()
+
+
+@pytest.fixture(scope="module")
+def keycloak() -> Iterator[_Keycloak]:
+    """Keycloak without a fixed hostname: the issuer follows the URL the test calls."""
+    with _run_keycloak() as kc:
+        yield kc
+
+
+@pytest.fixture(scope="module")
+def keycloak_behind_ingress() -> Iterator[_Keycloak]:
+    """Keycloak as the subchart starts it: a fixed public address, back channel dynamic.
+
+    The test reaches it on the container port, as a pod reaches the Service.
+    """
+    with _run_keycloak(
+        KC_HOSTNAME=f"{_PUBLIC_URL}/auth",
+        KC_HOSTNAME_BACKCHANNEL_DYNAMIC="true",
+        KC_PROXY_HEADERS="xforwarded",
+    ) as kc:
+        yield kc
 
 
 def _add_person(kc: _Keycloak, username: str, group: str) -> str:
@@ -287,3 +312,102 @@ def test_confidential_clients_use_the_secrets_from_the_environment(keycloak: _Ke
     audience = claims["aud"] if isinstance(claims["aud"], list) else [claims["aud"]]
     assert "meho-check-runner" in audience
     assert "meho-backplane" not in audience
+
+
+async def test_backplane_reaches_keycloak_through_the_service_address(
+    keycloak_behind_ingress: _Keycloak, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4591: discovery and tokens over the Service address, the public issuer in tokens.
+
+    The backplane's settings are the ones the chart derives for the built-in
+    Keycloak; the test talks plain HTTP to the container port, as a pod does
+    to the Service.
+    """
+    kc = keycloak_behind_ingress
+    internal = f"{kc.base_url}/realms/meho"
+    issuer = f"{_PUBLIC_URL}/auth/realms/meho"
+
+    discovery = httpx.get(f"{internal}/.well-known/openid-configuration").json()
+    assert discovery["issuer"] == issuer
+    assert discovery["authorization_endpoint"].startswith(issuer)
+    assert discovery["jwks_uri"].startswith(internal)
+    assert discovery["token_endpoint"].startswith(internal)
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", issuer)
+    monkeypatch.setenv("KEYCLOAK_DISCOVERY_URL", internal)
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("KEYCLOAK_ADMIN_URL", f"{kc.base_url}/admin/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_ID", "meho-admin")
+    monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", kc.client_secrets["meho-admin"])
+    get_settings.cache_clear()
+    clear_jwks_cache()
+    settings = get_settings()
+
+    # The Admin REST API with the meho-admin client: register an agent
+    # principal, then log in as it through the token endpoint the agent
+    # runs use, and check its token with the backplane's own JWT check.
+    async with KeycloakAdminClient.from_settings(settings) as admin:
+        internal_id = await admin.create_client(
+            client_id="agent:service-url-check",
+            name="service-url-check",
+            tenant_id=_TENANT_ID,
+            owner_sub="test",
+            audience="meho-backplane",
+            tenant_role="operator",
+        )
+        secret = await admin.get_client_secret(internal_id)
+    token = await get_client_credentials_token(
+        issuer_url=settings.keycloak_discovery_base,
+        client_id="agent:service-url-check",
+        client_secret=secret,
+        audience="meho-backplane",
+    )
+    operator = await verify_jwt_for_audience(f"Bearer {token}", expected_audience="meho-backplane")
+    assert str(operator.tenant_id) == _TENANT_ID
+    assert operator.tenant_role is TenantRole.OPERATOR
+
+
+def _set_ssl_required(kc: _Keycloak, value: str) -> None:
+    httpx.put(
+        f"{kc.base_url}/admin/realms/meho",
+        headers=_bootstrap_headers(kc),
+        json={"sslRequired": value},
+    ).raise_for_status()
+
+
+def _admin_grant_status(kc: _Keycloak) -> int:
+    return _token(
+        kc.base_url,
+        "meho",
+        {
+            "grant_type": "client_credentials",
+            "client_id": "meho-admin",
+            "client_secret": kc.client_secrets["meho-admin"],
+        },
+    ).status_code
+
+
+def test_fixed_https_address_lets_pods_call_over_plain_http(
+    keycloak_behind_ingress: _Keycloak,
+) -> None:
+    """#4591: the realm's ``sslRequired`` never blocks the Service address.
+
+    Keycloak checks the scheme of the frontend address, which
+    ``KC_HOSTNAME=https://<host>/auth`` fixes to https. So a pod's plain HTTP
+    call through the Service passes even with ``sslRequired: all``, whatever
+    the pod's own address.
+    """
+    _set_ssl_required(keycloak_behind_ingress, "all")
+    try:
+        assert _admin_grant_status(keycloak_behind_ingress) == 200
+    finally:
+        _set_ssl_required(keycloak_behind_ingress, "external")
+
+
+def test_without_a_fixed_address_the_check_does_apply(keycloak: _Keycloak) -> None:
+    """The control for the test above: without ``KC_HOSTNAME`` the request decides."""
+    _set_ssl_required(keycloak, "all")
+    try:
+        assert _admin_grant_status(keycloak) == 403
+    finally:
+        _set_ssl_required(keycloak, "external")

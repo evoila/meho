@@ -132,8 +132,10 @@ Operations for Logs uses the same Bearer family across the documented classes,
 but the 9.0 and 9.1 documents are differently named service artifacts, so no
 removal is inferred without lineage evidence.
 
-The Installer currently advertises `>=9.1,<10.0`. A 9.0 spec exists, but that
-does not lower the connector floor until a focused contract test proves it.
+The Installer advertises `>=9.0,<10.0`. Every path it calls is in the pinned
+9.0 installer file, and the 9.0 case of its spec-reconcile lane checks that in
+CI. The [Installer page](connectors-vcf-installer.md#installer-90) lists what
+differs on 9.0.
 VCF Automation Native Public Cloud endpoints in 9.1.1 are disabled by default;
 that is a target capability/configuration gate, not a class fork. VCD API 38.0
 is evidenced only for 10.5/10.6 and needs negotiation or a narrow range.

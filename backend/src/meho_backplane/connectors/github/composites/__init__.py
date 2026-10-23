@@ -19,12 +19,16 @@ dispatch can fire.
 Layout mirrors the vmware-rest composites package: ``__init__`` wires
 the registrar; ``_register.py`` carries per-composite registration
 metadata; ``_read.py`` / ``_board.py`` / ``_sub_issues.py`` carry handler
-implementations; ``_graphql.py`` carries the shared GraphQL transport
-helper; ``schemas.py`` carries the JSON Schema 2020-12 parameter +
-response contracts.
+implementations; ``_repos.py`` carries the repository write;
+``_graphql.py`` carries the shared GraphQL transport helper;
+``schemas.py`` carries the JSON Schema 2020-12 parameter + response
+contracts.
 
-Scope (5 composites): ``gh.composite.pr_status_summary`` (T4 #1224,
-read); and the #2081 board + sub-issue set -- ``gh.composite.project_view``
+Scope (7 composites): ``gh.composite.pr_status_summary`` (T4 #1224,
+read); ``gh.composite.repo_view`` (one repository, read);
+``gh.composite.repo_create`` (one repository in an organization, write,
+waits for approval); and the #2081
+board + sub-issue set -- ``gh.composite.project_view``
 (read), ``gh.composite.project_item_add`` /
 ``gh.composite.project_item_set_field`` (Projects-v2 GraphQL writes), and
 ``gh.composite.sub_issue_add`` (sub-issue linkage REST write). Together
@@ -39,9 +43,13 @@ from meho_backplane.connectors.github.composites._board import (
 )
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
+    repo_view_composite,
 )
 from meho_backplane.connectors.github.composites._register import (
     register_github_composite_operations,
+)
+from meho_backplane.connectors.github.composites._repos import (
+    repo_create_composite,
 )
 from meho_backplane.connectors.github.composites._sub_issues import (
     sub_issue_add_composite,
@@ -60,5 +68,7 @@ __all__ = [
     "project_item_set_field_composite",
     "project_view_composite",
     "register_github_composite_operations",
+    "repo_create_composite",
+    "repo_view_composite",
     "sub_issue_add_composite",
 ]

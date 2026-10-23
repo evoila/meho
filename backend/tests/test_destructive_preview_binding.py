@@ -582,6 +582,7 @@ async def test_refused_destructive_park_writes_one_denied_audit_row(
     assert rows[0].status_code == 403
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].payload["error"]["error_code"] == error_code
+    assert result.audit_id == rows[0].id
 
 
 # ---------------------------------------------------------------------------

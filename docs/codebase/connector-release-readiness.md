@@ -253,12 +253,13 @@ An AI picks an operation from its summary, description, group text and
 safety level. It fills in the parameters from the field descriptions. So
 these texts are part of what a connector ships.
 
-[`backend/tests/test_vmware_operation_contracts.py`](../../backend/tests/test_vmware_operation_contracts.py)
-checks every hand-written (typed and multi-step) operation of the VMware
-and Broadcom connectors. It reads what MEHO registers at start-up and
-calls no vendor system. It runs in the normal unit test sweep.
+[`backend/tests/test_operation_contracts.py`](../../backend/tests/test_operation_contracts.py)
+checks every hand-written (typed and multi-step) operation of every
+connector. It reads what MEHO registers at start-up and calls no vendor
+system. It runs in the normal unit test sweep. A new connector is covered
+as soon as its registrar runs; nothing needs to be added to the test.
 
-The nine rules (the rule name is in brackets):
+The ten rules (the rule name is in brackets):
 
 1. A one-line summary of at most 120 characters, and a description of at
    most 300 characters. Longer guidance goes into `llm_instructions`.
@@ -280,9 +281,24 @@ The nine rules (the rule name is in brackets):
 9. Every `destructive` operation has a preview builder
    (`register_preview_builder`). Without one it can never wait for
    approval. (`preview_builder`)
+10. A `safe` operation has no write word in its id. The write words
+    (`create`, `delete`, `set`, `start`, `power`, `save`, ...) are
+    `WRITE_WORDS` in `backend/src/meho_backplane/delete_names.py`, the
+    same module that holds the delete signs the standing-grant check and
+    the sandbox-mode decision use. The test
+    `backend/tests/test_delete_names.py` proves that every delete sign is
+    also a write word. The rule matches whole words between `.`, `_` and
+    `-`, so "set" inside "settings" does not count. A real read whose id
+    holds a write word (for example `mssql.ha.sync-health`) goes into
+    `READS_WITH_A_WRITE_WORD` at the top of the test, with a one-line
+    reason. (`write_name`)
+
+Ingested (generic) operations are not checked here. Their safety level
+comes from the HTTP method and the connector's safety floor, for example
+`connectors/vmware_rest/ingest_safety.py`.
 
 The gaps that exist today are listed in
-[`backend/tests/data/vmware_operation_contract_gaps.yaml`](../../backend/tests/data/vmware_operation_contract_gaps.yaml),
+[`backend/tests/data/operation_contract_gaps.yaml`](../../backend/tests/data/operation_contract_gaps.yaml),
 as connector id, then operation id, then the rules it does not meet yet.
 The list may only get shorter:
 
@@ -291,15 +307,19 @@ The list may only get shorter:
 - A listed gap that is gone also fails the test. The message names the
   entry. Delete that rule line (and the operation, or the connector, when
   nothing is left under it).
+- A `requires_approval` or `write_name` entry is a safety gap. Each one
+  has a comment with the reason it is still open. Fixing one changes who
+  must approve the operation, so the pull request that fixes it names the
+  operation.
 
 To shrink the list: fix the operation's texts or schemas, run
-`cd backend && uv run pytest tests/test_vmware_operation_contracts.py`,
+`cd backend && uv run pytest tests/test_operation_contracts.py`,
 and delete the entries the test reports as fixed.
 
-To cover a new VMware connector: add its connector id to
-`VMWARE_CONNECTORS` at the top of the test. That is one line. A new
-connector should meet all nine rules from the start, so it adds nothing
-to the gap list.
+A new connector should meet all ten rules from the start, so it adds
+nothing to the gap list. Every operation states `safety_level` and
+`requires_approval` in its own spec; no connector keeps a default for
+them in its spec class or registrar.
 
 Group texts are not checked for safety claims here; that is a separate
 test.

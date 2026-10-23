@@ -641,7 +641,7 @@ meho audit query [flags]
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
 - `--op-id` — narrow to one op-id (glob with * wildcards)
 - `--parent-audit-id` — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request
-- `--principal` — narrow to one operator (JWT subject; partial-match supported)
+- `--principal` — narrow to one operator (part of the user id or the name; case does not matter)
 - `--result-status` — narrow to one result-status (ok|error|denied|pending); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601

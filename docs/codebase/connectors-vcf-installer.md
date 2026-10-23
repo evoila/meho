@@ -1,11 +1,12 @@
-# Connector: vcf-installer (VCF Installer 9.1)
+# Connector: vcf-installer (VCF Installer 9.0 and 9.1)
 
 ## Overview
 
 The `vcf-installer` connector is the hand-rolled `HttpConnector` subclass that
 dispatches VMware Cloud Foundation **Installer** operations under the
 `(product="installer", version="9.1", impl_id="installer-rest")` registry triple
-(`connector_id="installer-rest-9.1"`). The Installer is the VCF 9.x bring-up
+(`connector_id="installer-rest-9.1"`). The connector serves Installer 9.0 and
+9.1 (see [Installer 9.0](#installer-90)). The Installer is the VCF 9.x bring-up
 appliance (the successor to Cloud Builder); this connector is the governed
 dispatch surface the automation add-on
 ([evoila-bosnia/meho-internal#223](https://github.com/evoila/meho/issues/2907))
@@ -35,7 +36,8 @@ Source: `backend/src/meho_backplane/connectors/vcf_installer/`.
 
 - **`InstallerConnector`** (`connector.py`) — `HttpConnector` subclass.
   `product="installer"`, `version="9.1"`, `impl_id="installer-rest"`,
-  `supported_version_range=">=9.1,<10.0"`, `priority=1`.
+  `supported_version_range=">=9.0,<10.0"`, `priority=1`. The id keeps `9.1`;
+  only the range starts at 9.0.
 - **`INSTALLER_EXECUTION_PROFILE`** (`profile.py`) — the reviewed declarative
   profile the connector derives its session auth from (the `session_login_token`
   scheme) and its fingerprint recipe (`GET /v1/system/appliance-info` → literal
@@ -262,7 +264,7 @@ Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
 ### Operation contracts
 
 The 14 typed ops and the bring-up composite meet the VMware operation-contract
-check (`backend/tests/test_vmware_operation_contracts.py`), with one gap left
+check (`backend/tests/test_operation_contracts.py`), with one gap left
 (see below):
 
 - **Response schemas** live in `_response_schemas.py` (split out for the
@@ -286,6 +288,49 @@ check (`backend/tests/test_vmware_operation_contracts.py`), with one gap left
   `requires_approval`. It only checks a spec and deploys nothing; making it wait
   for approval would change what it does, so it stays on the gap list.
 
+## Installer 9.0
+
+A VCF 9.0.x bring-up uses Installer 9.0.2. Such a target resolves to
+`installer-rest-9.1`, because the range is `>=9.0,<10.0`. There is no separate
+9.0 connector, because MEHO calls no path that 9.0 lacks:
+
+- The pinned 9.0 and 9.1 installer API files were compared with
+  `backend/scripts/diff_vcf_api_contract_catalogs.py`. 9.1 adds 5 operations
+  and removes none. MEHO calls none of the 5 new ones (resources calculation,
+  SDDC Manager discovery, vCenter network discovery, depot machine details).
+- The 9.0 case of the spec-reconcile lane (below) checks this in CI.
+
+**Every installer operation works on 9.0.** That is all 14 typed operations
+(`installer.sddc.spec.validate`, `installer.sddc.validation.status`,
+`installer.sddc.bringup.start`, `installer.sddc.bringup.retry`,
+`installer.sddc.bringup.status`, `installer.sddc.list`,
+`installer.bundles.list`, `installer.bundles.download-status`,
+`installer.bundles.download`, `installer.system.depot.get`,
+`installer.system.depot.set`, `installer.system.depot.sync-status`,
+`installer.system.trusted-certificates.list`,
+`installer.system.trusted-certificates.add`) and the multi-step operation
+`installer.composite.sddc.bringup`. None answers "not available on this
+version".
+
+What is different on 9.0 (from the two API files):
+
+- **SddcSpec.** MEHO sends the spec as it is, so the caller must build it for
+  the Installer's version. A 9.0 SddcSpec has `vcfOperationsFleetManagementSpec`
+  and no `vspClusterSpec`, `vidbSpec`, `fleetLcmSpec`, `sddcLcmSpec`,
+  `saltSpec` or `licenseServerSpec`. The `spec` hint says that rules (1) and
+  (3) are 9.1 only.
+- **Depot settings.** On 9.0, `depotConfiguration` needs `hostname` and `port`
+  and has no `url`. `vmwareAccount` has no `downloadActivationCode`.
+- **Answers.** Some 9.1 fields are not in a 9.0 answer, for example
+  `deploymentType` and `vcfInstanceName` on a bring-up task, and the DNS, NTP
+  and IP fields of `appliance-info`. MEHO reads these fields only when they are
+  there.
+- The token login (`POST /v1/tokens`), the trusted-certificate body and the
+  bundle download body are the same.
+
+A live bring-up of VCF 9.0 with Installer 9.0.2 through MEHO is a separate
+lab proof.
+
 ## Spec-reconcile lane
 
 Every hand-coded `METHOD:/path` — `POST:/v1/tokens`,
@@ -297,11 +342,15 @@ the depot-family reads such as `GET:/v1/system/settings/depot/depot-sync-info`
 `typed_writes.TYPED_WRITE_DECLARED_OP_IDS`), and the composite's
 `POST:/v1/sddcs/validations`, `POST:/v1/sddcs`,
 `GET:/v1/sddcs/validations/{id}` (introspected from
-`bringup.BRINGUP_DECLARED_OP_IDS`) — is asserted against the pinned
-`vcf-installer-9.1` shelf spec (vendored from `vmware/vcf-api-specs`) by
+`bringup.BRINGUP_DECLARED_OP_IDS`) — is asserted against **both** pinned
+shelf specs, `vcf-installer-9.0` and `vcf-installer-9.1` (vendored from
+`vmware/vcf-api-specs`; one test case per file), by
 [`backend/tests/test_connectors_vcf_installer_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_installer_spec_reconcile.py)
 (the #2980 harness; parse-only, in the required unit sweep, uniform skip when the
-shelf is unconfigured). Standard:
+shelf is unconfigured). CI checks out both files and fails when one is missing,
+so neither case skips there. A new operation that calls a 9.1-only path fails
+the 9.0 case; such an operation then needs a "not available on this version"
+answer for 9.0 targets before the range can stay at 9.0. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## Dependencies

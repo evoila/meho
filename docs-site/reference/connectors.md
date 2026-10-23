@@ -14,8 +14,8 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | --- | --- | --- | --- |
 | `argocd-api-3.x` | `argocd` | >=2.0,<4.0 | — |
 | `bind9-ssh-9.x` | `bind9` | — | typed |
-| `fleet-lcm-9.0` | `fleet` | >=9.0,<10.0 | — |
-| `fleet-rest-9.0` | `fleet` | >=8.0,<10.0 | — |
+| `fleet-lcm-9.0` | `fleet` | >=9.1,<10.0 | — |
+| `fleet-rest-9.0` | `fleet` | >=8.0,<9.1 | — |
 | `gcloud-rest-1.0` | `gcloud` | — | — |
 | `gh-rest-3` | `gh` | — | generic |
 | `harbor-rest-2.x` | `harbor` | >=2.0,<3.0 | generic |
@@ -23,7 +23,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `hetzner-rest-2026.04` | `hetzner` | — | — |
 | `holodeck-ssh-9.0` | `holodeck` | — | — |
 | `hyperv-ssh-2022.x` | `hyperv` | — | — |
-| `installer-rest-9.1` | `installer` | >=9.1,<10.0 | — |
+| `installer-rest-9.1` | `installer` | >=9.0,<10.0 | — |
 | `k8s-1.x` | `k8s` | — | typed |
 | `keycloak-admin-26.x` | `keycloak` | >=26.0,<27.0 | — |
 | `linux-ssh-1.x` | `linux` | — | — |
@@ -40,6 +40,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `rke2-ssh-1.x` | `rke2` | — | — |
 | `sddc-rest-9.0` | `sddc` | >=9.0,<10.0 | generic |
 | `sddc-vcf5-5.0` | `sddc` | >=5.0,<9.0 | — |
+| `srm-rest-9.1` | `srm` | >=8.8,<10.0 | — |
 | `tempo-api-2.x` | `tempo` | >=2.0,<3.0 | — |
 | `vault-1.x` | `vault` | — | typed |
 | `vcd-rest-10.6` | `vcd` | >=10.0,<11.0 | — |

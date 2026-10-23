@@ -2351,7 +2351,8 @@ def result_connector_vault_write_forbidden(
     can succeed end to end — park → approve → re-dispatch — and the write
     still fails at Vault's ACL because the identity the connector dispatches
     with lacks the required capability on the path the op authorizes against
-    (``create``/``update`` on ``<mount>/data/<path>`` for ``put``/``patch``,
+    (``create``/``update`` on ``<mount>/data/<path>`` for ``put``,
+    ``read``/``update`` there for ``patch`` — #4831,
     ``update`` on ``<mount>/delete/<path>`` for the ``vault.kv.delete``
     version soft-delete — #3274; ``read``/``delete`` on
     ``<mount>/metadata/<path>`` for the permanent
@@ -2399,14 +2400,17 @@ def result_connector_vault_write_forbidden(
     target_clause = _vault_write_target_clause(target_name, vault_role)
     # #3274: the capability + path kind is op-aware. A version soft-delete
     # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
-    # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
-    # path. Keep the message consistent with the ``write_path`` rendered by
+    # path; ``put`` with ``create``/``update`` on the ``/data/`` path; ``patch``
+    # reads before it writes, so ``read``/``update`` there (#4831). Keep the
+    # message consistent with the ``write_path`` rendered by
     # ``vault_kv_write_target_path`` so the two never disagree. The permanent
     # delete (#3424) reads and deletes on the ``/metadata/`` path.
     if op_id == "vault.kv.delete":
         capability_clause = "lacks 'update' on that delete path"
     elif op_id == "vault.kv.metadata.delete":
         capability_clause = "lacks 'read' or 'delete' on that metadata path"
+    elif op_id == "vault.kv.patch":
+        capability_clause = "lacks 'read'/'update' on that data path"
     else:
         capability_clause = "lacks 'create'/'update' on that data path"
     summary = (

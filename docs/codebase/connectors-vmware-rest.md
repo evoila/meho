@@ -72,14 +72,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
-- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
-  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
-  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+- **Missing managed objects on typed PropertyCollector reads (`#3481`, `#4776`)** — vCenter reports
+  an addressed, deleted vim object as a `ManagedObjectNotFound` fault inside
+  an HTTP 500. On the vCenter VI-JSON transport the fault body is JSON
+  (`{"_typeName": "ManagedObjectNotFound", "obj": {...}}`, the shape the
+  pinned `vi-json.yaml` documents and vCenter 9.1 sends); a standalone ESXi
+  host sends the SOAP-shaped XML fault. The addressed read operations `vmware.vm.info`,
   `vmware.host.usage`, `vmware.host.storage_devices`,
   `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
   into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
-  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
-  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  reads the fault in either form (JSON first, then XML) and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). A JSON fault
+  names the missing object in `obj`; it maps to `not_found` only when that
+  object is one the read asked for (a missing property collector is not a
+  missing VM), and a JSON fault without `obj` reports every addressed
+  object, as the XML form does. The dispatcher
   returns `status="not_found"` with `extras.error_code="not_found"`,
   `extras.resource_ids`, and the singular `extras.resource_id` when one object
   was addressed. A different fault, a non-PropertyCollector vmomi method, or
@@ -727,8 +734,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     same-origin redirect by itself). A `3xx` returns `redirect_path`; a
     `401`, `403`, `404` or `5xx` returns its `status` with no text.
   - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-    `size` (bytes), `sha256` (of the file bytes), `imports`, `parts`,
-    `text_parts`, `version`, `build`, `version_error`. `imports` lists the
+    `size` (bytes of the checked copy), `sha256` (of the checked copy),
+    `secrets_replaced`, `imports`, `parts`, `text_parts`, `version`,
+    `build`, `version_error`. `imports` lists the
     `location` / `schemaLocation` values of `wsdl:import`, `xsd:import` and
     `xsd:include`, as written, parsed with `defusedxml`; a file that is not
     XML gives `[]`. Only UTF-8 text comes back; other content is refused and
@@ -740,10 +748,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     failures that happen before any request goes out: no credentials for
     the target, access denied, or a credential store that cannot be reached
     (`CredentialsReadError`, `VaultClientError`).
+  - **The file is checked before it is cut.** The read runs the shared
+    API file secret check (`connectors/_shared/api_file_secrets.py`, see
+    `connectors-shared-api-file-secrets.md`) on the whole file: the file
+    is parsed (XML for a WSDL or XSD file), every value under a secret
+    name is replaced with `[REDACTED:param_name]`, and the file is
+    written back from the parsed copy with its namespace prefixes as
+    declared. A file that does not parse is refused with the reason.
+    `secrets_replaced` counts the replaced values; `size` and `sha256`
+    describe the checked copy. A redirect path gets the same check on its
+    query string.
   - **How to rebuild the file.** `text_parts` is a list of
     `{index, text}`, each at most 64 KiB of UTF-8, cut only between
     characters. Join the `text` of all parts in `index` order and encode as
-    UTF-8; the SHA-256 of the result equals `sha256`. A part is a fixed byte
+    UTF-8; the SHA-256 of the result equals `sha256` and the result is the
+    checked copy. A part is a fixed byte
     size, not a line, because a served file can be one long line. The answer
     has two lists (`imports` and `text_parts`), so JSONFlux keeps a large
     answer whole as a document record behind a result handle; the inline
@@ -754,18 +773,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     result (`result_handle_max_record_bytes`, 16 MiB by default, measured as
     stored JSON) stops with an error that names its size; the read never
     returns a cut file.
-  - **Redaction keeps the file whole.** MEHO redacts secret-shaped text in
+  - **Redaction keeps the copy whole.** MEHO redacts secret-shaped text in
     every stored result (the dispatcher runs
     `apply_connector_boundary_redaction` before the JSONFlux reducer). A rule
-    that fires on the file text would rewrite a part, and the joined parts
+    that fires on the text would rewrite a part, and the joined parts
     would no longer match `sha256`. So the read runs the same middleware, with
     the same connector, tenant and operation labels, on the text parts and on
-    the whole file text before it returns. The whole-file pass matters: a
+    the whole copy before it returns. The whole-file pass matters: a
     secret that the part cut splits in two matches in no single part, so the
     dispatcher's own redaction would store it in clear text. When the text
     would change, the read stops with an error that names the rule and the
     place (a part, or `file_text` for the whole file), and returns no file.
-    Redaction itself stays on. The default policy's `strip-api-key` rule fires
+    Redaction itself stays on; its `api_key` rule skips the placeholder the
+    file check writes. The default policy's `strip-api-key` rule fires
     on text such as
     `type="token:SecurityToken"`; a redaction policy registered for this
     operation changes what the check accepts, because both use the same
@@ -2365,7 +2385,15 @@ body never carried the single-`spec` envelope the single-parameter `find` /
 portgroup-moid **map** `network_mappings` (a map in the pinned 9.0 spec,
 not an array), `storage_provisioning` / `storage_profile_id` /
 `default_datastore_id`, and any `ovf_properties` folded into a single
-`PropertyParams` entry in `additional_parameters`. The EULA-accept wire
+`PropertyParams` entry in `additional_parameters`. An optional
+`deployment_option` (the OVF deployment option key, for example the size
+profile of an appliance) goes into the same list as a
+`DeploymentOptionParams` entry with `selected_key` (#4035). Before the
+deploy, MEHO reads the OVF summary (`?action=filter`) and checks the key
+against `additional_params[type=DeploymentOptionParams].deployment_options[].key`.
+A key the item does not offer is refused with `invalid_reference`, and
+`candidates` lists the offered keys. One summary read serves both this
+check and the default VM name. The EULA-accept wire
 key is **version-aware** (#3074): the pinned 9.0 spec keys it
 `accept_all_eula` (lowercase), but vCenter 8.0.x — and every pre-9.0
 release — rejects that key (`HTTP 400 UNEXPECTED_INPUT`) and expects the
@@ -3201,7 +3229,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
-| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |
+| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, `deployment_option`, power-on) | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
@@ -3510,7 +3538,13 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
   `POST:/PropertyCollector/{moId}/RetrievePropertiesEx`, ...) reach the
   wire through `mount_op_path`. It tells them apart from Automation paths
   by the PascalCase managed-object type in the first segment
-  (`_mount.is_vmomi_path`). On a modern vCenter session they mount on
+  (`_mount.is_vmomi_path`). The type may sit behind one of the five
+  service parts the vendor file uses, listed in
+  `_mount.VI_JSON_SERVICE_PREFIXES`: `/vsan` (vSAN management), `/sms`
+  (storage providers), `/pbm` (storage policies), `/eam` (ESX Agent
+  Manager) and `/vslm` (First Class Disks). Before #4775 those paths
+  went to `/api` and answered 404, because their first segment is lower
+  case. On a modern vCenter session they mount on
   `/sdk/vim25/{release}` (release from the same cached `_about_version`).
   Before #3534 they mounted on `/api` and answered a bare 404 on vCenter
   8.0.x. Limits: there is no `/api` 404 fallback on this path (the hook

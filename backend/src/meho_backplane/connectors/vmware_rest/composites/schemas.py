@@ -4761,6 +4761,21 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "values."
             ),
         },
+        "deployment_option": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional OVF deployment option key, for example the size profile "
+                "of an appliance. Sent as ``selected_key`` of a "
+                "``DeploymentOptionParams`` entry in "
+                "``ResourcePoolDeploymentSpec.additional_parameters``. MEHO first "
+                "reads the OVF summary (``?action=filter``) and checks the key "
+                "against the ``deployment_options`` it lists. A key the item does "
+                "not offer is refused with ``status='invalid_reference'`` before "
+                "any deploy, and ``candidates`` lists the offered keys. Omit it to "
+                "deploy the OVF's default option."
+            ),
+        },
         "accept_all_eula": {
             "type": "boolean",
             "description": (
@@ -4832,7 +4847,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "structured message with the vCenter status carried in ``issues`` "
                 "rather than a raw vendor error. ``'resolve_error'`` and "
                 "``'invalid_reference'`` also cover the OVF summary read that "
-                "supplies the default VM name when ``name`` is omitted. "
+                "supplies the default VM name when ``name`` is omitted or checks "
+                "``deployment_option``; ``'invalid_reference'`` also means the "
+                "``deployment_option`` key is not one the OVF item offers. "
                 "Every non-``deployed`` status is reached before or without a "
                 "successful mutation: when a failed deploy leaves a partial VM "
                 "or vApp behind, the composite tries to remove it and reports the "
@@ -4892,7 +4909,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Candidate ids on ``ambiguous_item`` (library-item ids) or "
-                "``ambiguous_library`` (library ids); ``null`` otherwise."
+                "``ambiguous_library`` (library ids); on ``invalid_reference`` for "
+                "a ``deployment_option`` the item does not offer, the keys it does "
+                "offer; ``null`` otherwise."
             ),
         },
     },
@@ -5563,6 +5582,26 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 # are the ``dangerous`` / ``requires_approval`` writes.
 
 
+#: Optional per-call guest credential reference shared by the five guest ops
+#: that log into the guest OS (#3364). A reference string only -- the value is
+#: read in-process under the operator's identity and never enters params.
+_GUEST_SECRET_REF_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": (
+        "Optional reference to the secret holding this VM's guest login "
+        "(guest_username / guest_password), in the same form as a target's "
+        "secret_ref (e.g. 'targets/app-vm-01', 'vault:targets/app-vm-01', "
+        "'gsm:<project>/<secret>'). Omit to use the vCenter target's own "
+        "secret. The reference must fall under the target's allowed "
+        "guest-secret prefix (by default the namespace of the target's "
+        "secret_ref, or extras.guest_secret_prefix); any other reference "
+        "is rejected before any secret is read. Only the reference travels "
+        "in params; the credential value never does."
+    ),
+}
+
+
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.
 GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -5595,6 +5634,7 @@ GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Override only if a deployment names the singleton differently."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
@@ -5628,6 +5668,7 @@ GUEST_ENV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm"],
     "additionalProperties": False,
@@ -5706,6 +5747,7 @@ GUEST_FILE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Ignored when fetch_content is false."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path"],
     "additionalProperties": False,
@@ -5755,6 +5797,7 @@ GUEST_FILE_WRITE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "guest_path", "content"],
     "additionalProperties": False,
@@ -6064,6 +6107,7 @@ GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "guest_secret_ref": _GUEST_SECRET_REF_PROPERTY,
     },
     "required": ["vm", "program_path"],
     "additionalProperties": False,

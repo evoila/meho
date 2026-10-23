@@ -26,7 +26,8 @@ Provider plane (``/cloudapi/1.0.0/*`` — Basic-auth →
 ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` JWT session):
 
 * ``vcfa.provider.org.list`` — ``GET /cloudapi/1.0.0/orgs``
-* ``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions``
+* ``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions`` on 9.0,
+  ``GET /cloudapi/v1/regions`` on 9.1 and newer (:func:`provider_regions_path`)
 * ``vcfa.provider.health`` — authenticated ``GET /cloudapi/1.0.0/orgs``
   (``pageSize=1``) plus the unauthenticated ``GET /iaas/api/about`` API
   version read, returned as one structured health object. Both paths serve
@@ -80,6 +81,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
+from packaging.version import InvalidVersion, Version
+
+from meho_backplane.connectors.resolver import resolve_target_version
 from meho_backplane.connectors.vcf_automation._op_schemas import (
     ABOUT_RESPONSE,
     IAAS_DEPLOYMENT_FIELDS,
@@ -93,10 +97,12 @@ from meho_backplane.connectors.vcf_automation._op_schemas import (
     obj,
 )
 from meho_backplane.connectors.vcf_automation._routing import Plane, plane_for_path
+from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
 __all__ = [
     "PROVIDER_ORGS_PATH",
     "PROVIDER_REGIONS_PATH",
+    "PROVIDER_REGIONS_V1_PATH",
     "TENANT_ABOUT_PATH",
     "TENANT_DEPLOYMENTS_PATH",
     "TENANT_DEPLOYMENT_DETAIL_PATH",
@@ -104,6 +110,7 @@ __all__ = [
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
     "VcfaTypedOp",
+    "provider_regions_path",
     "validate_typed_ops",
 ]
 
@@ -121,6 +128,11 @@ PROVIDER_ORGS_PATH: Final[str] = "/cloudapi/1.0.0/orgs"
 #: serving (consumer kb ``vcf-automation-9.0-provider-object-model.md``,
 #: probes 2026-05-16 / 2026-07-21).
 PROVIDER_REGIONS_PATH: Final[str] = "/cloudapi/vcf/regions"
+#: VCFA 9.1 and 9.1.1 document Region only under the ``v1/`` cloudapi
+#: prefix ("Query Regions"); their API references show no ``vcf/`` path
+#: at all (evoila/meho#4604). A 9.1 appliance still answers the 9.0 path,
+#: but that path is undocumented there.
+PROVIDER_REGIONS_V1_PATH: Final[str] = "/cloudapi/v1/regions"
 TENANT_PROJECTS_PATH: Final[str] = "/iaas/api/projects"
 TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
 #: Path template for the per-id deployment detail read. The ``{id}``
@@ -129,6 +141,34 @@ TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
 #: so the declared plane is validated before any substitution happens.
 TENANT_DEPLOYMENT_DETAIL_PATH: Final[str] = "/iaas/api/deployments/{id}"
 TENANT_ABOUT_PATH: Final[str] = "/iaas/api/about"
+
+#: First VCF Automation release whose API reference shows
+#: :data:`PROVIDER_REGIONS_V1_PATH` instead of :data:`PROVIDER_REGIONS_PATH`.
+_REGIONS_V1_MIN_VERSION: Final = Version("9.1")
+#: Upper guard so a date-shaped label that happens to parse (``2021.07``)
+#: is not taken for a product release (same guard as the 9.1 login pick).
+_PRODUCT_VERSION_CEILING: Final = Version("100")
+
+
+def provider_regions_path(target: VcfAutomationTargetLike) -> str:
+    """Return the region list path the API reference shows for *target*'s version.
+
+    9.1 and newer get :data:`PROVIDER_REGIONS_V1_PATH`. Anything else --
+    9.0, no version, or a label that is not a product version (the
+    fingerprint can record the ``2021-07-15`` API date) -- gets
+    :data:`PROVIDER_REGIONS_PATH`, which 9.0 documents and 9.1 still
+    answers. Same version rule as the 9.1 login pick in ``._auth``.
+    """
+    raw = resolve_target_version(target)
+    if raw is None:
+        return PROVIDER_REGIONS_PATH
+    try:
+        version = Version(raw)
+    except InvalidVersion:
+        return PROVIDER_REGIONS_PATH
+    if _REGIONS_V1_MIN_VERSION <= version < _PRODUCT_VERSION_CEILING:
+        return PROVIDER_REGIONS_V1_PATH
+    return PROVIDER_REGIONS_PATH
 
 
 @dataclass(frozen=True)
@@ -189,8 +229,12 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.deployment.list), read one deployment "
         "(vcfa.tenant.deployment.get), read the API versions "
         "(vcfa.tenant.about), or test only the tenant login "
-        "(vcfa.tenant.login.test). These ops use the tenant login; the provider "
-        "login does not work here. All reads."
+        "(vcfa.tenant.login.test). Also list what VCF Automation knows from "
+        "vCenter: vSphere networks (vcfa.tenant.fabric_network.list), computes "
+        "(vcfa.tenant.fabric_compute.list), regions (vcfa.tenant.region.list) and "
+        "cloud zones (vcfa.tenant.zone.list), and read a deploy request until it "
+        "ends (vcfa.tenant.blueprint_request.get). These ops use the tenant login; "
+        "the provider login does not work here. All reads."
     ),
     "vcfa-provider-writes": (
         "Changes on the VCF Automation provider plane that set up a tenant: "
@@ -203,9 +247,24 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "'unchanged'."
     ),
     "vcfa-tenant-writes": (
-        "Changes on the VCF Automation tenant plane: create a project in the "
-        "tenant org (vcfa.tenant.project.create). A person must approve each "
-        "call. Safe to run twice: an existing project answers 'unchanged'."
+        "Changes on the VCF Automation tenant plane, to give a team its own "
+        "project, network and first deployment: set the address settings and "
+        "tags of a vSphere network (vcfa.tenant.fabric_network.update), create a "
+        "network profile (vcfa.tenant.network_profile.create), create a project "
+        "with a quota and a network rule (vcfa.tenant.project.create), deploy "
+        "from a cloud template or only plan it "
+        "(vcfa.tenant.blueprint_request.create), and delete a deployment "
+        "(vcfa.tenant.deployment.delete). A person must approve each call. Safe "
+        "to run twice: an object that exists answers 'unchanged'."
+    ),
+    "vcfa-tenant-images": (
+        "Image names of the tenant org (image profiles), on the tenant plane. A cloud "
+        "template asks for an image by name, for example 'RHEL 9'; the profile of each "
+        "region maps the name to a vCenter template. Read the names and their templates "
+        "(vcfa.tenant.image_profile.list) and the templates VCF Automation knows "
+        "(vcfa.tenant.fabric_image.list), make it read new vCenter templates now "
+        "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
+        "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
     ),
 }
 
@@ -312,7 +371,8 @@ _PROVIDER_REGION_LIST = VcfaTypedOp(
     path=PROVIDER_REGIONS_PATH,
     summary="List the regions on the VCF Automation appliance (provider plane).",
     description=(
-        "Lists the regions with GET /cloudapi/vcf/regions on the provider plane. "
+        "Lists the regions on the provider plane: GET /cloudapi/vcf/regions on "
+        "VCF Automation 9.0, GET /cloudapi/v1/regions on 9.1 and newer. "
         "A region groups compute, memory and networking under one NSX Manager, "
         "with its vSphere Supervisors. Supports 'page' and 'pageSize'."
     ),

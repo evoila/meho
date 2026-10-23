@@ -146,8 +146,8 @@ _GROUP_KEY = "integrity"
 _GROUP_WHEN_TO_USE = (
     "Read-only checks over MEHO's own audit log. Use to find audit records "
     "that point to a parent row that does not exist (a multi-step operation "
-    "that stopped before its own row was saved). Nothing here writes or "
-    "repairs rows."
+    "that is still running, or that stopped before its own row was saved). "
+    "Nothing here writes or repairs rows."
 )
 
 _DESCRIPTION = (
@@ -163,7 +163,9 @@ _DESCRIPTION = (
 _LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Check whether MEHO lost the last save of a multi-step operation. A "
-        "loose row is history, not something to repair: look at the rows "
+        "multi-step operation saves its own row last, so a young loose row "
+        "may belong to an operation that is still running; check again "
+        "later. A loose row is never something to repair: look at the rows "
         "under it, and check the approval queue before running the operation "
         "again."
     ),

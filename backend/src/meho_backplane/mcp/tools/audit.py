@@ -603,8 +603,9 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": "integer",
             "description": (
                 "Nodes in the tree whose `parent_audit_id` names a row "
-                "that does not exist: a multi-step operation stopped "
-                "before its own row was saved (#4670)."
+                "that does not exist: a multi-step operation that is "
+                "still running, or that stopped before its own row was "
+                "saved (#4670)."
             ),
         },
     },

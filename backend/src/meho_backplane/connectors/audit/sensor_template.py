@@ -14,7 +14,9 @@ as a ready-to-send ``POST /api/v1/sensors`` body:
 The assertion selects ``$.recent_count`` (loose rows inside the default
 one-day window) and compares it with ``gt``: ``> 0`` is ``degraded``,
 ``> 10`` is ``critical``. ``severity`` is ``critical`` so the dashboard
-cap never hides the critical band (``checks/rollup.py``).
+cap never hides the critical band (``checks/rollup.py``). A multi-step
+operation that is still running also has loose rows until it saves its
+own row, so a ``degraded`` sample can clear by itself on the next run.
 
 :func:`loose_rows_sensor_template` returns a fresh dict; the operator may
 change ``name`` and ``interval_seconds`` before sending it.

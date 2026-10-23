@@ -4,11 +4,15 @@
 """Loose audit rows: records whose parent row does not exist (#4670).
 
 A multi-step operation saves the records of each step when the step ends,
-and its own row last, after the handler returns. When MEHO stops before
-that last save (a crash, a restart, a cancelled call), the step rows and
-the step's ``approval.request`` row stay, and their ``parent_audit_id``
-never gets a row. MEHO writes no repair row later, so these "loose rows"
-are permanent (``docs/decisions/composite-audit-when-a-step-waits.md``).
+and its own row last, after the handler returns. So while the operation
+runs, its finished steps are loose rows for a moment: their parent row
+arrives when the operation ends. When MEHO stops before that last save
+(a crash, a restart, a cancelled call), the step rows and the step's
+``approval.request`` row stay, and their ``parent_audit_id`` never gets a
+row. MEHO writes no repair row later, so these "loose rows" are permanent
+(``docs/decisions/composite-audit-when-a-step-waits.md``). A loose row
+alone does not tell the two cases apart; only its age and a later check
+do.
 
 This module is the read-only query that lists them. It never writes to
 ``audit_log``: the log stays append-only.

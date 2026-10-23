@@ -93,8 +93,12 @@ stays `pending` after the request is approved, rejected or expired. Use
 A **loose row** is an audit record whose `parent_audit_id` names a row
 that does not exist. It is what the crash case above leaves behind: the
 step rows and the step's `approval.request` row were saved, the
-operation's own row was not. MEHO never repairs them, so an operator
-needs a standing check. Three pieces give it:
+operation's own row was not. It is also what a multi-step operation
+looks like while it still runs: the operation saves its own row last, so
+its finished steps are loose until it ends. A loose row alone does not
+tell the two cases apart. A crash leaves the rows loose for good, and
+MEHO never repairs them, so an operator needs a standing check. Three
+pieces give it:
 
 - **The query.** `audit_query.find_loose_rows(*, tenant_id, session,
   limit=200, recent_window=1 day, now=None) -> LooseRowsResult`
@@ -123,8 +127,9 @@ needs a standing check. Three pieces give it:
   assertion `$.recent_count` with `threshold gt` — `degraded` above 0
   (at least one loose row younger than a day), `critical` above 10;
   `severity=critical` so the dashboard cap does not hide the critical
-  band. `tests/test_audit_loose_rows.py` proves the thresholds on
-  recorded answers.
+  band. A sample taken while a multi-step operation runs can show
+  `degraded` and clear on the next run. `tests/test_audit_loose_rows.py`
+  proves the thresholds on recorded answers.
 
   ```json
   {

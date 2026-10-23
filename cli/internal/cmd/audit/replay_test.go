@@ -385,6 +385,11 @@ func TestPrintReplayTreeLooseRowNote(t *testing.T) {
 	if !strings.Contains(one.String(), "1 loose row: the parent row does not exist") {
 		t.Errorf("expected singular loose-row note; got:\n%s", one.String())
 	}
+	// The operation saves its own row last, so the note must leave both
+	// cases open: still running, or stopped before that save.
+	if !strings.Contains(one.String(), "may still be running, or it stopped before its own row was saved") {
+		t.Errorf("loose-row note must not claim the operation stopped; got:\n%s", one.String())
+	}
 
 	fixture.LooseRowCount = 3
 	var many bytes.Buffer

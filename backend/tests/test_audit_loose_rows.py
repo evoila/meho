@@ -173,6 +173,45 @@ async def test_find_loose_rows_lists_step_row_and_approval_request(session: Asyn
 
 
 @pytest.mark.asyncio
+async def test_loose_row_clears_when_its_parent_is_saved_later(session: AsyncSession) -> None:
+    """A step row is loose only until the operation saves its own row.
+
+    A multi-step operation saves its finished steps first and its own row
+    last. A check that runs in between sees loose rows that no crash
+    produced. Once the parent row lands, the query and the replay count
+    both report zero without any repair.
+    """
+    this_session = uuid.uuid4()
+    operation_id = uuid.uuid4()
+    step = _row(
+        offset=timedelta(seconds=1), agent_session_id=this_session, parent_audit_id=operation_id
+    )
+    session.add(step)
+    await session.commit()
+
+    before = await find_loose_rows(tenant_id=_TENANT_A, session=session, now=_NOW)
+    assert [r.id for r in before.rows] == [step.id]
+    assert before.count == before.recent_count == 1
+    forest = await replay_session(this_session, tenant_id=_TENANT_A, session=session)
+    assert [n.id for n in forest] == [step.id]
+    assert await count_loose_rows_in_forest(forest, tenant_id=_TENANT_A, session=session) == 1
+
+    # The operation ends and saves its own row under the id the step named.
+    session.add(
+        _row(offset=timedelta(seconds=2), agent_session_id=this_session, row_id=operation_id)
+    )
+    await session.commit()
+
+    after = await find_loose_rows(tenant_id=_TENANT_A, session=session, now=_NOW)
+    assert after.rows == []
+    assert after.count == after.recent_count == 0
+    forest = await replay_session(this_session, tenant_id=_TENANT_A, session=session)
+    assert [n.id for n in forest] == [operation_id]
+    assert [c.id for c in forest[0].children] == [step.id]
+    assert await count_loose_rows_in_forest(forest, tenant_id=_TENANT_A, session=session) == 0
+
+
+@pytest.mark.asyncio
 async def test_find_loose_rows_clean_database_returns_nothing(session: AsyncSession) -> None:
     parent = _row()
     child = _row(offset=timedelta(seconds=1), parent_audit_id=parent.id)

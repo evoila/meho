@@ -186,11 +186,13 @@ class AuditReplayResult(BaseModel):
     ``when_negotiated`` capture label the deploy's ``/status`` reports.
 
     ``loose_row_count`` (#4670) is the number of nodes in ``root`` whose
-    ``parent_audit_id`` names a row that does not exist in the tenant: a
-    multi-step operation that stopped before its own row was saved
-    (``docs/decisions/composite-audit-when-a-step-waits.md``). Such rows
-    render as roots; this count tells them apart from real chain starts.
-    A root whose parent lives in another session is not counted.
+    ``parent_audit_id`` names a row that does not exist in the tenant. A
+    multi-step operation saves its own row last, so such a node belongs
+    to an operation that is still running, or to one that stopped before
+    that save (``docs/decisions/composite-audit-when-a-step-waits.md``).
+    Such rows render as roots; this count tells them apart from real
+    chain starts. A root whose parent lives in another session is not
+    counted.
 
     Frozen like the substrate models it carries.
     """

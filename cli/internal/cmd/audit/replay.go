@@ -223,7 +223,9 @@ func printReplayTree(w io.Writer, r *api.AuditReplayResult, maxDepth int) {
 
 // printLooseRowNote names the rows whose parent row does not exist. Such a
 // row renders as a root, so without the note it looks like a real start of
-// a chain. Silent when the count is zero.
+// a chain. A multi-step operation saves its own row last, so the note must
+// not claim the operation stopped: it may still be running. Silent when
+// the count is zero.
 func printLooseRowNote(w io.Writer, count int) {
 	if count <= 0 {
 		return
@@ -232,7 +234,7 @@ func printLooseRowNote(w io.Writer, count int) {
 	if count == 1 {
 		noun = "row"
 	}
-	fmt.Fprintf(w, "\n%d loose %s: the parent row does not exist (a multi-step operation stopped before its own row was saved)\n", count, noun)
+	fmt.Fprintf(w, "\n%d loose %s: the parent row does not exist (a multi-step operation may still be running, or it stopped before its own row was saved)\n", count, noun)
 }
 
 // printReplayNode renders one node and recurses into its children.

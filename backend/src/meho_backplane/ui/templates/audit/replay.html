@@ -71,9 +71,11 @@
           <span class="opacity-70">
             {% if loose_row_count %}
               Rows in this session point to a parent row that does not exist.
-              A multi-step operation stopped before its own row was saved. The
-              rows stay as they are; MEHO writes no repair row. Check the
-              approval queue before running the operation again.
+              A multi-step operation saves its own row last. Either it is
+              still running and the row is not saved yet, or it stopped before
+              that save. The rows stay as they are; MEHO writes no repair row.
+              If the operation has stopped, check the approval queue before
+              running it again.
             {% else %}
               Every row in this session has its parent row, or is a real start
               of a chain.

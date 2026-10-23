@@ -86,6 +86,7 @@ from meho_backplane.connectors.vault import (
 from meho_backplane.connectors.vault.ops import (
     _KV_OP_SPECS,
     VAULT_KV_WRITE_CAPABILITIES,
+    _capabilities_grant_write,
     vault_kv_write_capability_preflight,
     vault_kv_write_target_path,
 )
@@ -1401,3 +1402,194 @@ async def test_preflight_fail_soft_when_probe_raises(
     )
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# ``vault.kv.patch`` asks for the rights the patch really uses (#4831, #3897)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "op_id,expected",
+    [
+        # ``put`` is one unconditional POST: ``create`` for a new secret,
+        # ``update`` for an existing one, so both are needed.
+        ("vault.kv.put", {"create", "update"}),
+        # ``patch`` reads first (``read``) and then writes to a secret that
+        # already exists (``update``). It never needs ``create``.
+        ("vault.kv.patch", {"read", "update"}),
+        ("vault.kv.delete", {"update"}),
+        ("vault.kv.metadata.delete", {"delete", "read"}),
+    ],
+)
+def test_write_capabilities_per_op(op_id: str, expected: set[str]) -> None:
+    """The per-op capability requirement the preflight checks is pinned per op."""
+    assert VAULT_KV_WRITE_CAPABILITIES[op_id] == frozenset(expected)
+
+
+@pytest.mark.asyncio
+async def test_preflight_patch_passes_for_read_update_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``read`` + ``update`` on the data path is enough for a patch (#4831).
+
+    The old requirement asked for ``create`` too, so a role that Vault
+    lets patch an existing secret was reported as denied, and since
+    #3542 refused before it could park.
+    """
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/test/x": ["read", "update"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.patch", {"path": "meho/test/x", "data": {"k": "v"}}
+    )
+
+    assert result is not None
+    assert result["path"] == "secret/data/meho/test/x"
+    assert result["required"] == ["read", "update"]
+    assert result["granted"] == ["read", "update"]
+    assert result["will_be_denied"] is False
+
+
+@pytest.mark.asyncio
+async def test_preflight_patch_denied_for_write_only_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``create`` + ``update`` without ``read`` is flagged for a patch (#3897).
+
+    hvac's ``patch`` reads the current version before it writes, so a
+    write-only role fails at that read. The old requirement let it pass
+    and the approval was wasted.
+    """
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/test/x": ["create", "update"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.patch", {"path": "meho/test/x", "data": {"k": "v"}}
+    )
+
+    assert result is not None
+    assert result["required"] == ["read", "update"]
+    assert result["will_be_denied"] is True
+
+
+class _CapabilityAdapter:
+    """A stand-in for hvac's HTTP adapter that enforces a Vault ACL.
+
+    Drives the real ``hvac.api.secrets_engines.KvV2`` class so the test
+    pins what the installed hvac ``patch`` actually sends: a ``GET`` on the
+    data path (``read``) and then a ``POST`` to the existing secret with a
+    ``cas`` option (``update``). A missing secret answers ``InvalidPath``
+    on the ``GET``, as Vault's 404 does.
+    """
+
+    def __init__(self, granted: set[str], *, secret_exists: bool = True) -> None:
+        self.granted = granted
+        self.secret_exists = secret_exists
+        self.posts: list[dict[str, Any]] = []
+
+    def get(self, url: str, **_kwargs: Any) -> dict[str, Any]:
+        if "read" not in self.granted:
+            raise hvac.exceptions.Forbidden("permission denied")
+        if not self.secret_exists:
+            raise hvac.exceptions.InvalidPath("no value")
+        return {"data": {"data": {"username": "demo"}, "metadata": {"version": 3}}}
+
+    def post(self, url: str, json: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.posts.append({"url": url, "json": json})
+        needed = "update" if self.secret_exists else "create"
+        if needed not in self.granted:
+            raise hvac.exceptions.Forbidden("permission denied")
+        return {"data": {"version": 4}}
+
+
+def _install_real_kv_v2(monkeypatch: pytest.MonkeyPatch, adapter: _CapabilityAdapter) -> None:
+    from hvac.api.secrets_engines.kv_v2 import KvV2
+
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2 = KvV2(adapter=adapter)  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "granted",
+    [{"read", "update"}, {"create", "read", "update"}],
+    ids=["read+update", "create+read+update"],
+)
+async def test_patch_runs_when_the_preflight_passes(
+    monkeypatch: pytest.MonkeyPatch, granted: set[str]
+) -> None:
+    """A role the preflight passes can run the patch on an existing secret.
+
+    Pins the capability set and the HTTP calls together (#3897): the real
+    hvac ``patch`` does a ``GET`` and then one ``POST`` with ``cas`` set
+    to the version it read, and ``read`` + ``update`` lets both through.
+    """
+    from meho_backplane.connectors.vault.ops import vault_kv_patch
+
+    adapter = _CapabilityAdapter(granted)
+    _install_real_kv_v2(monkeypatch, adapter)
+    assert _capabilities_grant_write(sorted(granted), VAULT_KV_WRITE_CAPABILITIES["vault.kv.patch"])
+
+    result = await vault_kv_patch(
+        _make_operator(), None, {"path": "meho/test", "data": {"token": "rotated"}}
+    )
+
+    assert result == {"version": 4}
+    assert adapter.posts == [
+        {
+            "url": "/v1/secret/data/meho/test",
+            "json": {"options": {"cas": 3}, "data": {"username": "demo", "token": "rotated"}},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "granted,posts_sent",
+    [
+        # No ``read``: the first step (the GET) is refused. Nothing is written.
+        ({"create", "update"}, 0),
+        # No ``update``: the read works, the POST to the existing secret is refused.
+        ({"read"}, 1),
+        ({"create", "read"}, 1),
+    ],
+    ids=["create+update", "read", "create+read"],
+)
+async def test_patch_fails_when_the_preflight_denies(
+    monkeypatch: pytest.MonkeyPatch, granted: set[str], posts_sent: int
+) -> None:
+    """A role the preflight denies fails the same way at execution (#3897)."""
+    from meho_backplane.connectors.vault.ops import vault_kv_patch
+
+    adapter = _CapabilityAdapter(granted)
+    _install_real_kv_v2(monkeypatch, adapter)
+    assert not _capabilities_grant_write(
+        sorted(granted), VAULT_KV_WRITE_CAPABILITIES["vault.kv.patch"]
+    )
+
+    with pytest.raises(hvac.exceptions.Forbidden):
+        await vault_kv_patch(
+            _make_operator(), None, {"path": "meho/test", "data": {"token": "rotated"}}
+        )
+
+    assert len(adapter.posts) == posts_sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+async def test_patch_never_writes_a_missing_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A patch on a missing secret stops at the read; ``create`` is never used."""
+    from meho_backplane.connectors.vault.ops import vault_kv_patch
+
+    adapter = _CapabilityAdapter({"create", "read", "update"}, secret_exists=False)
+    _install_real_kv_v2(monkeypatch, adapter)
+
+    with pytest.raises(hvac.exceptions.InvalidPath):
+        await vault_kv_patch(
+            _make_operator(), None, {"path": "meho/test", "data": {"token": "rotated"}}
+        )
+
+    assert adapter.posts == []

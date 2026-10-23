@@ -526,6 +526,15 @@ def test_password_expiry_fields_never_expires_sentinel_is_not_an_error() -> None
     assert out["password_age_days"] == 400
 
 
+def test_password_expiry_fields_value_past_year_9999_is_not_an_error() -> None:
+    data = {"PwdLastSet": NEVER_EXPIRES_FILETIME - 1, "ExpiryComputed": NEVER_EXPIRES_FILETIME - 1}
+    out = password_expiry_fields(data, now=_NOW)
+    assert out["password_last_set"] is None
+    assert out["password_age_days"] is None
+    assert out["password_expires_at"] is None
+    assert out["days_to_expiry"] is None
+
+
 def test_password_expiry_fields_must_change_at_next_logon() -> None:
     data = {
         "SamAccountName": "new-hire",

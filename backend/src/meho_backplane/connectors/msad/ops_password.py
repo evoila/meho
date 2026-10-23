@@ -117,10 +117,18 @@ def _filetime(value: Any) -> int | None:
 
 
 def _filetime_to_datetime(value: int | None) -> datetime | None:
-    """Convert a FILETIME to an aware UTC datetime; ``0`` / ``None`` give ``None``."""
+    """Convert a FILETIME to an aware UTC datetime.
+
+    ``0`` / ``None`` give ``None``. So does any value past the year 9999
+    (``datetime`` cannot hold it); only the documented sentinel should get
+    that far, but a surprise value must not turn a read into an error.
+    """
     if not value:
         return None
-    return _FILETIME_EPOCH + timedelta(microseconds=value // 10)
+    try:
+        return _FILETIME_EPOCH + timedelta(microseconds=value // 10)
+    except OverflowError:
+        return None
 
 
 def _iso(value: datetime | None) -> str | None:

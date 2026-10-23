@@ -19,15 +19,15 @@ Source: `backend/src/meho_backplane/connectors/vcf_fleet/`.
 
 The connector ships three typed reads. **Versions** says where the call
 exists: the product versions of the connector implementation that
-registers it (`fleet-rest`, `>=8.0,<10.0`). Until the VCF 9.0 routing
-change lands, a 9.0 target resolves to `fleet-lcm` (see "Dual
-implementation"), so the reads run on 8.x targets today.
+registers it (`fleet-rest`, `>=8.0,<9.1`). An 8.x or 9.0 target resolves
+here; a 9.1 or newer target resolves to `fleet-lcm` (see "Dual
+implementation").
 
 | Operation | What it does | Vendor call | Risk | Versions |
 |---|---|---|---|---|
-| `fleet.about` | Read the appliance's API version, product version and build. | `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x (9.0 after #4442) |
-| `fleet.environment.list` | List the Fleet environments with the products deployed in each. | `GET /lcm/lcops/api/v2/environments` | read (`safe`, no approval) | 8.x (9.0 after #4442) |
-| `fleet.api_file.get` | Read one documentation page or API description file the appliance serves (the Lifecycle APIs or the Content Management APIs). Returns path, HTTP status, content type, size, SHA-256 and the version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x (9.0 after #4442) |
+| `fleet.about` | Read the appliance's API version, product version and build. | `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
+| `fleet.environment.list` | List the Fleet environments with the products deployed in each. | `GET /lcm/lcops/api/v2/environments` | read (`safe`, no approval) | 8.x, 9.0 |
+| `fleet.api_file.get` | Read one documentation page or API description file the appliance serves (the Lifecycle APIs or the Content Management APIs). Returns path, HTTP status, content type, size, SHA-256 and the version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
 
 VCF Fleet is the rebrand of vRealize Suite Lifecycle Manager (vRSLCM) under
 the VCF 9 umbrella; the appliance still identifies as vRSLCM in its internal
@@ -43,8 +43,8 @@ sees the difference:
 
 | impl | connector | surface | `supported_version_range` |
 |---|---|---|---|
-| `fleet-rest` (legacy, typed) | `VcfFleetConnector` (this doc) | vRSLCM `/lcm/lcops/api/v2/*` | `>=8.0,<10.0` |
-| `fleet-lcm` (modern, generic/ingested) | [`FleetLcmConnector`](connectors-fleet-lcm.md) | VCF 9 Fleet LCM Service `/v1/*` | `>=9.0,<10.0` |
+| `fleet-rest` (legacy, typed) | `VcfFleetConnector` (this doc) | vRSLCM `/lcm/lcops/api/v2/*` | `>=8.0,<9.1` |
+| `fleet-lcm` (modern, generic/ingested) | [`FleetLcmConnector`](connectors-fleet-lcm.md) | VCF 9 Fleet LCM Service `/v1/*` | `>=9.1,<10.0` |
 
 Both register under `product="fleet"` with distinct `impl_id`s, so the v2
 registry keys `("fleet","9.0","fleet-rest")` and `("fleet","9.0","fleet-lcm")`
@@ -55,29 +55,30 @@ by this legacy package only (a second class on that key would raise at import);
 The [resolver](../../backend/src/meho_backplane/connectors/resolver.py) picks
 the impl per target:
 
-- **8.x target → `fleet-rest`** — the only candidate whose range contains the
-  version (`fleet-lcm`'s `>=9.0,<10.0` excludes 8.x).
-- **9.0 target → `fleet-lcm`** — both ranges contain 9.0, but `fleet-lcm`'s
-  narrower `>=9.0,<10.0` (span 1.0) beats `fleet-rest`'s `>=8.0,<10.0`
-  (span 2.0) at the resolver's **most-specific-version** tie-break (step 2),
-  *before* operator preference (step 3) is consulted. The split is by
-  version-specificity, not `priority` — both impls keep `priority=1`.
+- **8.x or 9.0 target → `fleet-rest`** (`>=8.0,<9.1`). A VCF 9.0 fleet
+  appliance serves only the legacy `/lcm/*` API.
+- **9.1 or newer target → `fleet-lcm`** (`>=9.1,<10.0`). The `/fleet-lcm/v1`
+  API first ships with VCF 9.1: its spec file is in the `9.1.0.0` tag of
+  `vmware/vcf-api-specs`.
+
+The two ranges meet at 9.1 and do not overlap (#4442), so every version has
+exactly one candidate. Before #4442, `fleet-lcm` claimed `>=9.0,<10.0` and
+won a 9.0 target because the narrower range wins. Its reads then called
+paths a 9.0 appliance does not have. The split is by version range, not
+`priority` — both impls keep `priority=1`. Operator preference
+(`preferred_impl_id`) only breaks a tie between in-range candidates, so it
+cannot pick an out-of-range impl.
 
 The split is proven by
-[`backend/tests/test_connectors_fleet_dual_impl_resolution.py`](../../backend/tests/test_connectors_fleet_dual_impl_resolution.py).
-Because specificity precedes operator preference in the ladder, an operator
-**cannot** pin the legacy `/lcm/*` surface on a *9.0* target via
-`preferred_impl_id="fleet-rest"` — the more-specific `fleet-lcm` still wins
-(the resolver's documented, tested ordering; see that test's
-`preferred_impl_id` case).
+[`backend/tests/test_connectors_fleet_dual_impl_resolution.py`](../../backend/tests/test_connectors_fleet_dual_impl_resolution.py)
+(8.5, 8.18, 9.0 and 9.0.2 → `fleet-rest`; 9.1, 9.1.0 and 9.1.1 → `fleet-lcm`).
 
 ## Key types
 
 - **`VcfFleetConnector`** (`connector.py`) — `HttpConnector` subclass.
   Class attributes: `product="fleet"`, `version="9.0"`,
-  `impl_id="fleet-rest"`, `supported_version_range=">=8.0,<10.0"`
-  (re-banded from `">=9.0,<10.0"` in #3037 — see "Dual implementation"
-  below), `priority=1`. The priority outranks a future `GenericRestConnector`
+  `impl_id="fleet-rest"`, `supported_version_range=">=8.0,<9.1"`
+  (8.x and 9.0 — see "Dual implementation" above), `priority=1`. The priority outranks a future `GenericRestConnector`
   auto-shim defensively if both somehow register for the same triple.
 - **`VcfFleetTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`, `host`,

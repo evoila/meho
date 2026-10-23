@@ -8,10 +8,9 @@ The modern VCF 9 Fleet LCM Service ``/v1/*`` read core (#3047, initiative
 registered as typed ops (``source_kind="typed"``) so it dispatches on a
 fresh boot with **zero catalog state** — the read core is live the moment
 the connector loads, no operator ``meho connector ingest`` +
-``enable_reads`` step. This is what restores 9.0 fleet dispatch: a VCF
-Fleet 9.0 target resolves to ``fleet-lcm`` by the resolver's
-most-specific-version tie-break (``>=9.0,<10.0`` vs the legacy
-``fleet-rest`` ``>=8.0,<10.0``), and these ops give it a dispatchable
+``enable_reads`` step. A VCF Fleet 9.1 or newer target resolves to
+``fleet-lcm`` (``>=9.1,<10.0``; a 9.0 target resolves to the legacy
+``fleet-rest``, ``>=8.0,<9.1``), and these ops give it a dispatchable
 modern read surface.
 
 Each function here is the body a thin bound-method shim on

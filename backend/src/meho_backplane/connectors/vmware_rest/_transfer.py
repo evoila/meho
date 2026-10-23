@@ -33,6 +33,12 @@ What the helper does, one file at a time:
    destination does not support ``MOVE`` (``405`` / ``501``), the file keeps
    its temporary name and the result row says ``partial``.
 
+Before it touches the destination, the helper checks every name. A name must
+be a safe path, may appear only once, and may not use the ending
+``.meho-partial``: MEHO keeps that ending for its temporary files, and a file
+called ``disk.meho-partial`` would be removed as a leftover when ``disk`` is
+copied after it.
+
 The clean-up callback runs in a ``finally`` block, so it runs on success, on
 error and on cancel. It cannot run when the MEHO process dies. What is left
 then, and how it goes away:
@@ -52,7 +58,9 @@ address screen as a target host (``targets.ssrf_guard``). No result row, error m
 event carries a URL with a credential: rows carry the destination path only,
 and messages carry the file name and the HTTP status, never the vCenter
 download URL. An ``httpx`` transport error is reported by its class name only,
-because its text and its request can carry the full URL.
+because its text and its request can carry the full URL. ``httpx`` itself logs
+one line per request with the URL; the production logging
+(:mod:`meho_backplane.logging`) cuts that URL down to its scheme and host.
 """
 
 from __future__ import annotations
@@ -402,6 +410,25 @@ async def _rename(dest: _Dest, name: str, row: FileResult, *, overwrite: bool) -
         )
 
 
+def _check_names(files: Sequence[SourceFile]) -> None:
+    """Refuse an unsafe name, a name MEHO keeps for its temporary files, and a repeat.
+
+    ``<name>.meho-partial`` is the temporary name of ``<name>``. A file called
+    that would be deleted as a leftover when ``<name>`` is copied after it.
+    """
+    seen: set[str] = set()
+    for src in files:
+        _quoted_name(src.name)
+        if any(seg.endswith(PARTIAL_SUFFIX) for seg in src.name.split("/")):
+            raise TransferError(
+                f"file name {src.name!r} uses the ending {PARTIAL_SUFFIX!r}, which MEHO keeps "
+                "for its temporary files"
+            )
+        if src.name in seen:
+            raise TransferError(f"file name {src.name!r} is listed twice")
+        seen.add(src.name)
+
+
 def _check_planned_sizes(files: Sequence[SourceFile], max_file: int, max_total: int) -> None:
     for src in files:
         if src.size is not None and src.size > max_file:
@@ -480,6 +507,7 @@ async def copy_files(
     )
     try:
         base = _base_url(destination.base_url)
+        _check_names(files)
         _check_planned_sizes(files, max_file_bytes, max_total_bytes)
         dest = _Dest(client, base, await _read_token(destination, operator, target))
         if remove_leftovers is not None:

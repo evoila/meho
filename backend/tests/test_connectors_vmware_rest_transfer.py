@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
+import logging
+import sys
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 import respx
+import structlog
 from structlog.testing import capture_logs
 
 from meho_backplane.connectors.vmware_rest import _transfer
@@ -29,6 +33,7 @@ from meho_backplane.connectors.vmware_rest._transfer import (
     is_meho_temp_name,
     meho_temp_name,
 )
+from meho_backplane.logging import _STDLIB_BRIDGE_HANDLER_NAME, configure_logging
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -192,6 +197,49 @@ async def test_source_download_asks_for_raw_bytes(respx_mock: respx.MockRouter) 
     request = source.calls.last.request
     assert request.headers.get_list("accept-encoding") == ["identity"]
     assert request.headers["vmware-api-session-id"] == SESSION
+
+
+def _undo_production_logging() -> None:
+    structlog.reset_defaults()
+    root = logging.getLogger()
+    for handler in [h for h in root.handlers if h.name == _STDLIB_BRIDGE_HANDLER_NAME]:
+        root.removeHandler(handler)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).propagate = True
+
+
+@respx.mock(assert_all_called=False)
+async def test_production_logging_hides_the_download_url(
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """httpx logs every request at INFO through Python's ``logging``.
+
+    With the production logging, that line reaches stdout. It must not carry
+    the vCenter download URL: its path and query are the credential.
+    """
+    _source(respx_mock, "vm.ovf", b"c" * 10)
+    _destination(respx_mock, "vm.ovf")
+    # Another library's dictConfig can switch the httpx logger off in the test session.
+    monkeypatch.setattr(logging.getLogger("httpx"), "disabled", False)
+    # A fresh structlog proxy, so the JSON logger this test caches does not outlive it.
+    monkeypatch.setattr(_transfer, "_log", structlog.get_logger(_transfer.__name__))
+    stdout = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    configure_logging(level=logging.INFO)
+    try:
+        with caplog.at_level(logging.INFO):
+            await _run([_file("vm.ovf")], _Calls())
+    finally:
+        _undo_production_logging()
+
+    text = stdout.getvalue() + caplog.text
+    assert "HTTP Request: GET https://vcenter.example.test " in text
+    assert "HTTP Request: PUT https://store.example.test " in text
+    assert "vcenter_transfer_file_copied" in stdout.getvalue()
+    for secret in ("vc-download-secret", "cls-data", "session-1", TOKEN, SESSION):
+        assert secret not in text, secret
 
 
 @respx.mock(assert_all_called=False)
@@ -397,6 +445,33 @@ async def test_unsafe_file_name_is_refused(name: str) -> None:
     calls = _Calls()
     with pytest.raises(TransferError, match="not a safe destination path"):
         await _run([_file(name)], calls)
+    assert calls.cleanup == 1
+
+
+@pytest.mark.parametrize(
+    ("names", "reason"),
+    [
+        (["disk.meho-partial", "disk"], "keeps for its temporary files"),
+        (["disk", "disk.meho-partial/x"], "keeps for its temporary files"),
+        (["disk", "disk"], "listed twice"),
+    ],
+)
+@respx.mock(assert_all_called=False)
+async def test_reserved_or_repeated_names_are_refused_before_any_change(
+    respx_mock: respx.MockRouter, names: list[str], reason: str
+) -> None:
+    # "disk.meho-partial" is the temporary name of "disk". Without the check,
+    # copying "disk" after it would delete the first file as a leftover.
+    for name in names:
+        _source(respx_mock, name, b"x" * 10)
+        _destination(respx_mock, name)
+    calls = _Calls()
+
+    with pytest.raises(TransferError, match=reason) as info:
+        await _run([_file(name) for name in names], calls)
+
+    assert not respx_mock.calls
+    assert info.value.files == []
     assert calls.cleanup == 1
 
 

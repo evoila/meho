@@ -2715,6 +2715,11 @@ The calling operation owns the vCenter side. It passes the source files
 a keep-alive callback, a clean-up callback, and optionally a callback that
 lists and removes leftovers from an earlier run.
 
+Before the first copy it checks every name: a safe path, listed once, and
+not ending in `.meho-partial`. MEHO keeps that ending for its temporary
+files; a file called `disk.meho-partial` would be removed as a leftover when
+`disk` is copied after it.
+
 Per file, one at a time:
 
 1. `HEAD` the final path: `401` / `403` stops (no write access); a file that
@@ -2739,6 +2744,8 @@ the vCenter session only to vCenter. The destination host passes the same
 address screen as a target host (`targets/ssrf_guard.py`, through the
 address-pinning transport). Rows, errors and logs never carry the
 vCenter download URL or a token; a transport error shows only its class name.
+`httpx` logs one line per request with the URL; the production logging
+(`meho_backplane/logging.py`) cuts that URL down to its scheme and host.
 
 **Clean-up.** The clean-up callback runs in a `finally` block on success,
 error and cancel. When the MEHO process dies, it cannot run. What is left, and

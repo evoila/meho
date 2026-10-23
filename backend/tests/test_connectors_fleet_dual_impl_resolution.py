@@ -1,58 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The first two-impl resolver test — ``product=fleet`` (fleet-rest + fleet-lcm), #3037.
+"""Two-impl resolver test for ``product=fleet`` (fleet-rest + fleet-lcm).
 
-``product=fleet`` is the codebase's **first real two-implementation case**
+``product=fleet`` was the codebase's first real two-implementation case
 (initiative #3033). Two hand-rolled ``HttpConnector`` subclasses register
-under the same product with distinct ``impl_id``s and overlapping version
-bands, and :func:`~meho_backplane.connectors.resolver.resolve_connector` picks
-one per target by fingerprint:
+under the same product with distinct ``impl_id``s, and
+:func:`~meho_backplane.connectors.resolver.resolve_connector` picks one per
+target by fingerprint:
 
 * legacy typed ``fleet-rest``
   (:class:`~meho_backplane.connectors.vcf_fleet.connector.VcfFleetConnector`) —
-  the vRSLCM ``/lcm/*`` surface, ``supported_version_range=">=8.0,<10.0"``
-  (re-banded from ``">=9.0,<10.0"`` in this Task).
-* modern generic ``fleet-lcm``
+  the ``/lcm/*`` API, ``supported_version_range=">=8.0,<9.1"``. Aria Suite
+  Lifecycle 8.x and VCF Fleet 9.0 serve this API.
+* modern ``fleet-lcm``
   (:class:`~meho_backplane.connectors.fleet_lcm.connector.FleetLcmConnector`) —
-  the VCF 9 Fleet LCM Service ``/v1/*`` surface,
-  ``supported_version_range=">=9.0,<10.0"``.
+  the ``/fleet-lcm/v1`` API, ``supported_version_range=">=9.1,<10.0"``. This
+  API first ships with VCF 9.1 (its spec file is in the ``9.1.0.0`` tag of
+  ``vmware/vcf-api-specs``).
 
-This test constructs both registrations exactly as the two packages'
-``__init__`` modules do (the legacy adds the ``("fleet","","")`` wildcard
-fallback; the modern impl registers only its versioned triple) and asserts the
-resolution matrix against fake targets — mirroring the target-construction and
-``resolve_connector`` call shape of :mod:`tests.test_connectors_resolver`.
+The two ranges do not overlap (#4442). Before that change ``fleet-lcm``
+claimed ``>=9.0,<10.0`` and won a 9.0 target by the most-specific-range
+rule, so a 9.0 appliance got reads against paths it does not serve. Now
+every version has exactly one versioned candidate, and operator preference
+(``preferred_impl_id``) cannot pick an impl that is out of range.
 
-A note on the operator-preference case (a corrected task assertion)
-------------------------------------------------------------------
-
-Tasks #3037 / initiative #3033 framed a third case as *"preferred_impl_id=
-'fleet-rest' on a 9.0 target → resolves fleet-rest (operator-preference
-tie-break)."* That is **not** how the resolver behaves, and it is internally
-inconsistent with the second case. The tie-break ladder runs
-**most-specific-version (step 2) *before* operator preference (step 3)** — see
-the :mod:`~meho_backplane.connectors.resolver` module docstring, and the pin
-``test_resolve_operator_preference_does_not_override_specificity`` in
-:mod:`tests.test_connectors_resolver` ("This pins the documented ordering
-against the issue body's alternative reading"). For any 9.x target *both* impls
-are in range, and ``fleet-lcm``'s
-``>=9.0,<10.0`` (bounded span 1.0) is **strictly** more specific than
-``fleet-rest``'s ``>=8.0,<10.0`` (span 2.0), so specificity resolves to
-``fleet-lcm`` and returns *before* ``preferred_impl_id`` is ever consulted.
-Operator preference only breaks a specificity **tie** (equal spans), which
-these two impls never have. Satisfying "9.0 → fleet-lcm by most-specific-
-version" (case 2) and "9.0 + preferred fleet-rest → fleet-rest" (case 3)
-simultaneously is impossible under the ladder: case 2 requires ``fleet-lcm``
-strictly more specific, which is exactly what makes preference moot in case 3.
-
-So case 3 below asserts the **actual, documented** behaviour — the more-specific
-``fleet-lcm`` still wins on a 9.0 target even with
-``preferred_impl_id="fleet-rest"`` — and documents that pinning the legacy
-``/lcm/*`` surface on a genuine 9.0 target is **not** achievable via
-``preferred_impl_id`` under the current (deliberate, previously-settled)
-ladder ordering. The generic operator-preference-breaks-a-tie mechanism is
-covered by :mod:`tests.test_connectors_resolver`.
+This test registers both impls exactly as the two packages' ``__init__``
+modules do (the legacy adds the ``("fleet","","")`` wildcard fallback; the
+modern impl registers only its versioned triple) and checks the resolution
+matrix against fake targets — the same target shape and ``resolve_connector``
+call as :mod:`tests.test_connectors_resolver`.
 """
 
 from __future__ import annotations
@@ -151,9 +128,9 @@ def test_both_impls_register_under_distinct_triples() -> None:
         "9.0",
         "fleet-lcm",
     )
-    # The re-banded legacy range + the modern range are what the split hinges on.
-    assert VcfFleetConnector.supported_version_range == ">=8.0,<10.0"
-    assert FleetLcmConnector.supported_version_range == ">=9.0,<10.0"
+    # The two ranges meet at 9.1 and do not overlap; the split hinges on them.
+    assert VcfFleetConnector.supported_version_range == ">=8.0,<9.1"
+    assert FleetLcmConnector.supported_version_range == ">=9.1,<10.0"
 
     triples = set(all_connectors_v2())
     assert ("fleet", "9.0", "fleet-rest") in triples
@@ -163,78 +140,62 @@ def test_both_impls_register_under_distinct_triples() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Case 1 — an 8.x target resolves the legacy fleet-rest (only in-range candidate)
+# 8.x and 9.0 targets resolve the legacy fleet-rest (/lcm/* API)
 # ---------------------------------------------------------------------------
 
 
-def test_8x_target_resolves_legacy_fleet_rest() -> None:
-    """A VCF Fleet / Aria Suite Lifecycle 8.5 target resolves ``fleet-rest``.
+@pytest.mark.parametrize("version", ["8.5", "8.18", "9.0", "9.0.2"])
+def test_8x_and_9_0_targets_resolve_legacy_fleet_rest(version: str) -> None:
+    """Aria Suite Lifecycle 8.x and VCF Fleet 9.0 targets resolve ``fleet-rest``.
 
-    ``fleet-lcm``'s ``>=9.0,<10.0`` excludes 8.5, so the legacy impl is the
+    ``fleet-lcm``'s ``>=9.1,<10.0`` excludes them, so the legacy impl is the
     only versioned candidate in range; the wildcard is demoted by step 1.
     """
-    target = _FakeTarget(product="fleet", fingerprint=_fp("8.5"))
+    target = _FakeTarget(product="fleet", fingerprint=_fp(version))
     assert resolve_connector(target) is VcfFleetConnector
 
 
 # ---------------------------------------------------------------------------
-# Case 2 — a 9.0 target resolves the modern fleet-lcm (most-specific-version)
+# 9.1 and newer targets resolve the modern fleet-lcm (/fleet-lcm/v1 API)
 # ---------------------------------------------------------------------------
 
 
-def test_9_0_target_resolves_modern_fleet_lcm_by_specificity() -> None:
-    """A VCF Fleet 9.0 target resolves ``fleet-lcm`` by most-specific-version.
+@pytest.mark.parametrize("version", ["9.1", "9.1.0", "9.1.1"])
+def test_9_1_targets_resolve_modern_fleet_lcm(version: str) -> None:
+    """VCF Fleet 9.1 and newer targets resolve ``fleet-lcm``.
 
-    Both versioned impls are in range for 9.0; ``fleet-lcm``'s bounded
-    ``>=9.0,<10.0`` (span 1.0) beats ``fleet-rest``'s ``>=8.0,<10.0`` (span 2.0)
-    at the resolver's step-2 specificity tie-break. The wildcard is demoted
-    first (step 1). This is the initiative's core assertion — the split is by
-    version-specificity, not priority (both impls keep ``priority=1``).
+    ``fleet-rest``'s ``>=8.0,<9.1`` excludes them, so the modern impl is the
+    only versioned candidate in range.
     """
-    target = _FakeTarget(product="fleet", fingerprint=_fp("9.0"))
-    assert resolve_connector(target) is FleetLcmConnector
-
-
-def test_9_0_2_patch_target_still_resolves_fleet_lcm() -> None:
-    """A patch-versioned 9.0.2 target resolves ``fleet-lcm`` too (in ``>=9.0,<10.0``)."""
-    target = _FakeTarget(product="fleet", fingerprint=_fp("9.0.2"))
+    target = _FakeTarget(product="fleet", fingerprint=_fp(version))
     assert resolve_connector(target) is FleetLcmConnector
 
 
 # ---------------------------------------------------------------------------
-# Case 3 — operator preference is MOOT on a 9.0 target (specificity wins first)
+# Operator preference cannot pick an out-of-range impl
 # ---------------------------------------------------------------------------
 
 
-def test_9_0_preferred_fleet_rest_is_moot_specificity_still_wins() -> None:
-    """``preferred_impl_id="fleet-rest"`` on a 9.0 target does NOT flip the result.
+def test_9_0_preferred_fleet_lcm_still_resolves_fleet_rest() -> None:
+    """``preferred_impl_id="fleet-lcm"`` on a 9.0 target does not pick ``fleet-lcm``.
 
-    Corrects the task's third assertion (see the module docstring). Specificity
-    (step 2) resolves to the more-specific ``fleet-lcm`` and returns *before*
-    operator preference (step 3) is consulted, so the operator **cannot** pin
-    the legacy ``/lcm/*`` surface on a genuine 9.0 target this way. Mirrors the
-    ``test_resolve_operator_preference_does_not_override_specificity`` pin in
-    :mod:`tests.test_connectors_resolver`, scoped to the real fleet impls.
+    Preference only breaks a tie between in-range candidates. On 9.0 only
+    ``fleet-rest`` is in range, so the 9.0 appliance keeps the ``/lcm/*`` API.
     """
     target = _FakeTarget(
         product="fleet",
-        fingerprint=_fp("9.0"),
-        preferred_impl_id="fleet-rest",
-    )
-    assert resolve_connector(target) is FleetLcmConnector
-
-
-def test_9_0_preferred_fleet_lcm_also_resolves_fleet_lcm() -> None:
-    """The consistent-with-specificity preference (``fleet-lcm``) resolves ``fleet-lcm``.
-
-    A sanity companion to the moot case: when the operator's preference agrees
-    with the specificity winner, the result is unchanged — preference neither
-    helps nor hurts here because specificity already decided.
-    """
-    target = _FakeTarget(
-        product="fleet",
-        fingerprint=_fp("9.0"),
+        fingerprint=_fp("9.0.2"),
         preferred_impl_id="fleet-lcm",
+    )
+    assert resolve_connector(target) is VcfFleetConnector
+
+
+def test_9_1_preferred_fleet_rest_still_resolves_fleet_lcm() -> None:
+    """``preferred_impl_id="fleet-rest"`` on a 9.1 target does not pick ``fleet-rest``."""
+    target = _FakeTarget(
+        product="fleet",
+        fingerprint=_fp("9.1.0"),
+        preferred_impl_id="fleet-rest",
     )
     assert resolve_connector(target) is FleetLcmConnector
 
@@ -247,7 +208,7 @@ def test_9_0_preferred_fleet_lcm_also_resolves_fleet_lcm() -> None:
 def test_unfingerprinted_target_resolves_via_legacy_wildcard() -> None:
     """A fresh target (no fingerprint, no asserted version) resolves via the wildcard.
 
-    Neither versioned entry matches without a version (the specificity filter
+    Neither versioned entry matches without a version (the range filter
     needs one), so only the legacy-owned ``("fleet","","")`` wildcard survives.
     ``fleet-lcm``'s deliberate lack of a wildcard sibling does not break
     unfingerprinted resolution — one wildcard per product suffices.

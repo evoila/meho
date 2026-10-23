@@ -226,8 +226,22 @@ registrar is queued via `register_typed_op_registrar` in the package
   (which filters resources by *whether* they report a stat), this op returns
   the stat's **value**; the handler passes the payload through unparsed so
   the vendor's `stats-of-resources` field names stay out of executable code.
+- **`vrops.license.info`** — `GET /suite-api/api/product/licensing/edition`
+  and `GET /suite-api/api/product/licensing/info`. The edition and the
+  licence of this VCF Operations instance in one object:
+  `productLicensingEdition`, `licensed`, `licenseName`, `expirationDate`
+  (epoch milliseconds) and `licenseKey`. The handler masks `licenseKey`
+  before it returns: only the last 5 characters show, and a key of 10
+  characters or fewer is hidden in full. The op also carries the tag
+  `license-key`, so the flight recorder leaves the raw vendor bodies of
+  both calls out of the trace. So no licence key reaches the agent, the
+  audit row, a stored result or the trace in clear text. The vendor API
+  shows no licence use on these two calls. This op is **9.x only**: it sits
+  in `VROPS_9_ONLY_TYPED_OPS`, not in `VROPS_TYPED_OPS`, because the 8.x
+  connector reuses `VROPS_TYPED_OPS`. The licence management calls
+  (licence servers, assigning licences) are a separate piece of work.
 
-All four are `safety_level="safe"`, `requires_approval=False`,
+All five are `safety_level="safe"`, `requires_approval=False`,
 read-only. Each rides the connector's `OpsToken` session; `authSource`
 federation lives in the acquire body, not on the reads. `vrops.resource.query`
 encodes its `page`/`pageSize` pagination onto the request path (the base
@@ -237,11 +251,11 @@ encodes its `page`/`pageSize` pagination onto the request path (the base
 stat / alert / resource sets reduce to a JSONFlux handle at the dispatch
 layer.
 
-**Operation contracts.** The four ops meet the VMware operation-contract check
+**Operation contracts.** The five ops meet the VMware operation-contract check
 (`backend/tests/test_vmware_operation_contracts.py`). Their response schemas
 live in `_response_schemas.py` and use the field names of the pinned
 `vcf-operations-9.0` Suite API file (`version`, `alerts`, `resources`,
-`stats-of-resources`; note the stats rows sit under `stat-list.stat[]`). Each
+`stats-of-resources`, `product-licensing`, `LicenseInfo`; note the stats rows sit under `stat-list.stat[]`). Each
 parameter schema has one example call under `examples`, and each
 `llm_instructions` blob has `when_to_call`, `output_shape` and `next_step`. The
 `resourceState`, `resourceStatus` and `resourceHealth` filters of
@@ -258,7 +272,7 @@ symptoms, recommendations, super metrics) stay browsable until Initiative
 #2266 T7 retires the apparatus.
 
 **Spec-reconcile lane (#2984).** Every hand-coded `METHOD:/path` above — the
-four typed-read paths plus the session mint
+six typed-read paths (the licence read uses two of them) plus the session mint
 (`POST /suite-api/api/auth/token/acquire`) — is asserted against the pinned
 `vcf-operations-9.0` shelf spec by
 [`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_operations_spec_reconcile.py)

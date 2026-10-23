@@ -198,16 +198,15 @@ class VcfFleetConnector(HttpConnector):
     product = "fleet"
     version = "9.0"
     impl_id = "fleet-rest"
-    # Re-banded from ``">=9.0,<10.0"`` to ``">=8.0,<10.0"`` in #3037 so the
-    # legacy ``/lcm/*`` impl covers Aria Suite Lifecycle 8.x AND the VCF
-    # Fleet 9.0 ``/lcm/*`` back-compat surface, while the modern
-    # ``fleet-lcm`` impl (``>=9.0,<10.0``) takes a 9.0 target by the
-    # resolver's most-specific-version tie-break. Only the *range* moved:
+    # ``>=8.0,<9.1``: Aria Suite Lifecycle 8.x and VCF Fleet 9.0, which serve
+    # the legacy ``/lcm/*`` API. The modern ``fleet-lcm`` impl starts at 9.1
+    # (``>=9.1,<10.0``), where the ``/fleet-lcm/v1`` API first ships, so the
+    # two ranges do not overlap (#4442). Only the *range* moved:
     # ``version="9.0"`` (the registry-key label) and ``connector_id``
     # ``"fleet-rest-9.0"`` are unchanged, so no endpoint_descriptor row or
-    # target round-trip churns. See the first two-impl resolution test,
+    # target round-trip churns. See the two-impl resolution test,
     # ``backend/tests/test_connectors_fleet_dual_impl_resolution.py``.
-    supported_version_range = ">=8.0,<10.0"
+    supported_version_range = ">=8.0,<9.1"
     priority = 1
 
     def __init__(

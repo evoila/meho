@@ -23,8 +23,9 @@ implementations; ``_graphql.py`` carries the shared GraphQL transport
 helper; ``schemas.py`` carries the JSON Schema 2020-12 parameter +
 response contracts.
 
-Scope (8 composites): ``gh.composite.pr_status_summary`` (T4 #1224,
-read); and the #2081 board + sub-issue set -- ``gh.composite.project_view``
+Scope (9 composites): ``gh.composite.pr_status_summary`` (T4 #1224,
+read); ``gh.composite.repo_view`` (one repository, read); and the #2081
+board + sub-issue set -- ``gh.composite.project_view``
 (read), ``gh.composite.project_item_add`` /
 ``gh.composite.project_item_set_field`` (Projects-v2 GraphQL writes), and
 ``gh.composite.sub_issue_add`` (sub-issue linkage REST write). Together
@@ -47,6 +48,7 @@ from meho_backplane.connectors.github.composites._git import (
 )
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
+    repo_view_composite,
 )
 from meho_backplane.connectors.github.composites._register import (
     register_github_composite_operations,
@@ -74,5 +76,6 @@ __all__ = [
     "project_item_set_field_composite",
     "project_view_composite",
     "register_github_composite_operations",
+    "repo_view_composite",
     "sub_issue_add_composite",
 ]

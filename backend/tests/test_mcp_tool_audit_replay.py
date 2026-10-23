@@ -247,6 +247,7 @@ def test_replay_admin_returns_tree_envelope(
     # #2776: the excluded-null tally rides on the same envelope; empty
     # audit_log in this test → zero.
     assert payload["excluded_null_session_count"] == 0
+    assert payload["loose_row_count"] == 0
     assert len(payload["root"]) == 1
     assert payload["root"][0]["id"] == "11111111-1111-1111-1111-111111111111"
     assert payload["root"][0]["depth"] == 0
@@ -353,6 +354,7 @@ def test_replay_admin_excluded_null_session_count_zero_base_case(
     payload = _replay_seeded(client, _SESSION_ID)
     assert payload["row_count"] == 0
     assert payload["excluded_null_session_count"] == 0
+    assert payload["loose_row_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -565,6 +567,7 @@ def test_query_audit_tree_own_session_returns_tree(
     assert payload["row_count"] == 2
     # #2776: parity — the operator self-session tree branch carries the key too.
     assert payload["excluded_null_session_count"] == 0
+    assert payload["loose_row_count"] == 0
     assert mock_replay.await_args.kwargs["tenant_id"] == op.tenant_id
 
 

@@ -67,6 +67,7 @@ from meho_backplane.audit_query import (
     DurationParseError,
     InvalidCursorError,
     UnsupportedFilterError,
+    count_loose_rows_in_forest,
     parse_duration,
     query_audit,
     replay_session,
@@ -369,15 +370,16 @@ async def _build_replay_response(
     ``session_too_large`` token — the MCP analogue of T4's REST 413, the
     transport has no streaming body for a 413-style partial), dispatches
     through :func:`replay_session`, and returns the
-    ``{root, session_id, tenant_id, row_count, excluded_null_session_count}``
-    envelope. ``row_count`` is the assembled-node count (post depth-cap),
+    ``{root, session_id, tenant_id, row_count, excluded_null_session_count,
+    loose_row_count}`` envelope. ``row_count`` is the assembled-node count (post depth-cap),
     so it reflects what the caller actually receives.
     ``excluded_null_session_count`` (#2700 → #2776 MCP parity) is the
     tenant-wide tally of header-less ``method=MCP`` rows that no replay can
     reach — it keeps an empty forest distinguishable from an empty history.
     It is computed *after* the over-cap guard, so a rejected session raises
     ``session_too_large`` before the field is ever built (matching REST's
-    pre-413 behaviour).
+    pre-413 behaviour). ``loose_row_count`` (#4670) is the number of nodes
+    in the tree whose parent id names no row in the tenant.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -407,6 +409,11 @@ async def _build_replay_response(
             tenant_id=tenant_id,
             session=session,
         )
+        loose_row_count = await count_loose_rows_in_forest(
+            root,
+            tenant_id=tenant_id,
+            session=session,
+        )
 
     serialized_root = [node.model_dump(mode="json") for node in root]
     return {
@@ -415,6 +422,7 @@ async def _build_replay_response(
         "tenant_id": str(tenant_id),
         "row_count": _count_tree_nodes(serialized_root),
         "excluded_null_session_count": excluded_null_session_count,
+        "loose_row_count": loose_row_count,
     }
 
 
@@ -592,6 +600,15 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
                 "empty history (#2700)."
             ),
         },
+        "loose_row_count": {
+            "type": "integer",
+            "description": (
+                "Nodes in the tree whose `parent_audit_id` names a row "
+                "that does not exist: a multi-step operation that is "
+                "still running, or that stopped before its own row was "
+                "saved (#4670)."
+            ),
+        },
     },
     "required": [
         "root",
@@ -599,6 +616,7 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     ],
 }
 

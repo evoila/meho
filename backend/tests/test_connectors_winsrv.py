@@ -40,6 +40,7 @@ from meho_backplane.connectors.winsrv.ops_features import (
     winsrv_feature_remove,
 )
 from meho_backplane.connectors.winsrv.ops_localusers import (
+    _LOCALUSER_SELECT,
     winsrv_localuser_create,
     winsrv_localuser_delete,
     winsrv_localuser_list,
@@ -522,8 +523,20 @@ async def test_localuser_list_reads_no_secret() -> None:
     run_mock = _run('{"rows":[{"Name":"Administrator"}],"total":1}')
     with patch.object(connector, "_run_command", run_mock):
         result = await winsrv_localuser_list(connector, _TARGET, {})
-    assert "Get-LocalUser" in _script_from_call(run_mock)
+    script = _script_from_call(run_mock)
+    assert "Get-LocalUser" in script
+    assert "-Password " not in script
     assert result["total"] == 1
+
+
+def test_localuser_select_renders_password_dates_as_iso_text() -> None:
+    """``PasswordLastSet`` / ``PasswordExpires`` ride as ISO 8601 text (``.ToString('o')``)
+    and stay null when Windows has no value."""
+    for prop in ("PasswordLastSet", "PasswordExpires"):
+        assert (
+            f"@{{Name='{prop}'; Expression={{ if ($_.{prop}) "
+            f"{{ $_.{prop}.ToString('o') }} else {{ $null }} }}}}"
+        ) in _LOCALUSER_SELECT
 
 
 def test_no_write_op_exposes_a_secret_value_field() -> None:

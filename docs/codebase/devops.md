@@ -1476,7 +1476,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-4-way pytest stride matrix (`python-unit-shard`). The required-context
+4-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1637,7 +1637,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
+| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
@@ -1694,29 +1694,50 @@ The required unit lane was a single `python-lint-test` job running ruff +
 ruff format + mypy + the whole ~13k-test unit sweep serially (~19-min
 wall) — the biggest single contributor to PR wall-time. #3251 split it
 into three cooperating jobs, mirroring the #3172/#3177 coverage-sweep
-shape (deterministic file-stride matrix + fan-in):
+shape (deterministic file-level matrix + fan-in):
 
 - **`python-lint`** — ruff check + ruff format --check + mypy. Whole-tree
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **4-way stride matrix**.
-  Each shard runs `find tests -name 'test_*.py' -not -path
-  'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk 'NR %
-  4 == shard - 1'` — the sorted test-file list, every fourth file. The
-  stride (not contiguous blocks) spreads heavyweight suites across shards,
-  and the four residues partition the file set **exactly** (union == full,
-  pairwise disjoint). #3251 started with 3 shards. #4655 raised the count
-  to 4 when the slowest shard reached the 660 s per-shard budget (579 s
-  as a middle value and up to 605 s on `main`; 663 s on a pull request).
-  The budget stayed at 660 s:
-  the rule in `ci.yml` is to measure, then add shards, not to raise the
-  budget. To change the count again, edit the matrix and `TOTAL` in the
-  pytest step together. File-level sharding is strictly coarser than what
-  xdist `--dist loadscope` already does across workers (whole modules stay
-  together, conftest semantics identical to a full run), so an xdist-safe
-  suite is shard-safe — proven live by the `python-coverage` sweep, which
-  runs the identical split over a superset of these files. `fail-fast:
+- **`python-unit-shard`** — the pytest sweep as a **4-way matrix split by
+  measured file time**. Each shard lists the test files with `find tests
+  -name 'test_*.py' -not -path 'tests/integration/*' -not -path
+  'tests/migrations/*' | sort` and pipes the list into
+  `tests/_unit_shard_split.py --shard N --total 4`. The splitter reads the
+  measured seconds per test file from `tests/_unit_shard_durations.json`,
+  sorts the files slowest first, and gives each file to the shard with
+  the least time so far (a file without a measurement counts as the
+  median; every file also carries a small fixed cost for import and
+  collection, so files whose tests all skip still spread out). The same
+  list always gives the same split, and the four shards partition the
+  file set **exactly** (union == full, pairwise disjoint;
+  `tests/test_unit_shard_split.py` pins both). The splitter prints the
+  file count and the predicted seconds per shard on stderr, so the shard
+  log shows when the measurements drift from the real wall. Each shard
+  writes its per-test times with `-o junit_family=xunit1 --junitxml` and
+  uploads them as the artifact `python-unit-shard-junit-<N>`. To refresh
+  the measurements, download the four artifacts of one green run and
+  pass them to `tests/_unit_shard_split.py --measure`; the module
+  docstring has the exact commands. Take the numbers from CI, not from a
+  laptop: tests that need Docker or the spec shelf skip locally but run
+  in CI, and a local measurement put all of them into one shard (584 s
+  against 443 s for the lightest). #3251 started with 3 shards and gave
+  every N-th file of
+  the sorted list to one shard. #4655 raised the count to 4 when the
+  slowest shard reached the 660 s per-shard budget (579 s as a middle
+  value and up to 605 s on `main`; 663 s on a pull request). #4809
+  replaced the every-N-th-file rule with the measured split when shard 4
+  ran 613 s as a middle value against 465 s for shard 2, and the merge
+  queue dropped pull requests whose tests had all passed. The budget
+  stayed at 660 s: the rule in `ci.yml` is to measure, then rebalance or
+  add shards, not to raise the budget. To change the count, edit the
+  matrix and `TOTAL` in the pytest step together. File-level sharding is
+  strictly coarser than what xdist `--dist loadscope` already does across
+  workers (whole modules stay together, conftest semantics identical to a
+  full run), so an xdist-safe suite is shard-safe — proven live by the
+  `python-coverage` sweep, which runs a file-level split (every N-th
+  file) over a superset of these files. `fail-fast:
   false` so one red shard does not cancel the others; each shard keeps
   `--maxfail=1` for fast per-shard feedback. Each shard also arms a
   per-test hang guard, `--timeout=180 --timeout-method=signal` (#4270):

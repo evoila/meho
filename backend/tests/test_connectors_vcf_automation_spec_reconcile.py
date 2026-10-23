@@ -15,7 +15,9 @@ VCFA is dual-plane and its shelf is a **mosaic** (the shelf's
 lane splits by plane:
 
 * **Tenant plane — armed.** Every ``/iaas/api/*`` op_id asserts against
-  the pinned ``swagger-vra-sdk-go-v0.6.5/vra-iaas.json`` — the IaaS API
+  the pinned ``swagger-vra-sdk-go-v0.6.5/vra-iaas.json``, and every
+  ``/blueprint/api/*`` / ``/deployment/api/*`` op_id against its sibling
+  ``vra-blueprint.json`` / ``vra-catalog-deployment.json`` — the IaaS API
   Swagger 2.0 document vendored in the **Apache-2.0**
   `vmware/vra-sdk-go <https://github.com/vmware/vra-sdk-go>`_ repo at
   tag ``v0.6.5``, the closest published surface to the VCFA 9.x
@@ -90,7 +92,9 @@ from meho_backplane.connectors.vcf_automation import _paths as _paths_module
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
+from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import (
     VCFA_TYPED_OPS,
@@ -102,8 +106,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _SPEC_DIR = "vcf-automation-9.0"
-_TENANT_SPEC_FILE = "swagger-vra-sdk-go-v0.6.5/vra-iaas.json"
-_TENANT_SPEC_LABEL = f"{_SPEC_DIR}/{_TENANT_SPEC_FILE}"
+#: The tenant plane spans three APIs; each has its own Swagger 2.0 file on the
+#: shelf. ``plane_for_path`` sends all three to the tenant login.
+_TENANT_SPEC_FILES = (
+    "swagger-vra-sdk-go-v0.6.5/vra-iaas.json",
+    "swagger-vra-sdk-go-v0.6.5/vra-blueprint.json",
+    "swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json",
+)
+_TENANT_SPEC_LABEL = f"{_SPEC_DIR} tenant specs (vra-iaas, vra-blueprint, vra-catalog-deployment)"
 
 #: The Swagger 2.0 path-item keys that are HTTP operations (its fixed
 #: verb vocabulary); everything else on a path item (``parameters``,
@@ -149,6 +159,16 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     "TENANT_IMAGE_PROFILES_PATH": frozenset({"GET"}),
     "TENANT_IMAGE_PROFILE_PATH": frozenset({"GET", "PATCH"}),
     "TENANT_REQUEST_TRACKER_PATH": frozenset({"GET"}),
+    # A project's own network and its first deployment (tenant plane).
+    "TENANT_BLUEPRINT_REQUESTS_PATH": frozenset({"POST"}),
+    "TENANT_BLUEPRINT_REQUEST_PATH": frozenset({"GET"}),
+    "TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH": frozenset({"DELETE"}),
+    "TENANT_FABRIC_COMPUTES_PATH": frozenset({"GET"}),
+    "TENANT_FABRIC_NETWORKS_PATH": frozenset({"GET"}),
+    "TENANT_FABRIC_NETWORK_PATH": frozenset({"GET", "PATCH"}),
+    "TENANT_NETWORK_PROFILES_PATH": frozenset({"GET", "POST"}),
+    "TENANT_REGIONS_PATH": frozenset({"GET"}),
+    "TENANT_ZONES_PATH": frozenset({"GET"}),
 }
 
 #: ``typed_ops`` read-path constants the provisioning writes also ``POST``
@@ -246,7 +266,13 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
     }
     unswept = {
         op.op_id: op.path
-        for op in (*VCFA_TYPED_OPS, *VCFA_PROVISIONING_OPS, *VCFA_IMAGE_OPS)
+        for op in (
+            *VCFA_TYPED_OPS,
+            *VCFA_PROVISIONING_OPS,
+            *VCFA_IMAGE_OPS,
+            *VCFA_NETWORK_OPS,
+            *VCFA_DEPLOY_OPS,
+        )
         if op.path not in swept
     }
     assert not unswept, (
@@ -306,6 +332,18 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/iaas/api/request-tracker/{id}",
         "PATCH:/iaas/api/image-profiles/{id}",
         "POST:/iaas/api/cloud-accounts/{id}/private-image-enumeration",
+        # A project's own network and its first deployment.
+        "DELETE:/deployment/api/deployments/{deploymentId}",
+        "GET:/blueprint/api/blueprint-requests/{requestId}",
+        "GET:/iaas/api/fabric-computes",
+        "GET:/iaas/api/fabric-networks-vsphere",
+        "GET:/iaas/api/fabric-networks-vsphere/{id}",
+        "GET:/iaas/api/network-profiles",
+        "GET:/iaas/api/regions",
+        "GET:/iaas/api/zones",
+        "PATCH:/iaas/api/fabric-networks-vsphere/{id}",
+        "POST:/blueprint/api/blueprint-requests",
+        "POST:/iaas/api/network-profiles",
     }
 
 
@@ -325,7 +363,7 @@ def _swagger2_served_op_ids(spec_path: Path) -> set[str]:
     document = json.loads(spec_path.read_text(encoding="utf-8"))
     if document.get("swagger") != "2.0":
         pytest.fail(
-            f"{_TENANT_SPEC_LABEL}: expected a Swagger 2.0 document "
+            f"{spec_path.name}: expected a Swagger 2.0 document "
             f"(got swagger={document.get('swagger')!r} / "
             f"openapi={document.get('openapi')!r}) — the shelf artifact "
             "format moved; update this lane's extraction."
@@ -339,14 +377,14 @@ def _swagger2_served_op_ids(spec_path: Path) -> set[str]:
     }
     if not served:
         pytest.fail(
-            f"{_TENANT_SPEC_LABEL}: extracted zero served operations — the "
+            f"{spec_path.name}: extracted zero served operations — the "
             "shelf artifact layout moved; update this lane's extraction."
         )
     return served
 
 
 def test_tenant_hand_coded_paths_are_served_by_the_pinned_iaas_spec() -> None:
-    """Every tenant-plane op_id is served by the pinned vra-iaas.json spec.
+    """Every tenant-plane op_id is served by the pinned IaaS, blueprint or deployment spec.
 
     The tenant subset is selected with the connector's own
     :func:`~meho_backplane.connectors.vcf_automation._routing.plane_for_path`
@@ -355,8 +393,9 @@ def test_tenant_hand_coded_paths_are_served_by_the_pinned_iaas_spec() -> None:
     A red run here is the guard surfacing a finding; triage per
     docs/decisions/spec-reconcile-guards-standard.md.
     """
-    spec_path = require_shelf_spec(_SPEC_DIR, _TENANT_SPEC_FILE)
-    served = _swagger2_served_op_ids(spec_path)
+    served: set[str] = set()
+    for spec_file in _TENANT_SPEC_FILES:
+        served |= _swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
     declared = {
         op_id for op_id in _declared_op_ids() if plane_for_path(op_id.partition(":")[2]) == "tenant"
     }

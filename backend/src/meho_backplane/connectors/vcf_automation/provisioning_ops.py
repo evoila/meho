@@ -138,6 +138,50 @@ _PRINCIPALS_ITEM: dict[str, Any] = {
 }
 
 
+def _limit(description: str) -> dict[str, Any]:
+    return {"type": "integer", "minimum": 0, "description": f"{description} 0 means no limit."}
+
+
+_ZONE_ITEM: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "zone_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The cloud zone id (from vcfa.tenant.zone.list).",
+        },
+        "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The zone priority; a lower number wins. Default 0.",
+        },
+        "max_instances": _limit("The most VMs in this zone."),
+        "cpu_limit": _limit("The most vCPUs in this zone."),
+        "memory_limit_mb": _limit("The most memory in this zone, in MB."),
+        "storage_limit_gb": _limit("The most storage in this zone, in GB."),
+    },
+    "required": ["zone_id"],
+    "additionalProperties": False,
+}
+
+_CONSTRAINT_ITEM: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "expression": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A tag rule 'key:value', or '!key:value' to keep away from a tag.",
+        },
+        "mandatory": {
+            "type": "boolean",
+            "description": "True (default): a VM that matches no network fails to deploy.",
+        },
+    },
+    "required": ["expression"],
+    "additionalProperties": False,
+}
+
+
 def _principals(role: str) -> dict[str, Any]:
     return {
         "type": "array",
@@ -780,9 +824,8 @@ _PROJECT_CREATE = VcfaTypedOp(
     summary="Create a project in the tenant org (tenant plane); safe to run twice.",
     description=(
         "Creates a project with POST /iaas/api/projects on the tenant plane, with "
-        "optional administrators, members and viewers. A project with the same "
-        "name answers 'unchanged'. A 403 means the tenant user may not create "
-        "projects."
+        "optional users, cloud zones with a quota, and network tag rules. A project "
+        "with the same name answers 'unchanged' and is not changed."
     ),
     parameter_schema={
         "type": "object",
@@ -796,6 +839,19 @@ _PROJECT_CREATE = VcfaTypedOp(
             "administrators": _principals("administrators"),
             "members": _principals("members"),
             "viewers": _principals("viewers"),
+            "zones": {
+                "type": "array",
+                "items": _ZONE_ITEM,
+                "description": "Optional cloud zones the project may deploy to, each with a quota.",
+            },
+            "network_constraints": {
+                "type": "array",
+                "items": _CONSTRAINT_ITEM,
+                "description": (
+                    "Optional network tag rules. With 'project:<project-name>', the "
+                    "project's VMs only use networks that carry that tag."
+                ),
+            },
         },
         "required": ["name"],
         "additionalProperties": False,
@@ -803,6 +859,8 @@ _PROJECT_CREATE = VcfaTypedOp(
             {
                 "name": "<project-name>",
                 "administrators": [{"email": "<user-email>", "type": "user"}],
+                "zones": [{"zone_id": "<zone-id>", "max_instances": 10, "cpu_limit": 20}],
+                "network_constraints": [{"expression": "project:<project-name>"}],
             }
         ],
     },
@@ -819,16 +877,26 @@ _PROJECT_CREATE = VcfaTypedOp(
     safety_level="caution",
     requires_approval=True,
     llm_instructions=guidance(
-        when_to_call="Call to create a project (the scope for deployments) in the tenant org.",
+        when_to_call=(
+            "Call to create a project (the scope for deployments) in the tenant org, "
+            "optionally with a quota per cloud zone and a rule that keeps its VMs on "
+            "its own network."
+        ),
         preconditions=(
             "The target's tenant login works (check with vcfa.tenant.login.test) and "
-            "its user may create projects. A person must approve the call."
+            "its user may create projects (a 403 means it may not). Zone ids come from "
+            "vcfa.tenant.zone.list; a network rule needs a network with the same tag "
+            "(vcfa.tenant.fabric_network.update). A person must approve the call."
         ),
         output_shape=(
             "{status: created | unchanged | invalid_request, project: {id, name, "
-            f"organizationId}}, guidance}}. {_STATUS_NOTE}"
+            f"organizationId}}, guidance}}. {_STATUS_NOTE} An existing project keeps "
+            "its zones and rules."
         ),
-        next_step="vcfa.tenant.project.list to confirm.",
+        next_step=(
+            "vcfa.tenant.project.list to confirm, then vcfa.tenant.blueprint_request.create "
+            "with the project id."
+        ),
     ),
 )
 

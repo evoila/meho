@@ -9,7 +9,8 @@
 #
 #   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
 #     python-lint       : ruff check + ruff format --check + mypy (once)
-#     python-unit-shard : the pytest unit sweep as a 4-way file-stride matrix
+#     python-unit-shard : the pytest unit sweep as a 4-way matrix; test files
+#                         are split by measured time (#4809)
 #     python-unit-lane  : fan-in carrying the branch-protection required
 #                         context `Python (ruff + mypy + pytest)`
 #   go-lint-test      : golangci-lint + go build + go test on cli/
@@ -270,13 +271,14 @@ jobs:
   # `python-lint-test` job (ruff + ruff format + mypy + the whole ~13k-test
   # unit sweep, serial, ~19-min wall) was the single biggest contributor to
   # PR wall-time. It is now three cooperating jobs, mirroring the #3172/#3177
-  # coverage-sweep shape (deterministic file-stride matrix + fan-in):
+  # coverage-sweep shape (deterministic file-level matrix + fan-in):
   #
   #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
   #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
   #                       pool. Non-required check.
-  #   python-unit-shard — the pytest unit sweep as a 4-way stride matrix over
-  #                       the sorted test-file list (heavy pool, in parallel).
+  #   python-unit-shard — the pytest unit sweep as a 4-way matrix; the test
+  #                       files are split by measured time so every shard
+  #                       takes about as long (heavy pool, in parallel).
   #                       Non-required checks (`Python unit shard N/4`).
   #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
   #                       context `Python (ruff + mypy + pytest)`; fails iff
@@ -367,9 +369,10 @@ jobs:
     # Non-required checks (one per matrix leg: `Python unit shard 1/4`,
     # `.../2/4`, `.../3/4`, `.../4/4`) — the required context is carried by
     # the python-unit-lane fan-in below. This is the pytest half of the old
-    # required lane, split into a deterministic 4-way file-stride matrix
+    # required lane, split into a deterministic 4-way file-level matrix
     # (#3251, 3 shards; #4655 raised it to 4 when the 3 shards reached the
-    # 660 s budget) so its serial wall runs as parallel shards.
+    # 660 s budget; #4809 split by measured file time instead of every
+    # 4th file) so its serial wall runs as parallel shards.
     #
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
@@ -389,13 +392,14 @@ jobs:
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 4 stride shards (#3251 started with 3; #4655 raised it to 4 after the
-      # slowest shard reached the 660 s budget — measure, then add shards, do
+      # 4 shards (#3251 started with 3; #4655 raised it to 4 after the
+      # slowest shard reached the 660 s budget — measure, then rebalance, do
       # not raise the budget). fail-fast: false — one shard's red tests must NOT
       # cancel the others, so a broad breakage surfaces every failing shard in
-      # one run (the fan-in still fails if ANY leg fails). To rebalance, change
-      # the shard count in BOTH the matrix and the `TOTAL` in the pytest step,
-      # in lockstep.
+      # one run (the fan-in still fails if ANY leg fails). To change the shard
+      # count, edit BOTH the matrix and the `TOTAL` in the pytest step, in
+      # lockstep. To rebalance the shards, refresh the measured file times
+      # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
@@ -543,7 +547,7 @@ jobs:
         # too.
         #
         # Sharded (#3251): every shard runs this checkout, because each
-        # shard's stride slice may include the spec-backed reconcile
+        # shard's file set may include the spec-backed reconcile
         # lanes; the cone-mode sparse + blob:none filter keeps it cheap
         # (~0.4 MB argocd-3.3 + … a few tens of MB total), and the
         # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
@@ -770,7 +774,7 @@ jobs:
         # accepting either model -- so this step suffices for the
         # unit lane's correctness signal without paying the ``lg``
         # download wall every run. Each shard provisions the sm model
-        # (its stride slice may include the Tier-2 lanes); the ~12 MB
+        # (its file set may include the Tier-2 lanes); the ~12 MB
         # download is cheap enough to not warrant caching.
         #
         # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
@@ -790,7 +794,7 @@ jobs:
         # template`. Without helm they skip, so a broken chart test could
         # stay hidden on main. Same pinned action and Helm version as
         # chart.yml and the helm-lint-template job below. Every shard
-        # needs it: the file stride can put a chart test file in any shard.
+        # needs it: the file split can put a chart test file in any shard.
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: v3.16.4
@@ -802,7 +806,7 @@ jobs:
         # interpreter against a synthetic config. Without php they skip,
         # so a fragment that changes the wrong user could stay hidden on
         # main. Same `sudo -n apt-get` pattern as the Go lane's C-toolchain
-        # step below. Every shard needs it: the file stride can put the
+        # step below. Every shard needs it: the file split can put the
         # test file in any shard.
         #
         # `apt-get update` exits 100 when any one package index fails to
@@ -865,10 +869,10 @@ jobs:
           # test_g07_vsphere_canary.py (fixture-level backstop in
           # vcenter_spec_path); rule of record in
           # docs/decisions/spec-reconcile-guards-standard.md. The
-          # canary module lands in exactly one shard's stride slice, so
-          # this opt-out must stay on every shard.
+          # canary module lands in exactly one shard, so this opt-out
+          # must stay on every shard.
           MEHO_SKIP_SPEC_INGEST_TESTS: "1"
-        # PARALLELIZED two ways now (#3251): file-STRIDE across shards
+        # PARALLELIZED two ways now (#3251): by test FILE across shards
         # (this matrix) AND pytest-xdist WITHIN each shard. #585 unblocked
         # xdist by adding process-wide global-registry snapshot/restore +
         # deterministic MCP-module import in tests/conftest.py, eliminating
@@ -877,8 +881,8 @@ jobs:
         # --dist loadscope already does across workers (whole modules stay
         # together, conftest semantics are identical to a full run), so a
         # suite that is xdist-safe is shard-safe — proven live by the
-        # #3172/#3177 python-coverage sweep, which runs the identical
-        # file-stride split (over a superset of these files) green.
+        # #3172/#3177 python-coverage sweep, which runs a file-level
+        # split (over a superset of these files) green.
         # Worker count is -n 3 (lowered -n 6 → -n 4 per #1901 for CPU starvation,
         # then -n 4 → -n 3 for MEMORY headroom when the whole-suite lane OOM-killed
         # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/4 the
@@ -906,21 +910,26 @@ jobs:
         # non-blocking, sharded `python-coverage` + `python-coverage-combine`
         # jobs below (#1982/#1987/#3172).
         run: |
-          # Deterministic stride shard (#3251, mirrors the #3172/#3177
-          # python-coverage split): the sorted test-file list, every
-          # TOTAL-th file to this shard. File-level split keeps conftest /
-          # loadscope semantics identical to a full run; stride (vs
-          # contiguous blocks) spreads the heavyweight suites across shards.
-          # The four shards partition the full set exactly (NR mod 4 hits
-          # each residue once). tests/integration stays out (→ python-
-          # integration) and tests/migrations stays out (→ python-migration-
-          # tests), matching the pre-shard lane's `--ignore` of both.
+          # Deterministic split by measured file time (#4809; #3251 used
+          # every TOTAL-th file of the sorted list, which put the slow
+          # files unevenly: shard 4 ran 613 s against 465 s for shard 2).
+          # tests/_unit_shard_split.py sorts the files slowest first and
+          # gives each file to the shard with the least time so far, using
+          # the seconds in tests/_unit_shard_durations.json; a file without
+          # a measurement counts as the median. File-level split keeps
+          # conftest / loadscope semantics identical to a full run, and the
+          # four shards partition the full set exactly (every file lands in
+          # one shard; tests/test_unit_shard_split.py pins that).
+          # tests/integration stays out (→ python-integration) and
+          # tests/migrations stays out (→ python-migration-tests), matching
+          # the pre-shard lane's `--ignore` of both. The splitter prints
+          # the file count and the predicted seconds per shard on stderr.
           TOTAL=4
           SHARD="${{ matrix.shard }}"
-          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
+          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_shard_split.py --shard "${SHARD}" --total "${TOTAL}")
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
           if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
-            echo "::error::shard ${SHARD} selected 0 test files — stride selection broken"
+            echo "::error::shard ${SHARD} selected 0 test files — shard split broken"
             exit 1
           fi
           # Per-shard perf-budget guard — early warning for CI-perf creep (the
@@ -936,8 +945,9 @@ jobs:
           #   MEHO_FIXTURE_TIMING_FILE=/tmp/fixt MEHO_LIFESPAN_TIMING=/tmp/lifespan
           # then `uv run python tests/_perf_timing_report.py` to attribute the wall.
           # If ONE shard consistently trips while the others are comfortable, the
-          # stride is unbalanced by a heavy module — rebalance (raise the shard
-          # count in the matrix + TOTAL) rather than bumping only this budget.
+          # measured file times are stale — refresh tests/_unit_shard_durations.json
+          # (see tests/_unit_shard_split.py) rather than bumping only this budget.
+          # Add a shard (matrix + TOTAL) only when all shards are near the budget.
           budget_s=660
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
@@ -952,14 +962,38 @@ jobs:
           # unit tests (the Alembic upgrade/downgrade round-trips, ~55 s on
           # a loaded 3-worker box); raise it only with a --durations
           # measurement showing a legitimate test near it.
+          # --junitxml (#4809): the per-test times of this shard, uploaded
+          # by the step below. They are the input for refreshing
+          # tests/_unit_shard_durations.json (see tests/_unit_shard_split.py).
+          # xunit1, not the default xunit2, because only xunit1 writes the
+          # test file name on every test case.
           uv run pytest -n 3 --dist loadscope --maxfail=1 \
-            --timeout=180 --timeout-method=signal "${SHARD_FILES[@]}"
+            --timeout=180 --timeout-method=signal \
+            -o junit_family=xunit1 --junitxml=pytest-unit-shard.xml "${SHARD_FILES[@]}"
           dur=$(( $(date +%s) - start ))
           echo "::notice title=Unit pytest wall (shard ${SHARD}/${TOTAL})::${dur}s (budget ${budget_s}s per shard; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then
             echo "::error title=Unit perf budget exceeded (shard ${SHARD}/${TOTAL})::shard pytest ${dur}s > per-shard budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s (MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py — #793/#827). Amortize the cost or rebalance the shards; do not just bump the budget."
             exit 1
           fi
+
+      - name: Upload per-test times (input for the shard split)
+        # #4809: tests/_unit_shard_split.py balances the shards with the
+        # seconds in tests/_unit_shard_durations.json. Refresh that file
+        # from these artifacts (one per shard) of a green run; the module
+        # docstring has the commands. Uploaded whenever the file exists, so
+        # a shard that ran over the budget still shows where the time went.
+        # continue-on-error + timeout-minutes: a failed or hung upload must
+        # never fail or hold the shard.
+        if: always() && hashFiles('backend/pytest-unit-shard.xml') != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: python-unit-shard-junit-${{ matrix.shard }}
+          path: backend/pytest-unit-shard.xml
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Print peak memory
         # Prints how much memory this job's runner container used and how many
@@ -1087,7 +1121,7 @@ jobs:
           shards='${{ needs.python-unit-shard.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 4 stride legs): ${shards}"
+          echo "python-unit-shard (aggregate of all 4 shard legs): ${shards}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -1126,14 +1160,14 @@ jobs:
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest stride shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest stride shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest stride shards passed."
+            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest shards passed."
           fi
 
   python-coverage:
@@ -1998,7 +2032,7 @@ jobs:
     # Runs the relocated backend/tests/migrations/ suite: per-migration
     # data-transform assertions, the alembic upgrade/downgrade round-trip,
     # and the 3 pgvector-container forward-compat rollback tests. The
-    # required unit lane (the python-unit-shard stride matrix) excludes
+    # required unit lane (the python-unit-shard matrix) excludes
     # tests/migrations from its find, so this job carries the deep
     # per-migration coverage — but only on
     # migration-touching PRs, gated by the `changes` job.

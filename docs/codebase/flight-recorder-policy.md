@@ -12,7 +12,7 @@ This surface (#3272, #3447) is the operator-plane read/write path for the
 capture policy.
 
 It is an **operator-plane** surface: REST + CLI only, gated at the
-`tenant_admin` tier. It is deliberately **not** on the 25-tool agent working
+`tenant_admin` tier. It is deliberately **not** on the agent working
 surface and has **no MCP tool** — enabling capture is a governance decision, an
 operator action, not an agent one. (Simplest correct answer per postulate 5:
 REST + CLI, no MCP tool at all.)

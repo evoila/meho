@@ -265,7 +265,7 @@ stat / alert / resource / property sets reduce to a JSONFlux handle at the dispa
 layer.
 
 **Operation contracts.** The six ops meet the VMware operation-contract check
-(`backend/tests/test_vmware_operation_contracts.py`). Their response schemas
+(`backend/tests/test_operation_contracts.py`). Their response schemas
 live in `_response_schemas.py` and use the field names of the pinned
 `vcf-operations-9.0` Suite API file (`version`, `alerts`, `resources`,
 `stats-of-resources`, `resource-kind-attributes`, `product-licensing`,

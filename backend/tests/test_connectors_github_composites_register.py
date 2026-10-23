@@ -42,7 +42,7 @@ from meho_backplane.operations.typed_register import (
     clear_typed_op_registrars,
 )
 from meho_backplane.settings import get_settings
-from tests.test_vmware_operation_contracts import OperationContract, check_operation
+from tests.test_operation_contracts import OperationContract, check_operation
 
 _EXPECTED_OP_IDS: tuple[str, ...] = (
     "gh.composite.pr_status_summary",

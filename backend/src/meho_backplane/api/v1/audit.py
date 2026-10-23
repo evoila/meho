@@ -136,6 +136,7 @@ from meho_backplane.audit_query import (
     InvalidCursorError,
     MyRecentPage,
     UnsupportedFilterError,
+    count_loose_rows_in_forest,
     parse_duration,
     query_audit,
     replay_session,
@@ -540,6 +541,10 @@ async def replay(
     :func:`replay_session`, so a runaway session never materializes its
     tree just to be rejected — the recursive build is skipped entirely.
 
+    The 200 body also carries ``loose_row_count`` (#4670): the nodes in
+    the tree whose parent id names no row in the tenant — see
+    :func:`~meho_backplane.audit_query.count_loose_rows_in_forest`.
+
     The 200 body also carries ``excluded_null_session_count`` (#2700):
     the tenant-wide tally of ``method=MCP`` rows with a NULL
     ``agent_session_id`` (clients that never negotiated a session).
@@ -577,6 +582,11 @@ async def replay(
             tenant_id=operator.tenant_id,
             session=session,
         )
+        loose_row_count = await count_loose_rows_in_forest(
+            root,
+            tenant_id=operator.tenant_id,
+            session=session,
+        )
 
     structlog.contextvars.bind_contextvars(audit_row_count=row_count)
     return AuditReplayResult(
@@ -585,4 +595,5 @@ async def replay(
         tenant_id=operator.tenant_id,
         row_count=row_count,
         excluded_null_session_count=excluded_null_session_count,
+        loose_row_count=loose_row_count,
     )

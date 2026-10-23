@@ -1939,9 +1939,17 @@ type AuditQueryResult struct {
 // rows belong to no session), and mirrors the honest
 // “when_negotiated“ capture label the deploy's “/status“ reports.
 //
+// “loose_row_count“ (#4670) is the number of nodes in “root“ whose
+// “parent_audit_id“ names a row that does not exist in the tenant: a
+// multi-step operation that stopped before its own row was saved
+// (“docs/decisions/composite-audit-when-a-step-waits.md“). Such rows
+// render as roots; this count tells them apart from real chain starts.
+// A root whose parent lives in another session is not counted.
+//
 // Frozen like the substrate models it carries.
 type AuditReplayResult struct {
 	ExcludedNullSessionCount int                `json:"excluded_null_session_count"`
+	LooseRowCount            int                `json:"loose_row_count"`
 	Root                     []ReplayNode       `json:"root"`
 	RowCount                 int                `json:"row_count"`
 	SessionId                openapi_types.UUID `json:"session_id"`

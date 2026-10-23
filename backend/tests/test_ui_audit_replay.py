@@ -283,6 +283,38 @@ def test_replay_unauthenticated_redirects_to_login() -> None:
 # ===========================================================================
 
 
+def test_replay_shows_loose_row_count() -> None:
+    """#4670: a node whose parent row does not exist is counted next to the tree."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_uuid = uuid.uuid4()
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=0,
+        op_id="agent.session.start",
+        agent_session_id=session_uuid,
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=1,
+        op_id="vsphere.vm.rename",
+        agent_session_id=session_uuid,
+        parent_audit_id=uuid.uuid4(),
+    )
+
+    session_id, _jwks, mock = _admin_replay()
+    try:
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/sessions/{session_uuid}/replay")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "1 loose row" in body
+    assert "badge-warning" in body
+    assert "parent row that does not exist" in body
+
+
 def test_replay_renders_tree_for_tenant_admin() -> None:
     """AC1(a): an admin lift renders the nested parent/child tree."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -315,6 +347,9 @@ def test_replay_renders_tree_for_tenant_admin() -> None:
     assert 'role="tree"' in body
     assert "agent.session.start" in body
     assert "vsphere.vm.list" in body
+    # #4670: every row has its parent, so the loose-row note reads zero.
+    assert "0 loose rows" in body
+    assert "badge-warning" not in body
     # The child node opens the T2 drawer on "details" click (per-node gate).
     assert f"/ui/audit/show/{child_id}" in body
     assert f"/ui/audit/show/{root_id}" in body

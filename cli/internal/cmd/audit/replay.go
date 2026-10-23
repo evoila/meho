@@ -218,6 +218,21 @@ func printReplayTree(w io.Writer, r *api.AuditReplayResult, maxDepth int) {
 	for i := range r.Root {
 		printReplayNode(w, &r.Root[i], "", i == len(r.Root)-1, 0, maxDepth)
 	}
+	printLooseRowNote(w, r.LooseRowCount)
+}
+
+// printLooseRowNote names the rows whose parent row does not exist. Such a
+// row renders as a root, so without the note it looks like a real start of
+// a chain. Silent when the count is zero.
+func printLooseRowNote(w io.Writer, count int) {
+	if count <= 0 {
+		return
+	}
+	noun := "rows"
+	if count == 1 {
+		noun = "row"
+	}
+	fmt.Fprintf(w, "\n%d loose %s: the parent row does not exist (a multi-step operation stopped before its own row was saved)\n", count, noun)
 }
 
 // printReplayNode renders one node and recurses into its children.

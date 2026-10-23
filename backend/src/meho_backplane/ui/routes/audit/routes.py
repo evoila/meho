@@ -104,6 +104,7 @@ from meho_backplane.audit_query import (
     ReplayNode,
     UnsupportedFilterError,
     count_event_classes,
+    count_loose_rows_in_forest,
     parse_duration,
     query_audit,
     replay_session,
@@ -534,6 +535,10 @@ async def _build_replay_context(
     and ``root=[]`` -- the empty state, **never a 404** -- so a foreign
     session is indistinguishable from an empty one (the same posture the REST
     route's ``root=[]`` / ``row_count=0`` 200 holds).
+
+    ``loose_row_count`` (#4670) is the number of nodes in the tree whose
+    parent id names no row in the tenant, the same number the REST and MCP
+    envelopes carry.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -548,6 +553,9 @@ async def _build_replay_context(
             "replay_row_cap": _REPLAY_ROW_CAP,
             "over_cap": False,
             "root": [],
+            # Nodes whose parent id names no row (#4670); set after the
+            # tree is built, 0 for the empty and over-cap states.
+            "loose_row_count": 0,
             # The T1 flat-query pivot the over-cap notice (and the page
             # header) link to: the supported ``agent_session_id`` filter
             # pre-bound to this session.
@@ -561,6 +569,11 @@ async def _build_replay_context(
 
         forest = await replay_session(
             session_id,
+            tenant_id=session.tenant_id,
+            session=db_session,
+        )
+        context["loose_row_count"] = await count_loose_rows_in_forest(
+            forest,
             tenant_id=session.tenant_id,
             session=db_session,
         )

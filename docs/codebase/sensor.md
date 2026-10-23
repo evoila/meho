@@ -27,6 +27,13 @@ by-IP probe reads a misleading 404 / `tls_error` whether the service is
 healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
 § *Vhost-routed probes by IP*.
 
+A second one watches MEHO itself: **loose audit rows** (#4670). The
+`safe`, targetless op `audit.loose_rows` on `audit-integrity-1.x` lists
+audit records whose parent row does not exist, and
+`connectors/audit/sensor_template.py` holds the ready Sensor body (once
+an hour; `$.recent_count` `gt` 0 → `degraded`, `gt` 10 → `critical`).
+See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
+
 ## Key types
 
 - `meho_backplane.db.models.Sensor` — the ORM row. 30 columns: identity

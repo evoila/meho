@@ -28,6 +28,7 @@
     over_cap        -- bool: whether the count exceeded the cap
     replay_row_cap  -- int: the backend cap (single-sourced)
     root            -- list[dict]: the projected node forest (empty when none)
+    loose_row_count -- int: nodes whose parent id names no row (#4670)
     flat_query_href -- str: the T1 flat-query pivot for this session
     csrf_token      -- str: the minted double-submit token
 -#}
@@ -63,6 +64,22 @@
       {% if over_cap %}
         {% include "audit/_replay_over_cap.html" %}
       {% elif root %}
+        <p class="mb-3 text-sm" id="audit-replay-loose-rows">
+          <span class="badge badge-sm {{ 'badge-warning' if loose_row_count else 'badge-ghost' }}">
+            {{ loose_row_count }} loose row{{ '' if loose_row_count == 1 else 's' }}
+          </span>
+          <span class="opacity-70">
+            {% if loose_row_count %}
+              Rows in this session point to a parent row that does not exist.
+              A multi-step operation stopped before its own row was saved. The
+              rows stay as they are; MEHO writes no repair row. Check the
+              approval queue before running the operation again.
+            {% else %}
+              Every row in this session has its parent row, or is a real start
+              of a chain.
+            {% endif %}
+          </span>
+        </p>
         {% include "audit/_replay_tree.html" %}
       {% else %}
         <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">

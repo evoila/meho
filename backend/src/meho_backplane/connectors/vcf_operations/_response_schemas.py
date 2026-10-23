@@ -288,9 +288,11 @@ VROPS_LICENSING_VCENTER_QUERY_RESPONSE = _object(
 VROPS_LICENSING_PAYLOAD_RESPONSE = _object(
     "The vendor answer, unchanged, under payload.",
     {
-        "payload": _field(
-            ["object", "array", "string", "null"],
-            "The answer of VCF Operations, as it is. The vendor does not publish its fields.",
-        ),
+        # No "type": the answer can be any JSON value.
+        "payload": {
+            "description": (
+                "The answer of VCF Operations, as it is. The vendor does not publish its fields."
+            ),
+        },
     },
 )

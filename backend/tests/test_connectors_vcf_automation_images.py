@@ -454,6 +454,26 @@ async def test_mapping_update_refuses_a_template_of_another_region(
     assert not patch.called
 
 
+async def test_mapping_update_refuses_a_template_of_another_cloud_account(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    # Same region id, but the template belongs to another vCenter account.
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        patch = _mount_change(mock, _profile(**{"RHEL 9": _UBUNTU}), patched={})
+        mock.get("/iaas/api/fabric-images/fi-other").respond(
+            200,
+            json={"id": "fi-other", "externalRegionId": "region-a", "cloudAccountIds": ["ca-2"]},
+        )
+        result = await run(
+            "vcfa.tenant.image_profile.mapping.update",
+            {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-other"},
+        )
+    assert result["result"]["status"] == "invalid_request"
+    assert "ca-2" in result["result"]["guidance"]
+    assert "nothing was written" in result["result"]["guidance"]
+    assert not patch.called
+
+
 async def test_mapping_update_fabric_image_500_is_connector_error(
     vcfa: VcfAutomationConnector,
 ) -> None:

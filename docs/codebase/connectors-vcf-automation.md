@@ -238,7 +238,9 @@ approval preview in `_images.py`, all on the tenant plane, in the group
   template, or a removed name does not exist; nothing written) or
   `invalid_request` (both or neither of `fabric_image_id` / `remove`, an
   unknown fabric image, or a template of another region; checked before
-  any write). When the `PATCH` answer lacks a name that was sent,
+  any write). A template of another cloud account is refused too: the
+  profile's `cloudAccountId` must be in the image's `cloudAccountIds`,
+  because a vSphere region id is unique only inside one vCenter. When the `PATCH` answer lacks a name that was sent,
   `guidance` names it.
 - **Approval card.** The preview builder reads the profile and the fabric
   image at park time and shows the old and the new template plus the

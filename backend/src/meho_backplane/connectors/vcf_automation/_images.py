@@ -328,6 +328,16 @@ def _region_problem(profile: dict[str, Any], image: dict[str, Any]) -> str | Non
             f"fabric image {image.get('id')!r} is in region {have!r}, but the profile is "
             f"for region {want!r}; pick a template of the profile's region"
         )
+    # For vSphere the region id is a datacenter id, unique only inside one
+    # vCenter, so a template of another vCenter can share it. The cloud
+    # account tells the two vCenters apart.
+    account, accounts = profile.get("cloudAccountId"), image.get("cloudAccountIds")
+    if account and isinstance(accounts, list) and accounts and account not in accounts:
+        return (
+            f"fabric image {image.get('id')!r} belongs to cloud account(s) {accounts!r}, "
+            f"but the profile is for cloud account {account!r}; pick a template of the "
+            "profile's cloud account"
+        )
     return None
 
 

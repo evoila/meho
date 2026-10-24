@@ -2,33 +2,16 @@
 # Copyright (c) 2026 evoila Group
 #
 # Values for `helm template` when build-download.sh and check-download.sh
-# list the images of the chart. The built-in parts of the core are on, as in
-# the form-2 install. chart/values-single-node.yaml of the download comes
-# after this file, so its settings count too. The other values are
-# placeholders that the chart's schema requires; they change no image.
+# list the images of the chart. chart/values-single-node.yaml of the
+# download comes after this file and turns the built-in parts on. This file
+# holds only the placeholders the chart's schema requires, in the shape of
+# the place values install.sh writes (/etc/meho/values-place.yaml). They
+# change no image.
 ingress:
   host: meho.invalid
-  tls:
-    secretName: meho-tls
-postgres:
-  credentialsSecret: meho-postgres
-vault:
-  address: https://vault.invalid
-keycloak:
-  issuer: https://meho.invalid/auth/realms/meho
-config:
-  keycloakIssuerUrl: https://meho.invalid/auth/realms/meho
-  keycloakAudience: meho-backplane
-  vaultAddr: https://vault.invalid
-networkPolicy:
-  postgresCIDR: 10.0.1.0/24
-  vaultCIDR: 10.0.2.0/24
-  keycloakCIDR: 10.0.3.0/24
-corePostgres:
-  enabled: true
 coreKeycloak:
-  enabled: true
   hostname: meho.invalid
   firstTenantId: 3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c
-coreVault:
-  enabled: true
+networkPolicy:
+  postgresCIDR: 10.42.0.0/16
+  vaultCIDR: 10.42.0.0/16

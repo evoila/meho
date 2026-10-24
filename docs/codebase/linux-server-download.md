@@ -51,7 +51,7 @@ test keeps the two in step.
 | `packaging/common.sh` | The pinned versions and checksums, output helpers, the size check and the layout check. |
 | `packaging/images.sh` | The image list, the digests, the fetch into one OCI image layout, and the archive check. |
 | `packaging/parts.sh` | One function per part of the download, and the licence `README.txt`. |
-| `packaging/render-values.yaml` | Values for `helm template`: the core on, and placeholders the chart's schema requires. |
+| `packaging/render-values.yaml` | Placeholders for `helm template`, the keys the chart's schema requires, in the shape of the place values `install.sh` writes. `chart/values-single-node.yaml` comes after it and turns the core on. |
 | `packaging/image-sources.txt` | The licence and the source of each image repository. The build stops when an image has no line. |
 | `packaging/licenses/*.txt` | Licence texts of the images that are not under Apache-2.0, as their projects publish them. |
 | `values-single-node.yaml` | The values for one node, shipped as `chart/values-single-node.yaml`. |

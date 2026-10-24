@@ -91,6 +91,7 @@ from meho_backplane.connectors.vault.ops import (
     vault_kv_write_target_path,
 )
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client, install_fake_vault
@@ -1034,6 +1035,12 @@ _MOUNT_PREFIXED_PATH_CASES: list[tuple[str, dict[str, Any]]] = [
     ("vault.kv.metadata.delete", {"path": "secret/meho/test"}),
 ]
 
+#: The KV-v2 verbs whose tags or pin mark them as sending a secret, so the
+#: dispatcher withholds their error text (#4854).
+_SECRET_TEXT_WITHHELD_OPS = frozenset(
+    {"vault.kv.read", "vault.kv.list", "vault.kv.put", "vault.kv.patch"}
+)
+
 
 @pytest.mark.parametrize(
     "op_id,params",
@@ -1069,10 +1076,16 @@ async def test_execute_kv_op_mount_included_path_returns_path_shape_error(
 
     # The message names the mistake (the mount segment) and the
     # mount-relative form to use instead — an actionable error, not an
-    # opaque 403 (docs/codebase/error-message-shape.md).
+    # opaque 403 (docs/codebase/error-message-shape.md). For an op that
+    # sends or holds a secret (a ``secret`` tag or a ``credential_write``
+    # pin) the dispatcher withholds the error text (#4854); the class above
+    # still names the mistake.
     message = result.extras.get("exception_message", "")
-    assert "secret/" in message
-    assert "mount-relative" in message
+    if op_id in _SECRET_TEXT_WITHHELD_OPS:
+        assert message == VENDOR_TEXT_WITHHELD
+    else:
+        assert "secret/" in message
+        assert "mount-relative" in message
 
     # hvac is never reached: no JWT/OIDC login, and the verb's own call
     # log stays empty. The guard short-circuits ahead of every Vault call.
@@ -1096,10 +1109,13 @@ async def test_execute_kv_op_mount_included_path_honors_explicit_non_default_mou
     A non-default ``mount="kv-prod"`` with ``path="kv-prod/team"`` is the
     same doubled-prefix mistake and is rejected the same way; the message
     names the supplied mount and the mount-relative remainder.
+
+    It uses ``vault.kv.versions``: ``vault.kv.read`` carries a ``secret``
+    tag, so the dispatcher withholds its error text (#4854).
     """
     fake = install_fake_client(monkeypatch)
     result = await _dispatch_vault(
-        "vault.kv.read",
+        "vault.kv.versions",
         {"mount": "kv-prod", "path": "kv-prod/team/api-key"},
     )
 
@@ -1109,7 +1125,7 @@ async def test_execute_kv_op_mount_included_path_honors_explicit_non_default_mou
     assert "kv-prod/" in message
     assert "'team/api-key'" in message
     assert fake.auth.jwt.login_calls == []
-    assert fake.secrets.kv.v2.read_calls == []
+    assert fake.secrets.kv.v2.versions_calls == []
 
 
 async def test_execute_kv_op_path_equal_to_mount_is_not_rejected(

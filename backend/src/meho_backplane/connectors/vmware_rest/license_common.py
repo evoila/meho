@@ -32,7 +32,6 @@ both can import it without an import cycle.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -57,7 +56,6 @@ __all__ = [
     "OP_UPDATE_ASSIGNED_LICENSE",
     "LicenseInventory",
     "assignment_row",
-    "hide_license_keys",
     "is_evaluation",
     "license_row",
     "mask_license_key",
@@ -108,10 +106,6 @@ _VISIBLE_KEY_CHARS: Final = 5
 #: The key vSphere shows for its built-in evaluation licence.
 _EVALUATION_KEY: Final = "00000-00000-00000-00000-00000"
 _EVALUATION_EDITION: Final = "eval"
-#: A key in the vSphere shape: five groups of five letters or digits.
-_KEY_SHAPE: Final = re.compile(
-    r"(?<![A-Za-z0-9])[A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4}(?![A-Za-z0-9])"
-)
 
 
 def mask_license_key(key: object) -> str | None:
@@ -128,23 +122,6 @@ def mask_license_key(key: object) -> str | None:
         return "*" * len(key)
     head, tail = key[:-_VISIBLE_KEY_CHARS], key[-_VISIBLE_KEY_CHARS:]
     return "".join(char if char == "-" else "*" for char in head) + tail
-
-
-def _mask_match(match: re.Match[str]) -> str:
-    return mask_license_key(match.group(0)) or ""
-
-
-def hide_license_keys(text: str, *keys: str) -> str:
-    """Return *text* with every licence key in it masked.
-
-    Masks each of *keys* wherever it appears (any letter case), then every
-    other value in the vSphere key shape. Use it on vendor fault text before
-    that text reaches a result, an audit row or a log line.
-    """
-    for key in keys:
-        if key:
-            text = re.sub(re.escape(key), _mask_match, text, flags=re.IGNORECASE)
-    return _KEY_SHAPE.sub(_mask_match, text)
 
 
 def is_evaluation(info: dict[str, Any]) -> bool:

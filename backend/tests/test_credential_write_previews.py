@@ -156,6 +156,7 @@ async def test_k8s_secret_create_shows_key_names_and_refs_not_values() -> None:
             "string_data": {"password": _SECRET},
             "data": {"tls.key": _SECRET},
             "string_data_secret_ref": {"api_token": "vault:apps/api#token"},
+            "string_data_secret_mount": "kv-apps",
         },
     )
     assert preview["resource"] == "secret"
@@ -166,6 +167,8 @@ async def test_k8s_secret_create_shows_key_names_and_refs_not_values() -> None:
     assert preview["inline_key_names"] == ["password", "tls.key"]
     assert preview["string_data_secret_ref"] == {"api_token": "vault:apps/api#token"}
     assert "data_secret_ref" not in preview
+    assert preview["string_data_secret_mount"] == "kv-apps"
+    assert "data_secret_mount" not in preview
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,8 @@ id and the target.
 op_id                  preview
 =====================  ========================================================
 ``k8s.secret.create``  ``{name, namespace, type, key_names, inline_key_names,
-                       string_data_secret_ref?, data_secret_ref?}``
+                       string_data_secret_ref?, data_secret_ref?,
+                       string_data_secret_mount?, data_secret_mount?}``
 ``k8s.job.create``     ``{name, namespace, service_account_name?,
                        containers, init_containers}``; each container
                        is ``{name, image, env_var_names, env_from,
@@ -27,6 +28,8 @@ What is never shown
 * A Secret value: only the key names. A ``*_secret_ref`` map is shown,
   because it holds a store path per key (``vault:<path>#<field>``), not a
   value. The value is read from the store only when the approved call runs.
+  The ``*_secret_mount`` names are shown too: they say which store mount the
+  paths are read from.
 * A Job ``env`` value: only the variable names. ``env_from`` shows the names
   of the Secrets and ConfigMaps the pod loads, not their content.
 * A Job ``command`` / ``args``: only their size in bytes, because a command
@@ -75,6 +78,10 @@ async def _secret_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         preview["string_data_secret_ref"] = string_refs
     if data_refs is not None:
         preview["data_secret_ref"] = data_refs
+    for mount_field in ("string_data_secret_mount", "data_secret_mount"):
+        mount = params.get(mount_field)
+        if mount:
+            preview[mount_field] = str(mount)
     return preview
 
 

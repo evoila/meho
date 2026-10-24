@@ -202,8 +202,9 @@ work item, plus approval-bound minting.
   at-most-once acceptance — the signature does not replace central state.
   The signed `params_hash` is the work-item digest `params_digest`, a plain
   SHA-256 of the params: the runner computes it again and holds no server
-  key. The approval lookup and the mint audit row use the keyed hashes
-  instead (see the params hash section in `docs/codebase/approvals.md`).
+  key. The approval lookup, the mint audit row and the effect audit rows use
+  the keyed hashes instead (see the params hash section in
+  `docs/codebase/approvals.md`).
 - **Edge verification.** `_verify_remote_write_signature` (`runner/executor.py`)
   reconstructs the canonical payload from the delivered item, verifies the
   signature with the provisioned public key (integrity + target-scope), then
@@ -437,7 +438,12 @@ result submission back — a tampered report is **not** accepted, so the capabil
 stays unconsumed and the alarm below can still fire — and writes a durable
 `gateway.command.effect.quarantine` **security** audit row. The keying
 (`record.runner_id` bound to the token-authenticated runner) is why one runner
-cannot extend another's chain.
+cannot extend another's chain. These checks use the record's plain values. The
+`audit_log` row then stores keyed hashes in `params_hash`, `record_hash` and
+`signature`: `params_hash` is the same audit hash the mint row carries
+(computed from the command's stored params), or the keyed hash of the
+runner's digest when no command matches. The plain `record_hash` stays in the
+chain head for the next batch's checks.
 
 **Un-reported-mint security alarm** (`gateway/unreported_mint.py`, the
 `gateway/deadman.py` mould). A central-clock, advisory-lock-elected,

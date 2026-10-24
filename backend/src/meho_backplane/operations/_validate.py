@@ -56,6 +56,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "InvalidOpSchemaError",
+    "compute_audit_digest_hash",
     "compute_audit_params_hash",
     "compute_params_hash",
     "ingested_schema_for_validation",
@@ -68,6 +69,10 @@ __all__ = [
 #: Label for the key derivation in :func:`_params_hash_key`. It keeps this
 #: key different from any other key made from the same secret.
 _PARAMS_HASH_KEY_LABEL: Final[bytes] = b"meho-params-hash-key-v1"
+
+#: Prefix for :func:`compute_audit_digest_hash`, so its output never equals a
+#: params hash of the same text.
+_DIGEST_HASH_PREFIX: Final[bytes] = b"meho-audit-digest-v1\x00"
 
 
 class InvalidOpSchemaError(Exception):
@@ -159,6 +164,21 @@ def compute_audit_params_hash(params: Any) -> str:
     """
     masked, _secret_found = scrub_secret_named_values(params)
     return _keyed_params_hash(masked)
+
+
+def compute_audit_digest_hash(value: str) -> str:
+    """Return the keyed hash an audit record stores in place of *value*.
+
+    For values that are computed from a call's params elsewhere, where the
+    params themselves are not at hand: the satellite runner's params digest,
+    its effect chain ``record_hash`` and the work item's signature. The audit
+    row stores HMAC-SHA256 under the server key (with its own prefix)
+    instead, so the stored value cannot be computed again from the params
+    without the server key. Equal values still give equal hashes inside one
+    install.
+    """
+    message = _DIGEST_HASH_PREFIX + value.encode("utf-8")
+    return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
 
 
 def _unkeyed_params_hash(params: dict[str, Any]) -> str:

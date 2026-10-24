@@ -14,14 +14,18 @@ Fail-closed conformance for mechanism 4's centre half
 * a **tampered body** (record_hash no longer re-derives) is flagged;
 * a **broken link** (prev_hash not matching the accepted head) is flagged;
 * a runner **cannot forge a sibling runner's** chain (the record's ``runner_id``
-  must equal the authenticated runner).
+  must equal the authenticated runner);
+* the stored rows hold keyed hashes, never the runner's plain digest, record
+  hash or signature, while the chain head keeps the plain hash for the checks.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -35,7 +39,12 @@ from meho_backplane.gateway.effect_ingest import (
     EffectChainTamperError,
     ingest_effect_records,
 )
+from meho_backplane.operations._validate import (
+    compute_audit_digest_hash,
+    compute_audit_params_hash,
+)
 from meho_backplane.runner.effect_audit import EffectAuditChain, EffectAuditRecord
+from meho_backplane.runner.work_item_signing import params_digest
 from meho_backplane.settings import get_settings
 
 _RUNNER = "runner-w"
@@ -77,6 +86,8 @@ async def _seed_minted_command(
     tenant_id: uuid.UUID,
     command_id: uuid.UUID,
     runner_id: str = _RUNNER,
+    params: dict[str, Any] | None = None,
+    params_hash: str = "ph-1",
 ) -> uuid.UUID:
     """Seed a minted remote-write command + its synchronous mint audit row.
 
@@ -102,9 +113,9 @@ async def _seed_minted_command(
                 tenant_id=tenant_id,
                 runner_id=runner_id,
                 op_id="vmware.vm.tag.set",
-                params={"tag": "prod"},
+                params=params if params is not None else {"tag": "prod"},
                 enqueued_by_sub="op-admin",
-                params_hash="ph-1",
+                params_hash=params_hash,
                 safety_level="caution",
                 mint_audit_id=mint_audit_id,
                 signature="sig-1",
@@ -119,6 +130,7 @@ def _build_records(
     *,
     runner_id: str,
     command_id: str,
+    params_hash: str = "ph-1",
 ) -> list[EffectAuditRecord]:
     """A valid two-record (intent + outcome) chain for one command.
 
@@ -129,14 +141,14 @@ def _build_records(
     chain.record_intent(
         command_id=command_id,
         op_id="vmware.vm.tag.set",
-        params_hash="ph-1",
+        params_hash=params_hash,
         signature="sig-1",
         target_scope="scope-1",
     )
     chain.record_outcome(
         command_id=command_id,
         op_id="vmware.vm.tag.set",
-        params_hash="ph-1",
+        params_hash=params_hash,
         signature="sig-1",
         target_scope="scope-1",
         outcome="ok",
@@ -287,3 +299,89 @@ async def test_runner_cannot_forge_a_sibling_runners_chain(tmp_path: Path) -> No
             )
     assert "another runner" in exc.value.reason
     assert await _effect_rows(tenant) == []
+
+
+async def _ingest(tenant: uuid.UUID, records: list[EffectAuditRecord]) -> list[AuditLog]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await ingest_effect_records(
+            session, operator=_operator(tenant), runner_id=_RUNNER, records=records
+        )
+        await session.commit()
+    return sorted(await _effect_rows(tenant), key=lambda r: r.payload["seq"])
+
+
+@pytest.mark.asyncio
+async def test_effect_rows_store_keyed_hashes_not_the_runner_values(tmp_path: Path) -> None:
+    """The audit rows hold keyed hashes; the plain values stay in the chain head.
+
+    ``params_hash`` is the masked, keyed audit hash of the command's stored
+    params (the value its mint row carries), so the password does not change
+    it. ``record_hash`` and ``signature`` are keyed hashes too. The chain head
+    keeps the plain ``record_hash``, so the next batch is still checked.
+    """
+    tenant = uuid.uuid4()
+    command_id = uuid.uuid4()
+    params = {"username": "user-a", "password": "first-test-value"}
+    digest = params_digest(params)
+    await _seed_tenant(tenant)
+    await _seed_minted_command(
+        tenant_id=tenant, command_id=command_id, params=params, params_hash=digest
+    )
+    records = _build_records(
+        tmp_path, runner_id=_RUNNER, command_id=command_id.hex, params_hash=digest
+    )
+
+    rows = await _ingest(tenant, records)
+
+    other_password = compute_audit_params_hash({**params, "password": "second-test-value"})
+    assert len(rows) == 2
+    for row, record in zip(rows, records, strict=True):
+        assert row.payload["params_hash"] == compute_audit_params_hash(params) == other_password
+        assert row.payload["record_hash"] == compute_audit_digest_hash(record.record_hash)
+        assert row.payload["signature"] == compute_audit_digest_hash("sig-1")
+        stored = json.dumps(row.payload)
+        for plain in (digest, record.record_hash, "sig-1"):
+            assert plain not in stored
+    async with get_sessionmaker()() as session:
+        head = (
+            await session.execute(
+                select(RunnerEffectChain).where(RunnerEffectChain.tenant_id == tenant)
+            )
+        ).scalar_one()
+    assert head.last_hash == records[-1].record_hash
+
+
+@pytest.mark.asyncio
+async def test_effect_row_without_its_command_stores_the_keyed_digest(tmp_path: Path) -> None:
+    """With no matching command, the row stores the keyed hash of the runner's digest."""
+    tenant = uuid.uuid4()
+    await _seed_tenant(tenant)
+    records = _build_records(tmp_path, runner_id=_RUNNER, command_id=uuid.uuid4().hex)
+
+    rows = await _ingest(tenant, records)
+
+    assert len(rows) == 2
+    for row in rows:
+        assert row.payload["linked"] is False
+        assert row.payload["params_hash"] == compute_audit_digest_hash("ph-1")
+
+
+@pytest.mark.asyncio
+async def test_effect_row_with_another_digest_does_not_use_the_command_params(
+    tmp_path: Path,
+) -> None:
+    """A record whose digest is not its command's gets the keyed digest, not the params hash."""
+    tenant = uuid.uuid4()
+    command_id = uuid.uuid4()
+    await _seed_tenant(tenant)
+    await _seed_minted_command(tenant_id=tenant, command_id=command_id, params_hash="ph-other")
+    records = _build_records(tmp_path, runner_id=_RUNNER, command_id=command_id.hex)
+
+    rows = await _ingest(tenant, records)
+
+    assert len(rows) == 2
+    for row in rows:
+        assert row.payload["linked"] is True
+        assert row.payload["params_hash"] == compute_audit_digest_hash("ph-1")
+        assert row.payload["params_hash"] != compute_audit_params_hash({"tag": "prod"})

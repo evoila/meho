@@ -683,6 +683,7 @@ const (
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
 	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
 	TargetCreateProductRke2       TargetCreateProduct = "rke2"
+	TargetCreateProductSalt       TargetCreateProduct = "salt"
 	TargetCreateProductSddc       TargetCreateProduct = "sddc"
 	TargetCreateProductSrm        TargetCreateProduct = "srm"
 	TargetCreateProductTempo      TargetCreateProduct = "tempo"

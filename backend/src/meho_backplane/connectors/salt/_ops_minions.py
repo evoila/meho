@@ -202,7 +202,10 @@ _KEY_LIST = SaltTypedOp(
         },
     },
     group_key=_GROUP_MINIONS,
-    tags=(*_TAGS, "minion", "key"),
+    # Not tagged "key": that word marks an operation that sends a secret
+    # (SECRET_FAMILY_TAGS), so a trace would keep no body and an error would
+    # lose the vendor's text. A minion key row holds no secret.
+    tags=(*_TAGS, "minion", "acceptance"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={

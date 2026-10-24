@@ -9,6 +9,33 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.37.0](https://github.com/evoila/meho/releases/tag/v0.37.0) — 2026-10-24
+
+- **Security fix: deployment passwords in traces.** For tenants with the
+  flight recorder on, MEHO kept the full request and answer of seven
+  deployment and depot operations in its traces. They hold deployment
+  passwords and licence keys. MEHO now leaves them out. Traces written
+  before the upgrade keep them until they expire: check your trace
+  retention, and change those passwords and keys if needed.
+- **More VMware work through MEHO.** VM snapshots, vSphere licences, the
+  vCenter appliance's local accounts and vCenter alarms. Every change
+  waits for approval. A second person approves snapshot deletes, licence
+  assignments and appliance password changes.
+- **Licence keys stay masked.** The vSphere, SDDC Manager and VCF
+  Operations licence reads show only the last 5 characters of a key.
+  `sddc.license.list` now returns `key_masked` instead of `key`, so
+  scripts that read `key` must change.
+- **New connectors and reads.** Site Recovery Manager, eight HCX reads,
+  GitHub repository create and view, VCF Automation operations for
+  networks, deployments and image names, and a VCF Operations property
+  read.
+- **Two 0.36.0 problems fixed.** A `vault.kv.patch` with the right Vault
+  rights waits for approval again, and sensors check their rule against
+  the full result, so they no longer turn `unknown` when an answer is
+  shortened.
+- **Before you upgrade.** No database migration. If you come from
+  0.35.x, do the 0.36.0 steps first.
+
 ## [v0.36.0](https://github.com/evoila/meho/releases/tag/v0.36.0) — 2026-10-23
 
 - **Security fixes: logins, grants and secrets.** Everyone who used the

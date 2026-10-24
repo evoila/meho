@@ -173,24 +173,25 @@ _API_FILE_GET_INSTRUCTIONS: dict[str, object] = {
         ),
     },
     "output_shape": (
-        "{path, status, content_type, redirect_path, size, sha256, redacted_values, "
+        "{path, status, content_type, redirect_path, size, sha256, secrets_replaced, "
         "parts, text_parts: [{index, text}], version, build, iaas_api_version, "
         "version_error}. version and build come from the Orchestrator inside the "
         "appliance (GET /vco/api/about); iaas_api_version is the IaaS API date label "
         "(GET /iaas/api/about). A large answer comes back as a result handle whose rows "
         "are the text parts: page it with result_query (offset, limit; a small limit "
-        "such as 2). Join the text of all parts in index order to get the file. "
-        "redacted_values says how many secret values (a password, token, key or private "
-        "key) were replaced with a [REDACTED:...] placeholder; when it is 0 the joined "
-        "text is the exact file and its SHA-256 equals sha256."
+        "such as 2). The text is the checked copy of the file: the parsed file (JSON, "
+        "YAML, XML or HTML) written back, with every value under a secret name "
+        "replaced by [REDACTED:param_name]; secrets_replaced counts the replaced "
+        "values. Join the text of all parts in index order to get the copy; its "
+        "SHA-256 equals sha256."
     ),
     "next_step": (
         "On a landing page, find the file paths the page loads and read each one "
         "with this same operation. On a 3xx status, read redirect_path next. On 403 "
-        "or 404 the file is not served at that path; report the status. When "
-        "redacted_values is not 0, say so: the text is not the exact file. A file too "
-        "big for one stored result, or text that MEHO's redaction would still change, "
-        "stops with an error that says why."
+        "or 404 the file is not served at that path; report the status. A file that "
+        "does not parse, or is JavaScript, CSS or plain text, is refused; report it "
+        "instead of retrying. A file too big for one stored result, or text that "
+        "MEHO's redaction would still change, stops with an error that says why."
     ),
 }
 

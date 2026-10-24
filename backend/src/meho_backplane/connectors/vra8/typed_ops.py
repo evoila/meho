@@ -229,20 +229,18 @@ _API_FILE_GET_RESPONSE: dict[str, Any] = {
         },
         "size": {
             "type": ["integer", "null"],
-            "description": "File size in bytes; null when the status is not 2xx.",
+            "description": "Size of the checked copy in bytes; null when the status is not 2xx.",
         },
         "sha256": {
             "type": _TEXT_OR_NULL,
-            "description": (
-                "SHA-256 (hex) of the file bytes as served; null when the status is not 2xx."
-            ),
+            "description": ("SHA-256 (hex) of the checked copy; null when the status is not 2xx."),
         },
-        "redacted_values": {
+        "secrets_replaced": {
             "type": "integer",
             "description": (
-                "How many secret values (a password, token, key or private key) were "
-                "replaced with a [REDACTED:...] placeholder in the text. 0 means the text "
-                "is the file as served."
+                "How many values under a secret name (password, token, licence key, ...) "
+                "or other secret text were replaced with a [REDACTED:...] placeholder "
+                "in the copy."
             ),
         },
         "parts": {"type": "integer", "description": "How many text parts the file has."},
@@ -252,13 +250,13 @@ _API_FILE_GET_RESPONSE: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "index": {"type": "integer", "description": "Position of the part."},
-                    "text": {"type": "string", "description": "At most 64 KiB of the file."},
+                    "text": {"type": "string", "description": "At most 64 KiB of the copy."},
                 },
                 "required": ["index", "text"],
             },
             "description": (
-                "The file text, in order. Joining all parts gives the file; when "
-                "redacted_values is 0 it is the exact file and its SHA-256 equals sha256."
+                "The text of the checked copy, in order. Joined, they are the copy; its "
+                "SHA-256 equals sha256."
             ),
         },
         "version": {

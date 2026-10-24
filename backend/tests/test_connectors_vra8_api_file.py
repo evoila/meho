@@ -27,6 +27,7 @@ import respx
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_secrets import REDACTED, ApiFileFormatError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import AuthModel
@@ -37,7 +38,6 @@ from meho_backplane.connectors.vra8.api_file import (
     Vra8ApiFileError,
     split_text_parts,
 )
-from meho_backplane.connectors.vra8.api_file_redaction import REDACTED
 from meho_backplane.connectors.vra8.typed_ops import VRA8_TYPED_WHEN_TO_USE_BY_GROUP
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
@@ -55,7 +55,8 @@ _SWAGGER = json.dumps(
         "swagger": "2.0",
         "info": {"title": "Example IaaS API", "version": "2021-07-15"},
         "paths": {"/iaas/api/projects": {"get": {"summary": "List projects"}}},
-    }
+    },
+    separators=(",", ":"),
 )
 
 API_FILE_OP = next(op for op in VRA8_TYPED_OPS if op.op_id == OP_ID)
@@ -188,7 +189,7 @@ async def test_reads_a_swagger_file_with_size_hash_version_and_parts() -> None:
 
 async def test_landing_page_html_comes_back_as_text() -> None:
     connector = _connector()
-    page = "<html><body><a href='/iaas/api/swagger'>IaaS</a></body></html>"
+    page = '<html><body><a href="/iaas/api/swagger">IaaS</a></body></html>'
     async with respx.mock(base_url=_BASE) as mock:
         _mock_login_and_version(mock)
         mock.get("/automation-ui/api-docs").respond(
@@ -372,7 +373,9 @@ async def test_failed_version_read_still_returns_the_file(
     body = _SWAGGER.encode()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_login_and_version(mock, vco_status=vco_status, iaas_status=iaas_status)
-        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": "text/plain"})
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body, headers={"Content-Type": "application/json"}
+        )
         answer = await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
 
@@ -394,7 +397,9 @@ async def test_about_without_a_build_number_says_so() -> None:
         mock.post("/iaas/api/login").respond(200, json={"token": "bearer-abc"})
         mock.get("/vco/api/about").respond(200, json={"version": "8.18.0.00000"})
         mock.get("/iaas/api/about").respond(200, json={"latestApiVersion": "2021-07-15"})
-        mock.get(_SWAGGER_PATH).respond(200, content=b"{}")
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=b"{}", headers={"Content-Type": "application/json"}
+        )
         answer = await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
 
@@ -419,7 +424,7 @@ async def test_missing_credentials_sends_no_request() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Large files: joining the parts gives the exact file
+# Large files: joining the parts gives the checked copy
 # ---------------------------------------------------------------------------
 
 
@@ -436,19 +441,23 @@ def _many_line_yaml(lines: int) -> bytes:
 
 
 @pytest.mark.parametrize(
-    "body",
-    [_one_line_json(3 * 1024 * 1024), _many_line_yaml(12_000)],
+    ("body", "content_type"),
+    [
+        (_one_line_json(3 * 1024 * 1024), "application/json"),
+        (_many_line_yaml(12_000), "application/yaml"),
+    ],
     ids=["one-line-3mb", "12000-lines"],
 )
-async def test_joined_parts_have_the_file_sha256(body: bytes) -> None:
+async def test_joined_parts_have_the_copy_sha256(body: bytes, content_type: str) -> None:
     connector = _connector()
     async with respx.mock(base_url=_BASE) as mock:
         _mock_login_and_version(mock)
-        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": "text/plain"})
+        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": content_type})
         answer = await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
 
-    assert answer["size"] == len(body)
+    assert answer["size"] == len(_joined(answer))
+    assert answer["secrets_replaced"] == 0
     assert answer["parts"] == len(answer["text_parts"]) > 1
     assert [part["index"] for part in answer["text_parts"]] == list(range(answer["parts"]))
     assert all(len(part["text"].encode()) <= PART_MAX_BYTES for part in answer["text_parts"])
@@ -467,15 +476,17 @@ def test_split_never_cuts_a_multi_byte_character() -> None:
 async def test_file_too_big_for_one_result_stops_with_its_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = _many_line_yaml(4_000)
+    body = _one_line_json(200 * 1024)
     # The file fits the read cap, but not once it is stored as JSON text
-    # (line ends are escaped, and the record needs room).
+    # (its quotes are escaped, and the record needs room).
     cap = len(body) + 2_000
     monkeypatch.setattr(api_file, "get_settings", lambda: _settings(max_record_bytes=cap))
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_login_and_version(mock)
-        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": "text/plain"})
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body, headers={"Content-Type": "application/json"}
+        )
         with pytest.raises(Vra8ApiFileError, match=f"is {len(body)} bytes"):
             await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
@@ -503,7 +514,9 @@ async def test_file_with_more_parts_than_the_row_limit_stops_with_its_size(
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_login_and_version(mock)
-        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": "text/plain"})
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body, headers={"Content-Type": "application/json"}
+        )
         with pytest.raises(Vra8ApiFileError) as excinfo:
             await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
@@ -521,7 +534,9 @@ async def test_two_parts_fit_the_row_limit_of_two(monkeypatch: pytest.MonkeyPatc
     connector = _connector()
     async with respx.mock(base_url=_BASE) as mock:
         _mock_login_and_version(mock)
-        mock.get(_SWAGGER_PATH).respond(200, content=body, headers={"Content-Type": "text/plain"})
+        mock.get(_SWAGGER_PATH).respond(
+            200, content=body, headers={"Content-Type": "application/json"}
+        )
         answer = await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
     assert answer["parts"] == 2
@@ -557,36 +572,69 @@ async def test_non_utf8_text_is_refused() -> None:
     await connector.aclose()
 
 
-_SWAGGER_WITH_PASSWORD = _SWAGGER.replace(
-    '"swagger": "2.0"', '"swagger": "2.0", "x-note": "password=made-up-pass-value-0123"'
+# ---------------------------------------------------------------------------
+# Secret values are replaced before the text is returned
+# ---------------------------------------------------------------------------
+
+# Built from two strings so the repository's private-key scan does not see a key.
+_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE KEY-----"
+_PEM_BLOCK = f"{_PEM_HEADER}\nMIIEmadeupmadeupmadeup\n-----END RSA PRIVATE KEY-----\n"
+
+_HTML_HEAD = "<!DOCTYPE html>\n<html><head><title>API docs</title></head>\n<body>\n"
+_HTML_TAIL = "\n</body></html>\n"
+_SCRIPT_WITH_PASSWORD = (
+    '<script>\nvar login = {"user": "u",\n  "password":\n    "made-up-pass-value-0123"};\n</script>'
 )
+_XML_WITH_PASSWORD = (
+    '<?xml version="1.0"?>\n<api>\n  <user>u</user>\n'
+    "  <password>made-up-pass-value-0123</password>\n</api>\n"
+)
+_HTML_WITH_PASSWORD_ATTRIBUTE = '<input name="login" password="mu-01">'
+
+_SWAGGER_YAML = "swagger: '2.0'\ninfo:\n  title: Example IaaS API\n  version: 2021-07-15\n"
 
 
-async def test_labelled_pair_the_stored_result_redaction_sees_is_replaced_and_counted() -> None:
-    """A ``password=...`` label inside a string: the stored-result redaction's own case.
+def _swagger_with(field: str, value: str) -> str:
+    return _SWAGGER.replace('"swagger":"2.0"', f'"swagger":"2.0","{field}":"{value}"')
 
-    The read runs that redaction itself, so the answer already holds its
-    placeholder, and storing the answer changes nothing.
-    """
-    body = _SWAGGER_WITH_PASSWORD.encode()
-    assert _redact_like_the_dispatcher({"text": _SWAGGER_WITH_PASSWORD}).manifest
+
+def _swagger_yaml_with(line: str) -> str:
+    return _SWAGGER_YAML + line + "\npaths: {}\n"
+
+
+async def _read(path: str, body: bytes, content_type: str) -> dict[str, Any]:
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_login_and_version(mock)
-        mock.get(_SWAGGER_PATH).respond(
-            200, content=body, headers={"Content-Type": "application/json"}
-        )
-        answer = await _call(connector, _SWAGGER_PATH)
+        mock.get(path).respond(200, content=body, headers={"Content-Type": content_type})
+        answer = await _call(connector, path)
     await connector.aclose()
+    return answer
 
-    assert answer["redacted_values"] == 1
-    text = _joined(answer).decode()
-    assert "made-up-pass-value" not in json.dumps(answer)
-    assert "[REDACTED:" in text
-    assert text.startswith('{"swagger": "2.0", "x-note": "')
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
+
+def _assert_cleaned(answer: dict[str, Any], secrets: tuple[str, ...], count: int) -> None:
+    """The answer holds the checked copy, counts the values, and pins the copy."""
+    assert answer["secrets_replaced"] == count
+    copy = _joined(answer)
+    assert b"[REDACTED:" in copy
+    assert answer["size"] == len(copy)
+    assert answer["sha256"] == hashlib.sha256(copy).hexdigest()
+    dumped = json.dumps(answer)
+    for secret in secrets:
+        assert secret not in dumped
+    # The stored-result redaction leaves the answer as it is, so the
+    # dispatcher stores exactly this text.
     redaction = _redact_like_the_dispatcher(answer)
     assert redaction.manifest == () and redaction.redacted == redaction.raw
+
+
+async def test_labelled_pair_in_a_description_is_replaced_and_counted() -> None:
+    """A ``password=...`` label inside a string: MEHO's general rules replace it in the copy."""
+    body = _swagger_with("x-note", "password=made-up-pass-value-0123")
+    assert _redact_like_the_dispatcher({"text": body}).manifest
+    answer = await _read(_SWAGGER_PATH, body.encode(), "application/json")
+    _assert_cleaned(answer, ("made-up-pass-value",), 1)
+    assert json.loads(_joined(answer))["swagger"] == "2.0"
 
 
 def _json_with_a_secret_across_the_part_cut() -> bytes:
@@ -606,141 +654,32 @@ async def test_labelled_pair_split_across_the_part_cut_is_replaced() -> None:
     body = _json_with_a_secret_across_the_part_cut()
     parts = split_text_parts(body)
     assert parts[0].endswith("pass") and parts[1].startswith("word=")
-    # The per-part redaction alone misses the split label; the whole text trips it.
-    per_part = _redact_like_the_dispatcher(
-        {"text_parts": [{"index": i, "text": text} for i, text in enumerate(parts)]}
-    )
-    assert per_part.manifest == () and per_part.redacted == per_part.raw
-    assert _redact_like_the_dispatcher({"text": body.decode()}).manifest
-
-    connector = _connector()
-    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
-        _mock_login_and_version(mock)
-        mock.get(_SWAGGER_PATH).respond(
-            200, content=body, headers={"Content-Type": "application/json"}
-        )
-        answer = await _call(connector, _SWAGGER_PATH)
-    await connector.aclose()
-
-    assert answer["redacted_values"] == 1
-    assert "made-up-pass-value" not in json.dumps(answer)
-    assert "[REDACTED:" in _joined(answer).decode()
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# Secret values are replaced before the text is returned
-# ---------------------------------------------------------------------------
-
-# Built from two strings so the repository's private-key scan does not see a key.
-_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE KEY-----"
-_PEM_BLOCK = f"{_PEM_HEADER}\nMIIEmadeupmadeupmadeup\n-----END RSA PRIVATE KEY-----\n"
-
-_HTML_HEAD = "<!DOCTYPE html>\n<html><head><title>API docs</title></head>\n<body>\n"
-_HTML_TAIL = "\n</body></html>\n"
-_SCRIPT_WITH_PASSWORD = (
-    '<script>\nvar login = {"user": "u",\n  "password":\n    "made-up-pass-value-0123"};\n</script>'
-)
-_XML_WITH_PASSWORD = (
-    '<?xml version="1.0"?>\n<api>\n  <user>u</user>\n'
-    "  <password>made-up-pass-value-0123</password>\n</api>\n"
-)
-# A short value: the stored-result redaction sees ``password="..."`` from eight
-# characters on (quotes included), so only a shorter attribute value gets past it.
-_HTML_WITH_PASSWORD_ATTRIBUTE = '<input name="login" password="mu-01">'
-
-
-def _swagger_with(field: str, value: str) -> str:
-    return _SWAGGER.replace('"swagger": "2.0"', f'"swagger": "2.0", "{field}": "{value}"')
-
-
-_SWAGGER_YAML = "swagger: '2.0'\ninfo:\n  title: Example IaaS API\n  version: 2021-07-15\n"
-
-
-def _swagger_yaml_with(line: str) -> str:
-    return _SWAGGER_YAML + line + "\npaths: {}\n"
-
-
-async def _read(path: str, body: bytes, content_type: str) -> dict[str, Any]:
-    connector = _connector()
-    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
-        _mock_login_and_version(mock)
-        mock.get(path).respond(200, content=body, headers={"Content-Type": content_type})
-        answer = await _call(connector, path)
-    await connector.aclose()
-    return answer
-
-
-def _assert_cleaned(
-    answer: dict[str, Any], body: bytes, secret: str, count: int, cleaned: str | None = None
-) -> None:
-    """The answer holds the cleaned text, counts the values, and pins the file as served."""
-    assert answer["redacted_values"] == count
-    text = _joined(answer).decode()
-    assert text == (cleaned if cleaned is not None else body.decode().replace(secret, REDACTED))
-    assert answer["size"] == len(body)
-    assert answer["sha256"] == hashlib.sha256(body).hexdigest()
-    assert secret not in json.dumps(answer)
-    # The stored-result redaction leaves the cleaned answer as it is, so the
-    # dispatcher stores exactly this text.
-    redaction = _redact_like_the_dispatcher(answer)
-    assert redaction.manifest == () and redaction.redacted == redaction.raw
+    answer = await _read(_SWAGGER_PATH, body, "application/json")
+    _assert_cleaned(answer, ("made-up-pass-value",), 1)
 
 
 @pytest.mark.parametrize(
-    ("path", "body", "content_type", "secret"),
+    ("path", "body", "content_type"),
     [
         (
             "/automation/api-docs",
             _HTML_HEAD + _SCRIPT_WITH_PASSWORD + _HTML_TAIL,
             "text/html; charset=utf-8",
-            "made-up-pass-value-0123",
         ),
-        (
-            f"{_SWAGGER_PATH}/api-docs",
-            _XML_WITH_PASSWORD,
-            "application/xml",
-            "made-up-pass-value-0123",
-        ),
+        (f"{_SWAGGER_PATH}/api-docs", _XML_WITH_PASSWORD, "application/xml"),
         (
             "/automation-ui/api-docs",
             _HTML_HEAD + _HTML_WITH_PASSWORD_ATTRIBUTE + _HTML_TAIL,
             "text/html; charset=utf-8",
-            "mu-01",
         ),
     ],
     ids=["html-script-value-on-the-next-line", "xml-element", "html-attribute"],
 )
 async def test_password_in_an_html_or_xml_file_is_replaced(
-    path: str, body: str, content_type: str, secret: str
+    path: str, body: str, content_type: str
 ) -> None:
-    """The three cases the review found: the scan sees them whatever the format."""
-    # The stored-result redaction alone would leave the value in clear text.
-    redaction = _redact_like_the_dispatcher({"text": body})
-    assert redaction.manifest == () and redaction.redacted == redaction.raw
-
     answer = await _read(path, body.encode(), content_type)
-    _assert_cleaned(answer, body.encode(), secret, 1)
-
-
-@pytest.mark.parametrize(
-    "before_cut",
-    [6, 12, 20],
-    ids=["cut-in-the-key", "cut-at-the-line-break", "cut-in-the-value"],
-)
-async def test_password_split_across_the_part_cut_is_replaced(before_cut: int) -> None:
-    """The scan runs on the whole text before the cut, so a part boundary hides nothing."""
-    secret = '"password":\n    "made-up-pass-value-0123"'
-    head = _HTML_HEAD + "<!-- "
-    joint = " --><script>var login = {"
-    pad = "/" * (PART_MAX_BYTES - before_cut - len(head) - len(joint))
-    body = f"{head}{pad}{joint}{secret}}};</script>{_HTML_TAIL}"
-    assert body.index(secret) == PART_MAX_BYTES - before_cut
-    parts = split_text_parts(body.encode())
-    assert parts[0].endswith(secret[:before_cut]) and parts[1].startswith(secret[before_cut:])
-
-    answer = await _read("/automation/api-docs", body.encode(), "text/html; charset=utf-8")
-    _assert_cleaned(answer, body.encode(), "made-up-pass-value-0123", 1)
+    _assert_cleaned(answer, ("made-up-pass-value", "mu-01"), 1)
 
 
 @pytest.mark.parametrize(
@@ -750,156 +689,96 @@ async def test_password_split_across_the_part_cut_is_replaced(before_cut: int) -
         (_swagger_with("token", "made-up-token-value-0123"), "application/json"),
         (_swagger_with("refreshToken", "made-up-token-value-0123"), "application/json"),
         (_swagger_with("password", "it's-made-up-value"), "application/json"),
-        (_swagger_with("password", "made-up"), "application/json"),
         (_swagger_with("pwd", "m"), "application/json"),
         (_swagger_with("licenseKey", "MADE-UP-0000-0000"), "application/json"),
+        (_swagger_with("pass\\u0077ord", "made-up"), "application/json"),
         (_swagger_yaml_with("licenseKey: MADE-UP-0000-0000"), "application/yaml"),
-        (_swagger_yaml_with("  password: made-up"), "application/yaml"),
-        (_swagger_yaml_with("- token: 'it''s-made-up'"), "application/yaml"),
         (_swagger_yaml_with("example: {password: mu-01}"), "application/yaml"),
         (_swagger_yaml_with("password:\n  made-up"), "application/yaml"),
-        (_PEM_BLOCK, "text/plain"),
+        (_swagger_yaml_with('password: "made\n  up"'), "application/yaml"),
+        (
+            _swagger_yaml_with("x:\n  password: | # note\n    made up\n    and more"),
+            "application/yaml",
+        ),
+        (_swagger_yaml_with("password: made up # note"), "application/yaml"),
+        (_swagger_yaml_with("password: # note\n  madeup"), "application/yaml"),
+        (_swagger_yaml_with("password: made\n  up"), "application/yaml"),
+        (_swagger_yaml_with("password: null madeup"), "application/yaml"),
+        (_swagger_yaml_with("password: # note\n  # another note\n  madeup"), "application/yaml"),
+        (_swagger_yaml_with("password: made,up"), "application/yaml"),
+        (
+            '<?xml version="1.0"?>\n<api>\n  <password>made<!-- note -->up</password>\n</api>\n',
+            "application/xml",
+        ),
+        (
+            '<?xml version="1.0"?>\n<api>\n  <password>ma<![CDATA[de]]>up</password>\n</api>\n',
+            "application/xml",
+        ),
+        (
+            '<?xml version="1.0"?>\n<api>\n  <password>made<b>up</b></password>\n</api>\n',
+            "application/xml",
+        ),
+        (_PEM_BLOCK, "application/x-yaml"),
     ],
     ids=[
         "json-password",
         "json-token",
         "json-refresh-token",
         "json-password-with-apostrophe",
-        "json-short-password",
         "json-one-character-pwd",
         "json-license-key",
+        "json-key-written-with-an-escape",
         "yaml-license-key",
-        "yaml-short-password",
-        "yaml-list-token-with-apostrophe",
         "yaml-flow-mapping",
         "yaml-value-on-the-next-line",
+        "yaml-quoted-value-over-two-lines",
+        "yaml-block-scalar-with-a-comment",
+        "yaml-value-with-a-space-and-a-comment",
+        "yaml-comment-after-the-colon",
+        "yaml-bare-value-over-two-lines",
+        "yaml-value-after-null",
+        "yaml-value-after-two-comment-lines",
+        "yaml-value-with-a-comma",
+        "xml-text-split-by-a-comment",
+        "xml-text-split-by-a-cdata-section",
+        "xml-element-with-a-child-element",
         "private-key",
     ],
 )
-async def test_secret_the_stored_result_redaction_misses_is_replaced(
-    body: str, content_type: str
-) -> None:
-    # The stored-result redaction leaves these shapes as they are; that is why
-    # the read cleans the text itself.
-    redaction = _redact_like_the_dispatcher({"text": body})
-    assert redaction.manifest == () and redaction.redacted == redaction.raw
-
+async def test_secret_value_in_any_layout_is_replaced_whole(body: str, content_type: str) -> None:
+    """Every layout the code reviews found: the file is parsed, so the whole value goes."""
     answer = await _read(_SWAGGER_PATH, body.encode(), content_type)
-    assert answer["redacted_values"] == 1
-    text = _joined(answer).decode()
-    assert REDACTED in text
-    for secret in ("made-up", "MADE-UP", "MIIE", "mu-01", "'m'", '"m"'):
-        assert secret not in text
-    assert answer["sha256"] == hashlib.sha256(body.encode()).hexdigest()
-    assert answer["size"] == len(body.encode())
+    _assert_cleaned(answer, (), 1)
+    copy = _joined(answer).decode()
+    for leftover in ("made", "MADE", "madeup", "mu-01", "MIIE", "'m'", '"m"', "up</", ",up"):
+        assert leftover not in copy
 
 
 @pytest.mark.parametrize(
-    ("body", "content_type", "value", "cleaned"),
+    ("kind", "snippet", "before_cut"),
     [
-        (
-            _swagger_yaml_with('password: "made\n  up"'),
-            "application/yaml",
-            "made\n  up",
-            None,
-        ),
-        (
-            _swagger_yaml_with("password: 'made\n  up'"),
-            "application/yaml",
-            "made\n  up",
-            None,
-        ),
-        (
-            _swagger_yaml_with("x:\n  password: | # note\n    made up\n    and more"),
-            "application/yaml",
-            "made up",
-            _swagger_yaml_with(f"x:\n  password: {REDACTED} # note"),
-        ),
-        (_swagger_yaml_with("password: made up"), "application/yaml", "made up", None),
-        (_swagger_yaml_with("password: made up # note"), "application/yaml", "made up", None),
-        (
-            '<?xml version="1.0"?>\n<api>\n  <password>made<!-- note -->up</password>\n</api>\n',
-            "application/xml",
-            "made<!-- note -->up",
-            None,
-        ),
-        (
-            '<?xml version="1.0"?>\n<api>\n  <password>ma<![CDATA[de]]>up</password>\n</api>\n',
-            "application/xml",
-            "ma<![CDATA[de]]>up",
-            None,
-        ),
-        (
-            _swagger_yaml_with("password: # note\n  madeup"),
-            "application/yaml",
-            "madeup",
-            None,
-        ),
-        (_swagger_with("pass\\u0077ord", "madeup"), "application/json", "madeup", None),
-        (_swagger_yaml_with("password: made\n  up"), "application/yaml", "made\n  up", None),
-        (
-            '<?xml version="1.0"?>\n<api>\n  <password>made<b>up</b></password>\n</api>\n',
-            "application/xml",
-            "made<b>up</b>",
-            None,
-        ),
-    ],
-    ids=[
-        "yaml-double-quoted-value-over-two-lines",
-        "yaml-single-quoted-value-over-two-lines",
-        "yaml-block-scalar-with-a-comment-after-the-indicator",
-        "yaml-value-with-a-space-inside",
-        "yaml-value-with-a-space-inside-and-a-comment",
-        "xml-element-text-split-by-a-comment",
-        "xml-element-text-split-by-a-cdata-section",
-        "yaml-comment-after-the-colon-value-on-the-next-line",
-        "json-key-written-with-an-escape",
-        "yaml-bare-value-over-two-lines",
-        "xml-element-with-a-child-element",
-    ],
-)
-async def test_value_over_lines_comments_or_spaces_is_replaced_whole(
-    body: str, content_type: str, value: str, cleaned: str | None
-) -> None:
-    """The reviews' YAML, JSON and XML layouts: the whole value goes, nothing is left over."""
-    # The stored-result redaction alone leaves these values in clear text.
-    redaction = _redact_like_the_dispatcher({"text": body})
-    assert redaction.manifest == () and redaction.redacted == redaction.raw
-
-    answer = await _read(_SWAGGER_PATH, body.encode(), content_type)
-    _assert_cleaned(answer, body.encode(), value, 1, cleaned)
-    text = _joined(answer).decode()
-    for leftover in ("made", "up", "more", "note -->"):
-        assert leftover not in text.replace("# note", "")
-
-
-@pytest.mark.parametrize(
-    ("kind", "snippet", "value", "before_cut"),
-    [
-        ("xml", "<password>made<!-- note -->up</password>", "made<!-- note -->up", 20),
-        ("xml", "<password>made<!-- note -->up</password>", "made<!-- note -->up", 28),
-        ("yaml", 'password: "made\n  up"', "made\n  up", 16),
-        ("yaml", "password: made up", "made up", 15),
-        ("yaml", "password: # note\n  madeup", "madeup", 17),
-        ("yaml", "password: made\n  up", "made\n  up", 15),
-        ("json", '"pass\\u0077ord": "madeup"', "madeup", 8),
-        ("xml", "<password>made<b>up</b></password>", "made<b>up</b>", 16),
+        ("xml", "<password>made<!-- note -->up</password>", 20),
+        ("yaml", 'password: "made\n  up"', 16),
+        ("yaml", "password: # note\n  # another note\n  madeup", 17),
+        ("yaml", "password: null madeup", 14),
+        ("yaml", "password: made,up", 14),
+        ("json", '"pass\\u0077ord": "madeup"', 8),
+        ("xml", "<password>made<b>up</b></password>", 16),
     ],
     ids=[
         "xml-cut-inside-the-comment",
-        "xml-cut-after-the-comment",
         "yaml-cut-at-the-line-break-inside-the-quotes",
-        "yaml-cut-at-the-space-inside-the-value",
-        "yaml-cut-at-the-line-break-after-the-comment",
-        "yaml-cut-at-the-line-break-inside-the-bare-value",
+        "yaml-cut-in-the-comment-lines",
+        "yaml-cut-after-null",
+        "yaml-cut-before-the-comma",
         "json-cut-inside-the-escape-of-the-key",
         "xml-cut-inside-the-child-element",
     ],
 )
-async def test_value_over_lines_or_comments_split_across_the_part_cut_is_replaced(
-    kind: str, snippet: str, value: str, before_cut: int
+async def test_secret_value_split_across_the_part_cut_is_replaced(
+    kind: str, snippet: str, before_cut: int
 ) -> None:
-    """The scan runs on the whole text, so a part cut inside a comment or a value hides nothing."""
+    """The file is checked whole before the cut, so a part boundary hides nothing."""
     head, joint, tail, content_type = {
         "xml": ('<?xml version="1.0"?>\n<api>\n<!-- ', " -->\n", "\n</api>\n", "application/xml"),
         "yaml": ("swagger: '2.0'\n# ", "\n", "\npaths: {}\n", "application/yaml"),
@@ -917,83 +796,55 @@ async def test_value_over_lines_or_comments_split_across_the_part_cut_is_replace
     assert parts[0].endswith(snippet[:before_cut]) and parts[1].startswith(snippet[before_cut:])
 
     answer = await _read(_SWAGGER_PATH, body.encode(), content_type)
-    _assert_cleaned(answer, body.encode(), value, 1, body.replace(value, REDACTED))
+    _assert_cleaned(answer, (), 1)
+    assert "made" not in _joined(answer).decode()
 
 
 async def test_every_secret_value_is_counted() -> None:
     body = _SWAGGER.replace(
         '"paths"',
-        '"x-examples": [{"password":\n "made-up-a"}, {"token":\n "made-up-b"}, {"pwd": null}], '
-        '"paths"',
+        '"x-examples":[{"password":\n "made-up-a"},{"token":\n "made-up-b"},{"pwd":null}],"paths"',
     )
     answer = await _read(_SWAGGER_PATH, body.encode(), "application/json")
-    cleaned = body.replace("made-up-a", REDACTED).replace("made-up-b", REDACTED)
-    _assert_cleaned(answer, body.encode(), "made-up-", 2, cleaned)
+    _assert_cleaned(answer, ("made-up-a", "made-up-b"), 3)
 
 
-_YAML_SCHEMA_WITH_PASSWORD = _SWAGGER_YAML + (
-    "definitions:\n"
-    "  Login:\n"
-    "    properties:\n"
-    "      password:\n"
-    "        type: string\n"
-    "        format: password\n"
-    "      token: {type: string, example: ''}\n"
-    "    required:\n"
-    "      - username\n"
-    "      - password\n"
-    "securityDefinitions:\n"
-    "  oauth:\n"
-    "    flow: password\n"
-    "    tokenUrl: https://example.invalid/token\n"
-    "    description: 'Send the token: in the Authorization header'\n"
-    "x-example: {username: u, password: null, pwd: '', token: {}}\n"
-    "paths: {}\n"
-)
+async def test_secret_in_the_redirect_query_is_replaced_and_counted() -> None:
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/vco/api/docs").respond(
+            302, headers={"Location": "/vco/api/docs/index.html?token=made-up-token"}
+        )
+        answer = await _call(connector, "/vco/api/docs")
+    await connector.aclose()
+
+    assert answer["redirect_path"] == f"/vco/api/docs/index.html?token={REDACTED}"
+    assert answer["secrets_replaced"] == 1
+    assert "made-up-token" not in json.dumps(answer)
 
 
 @pytest.mark.parametrize(
     ("path", "body", "content_type"),
     [
-        (
-            _SWAGGER_PATH,
-            _SWAGGER.replace(
-                '"paths"',
-                '"definitions": {"Login": {"properties": {"password": {"type": "string"}, '
-                '"token": {"type": "string", "example": ""}}, '
-                '"required": ["username", "password"]}}, '
-                '"securityDefinitions": {"oauth": {"flow": "password", '
-                '"tokenUrl": "https://example.invalid/token"}}, '
-                '"x-example": {"username": "u", "password": null, "pwd": false}, "paths"',
-            ),
-            "application/json",
-        ),
-        (f"{_SWAGGER_PATH}/swagger.yaml", _YAML_SCHEMA_WITH_PASSWORD, "application/yaml"),
-        (
-            "/automation/api-docs",
-            _HTML_HEAD
-            + '<form><input type="password" name="password" placeholder="Password"></form>\n'
-            + "<p>Docs: send the token: in the header [not: yaml: {</p>"
-            + _HTML_TAIL,
-            "text/html; charset=utf-8",
-        ),
+        (_SWAGGER_PATH, '{"swagger": "2.0",', "application/json"),
+        (_SWAGGER_PATH, "swagger: [2.0\n", "application/yaml"),
+        (_SWAGGER_PATH, "var login = {};", "text/javascript"),
+        (_SWAGGER_PATH, _SWAGGER, "text/plain"),
     ],
-    ids=["json", "yaml", "html"],
+    ids=["broken-json", "broken-yaml", "javascript", "plain-text-without-a-file-ending"],
 )
-async def test_fields_named_like_a_secret_without_a_value_come_back_whole(
+async def test_file_that_does_not_parse_or_has_no_known_format_is_refused(
     path: str, body: str, content_type: str
 ) -> None:
-    """A schema names ``password`` as a property, in a required list and as an OAuth flow.
+    with pytest.raises(ApiFileFormatError):
+        await _read(path, body.encode(), content_type)
 
-    None of these is a credential value: the property is an object (or a
-    mapping on the next lines), the list holds the name only, ``flow``,
-    ``format``, ``type`` and ``name`` are the keys, ``null``, ``false``, an
-    empty string and an empty mapping are no secret, and a label inside a
-    description is running text. The file comes back whole.
-    """
-    answer = await _read(path, body.encode(), content_type)
-    assert answer["redacted_values"] == 0
-    assert _joined(answer) == body.encode()
+
+async def test_plain_text_with_a_known_file_ending_is_read_by_its_ending() -> None:
+    answer = await _read("/vco/api/docs/swagger.json", _SWAGGER.encode(), "text/plain")
+    assert answer["secrets_replaced"] == 0
+    assert _joined(answer) == _SWAGGER.encode()
 
 
 # ---------------------------------------------------------------------------

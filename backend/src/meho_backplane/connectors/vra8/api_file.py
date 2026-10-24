@@ -27,32 +27,27 @@ The read is narrow on purpose:
   names the redirect's path. A ``401`` is raised so the dispatcher
   renews the login and retries once; every other status comes back in
   ``status``.
-* The file comes back as text parts of at most 64 KiB each. Joining the
-  parts in order gives the file, and the exact file when
-  ``redacted_values`` is zero (see below); ``sha256`` is the hash of the
-  file bytes as served. A file that does not fit in one stored result,
-  as bytes or as rows, is refused with its size, never cut. Only UTF-8
-  text comes back.
-* The read cleans the file text before it returns it. First it scans
-  the whole file as text, whatever its format (:mod:`.api_file_redaction`),
-  and replaces every value of a secret-named key (the one rule MEHO uses
-  for secret-named fields), the content of a secret-named XML or HTML
-  element, an HTML attribute value and a PEM private key block with the
-  placeholder ``[REDACTED:param_name]``. Then it runs the secret redaction
-  MEHO applies to every stored result, with the labels the dispatcher
-  will use, on the whole text: that pass sees a labelled pair such as
-  ``api_key=...`` (also one a part cut would split) and writes its own
-  ``[REDACTED:<rule>]`` placeholder; it leaves a placeholder of the first
-  pass alone. The replacements of both passes are counted in
-  ``redacted_values``. When it is zero, the joined parts are
-  the file as served and match ``sha256``; when it is not, ``sha256``
-  still names the file as served, and the parts hold the cleaned text.
-  An example credential in a documentation file is replaced like a real
-  one; that is on purpose.
+* The file is checked before it comes back
+  (:func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`).
+  MEHO parses it as JSON, YAML, XML or HTML, replaces every value under a
+  secret name with ``[REDACTED:param_name]`` and writes the file back
+  from the parsed copy. MEHO's general secret-redaction rules run on each
+  parsed text value before the copy is written
+  (:func:`~meho_backplane.connectors._shared.api_file_read.text_redactor`),
+  so a labelled pair such as ``api_key=...`` in a description comes back
+  as a placeholder too. ``secrets_replaced`` counts every replaced value.
+  A file that does not parse, or whose format is unknown (JavaScript,
+  CSS, plain text), is refused with the reason. An example credential in
+  a documentation file is replaced like a real one; that is on purpose.
+* The checked copy comes back as text parts of at most 64 KiB each.
+  Joining the parts in order gives the copy; ``size`` and ``sha256``
+  describe the copy. A file that does not fit in one stored result, as
+  bytes or as rows, is refused with its size, never cut. Only UTF-8 text
+  comes back.
 * The stored-result redaction runs once more when the dispatcher stores
-  the answer. The read checks that it changes nothing on the cleaned
-  text and on each part, and refuses the file if it would, naming the
-  rule. So the stored parts are always the text the read returns.
+  the answer. The read checks that it changes nothing on the copy and on
+  each part, and refuses the file if it would, naming the rule. So the
+  stored parts are always the text the read returns.
 
 The version and build come from the Orchestrator inside the appliance
 (``GET /vco/api/about``: ``version`` and ``build-number``); the IaaS API
@@ -72,10 +67,11 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.api_file_read import text_redactor
+from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH, _VCO_ABOUT_PATH
-from meho_backplane.connectors.vra8.api_file_redaction import redact_secret_values
 from meho_backplane.connectors.vra8.session import Vra8TargetLike
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
@@ -340,38 +336,31 @@ def _redaction_labels(connector: Vra8Connector, operator: Operator) -> dict[str,
     }
 
 
-def _clean_text(text: str, connector: Vra8Connector, operator: Operator) -> tuple[str, int]:
-    """Replace every secret value in *text*; return the cleaned text and the count.
+def _checked_fields(
+    path: str, content_type: str | None, text: str, connector: Vra8Connector, operator: Operator
+) -> dict[str, Any]:
+    """Check the file and build its fields: ``size`` and ``sha256`` of the copy, the parts.
 
-    The whole-file scan (:func:`redact_secret_values`) runs first, then the
-    stored-result redaction with the dispatcher's labels, on the whole
-    text, so a labelled pair the part cut would split is found too and
-    the text the dispatcher stores is the text returned here. The count is
-    the number of secret values, whichever pass replaced them.
+    The shared check parses the file, replaces every value under a secret
+    name and runs MEHO's general redaction rules (with the labels the
+    dispatcher uses) on each text value, then writes the copy back. The
+    parts, ``size`` and ``sha256`` all describe that copy.
     """
-    cleaned, count = redact_secret_values(text)
-    result = apply_connector_boundary_redaction(
-        {"text": cleaned}, **_redaction_labels(connector, operator)
+    labels = _redaction_labels(connector, operator)
+    checked = check_api_file(
+        text,
+        content_type=content_type,
+        path=path,
+        text_rule=text_redactor(operator, connector_id=str(labels["connector_id"]), op_id=OP_ID),
     )
-    redacted = result.redacted["text"] if isinstance(result.redacted, dict) else cleaned
-    if not isinstance(redacted, str):
-        raise Vra8ApiFileError(
-            "MEHO's secret redaction did not return text; the file was not returned."
-        )
-    if redacted != cleaned:
-        count += sum(entry.count for entry in result.manifest)
-    return redacted, count
-
-
-def _file_fields(body: bytes, cleaned: str, redacted_values: int) -> dict[str, Any]:
-    """Build the file fields: ``size`` and ``sha256`` of the served file, the text in parts."""
-    parts = split_text_parts(cleaned.encode("utf-8"))
+    body = checked.text.encode("utf-8")
+    parts = split_text_parts(body)
     return {
         "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
-        "redacted_values": redacted_values,
+        "secrets_replaced": checked.secrets_replaced,
         "parts": len(parts),
-        "text_parts": [{"index": index, "text": text} for index, text in enumerate(parts)],
+        "text_parts": [{"index": index, "text": part} for index, part in enumerate(parts)],
     }
 
 
@@ -411,8 +400,8 @@ def _check_redaction_keeps_text(
 
     The dispatcher redacts every result with the policy for this
     (connector, tenant, operation) before it stores the result.
-    :func:`_clean_text` already ran that redaction on the whole text, so
-    a second run should change nothing; this check proves it on the text
+    The file check already ran those rules on each text value, so a
+    second run should change nothing; this check proves it on the text
     parts and on the whole text, and refuses the file if a rule still
     fires, so the stored parts are always the text the read returns.
     """
@@ -445,10 +434,11 @@ async def vra8_api_file_get_impl(
     2. ``GET`` the file with the connector's login, without following a
        redirect.
     3. Read the version, build and IaaS API label (best effort).
-    4. Replace every secret value in the file text with a placeholder and
-       count the replacements (``redacted_values``). Refuse a file that
-       does not fit in one stored result or whose cleaned text the
-       stored-result redaction would still change.
+    4. Check the file: parse it, replace every secret value with a
+       placeholder and count the replacements (``secrets_replaced``).
+       Refuse a file that does not parse, does not fit in one stored
+       result, or whose copy the stored-result redaction would still
+       change.
 
     A non-``2xx`` status comes back in ``status`` with no text. A ``3xx``
     also gives ``redirect_path``.
@@ -457,21 +447,23 @@ async def vra8_api_file_get_impl(
     max_record_bytes = get_settings().result_handle_max_record_bytes
 
     fetched = await _fetch_file(connector, operator, target, path, max_record_bytes)
+    redirect, redirect_replaced = (
+        scrub_query_string(fetched["redirect"]) if fetched["redirect"] else (None, 0)
+    )
     answer: dict[str, Any] = {
         "path": path,
         "status": fetched["status"],
         "content_type": fetched["content_type"],
-        "redirect_path": fetched["redirect"],
+        "redirect_path": redirect,
         "size": None,
         "sha256": None,
-        "redacted_values": 0,
+        "secrets_replaced": redirect_replaced,
         "parts": 0,
         "text_parts": [],
     }
     if 200 <= fetched["status"] < 300:
         text = _decode_text(path, fetched["content_type"], fetched["body"])
-        cleaned, redacted_values = _clean_text(text, connector, operator)
-        answer.update(_file_fields(fetched["body"], cleaned, redacted_values))
+        answer.update(_checked_fields(path, fetched["content_type"], text, connector, operator))
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         file_text = "".join(part["text"] for part in answer["text_parts"])
@@ -485,7 +477,7 @@ async def vra8_api_file_get_impl(
         status=answer["status"],
         size=answer["size"],
         parts=answer["parts"],
-        redacted_values=answer["redacted_values"],
+        secrets_replaced=answer["secrets_replaced"],
         has_build=answer["build"] is not None,
     )
     return answer

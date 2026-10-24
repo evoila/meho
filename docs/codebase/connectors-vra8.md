@@ -287,8 +287,8 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   dispatcher's session-recovery arm drops the cached bearer, logs in again
   and retries once, like every other read of this connector.
 - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
-  `size` (bytes) and `sha256` (both of the file as served),
-  `redacted_values` (how many secret values were replaced, see below),
+  `size` (bytes) and `sha256` (both of the checked copy, see below),
+  `secrets_replaced` (how many secret values were replaced),
   `parts`, `text_parts`, `version`, `build`, `iaas_api_version`,
   `version_error`. Only UTF-8 text (text, JSON, XML or YAML content types)
   comes back; other content is refused and the error names its content
@@ -303,10 +303,8 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   and `version_error` says why.
 - **How to rebuild the file.** `text_parts` is a list of `{index, text}`,
   each at most 64 KiB of UTF-8, cut only between characters. Join the `text`
-  of all parts in `index` order and encode as UTF-8. When `redacted_values`
-  is 0, the result is the exact file and its SHA-256 equals `sha256`; when
-  it is not, the result is the file with its secret values replaced, and
-  `sha256` still names the file as served. A part is a fixed byte size, not
+  of all parts in `index` order and encode as UTF-8. The result is the
+  checked copy of the file, and its SHA-256 equals `sha256`. A part is a fixed byte size, not
   a line, because a served file can be one long line. The text parts are the one list in the
   answer, so JSONFlux stores a large answer as rows behind a result handle
   (one row per part) and keeps the scalar fields (`sha256`, `size`, `parts`,
@@ -320,85 +318,41 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   `rows_record_bytes` (the parts, the scalar fields and the record's own
   fields), must fit `result_handle_max_record_bytes` (16 MiB by default).
 - **Secret values are replaced before the text is returned.** An API
-  description file or a documentation page can show a clear-text secret:
-  an example `"password": "..."` in a Swagger file, a
-  `<password>...</password>` element in an XML file, a `password="..."`
-  attribute or a script block in an HTML page, a PEM private key. MEHO's
-  stored-result redaction sees only labelled pairs on one line
-  (`api_key=...` with eight or more characters), so the read cleans the
-  text itself, in two passes on the whole file as text, whatever its
-  format (so a part cut hides nothing and no format needs its own rules):
-  1. `redact_secret_values` (`api_file_redaction.py`) replaces the value
-     of every secret-named key, the text of every secret-named XML or HTML
-     element and every PEM private key block with `[REDACTED:param_name]`,
-     the placeholder the dispatcher writes for a secret-named value of a
-     governed credential read. A key is secret-named by the one rule MEHO
-     uses for every secret-named parameter and field,
-     `is_secret_param_name` in `broadcast/events.py` (`password`, `pwd`,
-     `clientSecret`, `refreshToken`, `x-api-key`, `private_key`,
-     `licenseKey`, ...); there is no second list. The key may be in quotes
-     (JSON; a name written with escapes, `"pass\u0077ord"`, is read as
-     the name it spells), bare at the start of a line or after a list
-     dash (YAML, a properties file), bare in a flow mapping
-     (`{password: abc}`) or bare before `=` (an attribute, a query
-     string). The value follows `:` or `=`, on the same line or on the
-     next non-empty line (a comment after the colon, `password: # note`,
-     is skipped), and goes whole: a quoted string up to its closing
-     quote, also over several lines (an apostrophe or a doubled quote
-     inside counts; a quote that never closes takes the rest of its
-     line), a bare value with the spaces inside it (`made up`) up to the
-     end of the line, a stop character or a ` #` comment, plus the lines
-     below it that are indented more than the key (a YAML plain scalar
-     over several lines, `password: made` then `  up`; a comment line, a
-     list item or a mapping key ends it), or a YAML block scalar with its
-     indented lines (a comment after the `|` stays). An empty string,
-     `null`, `true`, `false`, a comment alone, an object or list (a
-     schema property named `password`), a key whose children follow on
-     the next lines (`password:` then `type: string`) and a secret-named
-     word in running text (`the token: in the header`) are not values, so
-     a schema comes back whole. The element rule follows the pfSense
-     configuration read (`connectors/pfsense/redaction.py`): a
-     secret-named element loses everything between its tags (with or
-     without a namespace prefix or attributes; comments, CDATA sections
-     and child elements inside go with it, so `<credentials>` with a
-     `<user>` and a `<password>` inside loses both); an element without a
-     closing tag loses its text up to the next tag. An element that is
-     not secret-named is checked child by child.
-  2. The stored-result redaction itself, with the connector, tenant and
-     operation labels the dispatcher will use, on the whole cleaned text.
-     It replaces a labelled pair such as `api_key=...` (also one that a
-     part cut would split) with its own `[REDACTED:<rule>]` placeholder.
-     Its labelled-pair rule leaves a value that already is a
-     `[REDACTED:...]` placeholder alone (`redaction/patterns.py`), so the
-     first pass's placeholders and their keys stay. Running it here means
-     the text the read returns is already the text the dispatcher stores.
-
-  `redacted_values` is the number of values both passes replaced. An
-  example credential in a documentation file is replaced like a real one;
-  that is on purpose. Before the answer leaves the handler, the read runs
-  the stored-result redaction once more, on the text parts and on the
-  whole text, and refuses the file if a rule would still change anything
-  (naming the rule and the place, never the text), so the stored parts are
-  always the text the read returns.
+  description file or a documentation page can show a clear-text secret,
+  for example an example password in a Swagger file. The read runs the
+  shared API file check on the whole file before it cuts the text into
+  parts, so a part cut hides nothing
+  (`connectors/_shared/api_file_secrets.py`, see
+  [`connectors-shared-api-file-secrets.md`](connectors-shared-api-file-secrets.md)).
+  The check parses the file as JSON, YAML, XML or HTML (the content type
+  decides; for `text/plain` or no content type, the file ending does),
+  replaces every value under a secret name with `[REDACTED:param_name]`
+  and writes the file back from the parsed copy. MEHO's general
+  secret-redaction rules run on each parsed text value before the copy is
+  written (`text_redactor` in `connectors/_shared/api_file_read.py`, with
+  the connector, tenant and operation labels the dispatcher uses), so a
+  labelled pair such as `api_key=...` in a description comes back as a
+  placeholder too. `secrets_replaced` counts every replaced value, also
+  one in the query of `redirect_path`. A file that does not parse, or
+  whose format is unknown (JavaScript, CSS, plain text), is refused with
+  the reason. What the caller loses: comments, the original spacing (JSON
+  comes back compact), inline JavaScript, and the value under a secret
+  name even when it is a schema. An example credential in a documentation
+  file is replaced like a real one; that is on purpose. Before the answer
+  leaves the handler, the read runs the stored-result redaction once more,
+  on the text parts and on the whole text, and refuses the file if a rule
+  would still change anything (naming the rule and the place, never the
+  text), so the stored parts are always the text the read returns.
 - **Tests.**
   [`test_connectors_vra8_api_file.py`](../../backend/tests/test_connectors_vra8_api_file.py)
   (respx: accepted and refused paths with no request, the login on the
-  `GET`, status and redirect cases, large files, version failures, a file
-  with a labelled `password=...` pair, whole and split across the part
-  cut, a password in an HTML script block with its value on the next
-  line, in an XML element and in an HTML attribute, the same split across
-  the part cut, credential fields in JSON and YAML (quoted, short, with an
-  apostrophe, a license key, a flow mapping, a value on the next line), a
-  private key block, YAML values that run over two lines, hold a space or
-  follow a `| # comment` indicator, XML element text split by a comment or
-  a CDATA section, the same split across the part cut, the count of
-  several values, schemas and pages
-  that name `password` without a value, a file with more parts than the
-  row limit, and the result-handle round trip);
-  [`test_connectors_vra8_api_file_redaction.py`](../../backend/tests/test_connectors_vra8_api_file_redaction.py)
-  (the whole-file scan on its own: every replaced shape with the exact
-  cleaned text, every kept shape, the count, the placeholder pinned to the
-  dispatcher's);
+  `GET`, status and redirect cases, large files, version failures, the
+  parsed copy and its SHA-256, a refused file that does not parse or has
+  no known format, secret values in JSON, YAML, XML and HTML replaced and
+  counted, also the layouts the code reviews found and a value across the
+  part cut, a labelled `password=...` pair in a description, a secret in
+  the redirect query, a file with more parts than the row limit, and the
+  result-handle round trip);
   [`test_connectors_vra8_typed_reads.py`](../../backend/tests/test_connectors_vra8_typed_reads.py)
   (zero-catalog dispatch, the 401 re-login, and `invalid_params` for a data
   path); and the reconcile lane below (`GET /vco/api/about` in the manifest,

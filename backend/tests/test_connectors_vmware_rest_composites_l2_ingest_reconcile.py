@@ -1318,6 +1318,7 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
     _drs_rule_delete,
     _library_delete,
+    _snapshot,
     _teardown,
     _teardown_network,
 )
@@ -1375,6 +1376,21 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
             "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        },
+    ),
+    # The VM snapshot create and delete: the snapshot-tree read, then one task.
+    "_VIM_SUB_OPS_VM_SNAPSHOT_CREATE": (
+        _snapshot,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/CreateSnapshotEx_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE": (
+        _snapshot,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task",
         },
     ),
 }

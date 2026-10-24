@@ -82,6 +82,7 @@ __all__ = [
     "VMWARE_LICENSE_ASSIGNED_LIST_OP",
     "VMWARE_LICENSE_LIST_OP",
     "VMWARE_OBJECT_COLLECT_OP",
+    "VMWARE_SNAPSHOT_LIST_OP",
     "VMWARE_TASKS_HISTORY_OP",
     "VMWARE_TASKS_RECENT_OP",
     "VMWARE_TYPED_OPS",
@@ -401,6 +402,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (  # 
     OBJECT_COLLECT_WHEN_TO_USE,
     VMWARE_OBJECT_COLLECT_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_snapshot_list import (  # noqa: E402
+    SNAPSHOT_LIST_GROUP_KEY,
+    SNAPSHOT_LIST_WHEN_TO_USE,
+    VMWARE_SNAPSHOT_LIST_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (  # noqa: E402
     SSO_ADMIN_API_FILE_GROUP_KEY,
     SSO_ADMIN_API_FILE_WHEN_TO_USE,
@@ -445,6 +451,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
     TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE,
     SSO_ADMIN_API_FILE_GROUP_KEY: SSO_ADMIN_API_FILE_WHEN_TO_USE,
+    SNAPSHOT_LIST_GROUP_KEY: SNAPSHOT_LIST_WHEN_TO_USE,
     # Shared with the licence assign composite: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
 }
@@ -510,10 +517,11 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
 #: standalone-ESXi); and the incident-survival reads ``vm.info`` +
 #: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
-#: (#3701, tasks older than the recent list); and the SSO Admin API
-#: description read ``vcenter.sso_admin.api_file.get``; and the two licence
-#: reads ``license.list`` + ``license.assigned.list`` (keys masked). The tuple
-#: shape lets future typed reads join without touching the registrar.
+#: (#3701, tasks older than the recent list); the SSO Admin API
+#: description read ``vcenter.sso_admin.api_file.get``; the snapshots of
+#: one VM, ``snapshot.list``; and the two licence reads ``license.list`` +
+#: ``license.assigned.list`` (keys masked). The tuple shape lets future typed
+#: reads join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -524,6 +532,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_TASKS_RECENT_OP,
     VMWARE_TASKS_HISTORY_OP,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
+    VMWARE_SNAPSHOT_LIST_OP,
     VMWARE_LICENSE_LIST_OP,
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
 )

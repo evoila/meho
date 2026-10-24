@@ -381,6 +381,17 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # would otherwise fall through to ``other`` and broadcast in full).
         # Same posture as its ``vcfa.provider.api_token.create`` sibling.
         "vcfa.provider.api_token.revoke",
+        # The vCenter appliance local-account password change. Like
+        # ``keycloak.user.reset_password``, its params carry only a Vault
+        # *path* (``password_secret_ref``); the new password is read
+        # in-process and sent only in the ``PATCH
+        # /api/appliance/local-accounts/{username}`` request BODY. The pin
+        # sets body_recorded=false for its flight-recorder spans, collapses
+        # the broadcast to aggregate-only, and keeps a waiting approval's
+        # params in the encrypted handoff store. Its sibling
+        # ``vmware.appliance.local_account.policy.set`` sends only expiry
+        # numbers and flags, so it is NOT pinned.
+        "vmware.appliance.local_account.password.set",
     }
 )
 

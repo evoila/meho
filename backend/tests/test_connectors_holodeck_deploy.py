@@ -25,8 +25,9 @@ Acceptance-criteria coverage matrix:
   already_applied) + the 9.1 verify-only path (greps, never seds).
 * Uniform op-identity envelope (#2681) on all four (parked proposed_effect for
   the three gated ops; op_id on the safe op's result).
-* Secret hygiene (#1503): router.patch parks op-identity-only (no token) and is
-  pinned credential-class; config.apply's schema admits no plaintext credential.
+* Secret hygiene (#1503): router.patch is pinned credential-class and parks
+  with its own preview (patch ids + files, #4850) that holds no token;
+  config.apply's schema admits no plaintext credential.
 
 Tests mirror the windows_dns / holodeck mocked-pwsh transport pattern
 (test_connectors_holodeck_write.py): pure helpers unit-tested directly, handler
@@ -887,18 +888,23 @@ async def test_gated_ops_carry_uniform_op_identity_envelope(
 
 
 @pytest.mark.asyncio
-async def test_router_patch_parks_op_identity_only_no_token(
+async def test_router_patch_parks_with_patch_preview_no_token(
     holodeck_deploy_e2e: HolodeckConnector,
 ) -> None:
-    """Secret hygiene: router.patch is credential-class -> parked op-identity-only, no token."""
+    """Secret hygiene: router.patch is credential-class; its preview holds no token."""
     assert classify_op("holodeck.router.patch") == "credential_write"
     assert set(HOLODECK_DEPLOY_CREDENTIAL_OPS) == {"holodeck.router.patch"}
     result = await _dispatch("holodeck.router.patch", {}, approved=False)
     assert result["status"] == "awaiting_approval"
     effect = await _parked_effect(result["extras"]["approval_request_id"])
-    # Credential-class + no bespoke builder -> params-echo suppressed.
-    assert effect["preview_populated"] is False
-    assert "params_echo" not in effect and "preview" not in effect
+    # Credential-class: no params echo, but the bespoke preview (#4850) shows
+    # which patches the call checks and which files it may edit.
+    assert effect["preview_populated"] is True
+    assert "params_echo" not in effect
+    preview = effect["preview"]
+    assert preview["hr_version"] == "9.0.2.0"
+    assert preview["verify_only"] is False
+    assert [p["patch_id"] for p in preview["patches"]] == ["C1", "C2", "C3"]
     blob = json.dumps(effect).lower()
     assert "brcm_build_token" not in blob
     assert "broadcombuildtoken" not in blob

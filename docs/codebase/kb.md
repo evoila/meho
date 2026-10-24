@@ -155,12 +155,26 @@ before returning. Seven verbs:
 The directory-walking helper `ingest_directory` calls. Reads
 Markdown front-matter via `python-frontmatter` and yields a
 `KbFileRecord(path, relative_path, slug, body, metadata)` for each
-valid file, sorted by POSIX relative path (`Path.rglob` order depends
+valid file, sorted by POSIX relative path (`os.walk` order depends
 on the filesystem, so the walker sorts). `path` is only used to read
 the file; `relative_path` is what gets stored and reported.
 Per-file errors (binary file, unreadable bytes, invalid slug,
 malformed front-matter) are caught inside the walker and appended
 to the caller's `errors` list rather than raising.
+
+The walker reads only regular files whose real location is inside
+the folder:
+
+- It does not follow links. It skips a linked file and does not
+  enter a linked folder.
+- It skips pipes, sockets and other special files.
+- The same rule applies to `.kb-ignore`. A linked `.kb-ignore` is
+  not read, so its patterns do not apply.
+- Each skipped file gets one `kb_file_skipped` warning log line with
+  its relative path and the reason (`link`, `not a regular file` or
+  `outside the root`). Skipped files are not counted as errors.
+- The folder passed to the walker may itself be a link. The walker
+  resolves it first.
 
 ## Control flow
 
@@ -251,7 +265,9 @@ hit's `doc_metadata` is the same JSONB column).
 `KbService.ingest_directory` delegates to
 `kb/directory_ingest.py::ingest_directory`.
 
-1. Confine the directory to `KB_INGEST_ROOT` (#101).
+1. Confine the directory to `KB_INGEST_ROOT` (#101). Both paths are
+   resolved with `os.path.realpath` first. Whole folder names are
+   compared, so `<root>-old` is not inside `<root>`.
 2. Pre-walk: `list(walk_kb_directory(directory, errors=errors))` reads
    every valid `.md` file, in sorted relative-path order, before any
    write. Per-file walk failures land in `errors`.

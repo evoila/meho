@@ -890,6 +890,13 @@ now; the reciprocal pointer back from that doc is the deferred edit. When
 the `destructive` safety tier ([#3196](https://github.com/evoila/meho/issues/3196))
 lands, the classifier already covers it via the tag it promotes.
 
+Deployment specs and depot credentials are kept out of trace bodies like
+credential writes: the operations that send a domain spec, an SddcSpec or the
+depot password (`sddc.domain.validate` / `create`,
+`installer.sddc.spec.validate`, `installer.sddc.bringup.start` / `retry`,
+`installer.composite.sddc.bringup`, `installer.system.depot.set`) carry the
+tag `credential`, a secret tag word (`SECRET_FAMILY_TAGS`).
+
 **F2 uncertainty (the F5 degrade)**. Any state the engine cannot *prove*
 fully redacted returns `uncertain=True`, which the caller must map to
 operator-only visibility. Uncertainty triggers:

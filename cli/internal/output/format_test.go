@@ -80,6 +80,148 @@ func TestRenderHumanHealth_SandboxMode(t *testing.T) {
 	}
 }
 
+// TestFormatDB pins the DB line for a database at the expected
+// revision, behind it, ahead of it (normal after a rollback), with no
+// revision, and for the failure and old-backplane shapes (#4830).
+func TestFormatDB(t *testing.T) {
+	cases := []struct {
+		name string
+		db   api.DbStatus
+		want string
+	}{
+		{"unknown", api.DbStatus{}, "unknown"},
+		{"old backplane migrated", api.DbStatus{Migrated: ptrBool(true)}, "migrated"},
+		{"old backplane not migrated", api.DbStatus{Migrated: ptrBool(false)}, "not migrated"},
+		{
+			"at head",
+			api.DbStatus{Migrated: ptrBool(true), Revision: ptrStr("0115"), Head: ptrStr("0115"), Detail: ptrStr("revision=0115")},
+			"migrated, revision 0115",
+		},
+		{
+			"behind",
+			api.DbStatus{Migrated: ptrBool(false), Revision: ptrStr("0114"), Head: ptrStr("0115"), Detail: ptrStr("current=0114 head=0115")},
+			"not migrated (database at 0114, this version expects 0115)",
+		},
+		{
+			"ahead after rollback",
+			api.DbStatus{Migrated: ptrBool(true), Revision: ptrStr("0116"), Head: ptrStr("0115"), Detail: ptrStr("current=0116 head=0115 db_ahead=true")},
+			"migrated, revision 0116 (newer than this version, which expects 0115; normal after a rollback)",
+		},
+		{
+			"fresh database",
+			api.DbStatus{Migrated: ptrBool(false), Head: ptrStr("0115"), Detail: ptrStr("current=None head=0115")},
+			"not migrated (database has no revision, this version expects 0115)",
+		},
+		{
+			"database unreachable",
+			api.DbStatus{Migrated: ptrBool(false), Head: ptrStr("0115"), Detail: ptrStr("check_failed: OperationalError")},
+			"not migrated (check_failed: OperationalError)",
+		},
+		{
+			"vector extension missing",
+			api.DbStatus{Migrated: ptrBool(false), Revision: ptrStr("0115"), Head: ptrStr("0115"), Detail: ptrStr("revision=0115 pgvector=missing")},
+			"not migrated (revision=0115 pgvector=missing)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatDB(tc.db); got != tc.want {
+				t.Errorf("formatDB() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderHumanHealth_UpgradeDetails pins the readiness, approvals
+// and features lines (#4830), and that an older backplane's response
+// without those fields prints exactly as before.
+func TestRenderHumanHealth_UpgradeDetails(t *testing.T) {
+	base := func() *api.HealthResponse {
+		return &api.HealthResponse{
+			Operator: api.OperatorIdentity{Sub: "alice-sub-id"},
+			Vault:    api.VaultStatus{Reachable: true, ReadOk: true},
+			Db:       api.DbStatus{Migrated: ptrBool(true), Revision: ptrStr("0115"), Head: ptrStr("0115")},
+		}
+	}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+
+	old := render(base())
+	for _, label := range []string{"Readiness", "Approvals", "Features"} {
+		if strings.Contains(old, label) {
+			t.Errorf("an old response must not print a %s line:\n%s", label, old)
+		}
+	}
+	if strings.Count(old, "\n") != 3 {
+		t.Errorf("an old response prints three lines:\n%s", old)
+	}
+
+	ready := base()
+	ready.Readiness = &api.ReadinessStatus{Ready: true, Checks: &[]api.ReadinessCheck{
+		{Name: "keycloak", Ok: true}, {Name: "vault", Ok: true}, {Name: "db", Ok: true, Detail: ptrStr("revision=0115")},
+	}}
+	ready.Approvals = &api.ApprovalsStatus{
+		Custody:                  "configured",
+		EffectivePosture:         "four_eyes_enforced",
+		DelegatedDecisionPosture: "production_own_hand_only",
+	}
+	ready.Features = &[]api.FeatureStatus{
+		{Name: "agent_runtime", Configured: true, MissingEnv: &[]string{}},
+		{Name: "mcp", Configured: true},
+	}
+	got := render(ready)
+	for _, want := range []string{
+		"  DB:    migrated, revision 0115\n",
+		"  Readiness: ready (keycloak, vault, db ok)\n",
+		"  Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured\n",
+		"  Features: all configured\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+
+	notReady := base()
+	notReady.Readiness = &api.ReadinessStatus{Ready: false, Checks: &[]api.ReadinessCheck{
+		{Name: "keycloak", Ok: true},
+		{Name: "vault", Ok: false, Detail: ptrStr("unreachable: ConnectError")},
+		{Name: "db", Ok: true},
+	}}
+	notReady.Approvals = &api.ApprovalsStatus{
+		Custody:                  "missing",
+		EffectivePosture:         "single_operator_break_glass",
+		DelegatedDecisionPosture: "lab_class_delegation_allowed",
+	}
+	notReady.Features = &[]api.FeatureStatus{
+		{Name: "agent_runtime", Configured: false, MissingEnv: &[]string{"KEYCLOAK_ADMIN_CLIENT_ID", "KEYCLOAK_ADMIN_CLIENT_SECRET"}},
+		{Name: "approval_custody", Configured: false, MissingEnv: &[]string{"APPROVAL_HANDOFF_ENCRYPTION_KEY"}},
+		{Name: "mcp", Configured: true},
+	}
+	got = render(notReady)
+	for _, want := range []string{
+		"  Readiness: not ready\n",
+		"    vault: failed (unreachable: ConnectError)\n",
+		"    ok: keycloak, db\n",
+		"  Approvals: one operator may approve their own request (break-glass); decisions on someone else's instruction are allowed; approval key missing\n",
+		"  Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID, KEYCLOAK_ADMIN_CLIENT_SECRET), approval_custody (needs APPROVAL_HANDOFF_ENCRYPTION_KEY)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+
+	empty := base()
+	empty.Readiness = &api.ReadinessStatus{Ready: false}
+	if got := render(empty); !strings.Contains(got, "  Readiness: not ready (no checks reported)\n") {
+		t.Errorf("empty check list must say so:\n%s", got)
+	}
+}
+
 // TestRenderHumanHealth_NoEmail confirms the fallback path (no
 // email → name → sub) renders the sub alone without the trailing
 // "(sub: ...)" tail.

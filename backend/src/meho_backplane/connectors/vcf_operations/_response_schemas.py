@@ -255,8 +255,9 @@ VROPS_LICENSE_INFO_RESPONSE: dict[str, Any] = _object(
         "licenseName": _field("string", "The licence name."),
         "expirationDate": _field("integer", "When the licence expires, in epoch milliseconds."),
         "licenseKey": _field(
-            "string",
-            "The licence key, masked by MEHO: only the last 5 characters show. For VCF "
+            ["string", "null"],
+            "The licence key, masked by MEHO: only the last 5 characters show. Null "
+            "when the vendor sends an empty key or a key that is not text. For VCF "
             "licences the vendor puts the licence name here.",
         ),
     },

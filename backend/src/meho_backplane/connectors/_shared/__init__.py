@@ -37,6 +37,9 @@ Exports:
   value under a secret name is replaced with a placeholder, and the
   checked copy is written back. The three reads on main and every new
   API file read use it.
+* :mod:`meho_backplane.connectors._shared.license_key` — the one rule for
+  showing a licence key: only its last 5 characters stay visible. Every
+  read that returns licence keys masks them with it.
 * :mod:`meho_backplane.connectors._shared.wrapped_creds` — the per-work-item
   short-lived response-wrapped credential broker + runner unwrap backend
   (#3191, satellite write-path mechanism 3), registered under kind

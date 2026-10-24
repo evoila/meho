@@ -149,6 +149,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.item.delete",
     # The destructive DRS rule delete; special-cased in the tier assertion below.
     "vmware.composite.cluster.drs_rule.delete",
+    # Licence assign: dangerous + approval (the default tier).
+    "vmware.composite.license.assign",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -303,6 +305,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vm_allocation."
         "vm_resource_allocation_set_composite"
     ),
+    "vmware.composite.license.assign": (
+        "meho_backplane.connectors.vmware_rest.composites._license.license_assign_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -398,6 +403,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.nic.repoint": "vm",
     "vmware.composite.vm.device.cdrom": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
+    "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
@@ -1013,6 +1019,14 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "precondition_failed",
             "still_present",
             "timeout",
+        },
+        # Licence assign: the write, the no-op, and three refusals before any change.
+        "vmware.composite.license.assign": {
+            "assigned",
+            "unchanged",
+            "license_not_found",
+            "license_ambiguous",
+            "asset_not_found",
         },
     }
     for op_id, expected_values in expected_status_values.items():

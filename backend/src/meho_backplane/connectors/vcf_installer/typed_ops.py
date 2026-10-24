@@ -357,7 +357,12 @@ _SPEC_VALIDATE = InstallerTypedOp(
     parameter_schema=_sddc_spec_parameter_schema("/v1/sddcs/validations"),
     response_schema=VALIDATION_RESPONSE,
     group_key=_GROUP_BRINGUP,
-    tags=("vcf", "installer", "bringup", "validation", "write"),
+    # "credential": the SddcSpec holds the core passwords and can hold licence
+    # keys. The word is a secret tag word of the flight recorder
+    # (SECRET_FAMILY_TAGS), so a trace keeps no request or answer body of this
+    # call, the same as for a credential write. Every op here that sends an
+    # SddcSpec or the depot password carries it.
+    tags=("vcf", "installer", "bringup", "validation", "write", "credential"),
     safety_level="caution",
     requires_approval=False,
     llm_instructions=_instructions(
@@ -434,7 +439,8 @@ _BRINGUP_START = InstallerTypedOp(
     parameter_schema=_sddc_spec_parameter_schema("/v1/sddcs"),
     response_schema=SDDC_TASK_RESPONSE,
     group_key=_GROUP_BRINGUP,
-    tags=("vcf", "installer", "bringup", "deploy", "dangerous"),
+    # "credential" keeps the SddcSpec out of trace bodies (see spec.validate).
+    tags=("vcf", "installer", "bringup", "deploy", "dangerous", "credential"),
     safety_level="dangerous",
     requires_approval=True,
     llm_instructions=_instructions(
@@ -499,7 +505,8 @@ _BRINGUP_RETRY = InstallerTypedOp(
     },
     response_schema=SDDC_TASK_RESPONSE,
     group_key=_GROUP_BRINGUP,
-    tags=("vcf", "installer", "bringup", "retry", "dangerous"),
+    # "credential" keeps a fixed SddcSpec out of trace bodies (see spec.validate).
+    tags=("vcf", "installer", "bringup", "retry", "dangerous", "credential"),
     safety_level="dangerous",
     requires_approval=True,
     llm_instructions=_instructions(
@@ -702,7 +709,9 @@ _DEPOT_SET = InstallerTypedOp(
     },
     response_schema=DEPOT_SET_RESPONSE,
     group_key=_GROUP_DEPOT,
-    tags=("vcf", "installer", "depot", "system", "write"),
+    # "credential" keeps the depot password out of trace bodies, in the request
+    # and in the answer that can echo it (see spec.validate).
+    tags=("vcf", "installer", "depot", "system", "write", "credential"),
     safety_level="caution",
     requires_approval=True,
     llm_instructions=_instructions(

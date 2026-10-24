@@ -1674,7 +1674,11 @@ _DOMAIN_VALIDATE = SddcTypedOp(
     parameter_schema=_domain_spec_parameter_schema("/v1/domains/validations"),
     response_schema=_object("The validation run.", _VALIDATION_FIELDS),
     group_key=_GROUP_LIFECYCLE,
-    tags=("write", "sddc", "vcf", "domain", "validation", "lifecycle"),
+    # "credential": the spec holds the passwords of the new domain and can hold
+    # licence keys. The word is a secret tag word of the flight recorder
+    # (SECRET_FAMILY_TAGS), so a trace keeps no request or answer body of this
+    # call, the same as for a credential write.
+    tags=("write", "sddc", "vcf", "domain", "validation", "lifecycle", "credential"),
     safety_level="caution",
     requires_approval=False,
     llm_instructions=_instructions(
@@ -1717,7 +1721,8 @@ _DOMAIN_CREATE = SddcTypedOp(
     parameter_schema=_domain_spec_parameter_schema("/v1/domains"),
     response_schema=_object("The task that builds the domain.", _TASK_FIELDS),
     group_key=_GROUP_LIFECYCLE,
-    tags=("write", "sddc", "vcf", "domain", "create", "dangerous"),
+    # "credential" keeps the spec out of trace bodies (see sddc.domain.validate).
+    tags=("write", "sddc", "vcf", "domain", "create", "dangerous", "credential"),
     safety_level="dangerous",
     requires_approval=True,
     llm_instructions=_instructions(

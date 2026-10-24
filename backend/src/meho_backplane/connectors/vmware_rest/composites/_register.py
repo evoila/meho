@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 69 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 71 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -40,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 53 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 55 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -56,12 +56,14 @@ three host-domain writes ``host.datastore_mount_nfs`` /
 later Supervisor / #3281, storage-policy, content-library / #3495 and
 resource-pool / #3505 write families, the #3339 teardown deletes, the
 DRS rule delete ``cluster.drs_rule.delete``, the VM snapshot create +
-delete ``vm.snapshot.create`` / ``vm.snapshot.delete``, and the licence
-assign ``license.assign``) are all ``requires_approval=True``.
+delete ``vm.snapshot.create`` / ``vm.snapshot.delete``, the licence assign
+``license.assign``, and the two alarm changes ``alarm.acknowledge`` /
+``alarm.reset`` / #4383) are all ``requires_approval=True``.
 33 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 9 pin
+clarity at the call site; the helper would default to it anyway). 11 pin
 ``safety_level="caution"`` -- the VM snapshot create ``vm.snapshot.create``,
-the datastore directory create
+the two alarm changes ``alarm.acknowledge`` / ``alarm.reset`` / #4383 (they
+change only the state of alarms), the datastore directory create
 ``datastore.dir.create`` / #3339, the reversible VM allocation write
 ``vm.resource_allocation.set`` / #3880, the #3505 governed-allocation writes
 ``resource_pool.create`` + the VM-Host affinity
@@ -90,6 +92,22 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.alarm_state import (
+    ALARMS_GROUP_KEY,
+    ALARMS_WHEN_TO_USE,
+)
+from meho_backplane.connectors.vmware_rest.composites._alarm import (
+    alarm_acknowledge_composite,
+    alarm_reset_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._alarm_schemas import (
+    ALARM_ACKNOWLEDGE_LLM_INSTRUCTIONS,
+    ALARM_ACKNOWLEDGE_PARAMETER_SCHEMA,
+    ALARM_ACKNOWLEDGE_RESPONSE_SCHEMA,
+    ALARM_RESET_LLM_INSTRUCTIONS,
+    ALARM_RESET_PARAMETER_SCHEMA,
+    ALARM_RESET_RESPONSE_SCHEMA,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
@@ -619,6 +637,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     # Shared with the two typed licence reads: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
+    # #4383: shared with the typed read vmware.alarm.triggered.list, which
+    # registers under the same group key with the same text.
+    ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
 }
 
 
@@ -1988,6 +2009,45 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
         llm_instructions=LICENSE_ASSIGN_LLM_INSTRUCTIONS,
     ),
+    # ----------------------------------------------------------------
+    # Alarm changes (#4383) -- caution / approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.alarm.acknowledge",
+        handler=alarm_acknowledge_composite,
+        summary="Acknowledge one triggered vCenter alarm on one object, so its actions stop.",
+        description=(
+            "Acknowledges one triggered alarm on one object (AlarmManager.AcknowledgeAlarm). "
+            "The alarm stays red or yellow, but its actions do not fire again until it was "
+            "green once. Reads the alarm before and after. An acknowledged alarm gives "
+            "unchanged."
+        ),
+        parameter_schema=ALARM_ACKNOWLEDGE_PARAMETER_SCHEMA,
+        response_schema=ALARM_ACKNOWLEDGE_RESPONSE_SCHEMA,
+        group_key=ALARMS_GROUP_KEY,
+        tags=["composite", "write", "alarms", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=ALARM_ACKNOWLEDGE_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.alarm.reset",
+        handler=alarm_reset_composite,
+        summary="Reset triggered vCenter alarms to green after their cause is fixed.",
+        description=(
+            "Resets to green every triggered alarm in the vCenter with the given status, "
+            "object kind and trigger kind (ClearTriggeredAlarms); vCenter cannot reset one "
+            "alarm alone. This hides a problem until the alarm fires again: fix the cause "
+            "first. The answer lists what was cleared."
+        ),
+        parameter_schema=ALARM_RESET_PARAMETER_SCHEMA,
+        response_schema=ALARM_RESET_RESPONSE_SCHEMA,
+        group_key=ALARMS_GROUP_KEY,
+        tags=["composite", "write", "alarms", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=ALARM_RESET_LLM_INSTRUCTIONS,
+    ),
 )
 
 
@@ -2004,14 +2064,15 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 69 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 71 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    53 write (the licence assign ``license.assign``, the VM snapshot create
-    (caution) + delete (destructive), the seven #3339 teardown composites --
-    six destructive deletes
+    55 write (the two caution alarm changes ``alarm.acknowledge`` /
+    ``alarm.reset`` / #4383 + the licence assign ``license.assign``, the VM
+    snapshot create (caution) + delete (destructive), the seven #3339 teardown
+    composites -- six destructive deletes
     + the caution ``datastore.dir.create`` -- + the destructive DRS rule delete
     ``cluster.drs_rule.delete`` + T6 / #509 + the caution VM
     allocation write

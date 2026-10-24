@@ -176,6 +176,10 @@ from typing import Any
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._alarm import (
+    alarm_acknowledge_preview,
+    alarm_reset_preview,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_preview,
     datastore_file_delete_preview,
@@ -1776,11 +1780,15 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     # Licence assign: live-read of the asset's licence now and the licence it
     # would get, from the handler's own plan. Keys are masked.
     "vmware.composite.license.assign": license_assign_preview,
+    # #4383 alarm changes: a live read of the alarm, or of the alarms the
+    # reset filter matches now.
+    "vmware.composite.alarm.acknowledge": alarm_acknowledge_preview,
+    "vmware.composite.alarm.reset": alarm_reset_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 48 write-composite park-time preview builders. Import-time.
+    """Wire the 51 write-composite park-time preview builders. Import-time.
 
     The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

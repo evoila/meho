@@ -191,6 +191,9 @@ _READ_OP_IDS: tuple[str, ...] = (
 _CAUTION_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.subscribed.create",
     "vmware.composite.content_library.subscribed.sync",
+    # The two alarm changes (#4383), caution + approval as well.
+    "vmware.composite.alarm.acknowledge",
+    "vmware.composite.alarm.reset",
 )
 
 # 54 total -- 14 read (T5 / #508 + 4 guest-ops reads / #3100 + the

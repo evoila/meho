@@ -874,12 +874,15 @@ class TestFeedGenerator:
     async def test_tenant_scoping(self, wake: _FakeWake) -> None:
         """Tenant A's feed never shows tenant B's announcements."""
         await seed_announcement(_TENANT_B, activity="tenant b plan")
-        await seed_announcement(_TENANT_A, activity="tenant a plan")
+        await seed_announcement(_TENANT_A, activity="tenant a one")
+        await seed_announcement(_TENANT_A, activity="tenant a two")
 
-        # Tenant B's row is older; a leak would put it in the first frame.
-        frames = await _take(_frames(), n=1)
+        # Sequence numbers count per tenant, so tenant B's row ties with
+        # tenant A's first row. Two frames are expected and two are taken: a
+        # leak would put tenant B's row in one of them.
+        frames = await _take(_frames(), n=2)
 
-        assert [_data(frame)["activity"] for frame in frames] == ["tenant a plan"]
+        assert [_data(frame)["activity"] for frame in frames] == ["tenant a one", "tenant a two"]
 
     async def test_principal_and_target_filters(self, wake: _FakeWake) -> None:
         await seed_announcement(_TENANT_A, principal_sub="agent-a", target="cluster-x")

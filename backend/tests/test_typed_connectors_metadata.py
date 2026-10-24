@@ -91,6 +91,8 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "guest_ops",
         "namespace_management",
         "content_library",
+        # Shared with the two typed licence reads.
+        "vmware-licensing",
         "alarms",
     }
 )

@@ -6,7 +6,8 @@ Copyright (c) 2026 evoila Group
 # VCF Fleet LCM (modern) op surface onboarding — operator recipe
 
 > Operator-facing recipe for the **modern** `fleet-lcm-9.0` op surface — the
-> VCF 9 Fleet LCM Service (`/v1/*`), its typed read core, Bearer/Basic auth,
+> VCF 9 Fleet LCM Service (`/v1/*`), its typed read core, the login through
+> VCF Operations,
 > and the optional wider-breadth spec ingest. The connector implementation
 > lives in
 > [`backend/src/meho_backplane/connectors/fleet_lcm/`](../../backend/src/meho_backplane/connectors/fleet_lcm/);
@@ -66,42 +67,37 @@ There is **no dedicated `meho fleet-lcm …` CLI verb tree** — the modern
 surface is dispatched through the generic `meho operation …` /
 `meho connector …` verbs and the agent meta-tools (below).
 
-## Auth — Bearer primary, Basic fallback
+## Auth — a token from VCF Operations
 
-Per the pinned `fleet-lcm-openapi.yaml` `securitySchemes`, the global scheme
-is `bearerToken` (HTTP Bearer), with `basicAuth` (HTTP Basic) defined as an
-alternative the appliance also accepts.
-`FleetLcmConnector.auth_headers` picks the scheme by inspecting the loaded
-credentials:
+The fleet lifecycle API takes a Bearer token. MEHO gets it from VCF
+Operations at the first call and keeps it:
 
-- **Bearer (primary)** — when the target's Vault secret carries a non-empty
-  `token` field, the connector sends `Authorization: Bearer <token>`.
-- **Basic (fallback)** — otherwise it sends `Authorization: Basic <b64>` off
-  the `username` / `password` pair.
+1. MEHO logs in to VCF Operations with the `username` and `password` from the
+   target's Vault secret (`POST /suite-api/api/auth/token/acquire`).
+2. MEHO trades that token for a fleet lifecycle token
+   (`POST /suite-api/api/auth/token/exchange`, service key `fleet-lcm`).
+3. Every fleet call sends `Authorization: Bearer <token>`.
 
-An operator opts a target into Bearer simply by **staging a `token` field**
-in its Vault secret — no target-row or `auth_model` change. The
-`username` / `password` pair is always required (the appliance accepts
-`basicAuth`, and the shared `CredentialsCache` contract requires it); the
-`token` is optional and additive. This mirrors the field-discriminator
-loaders the proxmox and github connectors ship.
+When the token expires, the fleet API answers `401`. MEHO then logs in once
+more and runs the call again. You do not need to do anything.
 
-> **Live-verify follow-up (still open, #3047).** The default loader surfaces a
-> **pre-staged** Vault token only. The alternative provisioning path — where
-> the connector POSTs `basicAuth` to the appliance's token endpoint to **mint**
-> a short-lived `bearerToken` on the fly — is a documented seam that is **not**
-> implemented, and Bearer has **not** been verified against a live appliance
-> (no reachable Fleet LCM appliance, #1002 / #995). Until that lands, a target
-> with no staged token authenticates with the Basic alternative.
+By default MEHO logs in at the target's own host and port. If the target's
+`host` carries the `/fleet-lcm` service path, MEHO leaves that path out of the
+login. If VCF Operations has a different address, add it to the secret as
+`vcf_ops_url` (see below).
+
+**Fallback: a stored token.** If the secret has a `token` field, MEHO sends
+that token as is and does not log in. A stored token expires, so use this
+only when the login does not work for you.
 
 ## Prerequisites
 
 - **A reachable VCF Fleet 9.x appliance.** The connector derives the base URL
   from `target.host` + `target.port`; the `/fleet-lcm` service base is an
   operator target-configuration concern carried on `host`.
-- **Service-account credentials in Vault.** The connector reads
-  `{"username", "password"}` (required) — and, optionally, `token` (to opt
-  into Bearer) — from Vault at `target.secret_ref`, under the **operator's**
+- **A VCF Operations account in Vault.** The connector reads
+  `{"username", "password"}` (required) and, when set, `vcf_ops_url` and
+  `token` from Vault at `target.secret_ref`, under the **operator's**
   identity (operator-context Vault read).
 - **A registered VCF Fleet 9.x target** with `product="fleet"`,
   `auth_model="shared_service_account"`, and a fingerprint that resolves to
@@ -137,19 +133,27 @@ meho targets probe fleet-9x --json | jq '{product, version, reachable}'
 
 ### Credentials in Vault
 
-Basic (default) — username/password only:
+The VCF Operations account MEHO logs in with:
 
 ```bash
 vault kv put secret/fleet-lcm/fleet-9x \
-  username="admin@local" \
-  password="<service-account-password>"
+  username="admin" \
+  password="<vcf-operations-password>"
 ```
 
-Bearer (optional) — add a `token` to opt the target into the primary scheme:
+Only when VCF Operations has a different address than the target — add its
+address (`https://host` or `https://host:port`, https only, no path):
 
 ```bash
 vault kv patch secret/fleet-lcm/fleet-9x \
-  token="<pre-staged-bearer-token>"
+  vcf_ops_url="https://vcf-ops.example.internal"
+```
+
+Fallback only — a stored fleet lifecycle token (MEHO then does not log in):
+
+```bash
+vault kv patch secret/fleet-lcm/fleet-9x \
+  token="<stored-bearer-token>"
 ```
 
 `secret_ref` is the **logical** KV-v2 path relative to the mount (e.g.
@@ -194,7 +198,7 @@ fleet-lcm specifics are:
 ```bash
 # 1. Ingest the pinned spec under the SAME connector id (fleet-lcm-9.0). The
 #    ingested rows are source_kind="ingested" and ride the already-registered
-#    FleetLcmConnector.auth_headers (Bearer/Basic), so no auth wiring is needed.
+#    FleetLcmConnector.auth_headers (the Bearer token), so no auth wiring is needed.
 meho connector ingest \
   --product fleet --version 9.0 --impl fleet-lcm \
   --spec docs:fleet-lcm-9.0/fleet-lcm-openapi.yaml \
@@ -235,16 +239,18 @@ Agents use `search_operations` / `call_operation` with
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | A 9.x target dispatches `/lcm/*` legacy ops | Fingerprint resolved to 8.x → `fleet-rest` | `meho targets probe fleet-9x` — confirm version 9.x so `fleet-lcm` is selected |
-| `VaultCredentialsReadError` naming the target on any read | The Vault secret is missing `username`/`password` | Stage the pair (`vault kv put …`); a token-only secret is rejected |
-| Basic sent when Bearer expected | No non-empty `token` in the Vault secret | `vault kv patch … token=<...>` and re-dispatch (credentials are cached per target; restart or wait for cache eviction if just staged) |
+| `VaultCredentialsReadError` naming the target on any read | The Vault secret is missing `username`/`password`, or `vcf_ops_url` is not a plain https address | Fix the secret (`vault kv put …`); a token-only secret is rejected |
+| `connector_auth_failed` naming `token/acquire` | VCF Operations refused the username or password | Fix the account in the secret; the next call reads Vault again |
+| `connector_error` naming `token/acquire` with HTTP 404 | The login went to an address that is not VCF Operations | Add `vcf_ops_url` with the VCF Operations address |
+| `connector_auth_failed` naming `token/exchange` | VCF Operations refused to hand out a fleet lifecycle token for this account | Give the account access to fleet management in VCF Operations |
 | `op_id unknown_op` for a write op | Writes are the ingested-breadth follow-up, not shipped in the read core | Ingest + enable the breadth (above), or use a read core op |
-| Bearer 401 against a real appliance | Live Bearer is unverified (#1002 / #995) | Fall back to Basic; the live Bearer handshake is the #3047 follow-up |
+| `connector_auth_failed` after a re-login on fleet calls | The fleet API refused even a fresh token | Check the account's fleet roles in VCF Operations; as a last resort store a `token` |
 
 ## Related resources
 
 - [`docs/codebase/connectors-fleet-lcm.md`](../codebase/connectors-fleet-lcm.md) — engineering reference
 - [`backend/src/meho_backplane/connectors/fleet_lcm/typed_ops.py`](../../backend/src/meho_backplane/connectors/fleet_lcm/typed_ops.py) — typed read-op metadata + registrar
-- [`backend/src/meho_backplane/connectors/fleet_lcm/session.py`](../../backend/src/meho_backplane/connectors/fleet_lcm/session.py) — the credential loader (Bearer token seam)
+- [`backend/src/meho_backplane/connectors/fleet_lcm/session.py`](../../backend/src/meho_backplane/connectors/fleet_lcm/session.py) — the credential loader and the VCF Operations login
 - [`docs/cross-repo/connector-ingestion.md`](./connector-ingestion.md) — the connector-agnostic ingest runbook
 - [`docs/cross-repo/vcf-fleet-onboarding.md`](./vcf-fleet-onboarding.md) — the legacy `fleet-rest` (8.x) surface
 - Task: [#3047](https://github.com/evoila/meho/issues/3047); parent initiative [#3033](https://github.com/evoila/meho/issues/3033)

@@ -27,13 +27,11 @@ the full 51-op spec) owns the wider write / breadth surface as a follow-up.
 
 Every read is issued directly on the connector's own authenticated client
 via :meth:`HttpConnector._get_json`, which applies
-:meth:`FleetLcmConnector.auth_headers` per request — Bearer primary
-(``Authorization: Bearer <token>`` when the loaded credentials carry a
-``token``), HTTP-Basic fallback otherwise. A raw ``401`` propagates as
-:class:`httpx.HTTPStatusError` to the dispatcher's credential-recovery arm,
-which evicts the cached credentials via
-:meth:`FleetLcmConnector.invalidate_credentials` (#2396) and re-dispatches
-once.
+:meth:`FleetLcmConnector.auth_headers` per request — the Bearer token from
+the VCF Operations login, or a stored token (#4476). A raw ``401``
+propagates as :class:`httpx.HTTPStatusError` to the dispatcher, which calls
+:meth:`FleetLcmConnector.invalidate_session` (one new login) and runs the
+read once more.
 
 The 13-read set (each ``GET:/path`` reconciled against the pinned
 Apache-2.0 ``fleet-lcm-openapi.yaml`` on the operator's shelf by

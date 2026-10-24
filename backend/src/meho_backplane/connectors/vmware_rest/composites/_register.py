@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 70 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 71 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -40,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 54 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 55 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -56,10 +56,10 @@ three host-domain writes ``host.datastore_mount_nfs`` /
 later Supervisor / #3281, storage-policy, content-library / #3495 and
 resource-pool / #3505 write families, the #3339 teardown deletes, the
 DRS rule delete ``cluster.drs_rule.delete``, the VM snapshot create +
-delete ``vm.snapshot.create`` / ``vm.snapshot.delete``, and the two alarm
-changes ``alarm.acknowledge`` / ``alarm.reset`` / #4383) are
-all ``requires_approval=True``.
-32 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
+delete ``vm.snapshot.create`` / ``vm.snapshot.delete``, the licence assign
+``license.assign``, and the two alarm changes ``alarm.acknowledge`` /
+``alarm.reset`` / #4383) are all ``requires_approval=True``.
+33 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
 clarity at the call site; the helper would default to it anyway). 11 pin
 ``safety_level="caution"`` -- the VM snapshot create ``vm.snapshot.create``,
 the two alarm changes ``alarm.acknowledge`` / ``alarm.reset`` / #4383 (they
@@ -146,6 +146,12 @@ from meho_backplane.connectors.vmware_rest.composites._library import (
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._license import (
+    LICENSE_ASSIGN_LLM_INSTRUCTIONS,
+    LICENSE_ASSIGN_PARAMETER_SCHEMA,
+    LICENSE_ASSIGN_RESPONSE_SCHEMA,
+    license_assign_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
@@ -359,6 +365,11 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.vmware_rest.license_common import (
+    LICENSE_GROUP_KEY,
+    LICENSE_KEY_TAG,
+    LICENSE_WHEN_TO_USE,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -624,6 +635,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "delete_items=true) or one item of a local library "
         "(content_library.item.delete)."
     ),
+    # Shared with the two typed licence reads: the same key and text.
+    LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
     # #4383: shared with the typed read vmware.alarm.triggered.list, which
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
@@ -1975,6 +1988,28 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         ],
     ),
     # ----------------------------------------------------------------
+    # Licence write -- dangerous / approval. The full key never leaves
+    # the handler; the license-key tag keeps the vCenter bodies out of
+    # the flight recorder.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.license.assign",
+        handler=license_assign_composite,
+        summary="Assign a licence from the vCenter's licence inventory to one host or the vCenter.",
+        description=(
+            "Assigns one licence, named by its name or the last 5 characters of its key, "
+            "to one asset: a host or the vCenter. MEHO looks up the full key itself and "
+            "never shows it. Waits until a second person approves."
+        ),
+        parameter_schema=LICENSE_ASSIGN_PARAMETER_SCHEMA,
+        response_schema=LICENSE_ASSIGN_RESPONSE_SCHEMA,
+        group_key=LICENSE_GROUP_KEY,
+        tags=["composite", "write", "license", LICENSE_KEY_TAG, "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=LICENSE_ASSIGN_LLM_INSTRUCTIONS,
+    ),
+    # ----------------------------------------------------------------
     # Alarm changes (#4383) -- caution / approval
     # ----------------------------------------------------------------
     _CompositeSpec(
@@ -2029,14 +2064,15 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 70 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 71 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    54 write (the two caution alarm changes ``alarm.acknowledge`` /
-    ``alarm.reset`` / #4383 + the VM snapshot create (caution) + delete
-    (destructive), the seven #3339 teardown composites -- six destructive deletes
+    55 write (the two caution alarm changes ``alarm.acknowledge`` /
+    ``alarm.reset`` / #4383 + the licence assign ``license.assign``, the VM
+    snapshot create (caution) + delete (destructive), the seven #3339 teardown
+    composites -- six destructive deletes
     + the caution ``datastore.dir.create`` -- + the destructive DRS rule delete
     ``cluster.drs_rule.delete`` + T6 / #509 + the caution VM
     allocation write

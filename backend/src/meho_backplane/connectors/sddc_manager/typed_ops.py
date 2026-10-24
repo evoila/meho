@@ -1423,15 +1423,24 @@ _LICENSE_LIST = SddcTypedOp(
     summary="List the license keys registered with SDDC Manager and their usage.",
     description=(
         "Lists the license keys registered with SDDC Manager via "
-        "GET /v1/license-keys: product type, key, description and how much of "
-        "each key is used. Use it for licensing questions. Read-only."
+        "GET /v1/license-keys: product type, description, how much of each key "
+        "is used, and the key masked to its last 5 characters. Use it for "
+        "licensing questions. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
     response_schema=_page_of(
         "license keys",
         {
             "id": _field("string", "The license key id."),
-            "key": _field("string", "The license key."),
+            "key_masked": {
+                "type": ["string", "null"],
+                "description": (
+                    "The license key with only its last 5 characters visible, for "
+                    "example '*****-*****-*****-*****-AB12C'. Null when SDDC Manager "
+                    "sends an empty key or a key that is not text. MEHO never returns "
+                    "a full key."
+                ),
+            },
             "productType": _field(
                 "string", "The product, for example VCENTER, VSAN, ESXI, NSXT or WCP."
             ),
@@ -1450,7 +1459,11 @@ _LICENSE_LIST = SddcTypedOp(
         },
     ),
     group_key=_GROUP_PLATFORM,
-    tags=("read-only", "sddc", "vcf", "license", "platform"),
+    # "license-key" marks this op as secret-bearing (its "key" token is in
+    # SECRET_FAMILY_TAGS), so the flight recorder leaves the raw vendor
+    # body of the call out of the trace. The handler masks the key only
+    # in its own return value.
+    tags=("read-only", "sddc", "vcf", "license", "platform", "license-key"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions=_instructions(
@@ -1459,8 +1472,9 @@ _LICENSE_LIST = SddcTypedOp(
             "keys are close to their limit."
         ),
         output_shape=(
-            "{elements: [{id, key, productType, description, licenseKeyUsage: "
-            "{total, used, remaining}}], pageMetadata}."
+            "{elements: [{id, key_masked, productType, description, licenseKeyUsage: "
+            "{total, used, remaining}}], pageMetadata}. key_masked shows only the "
+            "last 5 characters of the key."
         ),
         next_step=(
             "Report keys with few remaining units per product type. MEHO does not "

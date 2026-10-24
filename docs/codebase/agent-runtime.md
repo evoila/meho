@@ -662,6 +662,10 @@ a raised exception across the boundary, and never a launched loop.
   (`_MAX_SCANNED_CHARS`), and its time grows in line with the length it
   reads. So it takes at most a few milliseconds for any prompt. A
   runbook instruction after the first 16 KiB of a longer text is not seen.
+  When a text is cut, a hit that the cut reaches is not used either: the
+  words after the cut could change what it means ("use the runbooks page"
+  cut to "use the runbook"). So the cut can make the check miss an
+  instruction, but it never refuses a run that the full text allows.
 
   Capability (`toolset_admits_runbook_execution` in `agent/toolset.py`)
   is intersected explicitly: `RUNBOOK_EXECUTION_META_TOOL_NAMES` is an

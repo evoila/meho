@@ -273,10 +273,19 @@ _CLAUSE_CONTINUATIONS = frozenset(
 #: The check reads at most this many characters (16 KiB) of each text: the
 #: system prompt and the run input are each cut to this length first. Real
 #: prompts are much shorter. A longer text is checked on its first 16,384
-#: characters only. Together with a scan whose time grows in line with the
-#: text length, this keeps the check within a few milliseconds for any
+#: characters only, and a hit that the cut reaches is not used (see
+#: :data:`_HIT_TAIL_RE`). Together with a scan whose time grows in line with
+#: the text length, this keeps the check within a few milliseconds for any
 #: prompt. It runs at the start of every agent run.
 _MAX_SCANNED_CHARS = 16 * 1024
+
+#: What the instruction pattern may still read after a hit ends: spaces, an
+#: optional ``:`` and more spaces, an optional quote, and one run of slug
+#: characters (the next word). When a text was cut and this part reaches the
+#: cut, the words after the cut could change the hit: "use the runbooks
+#: page" cut to "use the runbook", or "use runbook templates" cut before
+#: "templates". So such a hit is not used, and the run is not refused for it.
+_HIT_TAIL_RE: re.Pattern[str] = re.compile(r"\s*+(?::\s*+)?[`'\"]?[a-z0-9.\-]*+", re.IGNORECASE)
 
 
 def _named_runbook(match: re.Match[str]) -> str | None:
@@ -308,7 +317,7 @@ def _named_runbook(match: re.Match[str]) -> str | None:
     return None
 
 
-def _first_instructed_runbook(text: str) -> str | None:
+def _first_instructed_runbook(text: str, *, cut: bool) -> str | None:
     """Return the first raw hit in *text* that passes every guard, or ``None``.
 
     A hit is prose, not an instruction, when it is a runbook-headed noun
@@ -321,6 +330,10 @@ def _first_instructed_runbook(text: str) -> str | None:
     and negations only once, and the subject is read back from the verb.
     So the time grows in line with the length of *text*, even when it
     holds thousands of hits.
+
+    *cut* means *text* is only the first part of a longer text. Then the
+    scan stops at a hit that the cut reaches (:data:`_HIT_TAIL_RE`): what
+    the hit means is not known, and no later hit can come after it.
     """
     size = len(text)
     reversed_text = ""  # made on first use, for the subject guard
@@ -328,14 +341,16 @@ def _first_instructed_runbook(text: str) -> str | None:
     checked = 0  # boundaries and negations before this offset are known
     negated = False  # a negation comes earlier in the current clause
     for match in _RUNBOOK_INSTRUCTION_RE.finditer(text):
+        if cut and _HIT_TAIL_RE.fullmatch(text, match.end()):
+            return None
         found = _named_runbook(match)
         if found is None:
             continue
         start = match.start()
-        cut = max(text.rfind(boundary, checked, start) for boundary in _CLAUSE_BOUNDARIES)
-        if cut >= 0:
+        last_boundary = max(text.rfind(boundary, checked, start) for boundary in _CLAUSE_BOUNDARIES)
+        if last_boundary >= 0:
             # The hit is in a new clause, which starts after the boundary.
-            clause_start = cut + 1
+            clause_start = last_boundary + 1
             checked = clause_start
             negated = False
         if not negated:
@@ -375,7 +390,9 @@ def find_runbook_instruction(*texts: str) -> str | None:
     Only the first :data:`_MAX_SCANNED_CHARS` characters of each text are
     read, and the time grows in line with the length read. So the check
     stays within a few milliseconds for any prompt. It runs at the start
-    of every run.
+    of every run. When a text is cut, a hit that the cut reaches is not
+    used, so the cut can make the check miss an instruction but never
+    refuse a run that the full text allows.
 
     Detection is deliberately independent of whether the referenced
     runbook *exists*: the failure being guarded (#2077) is "the agent has
@@ -385,7 +402,8 @@ def find_runbook_instruction(*texts: str) -> str | None:
     before refusing the run.
     """
     for text in texts:
-        found = _first_instructed_runbook(text[:_MAX_SCANNED_CHARS])
+        cut = len(text) > _MAX_SCANNED_CHARS
+        found = _first_instructed_runbook(text[:_MAX_SCANNED_CHARS], cut=cut)
         if found is not None:
             return found
     return None

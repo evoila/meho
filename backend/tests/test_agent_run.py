@@ -690,7 +690,7 @@ def _long_prompt(head: str, unit: str = "a") -> str:
         # One very long word, then a named hit near the end of the part
         # the check reads.
         (
-            _long_prompt("a" * (_MAX_SCANNED_CHARS - 100) + "1 use runbook x-1 "),
+            _long_prompt("a" * (_MAX_SCANNED_CHARS - 100) + "1 use runbook x-1 ", unit="b "),
             "x-1",
         ),
         # Thousands of hits in one clause, each with "we" before its verb.
@@ -731,6 +731,33 @@ async def test_find_runbook_instruction_reads_only_the_start_of_each_text() -> N
     # The cap applies to each text on its own: a long system prompt does
     # not hide an instruction in the run input.
     assert find_runbook_instruction(filler, instruction) == "disk-cleanup-1"
+
+
+@pytest.mark.parametrize(
+    ("phrase", "kept"),
+    [
+        # The cut falls just before the "s" of "runbooks".
+        ("use the runbooks page to review history", "use the runbook"),
+        # The cut falls just before "templates", the word that makes it prose.
+        ("explain how to use runbook templates", "explain how to use runbook "),
+        # The cut falls inside the word after "runbook": "to" is not "tomorrow".
+        ("you can use a runbook tomorrow", "you can use a runbook to"),
+    ],
+    ids=["cut-inside-runbooks", "cut-before-templates", "cut-inside-next-word"],
+)
+async def test_find_runbook_instruction_ignores_a_hit_that_the_cut_reaches(
+    phrase: str,
+    kept: str,
+) -> None:
+    """Cutting a long text never turns prose into a runbook instruction.
+
+    The words after the cut can change what a hit means, so a hit that
+    the cut reaches is not used. Here the cut keeps only *kept* of *phrase*.
+    """
+    text = "x" * (_MAX_SCANNED_CHARS - len(kept) - 1) + " " + phrase
+    assert text[:_MAX_SCANNED_CHARS].endswith(" " + kept)
+    assert find_runbook_instruction(phrase) is None
+    assert find_runbook_instruction(text) is None
 
 
 # ---------------------------------------------------------------------------

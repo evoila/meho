@@ -40,11 +40,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 import respx
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 
 from meho_backplane.api.v1 import health as health_module
 from meho_backplane.api.v1.health import VaultStatus
 from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.db.migrations import alembic_config
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -180,7 +182,13 @@ def test_operator_rank_health_reaches_federation_probe(
         "tenant_role": role,
     }
     assert body["vault"] == {"reachable": True, "read_ok": True, "detail": "version=7"}
-    assert body["db"] == {"migrated": True}
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert body["db"] == {
+        "migrated": True,
+        "revision": head,
+        "head": head,
+        "detail": f"revision={head}",
+    }
     assert probe_mock.await_count == 1
 
 
@@ -212,6 +220,7 @@ def test_read_only_liveness_returns_200_without_vault_touch(
         )
 
     assert response.status_code == 200
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert response.json() == {
         "operator": {
             "sub": "op-monitor",
@@ -220,7 +229,9 @@ def test_read_only_liveness_returns_200_without_vault_touch(
             "tenant_id": _DEFAULT_TENANT_ID,
             "tenant_role": "read_only",
         },
-        "db": {"migrated": True},
+        # #4830: the liveness route shares DbStatus, so it carries the
+        # revision too — still without touching Vault.
+        "db": {"migrated": True, "revision": head, "head": head, "detail": f"revision={head}"},
         # #2763: the runner-liveness facet rides the low-privilege
         # liveness route — an in-memory clock read honouring this
         # handler's no-Vault/no-connector constraint — so the external

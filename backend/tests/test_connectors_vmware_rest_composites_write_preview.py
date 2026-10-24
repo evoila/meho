@@ -127,6 +127,12 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.content_library.item.delete",
         # The destructive DRS rule delete: blast_radius from its own plan.
         "vmware.composite.cluster.drs_rule.delete",
+        # Licence assign: live-read of the asset's licence now and the new one.
+        "vmware.composite.license.assign",
+        # The two alarm changes (#4383): a live read of the alarm, or of the
+        # alarms the reset filter matches now.
+        "vmware.composite.alarm.acknowledge",
+        "vmware.composite.alarm.reset",
     }
 )
 

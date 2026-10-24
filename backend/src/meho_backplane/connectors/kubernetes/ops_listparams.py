@@ -188,11 +188,21 @@ NAMESPACE_XOR_ALL_NAMESPACES: list[dict[str, Any]] = [
     },
     {
         "required": ["namespace", "all_namespaces"],
-        "properties": {"all_namespaces": {"const": False}},
+        "properties": {
+            "all_namespaces": {
+                "const": False,
+                "description": "Must be false when ``namespace`` is given.",
+            }
+        },
     },
     {
         "required": ["all_namespaces"],
-        "properties": {"all_namespaces": {"const": True}},
+        "properties": {
+            "all_namespaces": {
+                "const": True,
+                "description": "Must be true when no ``namespace`` is given.",
+            }
+        },
         "not": {"required": ["namespace"]},
     },
 ]

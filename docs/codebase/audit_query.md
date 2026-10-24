@@ -527,6 +527,12 @@ from the validated JWT (resolved by `verify_mcp_jwt_and_bind`); the
 arguments dict never carries `tenant_id` (rejected by the schema).
 Cross-tenant probes are structurally impossible.
 
+The input schema accepts the same filters as the REST body, including
+`event_class` (#4807). Its `enum` is built from `AuditEventClass` plus
+null, so the schema and the substrate cannot drift apart. A test checks
+that every filter the tool's help text names is a property of the
+schema.
+
 Audit + broadcast contract:
 
 * The MCP dispatcher (`mcp/handlers.py`) writes one `audit_log` row

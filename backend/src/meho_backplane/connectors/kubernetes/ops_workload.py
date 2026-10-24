@@ -47,8 +47,10 @@ the next page. See ``docs/architecture/jsonflux.md``.
 
 The ``info`` handlers emit a flat dict structured around the API
 object's spec + status. Pod info includes container statuses (with
-ready / restartCount / lastState) because the operator's "is this pod
-healthy?" question is the dominant ``kubectl describe pod`` use case.
+ready / restartCount / lastState, the running image digest and the
+waiting / terminated reason) because the operator's "is this pod
+healthy, and if not, why?" question is the dominant ``kubectl
+describe pod`` use case.
 Deployment info includes the rollout status (replicas / available /
 ready / updated) because that's what ``kubectl rollout status`` reads.
 
@@ -192,14 +194,31 @@ def container_status_row(status: V1ContainerStatus) -> dict[str, Any]:
     ``"running"`` / ``"waiting"`` / ``"terminated"``) so the caller
     sees the operator-visible string ``kubectl get pods`` prints,
     not the union nesting.
+
+    ``image`` is the image the pod asked for; ``image_id`` is the
+    digest of the image the container really runs (empty until the
+    image is pulled). ``reason`` / ``message`` / ``exit_code`` come
+    from the populated ``waiting`` or ``terminated`` branch of
+    ``state`` and are ``None`` for a running container.
+    ``last_reason`` / ``last_exit_code`` read the same fields off
+    ``last_state`` so a ``CrashLoopBackOff`` row says why the
+    container stopped the last time (e.g. ``OOMKilled`` / 137).
     """
+    reason, message, exit_code = _container_state_detail(status.state)
+    last_reason, _last_message, last_exit_code = _container_state_detail(status.last_state)
     return {
         "name": status.name,
         "image": status.image,
+        "image_id": status.image_id,
         "ready": bool(status.ready),
         "restart_count": int(status.restart_count or 0),
         "state": _container_state_label(status.state),
+        "reason": reason,
+        "message": message,
+        "exit_code": exit_code,
         "last_state": _container_state_label(status.last_state),
+        "last_reason": last_reason,
+        "last_exit_code": last_exit_code,
     }
 
 
@@ -220,6 +239,24 @@ def _container_state_label(state: Any) -> str | None:
     if state.terminated is not None:
         return "terminated"
     return None
+
+
+def _container_state_detail(state: Any) -> tuple[str | None, str | None, int | None]:
+    """Return ``(reason, message, exit_code)`` from a :class:`V1ContainerState`.
+
+    Only the ``waiting`` and ``terminated`` branches carry a reason
+    (``ImagePullBackOff``, ``CrashLoopBackOff``, ``OOMKilled``, ...);
+    ``exit_code`` exists on ``terminated`` only. A running or absent
+    state yields all ``None``.
+    """
+    if state is None:
+        return None, None, None
+    if state.waiting is not None:
+        return state.waiting.reason, state.waiting.message, None
+    if state.terminated is not None:
+        terminated = state.terminated
+        return terminated.reason, terminated.message, terminated.exit_code
+    return None, None, None
 
 
 def pod_ready_string(pod: V1Pod) -> str:
@@ -946,7 +983,15 @@ K8S_POD_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
         "qos_class, age_seconds, labels, containers, init_containers, "
         "volumes, container_statuses, init_container_statuses, "
         "conditions}. ``container_statuses`` carries per-container "
-        "ready/restart_count/state for unhealthy-container diagnosis."
+        "{name, image, image_id, ready, restart_count, state, reason, "
+        "message, exit_code, last_state, last_reason, last_exit_code} "
+        "for unhealthy-container diagnosis. ``image_id`` is the digest "
+        "of the image the container really runs (empty until pulled); "
+        "``reason`` / ``message`` say why a container is waiting "
+        "(e.g. ImagePullBackOff with the pull error) or terminated "
+        "(e.g. OOMKilled with exit_code); ``last_reason`` / "
+        "``last_exit_code`` say why it stopped the last time "
+        "(the CrashLoopBackOff case)."
     ),
 }
 
@@ -1149,7 +1194,9 @@ WORKLOAD_OPS: tuple[KubernetesOp, ...] = (
             "habit reads: containers (image / ports / env / resources / "
             "volume mounts), init containers, volumes (name + source "
             "type), per-container statuses (ready / restart_count / "
-            "state), conditions, node assignment, QoS class. Ambiguous "
+            "state / running image digest / waiting or terminated "
+            "reason, message and exit code), conditions, node "
+            "assignment, QoS class. Ambiguous "
             "prefixes return a structured error listing the candidates."
         ),
         parameter_schema=K8S_POD_INFO_PARAMETER_SCHEMA,

@@ -495,6 +495,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "vcfa-rest",
         "vcfa-vra8",
         "vmware-rest",
+        "vr-rest",
         "vrli-rest",
         "vrli-vrli8",
         "vrops-rest",

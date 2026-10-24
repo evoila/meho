@@ -483,6 +483,83 @@ def test_container_status_row_picks_state_branch() -> None:
     assert container_status_row(cs_terminated)["state"] == "terminated"
 
 
+def test_container_status_row_running_has_image_id_and_no_reason() -> None:
+    """A running container reports the digest it runs and no reason."""
+    row = container_status_row(_make_container_status(name="app", state_label="running"))
+    assert row["image_id"] == "sha256:abcdef"
+    assert row["state"] == "running"
+    assert row["reason"] is None
+    assert row["message"] is None
+    assert row["exit_code"] is None
+    assert row["last_state"] is None
+    assert row["last_reason"] is None
+    assert row["last_exit_code"] is None
+
+
+def test_container_status_row_waiting_carries_reason_and_message() -> None:
+    """``ImagePullBackOff`` plus the pull error text come through."""
+    cs = V1ContainerStatus(
+        name="migrate",
+        image="registry.example.com/app:does-not-exist",
+        image_id="",
+        ready=False,
+        restart_count=0,
+        state=V1ContainerState(
+            waiting=V1ContainerStateWaiting(
+                reason="ImagePullBackOff",
+                message='Back-off pulling image "registry.example.com/app:does-not-exist"',
+            )
+        ),
+    )
+    row = container_status_row(cs)
+    assert row["state"] == "waiting"
+    assert row["image_id"] == ""
+    assert row["reason"] == "ImagePullBackOff"
+    assert row["message"] == 'Back-off pulling image "registry.example.com/app:does-not-exist"'
+    assert row["exit_code"] is None
+
+
+def test_container_status_row_crashloop_carries_last_termination() -> None:
+    """``CrashLoopBackOff`` says why the container stopped the last time."""
+    cs = V1ContainerStatus(
+        name="app",
+        image="app:1.0",
+        image_id="registry.example.com/app@sha256:0123",
+        ready=False,
+        restart_count=5,
+        state=V1ContainerState(waiting=V1ContainerStateWaiting(reason="CrashLoopBackOff")),
+        last_state=V1ContainerState(
+            terminated=V1ContainerStateTerminated(exit_code=137, reason="OOMKilled")
+        ),
+    )
+    row = container_status_row(cs)
+    assert row["state"] == "waiting"
+    assert row["reason"] == "CrashLoopBackOff"
+    assert row["message"] is None
+    assert row["last_state"] == "terminated"
+    assert row["last_reason"] == "OOMKilled"
+    assert row["last_exit_code"] == 137
+
+
+def test_container_status_row_terminated_carries_exit_code() -> None:
+    """A terminated container reports reason, message and exit code."""
+    cs = V1ContainerStatus(
+        name="job",
+        image="job:1.0",
+        image_id="registry.example.com/job@sha256:4567",
+        ready=False,
+        restart_count=0,
+        state=V1ContainerState(
+            terminated=V1ContainerStateTerminated(exit_code=1, reason="Error", message="boom")
+        ),
+    )
+    row = container_status_row(cs)
+    assert row["state"] == "terminated"
+    assert row["reason"] == "Error"
+    assert row["message"] == "boom"
+    assert row["exit_code"] == 1
+
+
 def test_pod_info_carries_per_container_statuses_and_volumes() -> None:
     """``pod_info`` projects spec + status + container statuses + volumes."""
     now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)

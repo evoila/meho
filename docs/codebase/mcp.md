@@ -739,7 +739,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666). |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |

@@ -716,6 +716,42 @@ via JWT/OIDC federation, reads a sentinel secret, probes the DB
 migration state, and returns a structured response. The CLI
 renders that response in one of two formats.
 
+### What the human format prints (#4830)
+
+One line per subsystem, in this order. The first three lines are the
+v0.1 contract; the rest appear only when the backplane sends the
+field, so a response from an older backplane prints as it always did.
+
+| Line | Source field | Example |
+|---|---|---|
+| `Logged in as …` | `operator` | `Logged in as alice@example.com (sub: …)` |
+| `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)` |
+| `DB: …` | `db` | `DB: migrated, revision 0115` |
+| `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
+| `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
+| `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
+| `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+
+The DB line (`formatDB` in `internal/output/format.go`) uses the
+database revision and the revision this version expects, which the
+backplane sends as values since #4830 (`db.revision`, `db.head`):
+
+- `DB: migrated, revision 0115` — the database is at the expected revision.
+- `DB: not migrated (database at 0114, this version expects 0115)` — the
+  migration did not run.
+- `DB: migrated, revision 0116 (newer than this version, which expects
+  0115; normal after a rollback)` — the database is ahead; see
+  `docs/codebase/migrations.md`, "Rollback contract".
+- `DB: not migrated (check_failed: OperationalError)` — the probe could
+  not read the database; the detail is the text `/ready` shows.
+
+When readiness fails, the line becomes a header followed by one indented
+line per failing check with its detail, and one `ok: …` line naming the
+checks that passed. This is how an operator confirms an upgrade through
+MEHO instead of a shell into the pod: the database revision, the
+readiness checks and the approval key state all come from one
+`meho status` call, and `--json` carries the same fields.
+
 ### Pipeline
 
 1. **Resolve the backplane URL.** Override (`--backplane <url>`)

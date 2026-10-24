@@ -5,7 +5,8 @@
 
 The alarm read and the two alarm changes call these VI-JSON methods:
 ``ServiceInstance.RetrieveServiceContent``, ``PropertyCollector.RetrievePropertiesEx``,
-``AlarmManager.AcknowledgeAlarm`` and ``AlarmManager.ClearTriggeredAlarms``.
+``PropertyCollector.ContinueRetrievePropertiesEx``, ``AlarmManager.AcknowledgeAlarm``
+and ``AlarmManager.ClearTriggeredAlarms``.
 
 * An always-on test pins the two child-op lists, so a change to them is seen.
 * The shelf tests read the pinned ``vcenter-9.0/vi-json.yaml``: every method is
@@ -81,11 +82,13 @@ def test_alarm_child_op_lists_are_the_expected_sets() -> None:
     assert _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE == (
         "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
         "POST:/AlarmManager/{moId}/AcknowledgeAlarm",
     )
     assert _alarm._VIM_SUB_OPS_ALARM_RESET == (
         "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
         "POST:/AlarmManager/{moId}/ClearTriggeredAlarms",
     )
 

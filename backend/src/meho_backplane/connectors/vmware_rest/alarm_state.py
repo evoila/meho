@@ -31,6 +31,12 @@ never read as "no triggered alarms": :func:`read_triggered_alarms` raises
 no entry for the object. An unset property has no ``missingSet`` entry and
 means no triggered alarms.
 
+vCenter may also split a large answer into pages: a ``RetrieveResult`` with
+some objects and a ``token``. Every read here follows each token with
+``ContinueRetrievePropertiesEx``, on the same session, until a page comes back
+without one. A page that fails makes the whole read fail, so a partial answer
+is never taken for a whole one.
+
 Every call goes through
 :meth:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector._post_vmomi_json`
 (VI-JSON on vCenter 8.0 U1 and newer). This module imports nothing from the
@@ -43,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.session import SessionTokenUsed
 from meho_backplane.connectors.vmware_rest.vim_body import (
     fault_type_name,
     retrieve_properties_body,
@@ -103,6 +110,9 @@ ALARM_ENTITY_TYPES: Final[tuple[str, ...]] = (
 # ``/sdk/vim25/{release}`` base. Both singletons have a fixed moId.
 _SERVICE_CONTENT_PATH: Final = "/ServiceInstance/ServiceInstance/RetrieveServiceContent"
 _RETRIEVE_PROPERTIES_PATH: Final = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+_CONTINUE_RETRIEVE_PATH: Final = "/PropertyCollector/propertyCollector/ContinueRetrievePropertiesEx"
+#: Most pages one property read follows: a guard against an answer that never ends.
+_MAX_PAGES: Final = 100
 
 _PROP_TRIGGERED: Final = "triggeredAlarmState"
 _PROP_ALARM_NAME: Final = "info.name"
@@ -231,6 +241,59 @@ def _props_by_moid(retrieve_result: Any) -> dict[str, dict[str, Any]]:
     return found
 
 
+def _token(retrieve_result: Any) -> str | None:
+    """The continuation ``token`` of a ``RetrieveResult``, or ``None`` on the last page."""
+    payload = unwrap_vim_value(retrieve_result)
+    token = payload.get("token") if isinstance(payload, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
+async def _retrieve_all_pages(
+    connector: VmwareRestConnector,
+    target: VsphereTargetLike,
+    operator: Operator,
+    body: dict[str, Any],
+    *,
+    promote_missing: bool = False,
+) -> dict[str, Any]:
+    """Run one ``RetrievePropertiesEx`` and follow every continuation page.
+
+    Each ``token`` goes once to ``ContinueRetrievePropertiesEx``, on the session
+    the first call used (vCenter accepts a token only there), until a page
+    has no token. Returns ``{"objects": [...]}`` with the objects of all pages.
+    A failed page raises; so does an answer that has not ended after
+    :data:`_MAX_PAGES` pages (:class:`AlarmStateUnreadableError`).
+    """
+    session = SessionTokenUsed()
+    result = await connector._post_vmomi_json(
+        target,
+        _RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=body,
+        promote_managed_object_not_found=promote_missing,
+        session_used=session,
+    )
+    objects = _objects(result)
+    token = _token(result)
+    pages = 1
+    while token is not None:
+        if pages >= _MAX_PAGES:
+            raise AlarmStateUnreadableError(
+                f"vCenter's answer had not ended after {_MAX_PAGES} pages; the read is incomplete"
+            )
+        result = await connector._post_vmomi_json(
+            target,
+            _CONTINUE_RETRIEVE_PATH,
+            operator=operator,
+            json={"token": token},
+            session_token=session.token,
+        )
+        objects.extend(_objects(result))
+        token = _token(result)
+        pages += 1
+    return {"objects": objects}
+
+
 def _unreadable_by_moid(retrieve_result: Any) -> dict[str, dict[str, str]]:
     """Map each object's moid to ``{property path: fault type}`` from its ``missingSet``.
 
@@ -304,14 +367,15 @@ async def read_triggered_alarms(
 
     Raises :class:`AlarmStateUnreadableError` when vCenter could not read the
     list (a ``missingSet`` entry) or sent no entry for the object, so a
-    caller never takes an unreadable list for an empty one.
+    caller never takes an unreadable list for an empty one. A failed
+    continuation page raises too.
     """
-    result = await connector._post_vmomi_json(
+    result = await _retrieve_all_pages(
+        connector,
         target,
-        _RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(mo_type, [moid], [_PROP_TRIGGERED]),
-        promote_managed_object_not_found=promote_missing,
+        operator,
+        retrieve_properties_body(mo_type, [moid], [_PROP_TRIGGERED]),
+        promote_missing=promote_missing,
     )
     unreadable = _unreadable_by_moid(result).get(moid)
     if unreadable:
@@ -378,13 +442,14 @@ async def _read_props(
     paths: list[str],
     notes: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """One best-effort property read; a failure adds a note and returns ``{}``."""
+    """One best-effort property read of all pages; a failure adds a note and returns ``{}``.
+
+    A failed page counts as a failed read: the note names it, and no names of
+    that type are used.
+    """
     try:
-        result = await connector._post_vmomi_json(
-            target,
-            _RETRIEVE_PROPERTIES_PATH,
-            operator=operator,
-            json=retrieve_properties_body(mo_type, moids, paths),
+        result = await _retrieve_all_pages(
+            connector, target, operator, retrieve_properties_body(mo_type, moids, paths)
         )
     except (httpx.HTTPError, RuntimeError) as exc:
         notes.append(f"{mo_type} names not read ({type(exc).__name__})")

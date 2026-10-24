@@ -32,6 +32,7 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
+from meho_backplane.connectors.vmware_rest import alarm_state as alarm_state_module
 from meho_backplane.connectors.vmware_rest.alarm_state import (
     ALARMS_GROUP_KEY,
     ALARMS_WHEN_TO_USE,
@@ -178,6 +179,22 @@ class _AlarmVim:
         self.alarm_list_answer_after_change: str | None = None
         #: Object types whose name read comes back in missingSet.
         self.unreadable_names: set[str] = set()
+        #: Paging: at most this many objects per page of a multi-object read.
+        self.page_size: int | None = None
+        #: The alarm list read answers an empty first page with a token.
+        self.alarm_list_on_second_page = False
+        #: The same, only for the reads after a change was sent.
+        self.alarm_list_on_second_page_after_change = False
+        #: A ContinueRetrievePropertiesEx call raises this.
+        self.fail_continue: Exception | None = None
+        #: Every page carries a new token (an answer that never ends).
+        self.endless_pages = False
+        #: The session token the fake reports to ``session_used``.
+        self.session = "<session-1>"
+        #: ``(token, session_token)`` of every ContinueRetrievePropertiesEx call.
+        self.continue_calls: list[tuple[str, str | None]] = []
+        self._pending: dict[str, list[list[dict[str, Any]]]] = {}
+        self._tokens = 0
         self.apply_changes = True
         self.missing: set[str] = set()
         self._changed = False
@@ -196,11 +213,17 @@ class _AlarmVim:
         operator: Operator,
         json: Any = None,
         promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         self.calls.append((path, copy.deepcopy(json), promote_managed_object_not_found))
+        if session_used is not None:
+            session_used.token = self.session
         _, _, method = path.strip("/").split("/")
         if method in self.fail:
             raise self.fail[method]
+        if method == "ContinueRetrievePropertiesEx":
+            return self._continue(json["token"], session_token)
         if method == "RetrieveServiceContent":
             content: dict[str, Any] = {
                 "_typeName": "ServiceContent",
@@ -251,11 +274,12 @@ class _AlarmVim:
                 return {"objects": [{"obj": moref(mo_type, moid)}]}
             states = [s for s in self.states if moid == _ROOT or s["entity"]["value"] == moid]
             val = {"_typeName": "ArrayOfAlarmState", "_value": copy.deepcopy(states)}
-            return {
-                "objects": [
-                    {"obj": moref(mo_type, moid), "propSet": [{"name": path_set[0], "val": val}]}
-                ]
-            }
+            entry = {"obj": moref(mo_type, moid), "propSet": [{"name": path_set[0], "val": val}]}
+            second = self.alarm_list_on_second_page or (
+                self._changed and self.alarm_list_on_second_page_after_change
+            )
+            pages = [[], [entry]] if second else [[entry]]
+            return self._serve(pages)
         if f"names:{mo_type}" in self.fail:
             raise self.fail[f"names:{mo_type}"]
         objects = []
@@ -273,7 +297,26 @@ class _AlarmVim:
             else:
                 props = [{"name": "name", "val": _boxed(self.names[(mo_type, moid)])}]
             objects.append({"obj": moref(mo_type, moid), "propSet": props})
-        return {"objects": objects}
+        size = self.page_size or max(len(objects), 1)
+        return self._serve([objects[i : i + size] for i in range(0, len(objects), size)] or [[]])
+
+    def _serve(self, pages: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Answer the first page; keep the rest behind a single-use token."""
+        first, rest = pages[0], pages[1:]
+        result: dict[str, Any] = {"objects": first}
+        if rest or self.endless_pages:
+            self._tokens += 1
+            token = f"<token-{self._tokens}>"
+            self._pending[token] = rest or [[]]
+            result["token"] = token
+        return result
+
+    def _continue(self, token: str, session_token: str | None) -> dict[str, Any]:
+        self.continue_calls.append((token, session_token))
+        if self.fail_continue is not None:
+            raise self.fail_continue
+        pages = self._pending.pop(token)  # a token works once
+        return self._serve(pages)
 
     def _acknowledge(self, body: dict[str, Any]) -> None:
         for state in self.states:
@@ -550,6 +593,62 @@ async def test_list_notes_the_names_vcenter_could_not_read() -> None:
     hosts = [row for row in out["alarms"] if row["entity_type"] == "HostSystem"]
     assert [row["entity_name"] for row in hosts] == [None, None]
     assert {row["entity_name"] for row in out["alarms"]} == {None, "Datacenters", "vm-c"}
+
+
+async def test_list_follows_every_page_of_the_name_reads() -> None:
+    """vCenter may split an answer into pages; every name and rule is still read."""
+    vim = _seeded()
+    vim.page_size = 1
+    out = await _list(vim)
+    assert out["read_note"] is None
+    assert {row["alarm_name"] for row in out["alarms"]} == {
+        "Test event alarm A",
+        "Test event alarm B",
+        "Test metric alarm",
+    }
+    assert all(row["trigger_kind"] is not None for row in out["alarms"])
+    assert all(row["entity_name"] is not None for row in out["alarms"])
+    # Three alarm pages and two host pages need three continuation calls, each
+    # with its own token, all on the session of the first call.
+    assert [token for token, _ in vim.continue_calls] == ["<token-1>", "<token-2>", "<token-3>"]
+    assert {session for _, session in vim.continue_calls} == {"<session-1>"}
+    assert vim._pending == {}
+
+
+async def test_list_follows_a_token_on_the_alarm_list_read() -> None:
+    vim = _seeded()
+    vim.alarm_list_on_second_page = True
+    out = await _list(vim)
+    assert len(out["alarms"]) == 4
+    assert vim.methods()[1:3] == ["RetrievePropertiesEx", "ContinueRetrievePropertiesEx"]
+
+
+async def test_a_failed_name_page_is_reported_and_its_names_are_not_used() -> None:
+    vim = _seeded()
+    vim.page_size = 1
+    vim.fail_continue = httpx.ConnectError("page lost")
+    out = await _list(vim)
+    assert "Alarm names not read (ConnectError)" in (out["read_note"] or "")
+    assert "HostSystem names not read (ConnectError)" in (out["read_note"] or "")
+    assert all(row["alarm_name"] is None for row in out["alarms"])
+    assert all(row["trigger_kind"] is None for row in out["alarms"])
+
+
+async def test_a_failed_alarm_list_page_fails_the_list() -> None:
+    vim = _seeded()
+    vim.alarm_list_on_second_page = True
+    vim.fail_continue = httpx.ConnectError("page lost")
+    with pytest.raises(httpx.ConnectError):
+        await _list(vim)
+
+
+async def test_an_answer_that_never_ends_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(alarm_state_module, "_MAX_PAGES", 3)
+    vim = _seeded()
+    vim.endless_pages = True
+    with pytest.raises(AlarmStateUnreadableError, match="had not ended after 3 pages"):
+        await _list(vim)
+    assert len(vim.continue_calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -833,6 +932,21 @@ async def test_reset_with_an_unreadable_list_after_the_call_is_not_verified(
     assert len(vim.calls_to("ClearTriggeredAlarms")) == 1
 
 
+async def test_reset_with_a_failed_page_after_the_call_is_not_verified(
+    gate: _GateRecorder,
+) -> None:
+    """A lost page of the list after the reset never reports alarms as cleared."""
+    vim = _seeded()
+    vim.apply_changes = False
+    vim.alarm_list_on_second_page_after_change = True
+    vim.fail_continue = httpx.ConnectError("page lost")
+    out = await _reset(vim, ["red"], "all", "all")
+    assert out["status"] == "not_verified"
+    assert out["cleared"] is None
+    assert "ConnectError" in out["issues"][0]["message"]
+    assert len(vim.calls_to("ClearTriggeredAlarms")) == 1
+
+
 async def test_reset_that_clears_every_alarm_reads_an_unset_list_as_empty(
     gate: _GateRecorder,
 ) -> None:
@@ -936,11 +1050,13 @@ def test_both_changes_have_a_preview_builder_and_a_child_op_list() -> None:
     assert _GOVERNED_SUBOP_MANIFEST[_ACK_OP] == (
         "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
         _ACK_SUB_OP,
     )
     assert _GOVERNED_SUBOP_MANIFEST[_RESET_OP] == (
         "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
         _CLEAR_SUB_OP,
     )
 

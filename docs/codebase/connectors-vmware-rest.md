@@ -3493,6 +3493,16 @@ reset before they change anything. The read after a change gives
 read. An unset property has no `missingSet` entry and means no triggered
 alarms.
 
+**Every page is read.** vCenter may split a large answer into pages: a
+`RetrieveResult` with some objects and a `token`. Every alarm read follows
+each token with `PropertyCollector.ContinueRetrievePropertiesEx`, on the
+session of the first call (vCenter accepts a token only there and only once),
+until a page comes back without a token; at most 100 pages. A failed page
+fails the whole read: the list or the change fails, the read after a change
+gives `not_verified`, and a failed name read shows in `read_note`, with no
+names of that object type used. So a lost page never leaves names or trigger
+kinds silently empty.
+
 **Trigger kind.** Each row has `trigger_kind`, from the alarm rule
 (`Alarm.info.expression`): `event` (only event conditions), `metric` (only
 metric or state conditions), `mixed` (both) or null (not known). The reset

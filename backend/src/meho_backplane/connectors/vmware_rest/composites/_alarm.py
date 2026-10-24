@@ -27,7 +27,8 @@ Flow of both handlers, on the connector session:
 
 1. ``ServiceInstance.RetrieveServiceContent`` -> root folder + alarm manager.
 2. ``RetrievePropertiesEx`` of the root folder's ``triggeredAlarmState``
-   (plus the alarm and object names) -> what is triggered now.
+   (plus the alarm and object names, following every continuation page with
+   ``ContinueRetrievePropertiesEx``) -> what is triggered now.
 3. The one change, through the governed VI-JSON write seam
    (:func:`._write._write_vmomi_sub_op`, the #2254 sub-op gate).
 4. The same read again -> the answer says what changed.
@@ -80,17 +81,22 @@ __all__ = [
 # keys; the reads are listed so the reconcile lanes check every path.
 _OP_RETRIEVE_SERVICE_CONTENT: Final = "POST:/ServiceInstance/{moId}/RetrieveServiceContent"
 _OP_RETRIEVE_PROPERTIES: Final = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+_OP_CONTINUE_RETRIEVE_PROPERTIES: Final = (
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
+)
 _OP_ACKNOWLEDGE_ALARM: Final = "POST:/AlarmManager/{moId}/AcknowledgeAlarm"
 _OP_CLEAR_TRIGGERED_ALARMS: Final = "POST:/AlarmManager/{moId}/ClearTriggeredAlarms"
 
 _VIM_SUB_OPS_ALARM_ACKNOWLEDGE: tuple[str, ...] = (
     _OP_RETRIEVE_SERVICE_CONTENT,
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_ACKNOWLEDGE_ALARM,
 )
 _VIM_SUB_OPS_ALARM_RESET: tuple[str, ...] = (
     _OP_RETRIEVE_SERVICE_CONTENT,
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_CLEAR_TRIGGERED_ALARMS,
 )
 

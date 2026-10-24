@@ -840,7 +840,12 @@ class TestFeedGenerator:
         await seed_announcement(_TENANT_A, activity="recent")
 
         start = FeedStart(since=datetime.now(UTC) - timedelta(minutes=5))
-        frames = await _take(_frames(start=start), n=2, timeout=1.0)
+        # One frame is enough to prove the replay skipped "old": it has the
+        # lower sequence number, so it would come first if the feed sent it.
+        # Asking for more frames than expected would make the test wait out
+        # its whole time limit, and fail when the first frame comes late on a
+        # busy runner (#4810).
+        frames = await _take(_frames(start=start), n=1)
 
         assert [_data(frame)["activity"] for frame in frames] == ["recent"]
 
@@ -859,7 +864,7 @@ class TestFeedGenerator:
             await session.commit()
 
         start = FeedStart(since=datetime.now(UTC) - timedelta(days=400))
-        frames = await _take(_frames(start=start), n=3, timeout=1.0)
+        frames = await _take(_frames(start=start), n=3)
 
         assert frames[0].startswith("event: gap\n")
         assert _data(frames[0])["reason"] == "retention_trimmed"
@@ -871,7 +876,8 @@ class TestFeedGenerator:
         await seed_announcement(_TENANT_B, activity="tenant b plan")
         await seed_announcement(_TENANT_A, activity="tenant a plan")
 
-        frames = await _take(_frames(), n=2, timeout=1.0)
+        # Tenant B's row is older; a leak would put it in the first frame.
+        frames = await _take(_frames(), n=1)
 
         assert [_data(frame)["activity"] for frame in frames] == ["tenant a plan"]
 
@@ -879,18 +885,16 @@ class TestFeedGenerator:
         await seed_announcement(_TENANT_A, principal_sub="agent-a", target="cluster-x")
         await seed_announcement(_TENANT_A, principal_sub="agent-b", target="cluster-y")
 
-        by_principal = await _take(
-            _frames(flt=AnnouncementFilter(principal="agent-b")), n=2, timeout=1.0
-        )
-        by_target = await _take(
-            _frames(flt=AnnouncementFilter(target="cluster-x")), n=2, timeout=1.0
-        )
+        # Both filters select the second row, so the first frame shows
+        # whether the filter dropped the first row.
+        by_principal = await _take(_frames(flt=AnnouncementFilter(principal="agent-b")), n=1)
+        by_target = await _take(_frames(flt=AnnouncementFilter(target="cluster-y")), n=1)
         by_op_class = await _take(
             _frames(flt=AnnouncementFilter(op_class="write")), n=1, timeout=1.0
         )
 
         assert [_data(frame)["principal_sub"] for frame in by_principal] == ["agent-b"]
-        assert [_data(frame)["target"] for frame in by_target] == ["cluster-x"]
+        assert [_data(frame)["target"] for frame in by_target] == ["cluster-y"]
         # ``op_class`` is an operation filter: no announcement matches it.
         assert by_op_class == []
 
@@ -920,7 +924,9 @@ class TestFeedGenerator:
 
         monkeypatch.setattr(feed_module, "latest_announcements", _boom)
 
-        frames = await _take(_frames(), n=5, timeout=1.0)
+        # The generator ends on its own after the error frame; ``n`` and the
+        # time limit only matter if that ever breaks.
+        frames = await _take(_frames(), n=5)
 
         assert len(frames) == 1
         assert frames[0].startswith("event: feed_error\n")

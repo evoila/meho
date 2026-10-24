@@ -13,6 +13,7 @@ from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     _GOVERNED_SUBOP_MANIFEST,
 )
 from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
+from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 
 # These writes deliberately do not park a proposed-effect preview. The exception
 # set names policy, while the registry remains the source for every op-id set.
@@ -62,6 +63,7 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",
+        "vmware.composite.vm.tools.installer.unmount",
         # #3880: ``.show`` / ``.set`` are not classifier suffixes -> ``other``.
         "vmware.composite.vm.resource_allocation.show",
         "vmware.composite.vm.resource_allocation.set",
@@ -116,10 +118,17 @@ def test_registry_coverage_is_derived_from_composites() -> None:
     _assert_composite_coverage(
         registry_ids,
         {spec.op_id: spec for spec in _COMPOSITES},
-        dict(_write_preview._WRITE_PREVIEW_BUILDERS),
+        _registered_preview_builders(registry_ids),
         dict(_GOVERNED_SUBOP_MANIFEST),
         {op_id: classify_op(op_id) for op_id in registry_ids},
     )
+
+
+def _registered_preview_builders(registry_ids: set[str]) -> dict[str, object]:
+    """Every preview builder of a composite: the shared map, and the ones a module registers."""
+    found = {op_id: b for op_id, b in _PREVIEW_BUILDERS.items() if op_id in registry_ids}
+    assert set(_write_preview._WRITE_PREVIEW_BUILDERS) <= set(found)
+    return found
 
 
 def test_deliberately_unmapped_composite_fails_closed() -> None:

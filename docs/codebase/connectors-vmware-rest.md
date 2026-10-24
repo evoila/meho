@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 71 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 73 hand-authored composites
 that orchestrate cross-spec workflows: 16 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -18,7 +18,7 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880`) and 55 write
+reservation read `vm.resource_allocation.show` / `#3880`) and 57 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -60,9 +60,11 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 `content_library.delete`, `content_library.item.delete`, plus the caution
 `datastore.dir.create` (see **Governed teardown deletes**), the destructive
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
-VM snapshot writes `vm.snapshot.create` (caution) + `vm.snapshot.delete`
-(destructive) (see **VM snapshot operations**), the licence assign
-`license.assign` (see **vSphere licences**), and the two caution alarm changes
+CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
+`vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
+Tools installer unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
++ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
+assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
 `alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
@@ -470,10 +472,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 71
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 73
   `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 44 dangerous/destructive
-  writes + 11 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 45 dangerous/destructive
+  writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1096,17 +1098,17 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 71 `vmware.composite.*` rows with
+   queued registrar and upserts: the 73 `vmware.composite.*` rows with
    `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 55 writes, all `requires_approval=True`
-   (33 `safety_level="dangerous"`; 11 `safety_level="caution"` —
+   service principals), and 57 writes, all `requires_approval=True`
+   (34 `safety_level="dangerous"`; 12 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
-   `vm.snapshot.create`;
+   `vm.tools.installer.unmount`, `vm.snapshot.create`;
    and 11 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
@@ -1490,7 +1492,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 71 composites (16 reads + 55 writes) land as `source_kind="composite"`
+The 73 composites (16 reads + 57 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1557,7 +1559,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 71 composites are hand-authored aggregators the connector ships as
+The 73 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -1967,6 +1969,67 @@ in `composites/_vm_allocation.py` and ride the `/sdk/vim25` seam:
   `RetrievePropertiesEx` / `ReconfigVM_Task` `vm.disk.grow` reconciles, so no
   new vim op_id is introduced. vCenter targets only (the standalone-ESXi SOAP
   transport has no `ReconfigVM_Task` builder).
+
+### VM hardware read, CD drive add and Tools installer unmount
+
+Three operations replace raw vCenter calls that people used often for VM
+hardware. All three call vSphere REST on the connector session, so they need
+no catalog ingest. Every path exists on vCenter 8.0 and 9.0, and all three are
+on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`). The read names the
+VM by id (`vm`, such as `vm-42`) or by `name`, like `vmware.vm.info`: an
+unknown name gives `not_found`, a name that fits two VMs is an error. The two
+changes take the VM id (`vm`) only, and no name. A change waits for approval,
+and it must then run on the VM the approver saw. A name looked up again after
+approval could point to another VM (for example after a rename). So get the
+id from the read first.
+
+- **`vmware.vm.hardware.show`** (typed read, `safe`, no approval;
+  `typed_ops_vm_hardware.py` with its schemas in `_vm_hardware_schemas.py`,
+  handler `vm_hardware_show`, group `vmware-vm-hardware`). Reads, all `GET`
+  under `/vcenter/vm/{vm}`:
+  `hardware/cpu` and `hardware/memory` (must work; a 404 gives `not_found`),
+  `hardware/cdrom` and `hardware/cdrom/{cdrom}`, `hardware/disk` and
+  `hardware/disk/{disk}`, `hardware/adapter/scsi`, `/sata` and `/nvme` with
+  `.../{adapter}` for the bus, and `tools/installer`.
+  Answer: `cpu` (count, cores per socket, hot add / remove), `memory`
+  (`size_mib`, hot add, step and limit), `cdroms` (backing type, ISO file,
+  host device, state, `connected`, `start_connected`), `disks` (type, address,
+  `capacity_bytes`, `vmdk_file`), `disk_controllers` (kind, adapter, type,
+  bus, sharing, `devices`) and `tools_installer_mounted`. The vSphere REST
+  controller resources do not list their devices, so the read joins them
+  itself: a disk or CD drive sits on the controller of the same kind and bus
+  number (`Disk.Info.scsi.bus`, `Cdrom.Info.sata.bus`, and so on). Each
+  controller's `devices` lists them by unit, with id, label, and for a disk
+  its size and VMDK file. The CD drive, disk, controller and installer reads
+  are best effort: a failed part is `null` and `read_notes` says why. When a
+  list works but one drive or disk cannot be read, that row keeps its id
+  with `null` fields and `read_notes` names it.
+- **`vmware.composite.vm.cdrom.add`** (`dangerous`, waits for approval;
+  `composites/_vm_cdrom_tools.py`). One `POST /vcenter/vm/{vm}/hardware/cdrom`
+  with a top-level `Cdrom.CreateSpec`: an ISO file backing when `iso_file` is
+  set (then `start_connected` defaults to true), else a client device backing
+  (an empty drive). Optional `type` (IDE or SATA) and `allow_guest_control`.
+  It reads the new drive back (`cdrom_info`). vCenter answers HTTP 400 for an
+  IDE drive on a running VM or a suspended VM; the answer is then
+  `status="refused"` with vCenter's error, and nothing changed. Not safe to
+  run twice: each call adds a drive.
+- **`vmware.composite.vm.tools.installer.unmount`** (`caution`, waits for
+  approval; same module). Reads `GET /vcenter/vm/{vm}/tools/installer` first.
+  When the installer is not mounted it sends nothing (`not_mounted`), so it is
+  safe to run twice. Else `POST .../tools/installer?action=disconnect`, then it
+  reads again: `unmounted`, or `still_mounted` when it still reads as mounted.
+  vCenter refuses the call for a VM that is off (`refused`).
+
+The two changes go through the shared write seam (`_write._write_sub_op`), so
+each REST write is checked by policy like the other composite writes. Their
+approval previews are registered in their own module: the cdrom add shows the
+drive to add and the drives the VM has now; the unmount shows whether the
+installer is mounted now. The `vm` id goes into the URL path, so it must match
+`^vm-[0-9]+$`; a device id from vCenter is checked and percent-encoded too.
+`test_connectors_vmware_rest_vm_hardware_reconcile.py` checks every REST call
+of the three operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
+skips without the vendor spec files). Tests use saved responses
+(`test_connectors_vmware_rest_typed_vm_hardware.py`).
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 

@@ -1943,7 +1943,10 @@ fails the central CI check, but it does not duplicate the publish
 path. Migration backward-compat (`migration-compat.yml`), dependency
 license scan (`dependency-license-check.yml`), secret scan
 (`secret-scan.yml`), and the SAST stack (`security-scan.yml`) all stay
-in their dedicated workflows.
+in their dedicated workflows. There, the `Semgrep SAST` job sends every
+finding of its four rule packs (error, warning and info) to the GitHub
+Security tab and shows new ones as annotations on pull requests, but it
+fails only on a finding from an error-level rule.
 
 ### Coverage handoff to SonarCloud
 

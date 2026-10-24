@@ -225,7 +225,10 @@ _API_FILE_GET_RESPONSE: dict[str, Any] = {
         },
         "redirect_path": {
             "type": _TEXT_OR_NULL,
-            "description": "For a 3xx answer: the path the redirect points to (not followed).",
+            "description": (
+                "For a 3xx answer: the path the redirect points to, or scheme://host/path "
+                "for another host (not followed)."
+            ),
         },
         "size": {
             "type": ["integer", "null"],

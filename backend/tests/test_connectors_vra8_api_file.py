@@ -13,6 +13,7 @@ re-login) is proven in ``test_connectors_vra8_typed_reads.py``.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 from collections.abc import Iterator
@@ -362,6 +363,21 @@ async def test_relative_redirect_resolves_against_the_file_folder() -> None:
     assert answer["redirect_path"] == "/vco/api/docs/swagger.json"
 
 
+async def test_redirect_to_another_host_names_the_host_without_the_query() -> None:
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/vco/api/docs").respond(
+            302, headers={"Location": "https://other.test.invalid/docs/index.html?page=2#top"}
+        )
+        answer = await _call(connector, "/vco/api/docs")
+    await connector.aclose()
+
+    assert answer["status"] == 302
+    assert answer["redirect_path"] == "https://other.test.invalid/docs/index.html"
+    assert answer["parts"] == 0
+
+
 @pytest.mark.parametrize(
     ("vco_status", "iaas_status", "failed_path"),
     [(500, 200, "/vco/api/about"), (403, 200, "/vco/api/about"), (200, 500, "/iaas/api/about")],
@@ -502,6 +518,50 @@ async def test_file_over_the_byte_cap_is_not_read(monkeypatch: pytest.MonkeyPatc
         with pytest.raises(Vra8ApiFileError, match=f"{len(body)} bytes"):
             await _call(connector, _SWAGGER_PATH)
     await connector.aclose()
+
+
+async def test_gzip_body_is_measured_after_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small gzip file is read; a small gzip body that decodes past the cap is refused."""
+    monkeypatch.setattr(api_file, "get_settings", lambda: _settings(max_record_bytes=10_000))
+    small = _SWAGGER.encode()
+    large = b"x" * 1_000_000
+    assert len(gzip.compress(large)) < 10_000
+    gzip_json = {"Content-Encoding": "gzip", "Content-Type": "application/json"}
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get("/vco/api/docs/swagger.json").respond(
+            200, content=gzip.compress(small), headers=gzip_json
+        )
+        mock.get(_SWAGGER_PATH).respond(200, content=gzip.compress(large), headers=gzip_json)
+        fits = await _call(connector, "/vco/api/docs/swagger.json")
+        with pytest.raises(Vra8ApiFileError, match="more than 10000 bytes"):
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    assert fits["status"] == 200
+    assert _joined(fits) == small
+    assert fits["sha256"] == hashlib.sha256(small).hexdigest()
+
+
+async def test_file_get_is_kept_in_the_flight_recorder(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        api_file.flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200, text=_SWAGGER, headers={"Content-Type": "application/json"}
+        )
+        await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    file_calls = [call for call in recorded if call["response"].url.path == _SWAGGER_PATH]
+    assert [(call["method"], call["response"].status_code) for call in file_calls] == [("GET", 200)]
 
 
 async def test_file_with_more_parts_than_the_row_limit_stops_with_its_size(

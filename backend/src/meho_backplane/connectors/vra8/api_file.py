@@ -24,7 +24,8 @@ The read is narrow on purpose:
   refused before a request goes out.
 * It sends one ``GET`` with the connector's login (the bearer token) to
   the target's own address. It does not follow a redirect: the answer
-  names the redirect's path. A ``401`` is raised so the dispatcher
+  names where it points (a path on the target, or ``scheme://host/path``
+  for another host, without its query). A ``401`` is raised so the dispatcher
   renews the login and retries once; every other status comes back in
   ``status``.
 * The file is checked before it comes back
@@ -67,12 +68,19 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.api_file_read import text_redactor
+from meho_backplane.connectors._shared.api_file_read import (
+    ApiFileNotTextError,
+    ApiFileTooLargeError,
+    fetch_without_redirects,
+    redirect_target,
+    text_redactor,
+)
 from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH, _VCO_ABOUT_PATH
 from meho_backplane.connectors.vra8.session import Vra8TargetLike
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
@@ -194,36 +202,11 @@ def _is_text(content_type: str | None) -> bool:
     )
 
 
-def _redirect_path(request_url: httpx.URL, location: str | None) -> str | None:
-    """Return the path (and query) a redirect points to, or ``None``."""
-    if not location:
+def _redirect(response: httpx.Response) -> str | None:
+    """Where a ``3xx`` points: a path on this target, or ``scheme://host/path`` elsewhere."""
+    if not response.is_redirect:
         return None
-    try:
-        target = request_url.join(location)
-    except httpx.InvalidURL:
-        return None
-    return target.raw_path.decode("ascii", "replace")
-
-
-async def _read_body(response: httpx.Response, max_bytes: int) -> bytes:
-    """Read the body, but refuse one over *max_bytes* without keeping it."""
-    declared = response.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > max_bytes:
-        raise Vra8ApiFileError(
-            f"The file is {int(declared)} bytes (Content-Length). One stored result "
-            f"holds at most {max_bytes} bytes, so the file was not read."
-        )
-    chunks: list[bytes] = []
-    size = 0
-    async for chunk in response.aiter_bytes():
-        size += len(chunk)
-        if size > max_bytes:
-            raise Vra8ApiFileError(
-                f"The file is more than {max_bytes} bytes. One stored result holds at "
-                "most that, so the file was not read."
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
+    return redirect_target(response.headers.get("location"), response.request.url)
 
 
 async def _fetch_file(
@@ -232,36 +215,38 @@ async def _fetch_file(
     target: Vra8TargetLike,
     path: str,
     max_bytes: int,
-) -> dict[str, Any]:
-    """Send the one ``GET`` with the bearer and return status, headers and body.
+) -> httpx.Response:
+    """Send the one ``GET`` with the bearer and return the answer with its body.
 
-    The pooled client class follows a same-origin redirect by itself, so
-    the request goes through :meth:`httpx.AsyncClient.send` with
-    ``follow_redirects=False`` to return a redirect unfollowed. A ``401``
-    is raised as :class:`httpx.HTTPStatusError`: the dispatcher then drops
+    The shared :func:`fetch_without_redirects` sends the request without
+    following a redirect and reads the body up to *max_bytes*, also for a
+    compressed body. The call is kept in the flight recorder. A ``401`` is
+    raised as :class:`httpx.HTTPStatusError`: the dispatcher then drops
     the cached bearer, logs in again and retries once, like every other
     read of this connector.
     """
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
-    request = client.build_request(
-        "GET", path, headers=headers, extensions=connector._request_extensions(target)
-    )
-    response = await httpx.AsyncClient.send(client, request, stream=True, follow_redirects=False)
+    span = flight_recorder_capture.span_start()
     try:
-        if response.status_code == 401:
-            response.raise_for_status()
-        status = response.status_code
-        content_type = response.headers.get("content-type")
-        redirect = (
-            _redirect_path(request.url, response.headers.get("location"))
-            if response.is_redirect
-            else None
+        response = await fetch_without_redirects(
+            client,
+            path,
+            headers=headers,
+            extensions=connector._request_extensions(target),
+            max_bytes=max_bytes,
         )
-        body = await _read_body(response, max_bytes) if response.is_success else b""
-    finally:
-        await response.aclose()
-    return {"status": status, "content_type": content_type, "redirect": redirect, "body": body}
+    except httpx.TransportError as exc:
+        flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
+        raise
+    except (ApiFileTooLargeError, ApiFileNotTextError) as exc:
+        raise Vra8ApiFileError(f"{path!r}: {exc}. The file was not returned.") from exc
+    flight_recorder_capture.record_vendor_call(
+        span, method="GET", request_headers=headers, response=response
+    )
+    if response.status_code == httpx.codes.UNAUTHORIZED:
+        response.raise_for_status()
+    return response
 
 
 def _text_field(payload: Any, key: str) -> str | None:
@@ -446,14 +431,15 @@ async def vra8_api_file_get_impl(
     path = check_api_file_path(params.get("path"))
     max_record_bytes = get_settings().result_handle_max_record_bytes
 
-    fetched = await _fetch_file(connector, operator, target, path, max_record_bytes)
-    redirect, redirect_replaced = (
-        scrub_query_string(fetched["redirect"]) if fetched["redirect"] else (None, 0)
-    )
+    response = await _fetch_file(connector, operator, target, path, max_record_bytes)
+    status = response.status_code
+    content_type = response.headers.get("content-type")
+    redirect_to = _redirect(response)
+    redirect, redirect_replaced = scrub_query_string(redirect_to) if redirect_to else (None, 0)
     answer: dict[str, Any] = {
         "path": path,
-        "status": fetched["status"],
-        "content_type": fetched["content_type"],
+        "status": status,
+        "content_type": content_type,
         "redirect_path": redirect,
         "size": None,
         "sha256": None,
@@ -461,9 +447,9 @@ async def vra8_api_file_get_impl(
         "parts": 0,
         "text_parts": [],
     }
-    if 200 <= fetched["status"] < 300:
-        text = _decode_text(path, fetched["content_type"], fetched["body"])
-        answer.update(_checked_fields(path, fetched["content_type"], text, connector, operator))
+    if response.is_success:
+        text = _decode_text(path, content_type, response.content)
+        answer.update(_checked_fields(path, content_type, text, connector, operator))
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         file_text = "".join(part["text"] for part in answer["text_parts"])

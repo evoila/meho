@@ -279,10 +279,14 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   and a small change adds it.
 - **How it reads.** One `GET` on the pooled client with the connector's
   login (`Authorization: Bearer`; the Orchestrator inside Aria Automation 8
-  takes the same token). The request goes through
-  `httpx.AsyncClient.send(..., follow_redirects=False)`, so a redirect is
-  not followed (the pooled client class would follow a same-origin redirect
-  by itself). A `3xx` returns `redirect_path`; a `403`, `404` or `5xx`
+  takes the same token). The request goes through the shared
+  `fetch_without_redirects` (`connectors/_shared/api_file_read.py`), like
+  the other API file reads: a redirect is not followed, the body is read up
+  to the stored-result limit (also a gzip or deflate body, measured after
+  decoding), and the call is kept in the flight recorder. A `3xx` returns
+  `redirect_path`: the path on the target, or `scheme://host/path` when the
+  redirect points to another host (the query is dropped). A secret-named
+  query value on a same-host path is replaced. A `403`, `404` or `5xx`
   returns its `status` with no text. A `401` is raised instead, so the
   dispatcher's session-recovery arm drops the cached bearer, logs in again
   and retries once, like every other read of this connector.

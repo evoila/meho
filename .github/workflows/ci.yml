@@ -949,9 +949,9 @@ jobs:
           # measured file times are stale — refresh tests/_unit_shard_durations.json
           # (see tests/_unit_shard_split.py) rather than bumping only this budget.
           # Add a shard (matrix + TOTAL) only when all shards are near the budget.
-          # 900 s (was 660 s): with every heavy runner busy (2 jobs per node),
-          # shards that pass every test take 674-710 s, and 660 s dropped good
-          # pull requests from the merge queue.
+          # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
+          # node), shards that pass every test can take 674-710 s, and 660 s
+          # dropped good pull requests from the merge queue.
           budget_s=900
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM

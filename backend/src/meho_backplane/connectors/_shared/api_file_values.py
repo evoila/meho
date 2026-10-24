@@ -8,17 +8,30 @@ YAML give, and what a text value that holds JSON gives) and keeps the
 count of replacements. The markup writers in :mod:`.api_file_markup` use
 it for text and attribute values; :mod:`.api_file_secrets` uses it for
 whole JSON and YAML files.
+
+A caller can give the scrubber one more rule for text values
+(``text_rule``): a function that takes one text value and returns the
+changed value and how many places changed. It runs on every text value
+that is not replaced whole, so a rule that scans text (MEHO's general
+secret-redaction rules, for example) changes the value before the file
+is written back. The writer then quotes or escapes the changed value as
+the format needs, and the file keeps its shape.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any, Final
 
 from meho_backplane.broadcast.events import is_secret_param_name
 
-__all__ = ["REDACTED", "ApiFileFormatError", "Scrubber", "dump_json"]
+__all__ = ["REDACTED", "ApiFileFormatError", "Scrubber", "TextRule", "dump_json"]
+
+#: A rule for one text value: returns the changed value and the count of
+#: places changed.
+TextRule = Callable[[str], tuple[str, int]]
 
 #: Written in place of every replaced value: the placeholder the governed
 #: Vault read returns for a secret-named value, so a reader sees one
@@ -40,8 +53,9 @@ def dump_json(data: Any) -> str:
 class Scrubber:
     """Replace secret values in parsed data; keep the count of replacements."""
 
-    def __init__(self, count: int = 0) -> None:
+    def __init__(self, count: int = 0, *, text_rule: TextRule | None = None) -> None:
         self.count = count
+        self._text_rule = text_rule
 
     def tree(self, node: Any, memo: dict[int, Any]) -> Any:
         """Return a copy of *node* with every secret value replaced.
@@ -75,22 +89,27 @@ class Scrubber:
         return node
 
     def text(self, value: str) -> str:
-        """Check one text value: a PEM private key, or JSON inside the text.
+        """Check one text value: a PEM private key, JSON inside the text, the text rule.
 
         JSON inside the text always comes back written from the parsed
         copy, also when nothing was replaced: the original text can hold
-        a repeated key the parser dropped, and its value with it.
+        a repeated key the parser dropped, and its value with it. The
+        text rule runs on the values inside such JSON, not on the written
+        JSON text, so the text stays JSON.
         """
         if _PEM_PRIVATE_KEY.search(value):
             self.count += 1
             return REDACTED
         stripped = value.strip()
-        if not stripped or stripped[0] not in "{[":
+        if stripped and stripped[0] in "{[":
+            try:
+                parsed = json.loads(stripped)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                return dump_json(self.tree(parsed, {}))
+        if self._text_rule is None:
             return value
-        try:
-            parsed = json.loads(stripped)
-        except ValueError:
-            return value
-        if not isinstance(parsed, (dict, list)):
-            return value
-        return dump_json(self.tree(parsed, {}))
+        changed, count = self._text_rule(value)
+        self.count += count
+        return changed

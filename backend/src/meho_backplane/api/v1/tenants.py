@@ -24,7 +24,7 @@ values and the resolver's effective policy. The per-target tri-state override
 
 Surface posture (postulate 5): this is an **operator-plane** route -- REST +
 CLI (``meho tenants flight-recorder-policy set``) only. It is deliberately
-**not** on the 25-tool agent working surface and has **no MCP tool** at all; a
+**not** on the agent working surface and has **no MCP tool** at all; a
 governance-config mutation is an operator action, not an agent one.
 
 Scope + authorization:

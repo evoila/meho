@@ -229,8 +229,12 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.deployment.list), read one deployment "
         "(vcfa.tenant.deployment.get), read the API versions "
         "(vcfa.tenant.about), or test only the tenant login "
-        "(vcfa.tenant.login.test). These ops use the tenant login; the provider "
-        "login does not work here. All reads."
+        "(vcfa.tenant.login.test). Also list what VCF Automation knows from "
+        "vCenter: vSphere networks (vcfa.tenant.fabric_network.list), computes "
+        "(vcfa.tenant.fabric_compute.list), regions (vcfa.tenant.region.list) and "
+        "cloud zones (vcfa.tenant.zone.list), and read a deploy request until it "
+        "ends (vcfa.tenant.blueprint_request.get). These ops use the tenant login; "
+        "the provider login does not work here. All reads."
     ),
     "vcfa-provider-writes": (
         "Changes on the VCF Automation provider plane that set up a tenant: "
@@ -243,9 +247,24 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "'unchanged'."
     ),
     "vcfa-tenant-writes": (
-        "Changes on the VCF Automation tenant plane: create a project in the "
-        "tenant org (vcfa.tenant.project.create). A person must approve each "
-        "call. Safe to run twice: an existing project answers 'unchanged'."
+        "Changes on the VCF Automation tenant plane, to give a team its own "
+        "project, network and first deployment: set the address settings and "
+        "tags of a vSphere network (vcfa.tenant.fabric_network.update), create a "
+        "network profile (vcfa.tenant.network_profile.create), create a project "
+        "with a quota and a network rule (vcfa.tenant.project.create), deploy "
+        "from a cloud template or only plan it "
+        "(vcfa.tenant.blueprint_request.create), and delete a deployment "
+        "(vcfa.tenant.deployment.delete). A person must approve each call. Safe "
+        "to run twice: an object that exists answers 'unchanged'."
+    ),
+    "vcfa-tenant-images": (
+        "Image names of the tenant org (image profiles), on the tenant plane. A cloud "
+        "template asks for an image by name, for example 'RHEL 9'; the profile of each "
+        "region maps the name to a vCenter template. Read the names and their templates "
+        "(vcfa.tenant.image_profile.list) and the templates VCF Automation knows "
+        "(vcfa.tenant.fabric_image.list), make it read new vCenter templates now "
+        "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
+        "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
     ),
 }
 

@@ -50,7 +50,15 @@ What the helper does, in order:
      way.
    * A text value that holds a private key in PEM form, under any name.
 
-4. Writes the checked copy in the same format and counts the replaced
+4. Runs the caller's text rule, when one is given, on every text value
+   that was not replaced whole (``text_rule``: one text value in, the
+   changed value and the count of places changed out). The SRM read
+   gives MEHO's general secret-redaction rules here, so an
+   ``Authorization: Basic ...`` example in a description comes back as
+   a placeholder. The rule sees the parsed value, before the file is
+   written back, so the writer quotes the changed value as the format
+   needs and no value changes its type.
+5. Writes the checked copy in the same format and counts the replaced
    values.
 
 :func:`scrub_query_string` does the same for the query of a redirect
@@ -74,6 +82,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
     ApiFileFormatError,
     Scrubber,
+    TextRule,
     dump_json,
 )
 
@@ -81,6 +90,7 @@ __all__ = [
     "REDACTED",
     "ApiFileFormatError",
     "CheckedApiFile",
+    "TextRule",
     "check_api_file",
     "detect_format",
     "scrub_query_string",
@@ -148,11 +158,15 @@ def detect_format(content_type: str | None, path: str) -> str | None:
     return None
 
 
-def check_api_file(text: str, *, content_type: str | None, path: str) -> CheckedApiFile:
+def check_api_file(
+    text: str, *, content_type: str | None, path: str, text_rule: TextRule | None = None
+) -> CheckedApiFile:
     """Parse *text*, replace every secret value, write the copy back.
 
-    Raises :exc:`ApiFileFormatError` when the format is unknown or the
-    file does not parse. An empty file comes back empty.
+    *text_rule*, when given, runs on every text value that is not
+    replaced whole; its count joins ``secrets_replaced``. Raises
+    :exc:`ApiFileFormatError` when the format is unknown or the file
+    does not parse. An empty file comes back empty.
     """
     if not text:
         return CheckedApiFile("", 0)
@@ -164,7 +178,7 @@ def check_api_file(text: str, *, content_type: str | None, path: str) -> Checked
             "returned"
         )
     try:
-        copy, count = _CHECKERS[fmt](text, path)
+        copy, count = _CHECKERS[fmt](text, path, text_rule)
     except RecursionError:
         raise ApiFileFormatError(f"{path} is nested too deeply to check; not returned") from None
     return CheckedApiFile(copy, count)
@@ -198,7 +212,7 @@ def scrub_query_string(path: str) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def _check_json(text: str, path: str) -> tuple[str, int]:
+def _check_json(text: str, path: str, text_rule: TextRule | None) -> tuple[str, int]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -206,7 +220,7 @@ def _check_json(text: str, path: str) -> tuple[str, int]:
             f"{path} is not well-formed JSON ({exc.msg} at line {exc.lineno}, column "
             f"{exc.colno}); the file is not returned"
         ) from None
-    scrubber = Scrubber()
+    scrubber = Scrubber(text_rule=text_rule)
     copy = scrubber.tree(data, {})
     return dump_json(copy), scrubber.count
 
@@ -216,7 +230,7 @@ def _check_json(text: str, path: str) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def _check_yaml(text: str, path: str) -> tuple[str, int]:
+def _check_yaml(text: str, path: str, text_rule: TextRule | None) -> tuple[str, int]:
     loader = _YAML_LOADER(text)
     try:
         try:
@@ -233,7 +247,7 @@ def _check_yaml(text: str, path: str) -> tuple[str, int]:
             ) from None
     finally:
         loader.dispose()
-    scrubber = Scrubber(count)
+    scrubber = Scrubber(count, text_rule=text_rule)
     copy = scrubber.tree(data, {})
     try:
         text_out = yaml.dump(copy, Dumper=_YAML_DUMPER, sort_keys=False, allow_unicode=True)
@@ -339,7 +353,7 @@ def _redacted_node() -> yaml.ScalarNode:
     return yaml.ScalarNode(_YAML_STR_TAG, REDACTED)
 
 
-_CHECKERS: Final[dict[str, Callable[[str, str], tuple[str, int]]]] = {
+_CHECKERS: Final[dict[str, Callable[[str, str, TextRule | None], tuple[str, int]]]] = {
     "json": _check_json,
     "yaml": _check_yaml,
     "xml": check_xml,

@@ -49,9 +49,15 @@ stops with an error that names its size -- the read never returns a cut
 file. A file that does not parse, or whose format is unknown (JavaScript,
 CSS, plain text), is refused with the reason. The checked copy is what
 ``size`` and ``sha256`` describe, and ``secrets_replaced`` says how many
-values were replaced. A copy that the general secret-redaction rules
-would still change stops too; the rules run on the whole text and on the
-answer, so a secret that spans two parts is found as well.
+values were replaced. MEHO's general secret-redaction rules also run on
+every parsed text value before the file is written back
+(:func:`~meho_backplane.connectors._shared.api_file_read.text_redactor`):
+the vendor's Logs 9.0 API file has ``Authorization: Bearer ...`` examples
+in its description text, and these come back as a placeholder too. The
+count includes them. A copy that the rules would still change stops; the
+rules run on the whole text and on the answer, so a secret that spans
+two parts is found as well, and ``sha256`` always names what the caller
+gets.
 
 The flight recorder gets the checked copy, never the body as it came. The
 body of a ``401`` or ``440`` answer goes through the same check before the
@@ -86,6 +92,7 @@ from meho_backplane.connectors._shared.api_file_read import (
     fetch_without_redirects,
     redirect_target,
     text_items,
+    text_redactor,
 )
 from meho_backplane.connectors._shared.api_file_secrets import (
     ApiFileFormatError,
@@ -239,8 +246,14 @@ async def vrli_api_file_get_impl(
         expired.raise_for_status()
 
     content_type = response.headers.get("content-type")
+    connector_id = f"{connector.impl_id}-{connector.version}"
     try:
-        checked = check_api_file(decode_text(response, path), content_type=content_type, path=path)
+        checked = check_api_file(
+            decode_text(response, path),
+            content_type=content_type,
+            path=path,
+            text_rule=text_redactor(operator, connector_id=connector_id, op_id=_OP_ID),
+        )
     except (ApiFileNotTextError, ApiFileFormatError):
         _record(span, headers, response, b"")
         raise
@@ -267,13 +280,7 @@ async def vrli_api_file_get_impl(
         answer, items, operator_sub=operator.sub, op_id=_OP_ID, max_bytes=max_bytes
     )
     answer["items"] = items
-    assert_not_redacted(
-        answer,
-        text,
-        operator,
-        connector_id=f"{connector.impl_id}-{connector.version}",
-        op_id=_OP_ID,
-    )
+    assert_not_redacted(answer, text, operator, connector_id=connector_id, op_id=_OP_ID)
     return answer
 
 

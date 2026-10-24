@@ -374,14 +374,17 @@ refused with the reason and never the text. A redirect's query string
 goes through the same name check. `secrets_replaced` counts every
 replaced value.
 
-The dispatcher runs the shared secret-redaction rules on every answer
-before the caller sees it. A documentation page can hold free text that
-looks like a secret (for example an `Authorization` header line). Such a
-page would come back changed while `sha256` still names the copy. The
-read runs the same rules first, on the whole text and then on its
-answer, and stops with an error that names the rules and the number of
-places. Redaction stays on; the read just never claims a copy it cannot
-return.
+A page or file can also hold free text that looks like a secret. The
+vendor's Logs 9.0 API file has `Authorization: Bearer ...` examples in
+its descriptions. So the check also runs MEHO's general secret-redaction
+rules on every parsed text value before the file is written back
+(`text_redactor`). Text they match comes back as a placeholder such as
+`[REDACTED:authorization_header]`, and `secrets_replaced` counts it too.
+The copy keeps its format, and `size`, `sha256` and the parts describe
+it. The dispatcher runs the same rules on every answer before the caller
+sees it. As a last guard, the read runs them once more on the whole
+copy and on its answer, and stops with an error if they would still
+change something. So `sha256` always names what the caller gets.
 
 The flight recorder (the trace of each vendor call) gets the checked copy
 of the body, never the body as it came. When the file is refused, the
@@ -402,7 +405,7 @@ The answer:
 | `content_type` | The `Content-Type` header. |
 | `size` | Size of the checked copy in bytes. |
 | `sha256` | SHA-256 of the checked copy, hex. |
-| `secrets_replaced` | How many values under a secret name were replaced by `[REDACTED:param_name]`. |
+| `secrets_replaced` | How many values were replaced: values under a secret name (`[REDACTED:param_name]`) and text the general redaction rules match. |
 | `version`, `build` | The system version and build, as the fingerprint reports them. |
 | `version_error` | Why the version read failed; `null` when it worked. The file still comes back. |
 | `redirect_to` | Path of a redirect answer; `null` otherwise. |
@@ -473,10 +476,10 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   `/rest-api/` as `GET`, marked "documentation path, not in the API
   file", and keeps them out of the served check.
 - `vrli.api_file.get` replaces values by their name. Free text in a page
-  (prose, a `<pre>` block that is not JSON) is not parsed; only MEHO's
-  general redaction rules check it, and the read stops when they would
-  change it. A licence key under a name that is not a secret name (the
-  Logs licence API calls it `key`) is not replaced.
+  (prose, a `<pre>` block that is not JSON) has no names; only MEHO's
+  general redaction rules check it, and they replace only what they
+  match. A licence key under a name that is not a secret name (the Logs
+  licence API calls it `key`) is not replaced.
 - No DELETE-revoke on `aclose()` — a per-target network call during
   lifespan shutdown is more risk than benefit (same posture NSX
   takes). Revoke-on-close is v0.2.next.

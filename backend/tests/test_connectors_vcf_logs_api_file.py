@@ -26,8 +26,11 @@ What is covered, with a respx-mocked Logs system and no ingested catalog:
   stream, stop with an error and never pass as the complete file;
 * the whole stored record is measured: a file that passes the check is read
   back from the result store with every part, through ``dispatch()``;
-* a page the secret-redaction rules would change stops with an error, also
-  when the secret's label ends one part and its value starts the next;
+* a documentation example the secret-redaction rules match (an
+  ``Authorization: Bearer`` example in an HTML page or in a JSON API file's
+  description) comes back as the placeholder and is counted, also when
+  the secret's label would end one part and its value start the next;
+  ``size`` and ``sha256`` describe the joined parts;
 * every secret form the code reviews found (a JSON value with an
   apostrophe, ``sessionId``, a long value, a private-key block, an
   unquoted YAML name, a YAML ``|`` or ``>`` block value) comes back as the
@@ -902,10 +905,10 @@ async def test_every_part_of_a_file_that_passes_the_check_is_read_back_from_stor
 
 
 @pytest.mark.asyncio
-async def test_page_the_redaction_rules_would_change_stops_with_an_error(
+async def test_example_the_redaction_rules_match_comes_back_replaced_and_counted(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
-    """A documentation example that looks like a secret cannot come back as an exact file."""
+    """A documentation example that looks like a secret comes back as the placeholder."""
     await _register_and_resolve(_stub_embedding)
     set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
     page = (
@@ -919,23 +922,61 @@ async def test_page_the_redaction_rules_would_change_stops_with_an_error(
         )
         result = await _dispatch("/rest-api/auth.html")
 
-    assert result.status == "error"
-    message = result.extras["exception_message"]
-    assert "strip-authorization-header" in message
-    assert "1 place(s)" in message
-    assert "exact file cannot be returned" in message
-    assert "example-token-value" not in json.dumps(result.result) + json.dumps(
-        result.extras, default=str
-    )
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    assert "[REDACTED:authorization_header]" in joined
+    assert body["secrets_replaced"] == 1
+    assert body["size"] == len(joined.encode())
+    assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
+    assert "example-token-value" not in _rendered(result)
 
 
 @pytest.mark.asyncio
-async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
+async def test_api_file_with_a_bearer_example_in_a_description_comes_back_replaced(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
-    """``password=`` ends the first part and the value starts the second."""
+    """The vendor's Logs 9.0 API file has ``Authorization: Bearer`` examples in its text."""
     await _register_and_resolve(_stub_embedding)
-    set_default_reducer(JsonFluxReducer(store=ResultHandleStore(_FakeValkey())))  # type: ignore[arg-type]
+    spec = {
+        "openapi": "3.0.1",
+        "info": {
+            "title": "Logs API",
+            "description": "Send the session id on each call:\n"
+            "Authorization: Bearer example-session-id-0123456789",
+        },
+        "paths": {},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_version(mock)
+        mock.get("/rest-api/openapi.json").respond(
+            200, text=json.dumps(spec, indent=2), headers={"Content-Type": "application/json"}
+        )
+        result = await _dispatch("/rest-api/openapi.json")
+
+    assert result.status == "ok", result.error
+    body = result.result
+    joined = "".join(item["text"] for item in body["items"])
+    copy = json.loads(joined)
+    assert copy["info"]["title"] == "Logs API"
+    assert "[REDACTED:authorization_header]" in copy["info"]["description"]
+    assert body["secrets_replaced"] == 1
+    assert body["size"] == len(joined.encode())
+    assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
+    assert "example-session-id-0123456789" not in _rendered(result)
+
+
+@pytest.mark.asyncio
+async def test_secret_whose_label_ends_one_part_comes_back_replaced(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """``password=`` would end the first part and the value start the second.
+
+    Each part alone does not match the rules, so a check of the parts alone
+    would miss it. The rules run on the whole text value before the file is
+    cut, so the value comes back replaced.
+    """
+    instance, _ = await _register_and_resolve(_stub_embedding)
     label = b" password="
     page = b"x" * (PART_BYTES - len(label)) + label + b"example-secret-value-0123456789 tail\n"
     parts = [part.decode() for part in split_parts(page)]
@@ -952,15 +993,16 @@ async def test_secret_that_crosses_a_part_boundary_stops_with_an_error(
         mock.get("/rest-api/split.html").respond(
             200, content=page, headers={"Content-Type": "text/html"}
         )
-        result = await _dispatch("/rest-api/split.html")
+        body = await instance.api_file_get(
+            _make_operator(), _LogsTarget(), {"path": "/rest-api/split.html"}
+        )
 
-    assert result.status == "error"
-    message = result.extras["exception_message"]
-    assert "exact file cannot be returned" in message
-    assert "1 place(s)" in message
-    assert "example-secret-value" not in json.dumps(result.result) + json.dumps(
-        result.extras, default=str
-    )
+    joined = "".join(item["text"] for item in body["items"])
+    assert "[REDACTED:" in joined
+    assert body["secrets_replaced"] == 1
+    assert body["size"] == len(joined.encode())
+    assert body["sha256"] == hashlib.sha256(joined.encode()).hexdigest()
+    assert "example-secret-value" not in json.dumps(body)
 
 
 def _private_key_block(kind: str, body: str) -> str:

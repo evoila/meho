@@ -121,10 +121,13 @@ MEHO stores a long list behind a result handle; the agent reads it with
 - `vro.workflow.get` returns no default values and no attribute values:
   they can hold secrets and are not needed to call a workflow.
 - `vro.execution.get` replaces the value of a parameter whose type is
-  `SecureString`, whose `encrypt-value` flag is set, or whose name says
-  password, secret, token, API key, secret key, private key or licence
-  key (for example `apiKey`, `secretKey`, `adminPassword`), with
-  `***REDACTED***`.
+  `SecureString`, whose `encrypt-value` flag is set, or whose name is a
+  secret name, with `***REDACTED***`. A name is secret when MEHO's shared
+  rule (`is_secret_param_name` in `broadcast/events.py`: password,
+  passphrase, secret, token, API key, private key and more, for example
+  `adminPassword`, `passphrase`, `privateKeyPem`, `passwordValue`) says
+  so, or when it is one of the few names the connector adds (bare
+  `license`, `licence`, `authorization`).
 - Every answer, and every vendor answer the flight recorder stores
   (`trace_response_body`), has secret-named fields replaced at any depth.
 - The same goes for `{key, value}` entries, the shape a `Properties`

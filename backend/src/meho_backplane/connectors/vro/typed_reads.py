@@ -20,11 +20,14 @@ result handle and the agent can filter it with ``result_query``.
 
 **Secrets.** A workflow run's inputs and outputs can hold passwords. A
 parameter whose type is ``SecureString``, whose ``encrypt-value`` flag is
-set, or whose name says password, secret, token, API key, secret key,
-private key or licence key comes back with its value replaced by
-:data:`REDACTED`. Any field with such a name, at any depth, is replaced
-too. The connector masks the same fields before the flight recorder
-records a vendor answer.
+set, or whose name is a secret name comes back with its value replaced by
+:data:`REDACTED`. A name is secret when MEHO's shared rule
+(:func:`~meho_backplane.broadcast.events.is_secret_param_name`: password,
+passphrase, secret, token, API key, private key, ...) says so, or when it
+is one of the names listed here that the shared rule leaves out (bare
+``license``, ``authorization``). Any field with such a name, at any depth,
+is replaced too. The connector masks the same fields before the flight
+recorder records a vendor answer.
 
 **Log text.** A log line's text is cut at :data:`LOG_TEXT_MAX` characters.
 The shared secret rules run on the whole text first: they need the label
@@ -41,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors._shared.api_file_read import text_redactor
 from meho_backplane.connectors._shared.api_file_values import TextRule
 from meho_backplane.connectors.vro.session import VroTargetLike
@@ -102,6 +106,8 @@ _LOGS_OP_ID: Final = "vro.execution.logs"
 REDACTED: Final = "***REDACTED***"
 
 #: Key names (lower case, without ``_`` and ``-``) whose value is secret.
+#: Checked next to the shared rule, which has no bare ``license`` or
+#: ``authorization``.
 _SECRET_KEYS: Final[frozenset[str]] = frozenset(
     {
         "password",
@@ -138,8 +144,11 @@ _SECRET_SUFFIXES: Final[tuple[str, ...]] = (
 
 
 def _is_secret_name(key: object) -> bool:
+    """True when *key* names a secret: by the shared rule or by the lists above."""
     if not isinstance(key, str):
         return False
+    if is_secret_param_name(key):
+        return True
     name = key.lower().replace("_", "").replace("-", "")
     return name in _SECRET_KEYS or name.endswith(_SECRET_SUFFIXES)
 

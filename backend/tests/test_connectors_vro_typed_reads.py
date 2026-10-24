@@ -51,7 +51,12 @@ from meho_backplane.connectors.vro import (
     VroConnector,
     register_vro_typed_operations,
 )
-from meho_backplane.connectors.vro.typed_reads import LOG_TEXT_MAX, REDACTED, flat_rows
+from meho_backplane.connectors.vro.typed_reads import (
+    LOG_TEXT_MAX,
+    REDACTED,
+    flat_rows,
+    redact_secrets,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
@@ -693,6 +698,124 @@ async def test_api_key_and_secret_key_values_are_replaced_in_parameters_and_prop
     for rendered in (json.dumps(result.result), json.dumps(trace)):
         assert "<region>" in rendered
         for secret in (*secrets.values(), "made-up-out-1"):
+            assert secret not in rendered
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "passphrase",
+        "sshPassphrase",
+        "privateKeyPem",
+        "private_key_pem",
+        "passwordValue",
+        "PasswordValue",
+    ],
+)
+def test_shared_secret_names_are_replaced_at_any_depth(name: str) -> None:
+    secret = "made-up-secret-value"
+    payload = {
+        "inputParameters": [
+            {"name": name, "type": "string", "value": {"string": {"value": secret}}},
+            {
+                "name": "props",
+                "type": "Properties",
+                "value": {"properties": {"property": [{"key": name, "value": secret}]}},
+            },
+        ],
+        name: secret,
+        "nested": {"inner": {name: secret}},
+        "keep": "<kept-value>",
+    }
+    redacted = redact_secrets(payload)
+    assert redacted["inputParameters"][0]["value"] == REDACTED
+    assert redacted["inputParameters"][1]["value"]["properties"]["property"][0]["value"] == REDACTED
+    assert redacted[name] == REDACTED
+    assert redacted["nested"]["inner"][name] == REDACTED
+    rendered = json.dumps(redacted)
+    assert "<kept-value>" in rendered
+    assert secret not in rendered
+    assert json.dumps(payload).count(secret) == 4, "the input is not changed"
+
+
+@pytest.mark.asyncio
+async def test_passphrase_private_key_and_password_value_are_replaced_in_run_and_trace(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    connector = await _register(_stub_embedding)
+    secrets = {
+        "passphrase": "made-up-passphrase-1",
+        "privateKeyPem": "made-up-private-key-1",
+        "passwordValue": "made-up-password-1",
+        "out_passphrase": "made-up-passphrase-2",
+        "out_private_key": "made-up-private-key-2",
+    }
+    payload = {
+        "id": _RUN,
+        "state": "completed",
+        "inputParameters": [
+            {"name": "vmName", "type": "string", "value": {"string": {"value": "<vm-name>"}}},
+            {
+                "name": "passphrase",
+                "type": "string",
+                "value": {"string": {"value": secrets["passphrase"]}},
+            },
+            {
+                "name": "privateKeyPem",
+                "type": "string",
+                "value": {"string": {"value": secrets["privateKeyPem"]}},
+            },
+            {
+                "name": "inputProperties",
+                "type": "Properties",
+                "value": {
+                    "properties": {
+                        "property": [
+                            {"key": "hostName", "value": {"string": {"value": "<host-name>"}}},
+                            {
+                                "key": "passwordValue",
+                                "value": {"string": {"value": secrets["passwordValue"]}},
+                            },
+                        ]
+                    }
+                },
+            },
+        ],
+        "outputParameters": [
+            {"name": "result", "type": "string", "value": {"string": {"value": "<result>"}}},
+            {
+                "name": "passphrase",
+                "type": "string",
+                "value": {"string": {"value": secrets["out_passphrase"]}},
+            },
+            {
+                "name": "privateKeyPem",
+                "type": "string",
+                "value": {"string": {"value": secrets["out_private_key"]}},
+            },
+        ],
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_RUN_PATH).respond(200, json=payload)
+        result = await _dispatch("vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN})
+
+    assert result.status == "ok", result.error
+    inputs = {p["name"]: p["value"] for p in result.result["inputs"]}
+    assert inputs["vmName"] == {"string": {"value": "<vm-name>"}}
+    assert inputs["passphrase"] == REDACTED
+    assert inputs["privateKeyPem"] == REDACTED
+    entries = inputs["inputProperties"]["properties"]["property"]
+    assert entries[0]["value"] == {"string": {"value": "<host-name>"}}
+    assert entries[1]["value"] == REDACTED
+    outputs = {p["name"]: p["value"] for p in result.result["outputs"]}
+    assert outputs["result"] == {"string": {"value": "<result>"}}
+    assert outputs["passphrase"] == REDACTED
+    assert outputs["privateKeyPem"] == REDACTED
+    trace = connector.trace_response_body(httpx.Response(200, json=payload))
+    for rendered in (json.dumps(result.result), json.dumps(trace)):
+        assert "<host-name>" in rendered
+        assert "<result>" in rendered
+        for secret in secrets.values():
             assert secret not in rendered
 
 

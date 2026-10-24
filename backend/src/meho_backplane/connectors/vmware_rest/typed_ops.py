@@ -432,6 +432,12 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (  # noqa: E
     VM_INFO_WHEN_TO_USE,
     VMWARE_VM_INFO_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (  # noqa: E402
+    VM_QUESTION_GROUP_KEY,
+    VM_QUESTION_WHEN_TO_USE,
+    VMWARE_VM_QUESTION_ANSWER_OP,
+    VMWARE_VM_QUESTION_GET_OP,
+)
 
 #: Curated ``when_to_use`` blurb per typed-op group.
 #: ``register_typed_operation`` requires a non-empty string whenever
@@ -457,6 +463,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE,
     SSO_ADMIN_API_FILE_GROUP_KEY: SSO_ADMIN_API_FILE_WHEN_TO_USE,
     SNAPSHOT_LIST_GROUP_KEY: SNAPSHOT_LIST_WHEN_TO_USE,
+    VM_QUESTION_GROUP_KEY: VM_QUESTION_WHEN_TO_USE,
     # Shared with the licence assign composite: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
@@ -526,10 +533,12 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: (#3701, tasks older than the recent list); the SSO Admin API
 #: description read ``vcenter.sso_admin.api_file.get``; the snapshots of
 #: one VM, ``snapshot.list``; the two licence reads ``license.list`` +
-#: ``license.assigned.list`` (keys masked); and the four
+#: ``license.assigned.list`` (keys masked); the four
 #: ``vmware.appliance.local_account.*`` operations (two reads, two changes
-#: that wait for approval). The tuple shape lets future typed ops join
-#: without touching the registrar.
+#: that wait for approval); and the VM question read and answer
+#: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
+#: approval). The tuple shape lets future typed ops join without touching
+#: the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -544,6 +553,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_LICENSE_LIST_OP,
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
     *APPLIANCE_LOCAL_ACCOUNTS_OPS,
+    VMWARE_VM_QUESTION_GET_OP,
+    VMWARE_VM_QUESTION_ANSWER_OP,
 )
 
 

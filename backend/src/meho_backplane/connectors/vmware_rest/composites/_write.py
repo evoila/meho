@@ -9037,39 +9037,35 @@ async def vm_device_cdrom_composite(
         "guidance": None,
     }
 
+    cdrom_params: dict[str, Any] = {"vm": vm_moid, "cdrom": cdrom_id}
+    done: dict[str, Any]
     if action == "remove":
-        gate, _ = await _write_sub_op(
-            connector, target, operator, _OP_DELETE_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+        sub_op, done = _OP_DELETE_VM_CDROM, {"status": "removed"}
+    elif action == "disconnect":
+        sub_op, done = _OP_DISCONNECT_VM_CDROM, {"status": "disconnected"}
+    else:
+        backing = params.get("backing")
+        if not isinstance(backing, dict):
+            return {
+                **base,
+                "status": "invalid_request",
+                "guidance": (
+                    "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}"
+                ),
+            }
+        sub_op, done = _OP_UPDATE_VM_CDROM, {"status": "updated", "requested_backing": backing}
+        cdrom_params["backing"] = backing
+    try:
+        gate, _ = await _write_sub_op(connector, target, operator, sub_op, cdrom_params)
+    except httpx.TimeoutException:
+        from meho_backplane.connectors.vmware_rest.vm_wait_state import (
+            device_change_result_unknown,
         )
-        if gate is not None:
-            return gate
-        return {**base, "status": "removed"}
 
-    if action == "disconnect":
-        gate, _ = await _write_sub_op(
-            connector, target, operator, _OP_DISCONNECT_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
-        )
-        if gate is not None:
-            return gate
-        return {**base, "status": "disconnected"}
-
-    backing = params.get("backing")
-    if not isinstance(backing, dict):
-        return {
-            **base,
-            "status": "invalid_request",
-            "guidance": "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}",
-        }
-    gate, _ = await _write_sub_op(
-        connector,
-        target,
-        operator,
-        _OP_UPDATE_VM_CDROM,
-        {"vm": vm_moid, "cdrom": cdrom_id, "backing": backing},
-    )
+        return {**base, **await device_change_result_unknown(connector, operator, target, vm_moid)}
     if gate is not None:
         return gate
-    return {**base, "status": "updated", "requested_backing": backing}
+    return {**base, **done}
 
 
 # ===========================================================================

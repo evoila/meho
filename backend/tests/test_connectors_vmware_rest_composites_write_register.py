@@ -931,6 +931,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "updated",
             "disconnected",
             "invalid_request",
+            "result_unknown",
         },
         # #3494: governed NFS tag-based SPBM storage-policy create/delete.
         # #3826 adds the resolve-before-create idempotency statuses: adopted

@@ -4226,13 +4226,14 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["removed", "updated", "disconnected", "invalid_request"],
+            "enum": ["removed", "updated", "disconnected", "invalid_request", "result_unknown"],
             "description": (
                 "``'removed'`` -- the device was deleted; ``'updated'`` -- "
                 "its backing was PATCHed; ``'disconnected'`` -- the device "
                 "was disconnected in-guest; ``'invalid_request'`` -- "
                 "``action='update'`` without a ``backing`` object (no write "
-                "issued)."
+                "issued); ``'result_unknown'`` -- the change timed out and "
+                "may still run (see ``running_tasks`` and ``vm_question``)."
             ),
         },
         "vm": {"type": "string", "description": "VM moid owning the CD-ROM."},
@@ -4281,7 +4282,41 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "guidance": {
             "type": ["string", "null"],
-            "description": "Hint on ``invalid_request``; ``null`` otherwise.",
+            "description": "Hint on ``invalid_request`` / ``result_unknown``, else ``null``.",
+        },
+        "running_tasks": {
+            "type": "array",
+            "description": "On ``result_unknown``: the queued or running vCenter tasks on the VM.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Task moid."},
+                    "operation": {"type": ["string", "null"], "description": "What it does."},
+                    "state": {"type": ["string", "null"], "description": "queued / running."},
+                    "progress": {"type": ["integer", "null"], "description": "Percent."},
+                    "start_time": {"type": ["string", "null"], "description": "Start time."},
+                },
+            },
+        },
+        "tasks_error": {
+            "type": ["string", "null"],
+            "description": (
+                "On ``result_unknown``: why the running tasks could not be read, else "
+                "``null``. ``vm_question`` is still valid when only the task read failed."
+            ),
+        },
+        "vm_question": {
+            "type": ["object", "null"],
+            "description": (
+                "On ``result_unknown``: the question the VM waits on (``id``, ``text``, "
+                "``choices``, ``default_choice``, ``messages``), or ``null``. Answer it "
+                "with ``vmware.vm.question.answer``."
+            ),
+        },
+        "issues": {
+            "type": "array",
+            "description": "On ``result_unknown``: one ``error`` entry.",
+            "items": {"type": "object"},
         },
     },
     "required": ["status", "vm", "cdrom", "action"],

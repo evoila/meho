@@ -662,6 +662,55 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       session-scoped read cursor that the op removes before it returns. It
       changes no inventory or configuration, and vCenter needs only the
       `System.View` privilege to create it.
+- **`vmware.vm.question.get`** and **`vmware.vm.question.answer`**
+  (`typed_ops_vm_question.py`, handlers `vm_question_get` /
+  `vm_question_answer`; the shared read is in `vm_wait_state.py`) — read
+  and answer the question a VM waits on.
+  vCenter can stop a VM change and wait until someone answers a question
+  in the VM; until then the change runs on, and a second try fails with
+  "Another task is already in progress".
+  - **Read** (`safe`). By `vm` moid or `name`. One PropertyCollector read
+    of `name`, `runtime.question` and `recentTask` on the VM, then one
+    `Task.info` read of those tasks (only when there are any). Returns
+    `{vm, name, pending, question: {id, text, choices: [{key, label,
+    summary}], default_choice, messages} | null, running_tasks: [{task,
+    operation, state, progress, start_time}], tasks_error}`;
+    `running_tasks` keeps only `queued` and `running` tasks.
+    - The question read must succeed. When vCenter could not read
+      `runtime.question` (a `missingSet` fault, for example no permission),
+      the read raises and names the fault type, so a read failure never
+      looks like "no question".
+    - The task read is best effort. When `recentTask` was unreadable or the
+      `Task.info` read fails, `running_tasks` is empty and `tasks_error`
+      says why; the question is still returned.
+    - When a long `running_tasks` list makes JSONFlux reduce the result to
+      a handle, the `result_objects` hint keeps the `question` (`id`,
+      `text`, `choices`, `default_choice`, `messages`) inline, so the caller
+      still has what it needs to answer. The inline copy is bounded: a
+      question with many long choices is cut, `result_object_truncations`
+      names the cut field, and `result_object_note` says how to get the
+      whole question. The reducer stores it complete with the rows, so
+      `result_query` with `path="/question"` returns every choice.
+    - When vCenter answers the `Task.info` read but could not read the
+      `info` of one task (a `missingSet` fault), or left a task out, that
+      task may still run: `running_tasks` is empty and `tasks_error` names
+      the fault, so an unreadable task never looks like "no running task".
+  - **Answer** (`dangerous`, waits for approval). Params `vm` (moid only,
+    checked against `[A-Za-z0-9-]+` because it goes into the URL path, and
+    percent-encoded), `question_id` and `answer` (a choice key). It reads
+    the question again first: a different question id or no question
+    returns `question_gone`, a key that is not a choice returns
+    `invalid_answer`, and nothing is sent in both cases. Then it POSTs
+    `VirtualMachine.AnswerVM` (`{questionId, answerChoice}`) on the VI-JSON
+    base `/sdk/vim25/{release}` through `_post_vmomi_json` (the ingested
+    `/api/VirtualMachine/...` form 404s on vCenter 9.x). A
+    `ConcurrentAccess` or `InvalidArgument` fault means someone closed the
+    question in the meantime and also returns `question_gone`. A question
+    vCenter could not read raises before anything is sent; a failed task
+    read does not stop the answer.
+  - **Approval preview.** A preview builder shows the approver the
+    question text, the label of the chosen answer, whether the question
+    is still open, the running tasks and `tasks_error`.
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input
@@ -1683,7 +1732,7 @@ enum) are:
 | `network.portgroup.vlan.set` | `set`, `unchanged`, `invalid_vlan_spec`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled; reconfigures an **existing** portgroup's `defaultPortConfig.vlan` to a trunk `NumericRange[]` or a single access VLAN — the given spec **replaces** the current config, there is no merge. Idempotent: the current VLAN is read + normalised (ranges sorted + merged-adjacent) first and a request that already matches returns `unchanged` with no write / no task; `invalid_vlan_spec` refuses both/neither VLAN mode (or `replace=false`) before any write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries normalised `before` / `after` VLAN views) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
-| `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
+| `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request`, `result_unknown` (the change timed out and may still run; carries `running_tasks`, `vm_question` and an `error` issue) |
 | `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `partial`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value (a limit of `0` included — `-1` clears) or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); `partial` when the task succeeded but the re-read `after` does not match every requested field; `vm_not_found` on a promoted `ManagedObjectNotFound`; a task *fault* raises `connector_error` like `vm.disk.grow`. Carries `before` / `after` allocation views) |
 | `network.portgroup.delete` / `folder.delete` | `deleted`, `unchanged`, `precondition_failed`, `still_present`, `timeout` (#3339; vim `Destroy_Task` polled; `precondition_failed` before any write when something still uses the object -- listed in `blockers`; a task *fault* raises `connector_error`) |
 | `host.standard_portgroup.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339; synchronous `RemovePortGroup` -- a vim fault raises) |
@@ -1757,6 +1806,14 @@ a host-pinning ISO:
   (`PATCH` the backing — requires a `backing` param, e.g.
   `{type: CLIENT_DEVICE}` to un-pin a host-local ISO), or `disconnect`
   (`POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect`).
+  When the write times out, the result is `result_unknown`, not a plain
+  timeout: vCenter may still run the change, often because it waits on a
+  question in the VM (for example a locked CD-ROM door). The result names
+  the VM's queued or running tasks and the pending question, read with
+  `vm_wait_state.read_vm_wait_state` (best effort: when only the task
+  read fails, the question is kept and `tasks_error` says what could not
+  be read), and carries an `error` issue, so the call is recorded as
+  failed. Answer the question with `vmware.vm.question.answer`.
 
 All three register a live-read **from->to** preview builder in
 `_write_preview.py`, so the parked approval row names the current state

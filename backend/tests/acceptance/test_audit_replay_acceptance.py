@@ -401,6 +401,7 @@ async def test_scenario_1_rest_replay_returns_multi_level_tree(
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     }
     assert body["session_id"] == str(agent_session_id)
     assert body["tenant_id"] == TENANT_A_ID
@@ -462,6 +463,7 @@ async def test_scenario_1_mcp_replay_returns_multi_level_tree(
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     }
     assert structured["excluded_null_session_count"] == 0
     assert structured["session_id"] == str(agent_session_id)
@@ -954,6 +956,7 @@ async def test_e2e_cli_wire_contract_replay_envelope_against_seeded_db(
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     }
     assert isinstance(body["root"], list)
     assert isinstance(body["row_count"], int)

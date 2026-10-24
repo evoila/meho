@@ -349,7 +349,7 @@ def isolated_registry() -> Iterator[None]:
     # so the fixture re-registers the *complete* production tool surface
     # (they were previously omitted — harmless while nothing pinned the full
     # inventory, but the surface-filter pin in
-    # ``tests.test_mcp_surface_filter`` asserts the exact 78-tool set). No
+    # ``tests.test_mcp_surface_filter`` asserts the exact tool set). No
     # other test reloads these modules, so the single reload here can't
     # double-register.
     importlib.reload(scheduler)

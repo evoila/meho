@@ -257,6 +257,10 @@ jobs:
         #   - `ignore-unfixed: true` drops CVEs with no upstream fix
         #     available, which would otherwise dominate the SARIF without
         #     any operator action to take.
+        #   - `trivyignores: .trivyignore` reads dated exceptions from the
+        #     file at the repo root. Each line names one finding and the day
+        #     its exception ends. From that day trivy stops ignoring it by
+        #     itself. The file says why each exception exists.
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
@@ -266,6 +270,7 @@ jobs:
           severity: CRITICAL,HIGH
           limit-severities-for-sarif: true
           ignore-unfixed: true
+          trivyignores: .trivyignore
           exit-code: '1'
 
       - name: Upload trivy SARIF to GitHub Security tab

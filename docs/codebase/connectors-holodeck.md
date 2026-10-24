@@ -112,7 +112,7 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   one schema per op id, split out so the op tables stay readable.
 
 **Operation contracts.** The 17 ops meet the VMware operation-contract check
-(`backend/tests/test_vmware_operation_contracts.py`); none is on its gap list.
+(`backend/tests/test_operation_contracts.py`); none is on its gap list.
 
 - Each `response_schema` names the fields the handler returns, with a
   description per field. Holodeck publishes no API file. Where a field is a

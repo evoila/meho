@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Request paths for the VCFA provisioning ops (evoila/meho#3890).
+"""Request paths for the VCFA provisioning ops (evoila/meho#3890) and image ops.
 
 Split out of :mod:`.typed_ops` (which keeps the read-op paths) so the
 provisioning surface -- org / role / user / API token / project writes
@@ -40,7 +40,22 @@ __all__ = [
     "PROVIDER_TOKENS_PATH",
     "PROVIDER_TOKEN_PATH",
     "PROVIDER_USERS_PATH",
+    "TENANT_BLUEPRINT_REQUESTS_PATH",
+    "TENANT_BLUEPRINT_REQUEST_PATH",
+    "TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH",
+    "TENANT_FABRIC_COMPUTES_PATH",
+    "TENANT_FABRIC_IMAGES_PATH",
+    "TENANT_FABRIC_IMAGE_PATH",
+    "TENANT_FABRIC_NETWORKS_PATH",
+    "TENANT_FABRIC_NETWORK_PATH",
     "TENANT_IAAS_API_VERSION",
+    "TENANT_IMAGE_ENUMERATION_PATH",
+    "TENANT_IMAGE_PROFILES_PATH",
+    "TENANT_IMAGE_PROFILE_PATH",
+    "TENANT_NETWORK_PROFILES_PATH",
+    "TENANT_REGIONS_PATH",
+    "TENANT_REQUEST_TRACKER_PATH",
+    "TENANT_ZONES_PATH",
 ]
 
 #: Every right the appliance knows (``GET``, FIQL ``filter``).
@@ -81,6 +96,47 @@ OAUTH_REGISTER_PATH: Final[str] = "/oauth/{context}/register"
 #: OAuth token grant (form-encoded ``jwt-bearer`` → ``refresh_token``).
 OAUTH_TOKEN_PATH: Final[str] = "/oauth/{context}/token"
 
+# Tenant plane: a project's own network and its first deployment. The
+# ``/iaas/api`` paths are in the pinned ``vra-iaas.json``; the blueprint and
+# deployment paths are in ``vra-blueprint.json`` and
+# ``vra-catalog-deployment.json`` of the same ``vra-sdk-go`` v0.6.5 shelf. The
+# path parameter names match those files, so the reconcile lane can compare
+# them as they are.
+
+#: The vSphere networks VCF Automation has read from vCenter (``GET``).
+TENANT_FABRIC_NETWORKS_PATH: Final[str] = "/iaas/api/fabric-networks-vsphere"
+#: One vSphere network (``GET`` before the change, ``PATCH`` the change).
+TENANT_FABRIC_NETWORK_PATH: Final[str] = "/iaas/api/fabric-networks-vsphere/{id}"
+#: The clusters and hosts VCF Automation has read from vCenter (``GET``).
+TENANT_FABRIC_COMPUTES_PATH: Final[str] = "/iaas/api/fabric-computes"
+#: The org's regions (``GET``); a network profile needs a region id.
+TENANT_REGIONS_PATH: Final[str] = "/iaas/api/regions"
+#: The org's cloud zones (``GET``); a project quota needs a zone id.
+TENANT_ZONES_PATH: Final[str] = "/iaas/api/zones"
+#: Network profiles (``GET`` the name check, ``POST`` the create).
+TENANT_NETWORK_PROFILES_PATH: Final[str] = "/iaas/api/network-profiles"
+#: Deploy from a cloud template, or only plan it (``POST``).
+TENANT_BLUEPRINT_REQUESTS_PATH: Final[str] = "/blueprint/api/blueprint-requests"
+#: One deploy request (``GET``), read until it ends.
+TENANT_BLUEPRINT_REQUEST_PATH: Final[str] = "/blueprint/api/blueprint-requests/{requestId}"
+#: One deployment on the deployment API (``DELETE``).
+TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH: Final[str] = "/deployment/api/deployments/{deploymentId}"
+
 #: The IaaS API version the tenant writes pin (``?apiVersion=``) -- the
 #: ``latestApiVersion`` VCFA 9.0 and 9.1 report from ``/iaas/api/about``.
 TENANT_IAAS_API_VERSION: Final[str] = "2021-07-15"
+
+#: The image profiles of the org: each maps image names to templates (``GET``).
+TENANT_IMAGE_PROFILES_PATH: Final[str] = "/iaas/api/image-profiles"
+#: One image profile (``GET`` read, ``PATCH`` replaces the whole mapping).
+TENANT_IMAGE_PROFILE_PATH: Final[str] = "/iaas/api/image-profiles/{id}"
+#: The templates (fabric images) VCF Automation knows (``GET``).
+TENANT_FABRIC_IMAGES_PATH: Final[str] = "/iaas/api/fabric-images"
+#: One fabric image (``GET``).
+TENANT_FABRIC_IMAGE_PATH: Final[str] = "/iaas/api/fabric-images/{id}"
+#: Read the templates of a cloud account now (``POST`` → request tracker).
+TENANT_IMAGE_ENUMERATION_PATH: Final[str] = (
+    "/iaas/api/cloud-accounts/{id}/private-image-enumeration"
+)
+#: The state of a running request (``GET``).
+TENANT_REQUEST_TRACKER_PATH: Final[str] = "/iaas/api/request-tracker/{id}"

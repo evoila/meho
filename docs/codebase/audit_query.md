@@ -88,6 +88,75 @@ stays `pending` after the request is approved, rejected or expired. Use
 (`meho approvals list`, or the console's approvals page). Decision record:
 [`docs/decisions/composite-audit-when-a-step-waits.md`](../decisions/composite-audit-when-a-step-waits.md).
 
+### Loose rows: the standing check (#4670)
+
+A **loose row** is an audit record whose `parent_audit_id` names a row
+that does not exist. It is what the crash case above leaves behind: the
+step rows and the step's `approval.request` row were saved, the
+operation's own row was not. It is also what a multi-step operation
+looks like while it still runs: the operation saves its own row last, so
+its finished steps are loose until it ends. A loose row alone does not
+tell the two cases apart. A crash leaves the rows loose for good, and
+MEHO never repairs them, so an operator needs a standing check. Three
+pieces give it:
+
+- **The query.** `audit_query.find_loose_rows(*, tenant_id, session,
+  limit=200, recent_window=1 day, now=None) -> LooseRowsResult`
+  (`audit_query/loose_rows.py`). Read-only: two `SELECT` statements, no
+  write. It lists the tenant's loose rows newest first (`LooseRow`: id,
+  time, principal, operation, event class, path, parent id), with the
+  exact total `count` and `recent_count` (rows younger than the window),
+  `recent_since`, and `truncated` when the list is capped (`limit` ≤
+  1000). A parent "exists" when a row with that id exists in the same
+  tenant, the same rule the replay closure uses. `event_class` tells a
+  step row (`operation_execution`) and an approval request
+  (`policy_decision`, path `approval.request`) apart.
+- **The operation.** `audit.loose_rows` on the synthetic connector
+  `audit-integrity-1.x` (`connectors/audit/ops.py`) wraps the query as a
+  targetless, `safe` typed op so a Sensor can pin it. Params: `limit`,
+  `recent_window_seconds`. The result is set-shaped: over the JSONFlux
+  threshold the reducer moves `rows` behind a result handle, and the
+  op's `result_scalars` hint keeps `count` / `recent_count` /
+  `recent_since` / `truncated` inline so an assertion still reads them.
+  The op id classifies as `audit_query`, so its broadcast event is
+  aggregate-only. Its own dispatch is audited like any operation; that
+  row is the record of the check, not a repair.
+- **The sensor template.** `connectors/audit/sensor_template.py` holds
+  `LOOSE_ROWS_SENSOR_TEMPLATE`, a ready `POST /api/v1/sensors` body
+  (`loose_rows_sensor_template(name=...)` returns a copy): once an hour,
+  assertion `$.recent_count` with `threshold gt` — `degraded` above 0
+  (at least one loose row younger than a day), `critical` above 10;
+  `severity=critical` so the dashboard cap does not hide the critical
+  band. A sample taken while a multi-step operation runs can show
+  `degraded` and clear on the next run. `tests/test_audit_loose_rows.py`
+  proves the thresholds on recorded answers.
+
+  ```json
+  {
+    "name": "audit-loose-rows",
+    "connector_id": "audit-integrity-1.x",
+    "op_id": "audit.loose_rows",
+    "target": null,
+    "params": {},
+    "assertion": {
+      "select": {"path": "$.recent_count"},
+      "compare": {"type": "threshold", "op": "gt", "degraded": 0, "critical": 10}
+    },
+    "cadence_kind": "interval",
+    "interval_seconds": 3600,
+    "severity": "critical"
+  }
+  ```
+
+The replay view shows the same thing per session: every replay envelope
+(REST, MCP, console, `meho audit replay`) carries `loose_row_count`, the
+nodes of the tree whose parent id names no row in the tenant
+(`audit_query.count_loose_rows_in_forest`). Such a node renders as a
+root, so the count tells it apart from a real start of a chain; a root
+whose parent lives in another session is not counted. The console shows
+the count as a badge above the tree, and the CLI prints one note after
+the tree when the count is above zero.
+
 ### Class counters and execution-only traces (#3747)
 
 - `count_event_classes(filters, *, tenant_id, session)` returns one row
@@ -123,7 +192,8 @@ take `event_class` as a required argument.
 | Field | Type | Backend |
 |---|---|---|
 | `target` | `str \| None` | Matched against `targets.name` for the same tenant (alias resolution is the T2 router's job). |
-| `principal` | `str \| None` | `audit_log.operator_sub ILIKE %value%`. |
+| `principal` | `str \| None` | Part of the user id **or** the name: `audit_log.operator_sub ILIKE %value%` OR `payload->>'principal_name' ILIKE %value%` (#4668). `%` and `_` in the value match literally. |
+| `principal_sub` | `str \| None` | `audit_log.operator_sub = value` (exact). Only the "my recent" views set it, from the caller's own token. Not on the REST body or the MCP input schema. |
 | `op_id` | `str \| None` | Glob (`*` ↔ `%`). Matched against `payload->>'op_id'` (MCP rows) **OR** derived `http.<method>:<path>` (HTTP rows). |
 | `op_class` | `str \| None` | Exact match against `payload->>'op_class'`. |
 | `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"` / `"pending"`. Maps to status-code ranges. `pending` (202) is history: the run stopped to wait for approval, and the row stays `pending` after the decision. It matches the `approval.request` row and, since #4275, the stopped operation's own `operation_execution` row; add `event_class` to pick one. To see what waits now, use the approval queue (`meho approvals list`). |
@@ -190,7 +260,8 @@ query_audit(filters, tenant_id, session)
   │       [+ agent_session_id = :agent_session_id]
   │       [+ work_ref = :work_ref]                              ← exact match
   │       [+ event_class = :event_class]                        ← exact match
-  │       [+ operator_sub ILIKE :principal]
+  │       [+ operator_sub ILIKE :principal OR payload->>'principal_name' ILIKE :principal]
+  │       [+ operator_sub = :principal_sub]                     ← exact match
   │       [+ occurred_at >= :since]
   │       [+ occurred_at <= :until]
   │       [+ target_id IN (SELECT id FROM targets WHERE tenant_id = :tenant_id
@@ -320,7 +391,8 @@ how an operator replays it.
   it, and an unpaired service account's rows landed with a NULL
   `agent_session_id`.
 - A call **without** a `work_ref` still lands NULL. There is nothing to group
-  it by. Find those rows by principal (`meho audit query --principal`).
+  it by. Find those rows by principal (`meho audit query --principal`,
+  which matches part of the user id or of the name).
 
 How an operator replays a client-credential run:
 
@@ -350,10 +422,10 @@ tenant-scoping invariant is enforced one layer up.
 | `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
-| `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
+| `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
 | `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace (#3747); any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
-| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
+| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}`; `loose_row_count` is the nodes whose parent id names no row, #4670). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped
 `SELECT count(*) WHERE agent_session_id = :id AND tenant_id = :tid` (the
@@ -395,9 +467,10 @@ return rows for **every** principal in the calling tenant. Any `operator`
 is **no per-principal role check** on either route, and filtering
 `principal` on another operator's sub is a supported forensic lookup.
 Only `my-recent` stays self-scoped: it binds
-`filters.principal = operator.sub`, so the caller sees their own rows
-only. Cross-**tenant** isolation is unchanged (the substrate's first
-WHERE clause is always `audit_log.tenant_id`; `show` → 404 on a foreign
+`filters.principal_sub = operator.sub` (exact match on the user id), so
+the caller sees their own rows only. Cross-**tenant** isolation is
+unchanged (the substrate's first WHERE clause is always
+`audit_log.tenant_id`; `show` → 404 on a foreign
 `audit_id`, per the module and `show` docstrings in
 `backend/src/meho_backplane/api/v1/audit.py`), and dispatch rows carry
 `payload.params_hash` — a SHA-256 over the canonicalised params
@@ -492,8 +565,9 @@ attempt (the dispatcher's per-call RBAC re-check, not a transport
 `shape="tree"` the handler short-circuits the flat filter path and
 reconstructs the caller's session as a `ReplayNode` forest via
 `replay_session`, returning `{root, session_id, tenant_id, row_count,
-excluded_null_session_count}` (same envelope, including the same
-`excluded_null_session_count` gloss, as the admin tool below).
+excluded_null_session_count, loose_row_count}` (same envelope, including
+the same `excluded_null_session_count` and `loose_row_count` glosses, as
+the admin tool below).
 
 The tree path is **self-session only** and intentionally stricter than
 the flat path (which already returns other in-tenant principals' rows):
@@ -524,10 +598,12 @@ admin replays *another* agent's session, where `query_audit`'s
   argument — so an admin cannot replay another tenant's session (a
   foreign session id yields an empty `root`).
 * Returns `{root: [ReplayNode…], session_id, tenant_id, row_count,
-  excluded_null_session_count}` via `model_dump(mode="json")`;
-  `row_count` is the total node count in the returned tree, and
-  `excluded_null_session_count` is the tenant-wide tally of header-less
-  `method=MCP` NULL-session rows no replay can reach (#2700 / #2776).
+  excluded_null_session_count, loose_row_count}` via
+  `model_dump(mode="json")`; `row_count` is the total node count in the
+  returned tree, `excluded_null_session_count` is the tenant-wide tally
+  of header-less `method=MCP` NULL-session rows no replay can reach
+  (#2700 / #2776), and `loose_row_count` is the nodes whose parent id
+  names no row in the tenant (#4670).
 * `op_class="audit_query"`, so — via the matching `meho.audit.` arm
   in `classify_op` — the MCP broadcast event is aggregate-only
   (`{op_class, result_status, row_count}`), never the `ReplayNode`

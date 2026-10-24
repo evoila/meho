@@ -406,6 +406,7 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+    "examples": [{"host": "host-21"}],
 }
 
 _DEVICE_ITEM_SCHEMA: dict[str, Any] = {
@@ -545,25 +546,12 @@ HOST_STORAGE_DEVICES_WHEN_TO_USE = (
 VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
     op_id="vmware.host.storage_devices",
     handler_attr="host_storage_devices",
-    summary=(
-        "Per-host raw SCSI storage devices — per-LUN uuid, ssd/local flags, "
-        "capacity, model/vendor, and is_boot."
-    ),
+    summary="Raw SCSI disks of one ESXi host: UUID, flash flag, size, model and boot disk.",
     description=(
-        "Returns one row per SCSI LUN on an ESXi host: uuid (ScsiLun.uuid — the "
-        "id host.disk_mark_flash takes), canonical_name, device_type, "
-        "capacity_bytes (null on non-disk LUNs), ssd (flash) and local from "
-        "HostScsiDisk, trimmed model / vendor, and is_boot (the boot device, "
-        "matched via HostBootDeviceSystem.QueryBootDevices — authoritative only "
-        "when boot_device_resolution=='matched', else null; the key format is "
-        "vendor-defined so no_match/unavailable are expected). Reads "
-        "config.storageDevice.scsiLun + configManager.bootDeviceSystem via one "
-        "PropertyCollector RetrievePropertiesEx directly on the connector session "
-        "(zero catalog ingest), on a vCenter target (host name/moref resolution) "
-        "and a standalone ESXi target no vCenter manages yet (host param ignored "
-        "— the host is the target, #3332). Device read fail-closed "
-        "(storage_devices_unreadable); boot resolution fail-safe. Set-shaped, "
-        "JSONFlux-reduced when large. safety_level=safe, read-only."
+        "Returns one row per SCSI device of an ESXi host: uuid, canonical name, type, "
+        "capacity, ssd (flash) and local flags, model, vendor and is_boot. Works through "
+        "vCenter (host is required) and on a standalone ESXi host (host is ignored). "
+        "Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -572,29 +560,30 @@ VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call to discover a host's raw disks (uuid + ssd flag + is_boot) "
-            "before selecting disks to flash-mark, which the other host storage "
-            "reads do not surface. Works on a standalone ESXi host (no managing "
-            "vCenter) as well as through a vCenter. is_boot is advisory: trust "
-            "it to exclude the boot disk ONLY when boot_device_resolution == "
-            "'matched'; treat null as unknown, never as 'not the boot disk'."
+        "when_to_call": (
+            "Call to list the raw disks of an ESXi host, for example to find the disk "
+            "UUIDs and flash flags before vmware.composite.host.disk_mark_flash, or to "
+            "find the boot disk. Works on a standalone ESXi host too."
         ),
         "parameter_hints": {
             "host": (
-                "Host display name or moref on a vCenter target; omit on a "
+                "Host display name or moid on a vCenter target; omit on a "
                 "standalone-ESXi target (the host is the target)."
             ),
         },
         "output_shape": (
-            "{status, host, devices: [{uuid, canonical_name, device_type, "
-            "capacity_bytes, ssd, local, model, vendor, is_boot}], device_count, "
-            "current_boot_device_key, boot_device_resolution, boot_device_note}. "
-            "host.disk_mark_flash takes an explicit disk_uuids list; rely on "
-            "is_boot to exclude the boot disk only under boot_device_resolution "
-            "== 'matched'. Refusals (host_required / host_not_found / "
-            "ambiguous_host / unsupported_host_target / "
-            "storage_devices_unreadable) carry an empty devices array."
+            "{status: ok|host_required|host_not_found|ambiguous_host|"
+            "unsupported_host_target|storage_devices_unreadable, host, devices: [{uuid, "
+            "canonical_name, device_type, capacity_bytes, ssd, local, model, vendor, "
+            "is_boot}], device_count, current_boot_device_key, boot_device_resolution: "
+            "matched|no_match|unavailable, boot_device_note, candidate_hosts, read_note}. "
+            "Every status except ok has an empty devices list."
+        ),
+        "next_step": (
+            "Trust is_boot only when boot_device_resolution is matched; null means "
+            "unknown, never 'not the boot disk'. Pass the chosen uuid values as "
+            "disk_uuids to vmware.composite.host.disk_mark_flash. On ambiguous_host, "
+            "call again with one of candidate_hosts."
         ),
     },
 )

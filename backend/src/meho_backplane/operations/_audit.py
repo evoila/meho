@@ -35,6 +35,7 @@ import structlog
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
@@ -53,6 +54,7 @@ __all__ = [
     "reveal_secret_var",
     "run_id_var",
     "step_id_var",
+    "with_audit_receipt",
     "work_ref_var",
     "write_audit_row",
 ]
@@ -741,8 +743,13 @@ async def audit_rejection_safe(
     params_hash: str,
     result_status: str,
     duration_ms: float,
-) -> None:
+) -> uuid.UUID | None:
     """Write one audit row for a pre-execution rejection; no broadcast (#3500).
+
+    Returns the row id when the row committed, ``None`` when the write
+    failed, like :func:`audit_safe`. The caller puts it on the result with
+    :func:`with_audit_receipt` so the refused call can be linked to its row
+    (#4669).
 
     Used for the abuse-control rejections (rate limit / concurrent-op cap):
     the over-limit event must be audited (spec §6), but -- unlike a policy
@@ -778,3 +785,19 @@ async def audit_rejection_safe(
             result_status=result_status,
             operator_sub=operator.sub,
         )
+        return None
+    return audit_id
+
+
+def with_audit_receipt(result: OperationResult, receipt: uuid.UUID | None) -> OperationResult:
+    """Return *result* with *receipt* as its ``audit_id``; unchanged when there is none.
+
+    Every path that writes an audit row for a result it already built uses
+    this: the error row (#3864) and every refusal row (#4669). The result
+    stays as it is when the row did not commit (``receipt is None``) or when
+    it already carries an ``audit_id``, so ``audit_id: null`` keeps meaning
+    "no audit row was written".
+    """
+    if receipt is None or result.audit_id is not None:
+        return result
+    return result.model_copy(update={"audit_id": receipt})

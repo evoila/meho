@@ -58,6 +58,11 @@ _BASE_OVERRIDES = [
 ]
 
 _ON = [
+    # The chart derives the issuer from the built-in Keycloak (#4591).
+    "--set",
+    "keycloak.issuer=",
+    "--set",
+    "config.keycloakIssuerUrl=",
     "--set",
     "coreKeycloak.enabled=true",
     "--set",
@@ -369,3 +374,167 @@ def test_bad_values_fail_at_render(extra: list[str], messages: tuple[str, ...]) 
     result = _run(*_ON, *extra)
     assert result.returncode != 0
     assert any(m in result.stderr for m in messages), result.stderr
+
+
+# --- The backplane uses the built-in Keycloak (#4591) ----------------------
+
+
+def _backplane(*extra: str) -> tuple[dict[str, str], dict[str, dict[str, Any]], dict[str, Any]]:
+    """Return the backplane's ConfigMap data, container env and NetworkPolicy."""
+    docs = _render(*extra)
+    config = next(
+        d for d in docs if d["kind"] == "ConfigMap" and "KEYCLOAK_ISSUER_URL" in d.get("data", {})
+    )
+    deployment = next(
+        d
+        for d in docs
+        if d["kind"] == "Deployment"
+        and d["metadata"]["labels"].get("app.kubernetes.io/name") == "meho"
+    )
+    env = _env(deployment["spec"]["template"]["spec"]["containers"][0])
+    policy = next(
+        d
+        for d in docs
+        if d["kind"] == "NetworkPolicy"
+        and d["metadata"]["labels"].get("app.kubernetes.io/name") == "meho"
+    )
+    return config["data"], env, policy
+
+
+def test_backplane_settings_come_from_the_built_in_keycloak() -> None:
+    data, env, _ = _backplane(*_ON)
+    assert {k: v for k, v in data.items() if "KEYCLOAK" in k} == {
+        # Tokens carry the public address; pods call the Service.
+        "KEYCLOAK_ISSUER_URL": "https://meho.test/auth/realms/meho",
+        "KEYCLOAK_DISCOVERY_URL": "http://test-keycloak:8080/auth/realms/meho",
+        "KEYCLOAK_AUDIENCE": "meho-backplane",
+        "KEYCLOAK_CLI_CLIENT_ID": "meho-cli",
+        "UI_KEYCLOAK_CLIENT_ID": "meho-web",
+        "KEYCLOAK_JWKS_CACHE_TTL_SECONDS": "300",
+        "KEYCLOAK_JWT_LEEWAY_SECONDS": "30",
+    }
+    assert env["KEYCLOAK_ADMIN_URL"]["value"] == "http://test-keycloak:8080/auth/admin/realms/meho"
+    assert env["KEYCLOAK_ADMIN_CLIENT_ID"]["value"] == "meho-admin"
+    assert env["KEYCLOAK_ADMIN_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"] == {
+        "name": "test-core-keycloak-admin",
+        "key": "client_secret",
+    }
+
+
+def test_audience_and_client_ids_match_the_realm_file() -> None:
+    realm = json.loads(_REALM_FILE.read_text())
+    clients = {c["clientId"]: c for c in realm["clients"]}
+    data, env, _ = _backplane(*_ON)
+    assert clients[data["KEYCLOAK_AUDIENCE"]]["publicClient"] is False
+    assert clients[data["KEYCLOAK_CLI_CLIENT_ID"]]["publicClient"] is True
+    assert clients[data["UI_KEYCLOAK_CLIENT_ID"]]["publicClient"] is False
+    assert clients[env["KEYCLOAK_ADMIN_CLIENT_ID"]["value"]]["serviceAccountsEnabled"] is True
+
+
+def test_service_address_follows_a_long_release_name() -> None:
+    release = "r" * 53
+    docs = _render(*_ON, release=release)
+    service = next(d for d in docs if d["kind"] == "Service" and _is_keycloak(d))
+    config = next(d for d in docs if d.get("data", {}).get("KEYCLOAK_DISCOVERY_URL"))
+    name = service["metadata"]["name"]
+    assert config["data"]["KEYCLOAK_DISCOVERY_URL"] == f"http://{name}:8080/auth/realms/meho"
+
+
+def test_bring_your_own_keycloak_settings_are_unchanged() -> None:
+    data, env, policy = _backplane(
+        "--set",
+        "config.keycloakCliClientId=my-cli",
+        "--set",
+        "keycloakAdmin.enabled=true",
+        "--set",
+        "keycloakAdmin.url=https://keycloak.test/admin/realms/meho",
+        "--set",
+        "keycloakAdmin.clientId=my-admin",
+        "--set",
+        "keycloakAdmin.clientSecret.secretName=my-admin-secret",
+    )
+    assert "KEYCLOAK_DISCOVERY_URL" not in data
+    assert data["KEYCLOAK_ISSUER_URL"] == "https://keycloak.test/realms/meho"
+    assert data["KEYCLOAK_AUDIENCE"] == "meho-backplane"
+    assert data["KEYCLOAK_CLI_CLIENT_ID"] == "my-cli"
+    assert data["UI_KEYCLOAK_CLIENT_ID"] == ""
+    assert env["KEYCLOAK_ADMIN_URL"]["value"] == "https://keycloak.test/admin/realms/meho"
+    assert env["KEYCLOAK_ADMIN_CLIENT_ID"]["value"] == "my-admin"
+    assert env["KEYCLOAK_ADMIN_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"] == {
+        "name": "my-admin-secret",
+        "key": "client_secret",
+    }
+    keycloak_rule = next(r for r in policy["spec"]["egress"] if r["ports"][0]["port"] == 443)
+    assert keycloak_rule["to"] == [{"ipBlock": {"cidr": "10.0.3.0/24"}}]
+
+
+def test_admin_settings_stay_off_without_either_switch() -> None:
+    _, env, _ = _backplane()
+    assert not {"KEYCLOAK_ADMIN_URL", "KEYCLOAK_ADMIN_CLIENT_ID"} & set(env)
+
+
+def test_backplane_may_call_the_built_in_keycloak_pod() -> None:
+    _, _, policy = _backplane(*_ON, "--set", "coreKeycloak.service.port=80")
+    rules = [r for r in policy["spec"]["egress"] if "podSelector" in r["to"][0]]
+    keycloak = next(
+        r
+        for r in rules
+        if r["to"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "keycloak"
+    )
+    assert keycloak["to"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/instance"] == "test"
+    # The pod's port, not the Service's.
+    assert keycloak["ports"] == [{"port": 8080, "protocol": "TCP"}]
+    assert not [r for r in policy["spec"]["egress"] if r["ports"][0]["port"] == 443]
+
+
+def test_pods_may_call_over_plain_http_because_the_public_address_is_https() -> None:
+    # Keycloak checks `sslRequired` against the frontend address. A fixed
+    # https `KC_HOSTNAME` is what lets the backplane call the Service over
+    # plain HTTP from any pod address (proved in
+    # tests/integration/test_core_keycloak_realm_import.py).
+    assert json.loads(_REALM_FILE.read_text())["sslRequired"] == "external"
+    env = _env(_pod(_keycloak_docs())["containers"][0])
+    assert env["KC_HOSTNAME"]["value"].startswith("https://")
+
+
+@pytest.mark.parametrize(
+    ("key", "core_kind"),
+    [
+        ("corePostgres.existingSecrets.keycloak", "postgres-keycloak"),
+        ("keycloakAdmin.clientSecret.secretName", "keycloak-admin"),
+        ("uiConsole.secretName", "ui-auth"),
+        ("checkRunner.clientSecret.secretName", "check-runner"),
+    ],
+)
+def test_secret_names_keycloak_reads_must_be_the_core_ones(key: str, core_kind: str) -> None:
+    result = _run(*_ON, "--set", f"{key}=my-secret")
+    assert result.returncode != 0
+    assert (
+        f'{key} must be empty or "test-core-{core_kind}" while coreKeycloak.enabled is on'
+        in result.stderr
+    ), result.stderr
+    # The core name itself is fine: the secrets Job makes that Secret.
+    assert _run(*_ON, "--set", f"{key}=test-core-{core_kind}").returncode == 0
+
+
+@pytest.mark.parametrize("key", ["config.keycloakIssuerUrl", "keycloak.issuer"])
+def test_hand_set_issuer_fails_with_the_built_in_keycloak(key: str) -> None:
+    result = _run(*_ON, "--set", f"{key}=https://keycloak.test/realms/meho")
+    assert result.returncode != 0
+    assert f"{key} must be empty while coreKeycloak.enabled is on" in result.stderr
+
+
+def test_issuer_audience_and_cidr_stay_required_for_bring_your_own() -> None:
+    keys = (
+        "keycloak.issuer",
+        "config.keycloakIssuerUrl",
+        "config.keycloakAudience",
+        "networkPolicy.keycloakCIDR",
+    )
+    for key in keys:
+        result = _run("--set", f"{key}=")
+        assert result.returncode != 0, key
+    # The built-in Keycloak needs none of them: the chart derives the
+    # settings, and the NetworkPolicy reaches the pod by its labels.
+    blank = [arg for key in keys[2:] for arg in ("--set", f"{key}=")]
+    assert _run(*_ON, *blank).returncode == 0

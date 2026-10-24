@@ -60,6 +60,9 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vmware_rest._typed_response_schemas import (
+    HOST_USAGE_RESPONSE_SCHEMA,
+)
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
@@ -77,6 +80,7 @@ __all__ = [
     "VMWARE_HOST_USAGE_OP",
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_OBJECT_COLLECT_OP",
+    "VMWARE_SNAPSHOT_LIST_OP",
     "VMWARE_TASKS_HISTORY_OP",
     "VMWARE_TASKS_RECENT_OP",
     "VMWARE_TYPED_OPS",
@@ -390,6 +394,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (  # 
     OBJECT_COLLECT_WHEN_TO_USE,
     VMWARE_OBJECT_COLLECT_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_snapshot_list import (  # noqa: E402
+    SNAPSHOT_LIST_GROUP_KEY,
+    SNAPSHOT_LIST_WHEN_TO_USE,
+    VMWARE_SNAPSHOT_LIST_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (  # noqa: E402
     SSO_ADMIN_API_FILE_GROUP_KEY,
     SSO_ADMIN_API_FILE_WHEN_TO_USE,
@@ -434,26 +443,18 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
     TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE,
     SSO_ADMIN_API_FILE_GROUP_KEY: SSO_ADMIN_API_FILE_WHEN_TO_USE,
+    SNAPSHOT_LIST_GROUP_KEY: SNAPSHOT_LIST_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
     op_id="vmware.host.usage",
     handler_attr="host_usage",
-    summary="Per-host CPU/memory utilisation, hardware totals, and maintenance mode.",
+    summary="CPU and memory load, hardware totals and maintenance mode of each ESXi host.",
     description=(
-        "Returns one row per ESXi host in the vCenter with its live "
-        "utilisation and capacity: quick_stats (overall_cpu_usage_mhz, "
-        "overall_memory_usage_mb, uptime_seconds), hardware "
-        "(cpu_model, cpu_mhz per core, num_cpu_packages/cores/threads, "
-        "memory_size_bytes), and in_maintenance_mode. CPU load compares "
-        "overall_cpu_usage_mhz against cpu_mhz*num_cpu_cores; memory load "
-        "compares overall_memory_usage_mb (MB) against memory_size_bytes "
-        "(bytes -- different units). Reads the Web-Services-API "
-        "HostSystem.summary.quickStats / .hardware / runtime.inMaintenanceMode "
-        "via PropertyCollector directly on the connector session, so it "
-        "works with zero catalog ingest -- the plain REST host summary "
-        "reports only liveness, not load. Optional filter_hosts narrows to "
-        "specific host MoRef ids. safety_level=safe, read-only."
+        "Returns one row per ESXi host: CPU in use (MHz), memory in use (MB), uptime, CPU "
+        "model, cores and clock speed, memory size (bytes) and whether the host is in "
+        "maintenance mode. Reads the vSphere API directly, so it needs no catalog ingest. "
+        "Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -468,36 +469,34 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
             },
         },
         "additionalProperties": False,
+        "examples": [{"filter_hosts": ["host-21"]}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "hosts": {"type": "array"},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=HOST_USAGE_RESPONSE_SCHEMA,
     group_key=_HOST_USAGE_GROUP_KEY,
     tags=("read-only", "vmware", "vcenter", "host", "utilisation"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call when the operator asks about ESXi host load, headroom, or "
-            "capacity -- CPU/memory utilisation per host, which hosts are near "
-            "capacity, or whether a host is in maintenance mode. The plain "
-            "vCenter REST host listing gives liveness only; this op adds the "
-            "load figures."
+        "when_to_call": (
+            "Call to see how busy each ESXi host is (CPU and memory), how much room is "
+            "left, or whether a host is in maintenance mode. The vCenter host list alone "
+            "only says if a host is up."
         ),
         "parameter_hints": {
-            "filter_hosts": "List of host MoRef ids to narrow to; omit for all hosts.",
+            "filter_hosts": "Host moids, e.g. ['host-21']; omit for all hosts.",
         },
         "output_shape": (
             "{hosts: [{id, name, quick_stats: {overall_cpu_usage_mhz, "
-            "overall_memory_usage_mb, uptime_seconds}, hardware: {cpu_model, "
-            "cpu_mhz, num_cpu_packages, num_cpu_cores, num_cpu_threads, "
-            "memory_size_bytes}, in_maintenance_mode}, ...]}. When a host's "
-            "property read failed, quick_stats/hardware/in_maintenance_mode "
-            "are null and the row carries a read_note."
+            "overall_memory_usage_mb, uptime_seconds}, hardware: {cpu_model, cpu_mhz, "
+            "num_cpu_packages, num_cpu_cores, num_cpu_threads, memory_size_bytes}, "
+            "in_maintenance_mode, read_note}]}. When a host's read failed, quick_stats, "
+            "hardware and in_maintenance_mode are null and read_note says why."
+        ),
+        "next_step": (
+            "CPU use in percent is overall_cpu_usage_mhz / (cpu_mhz * num_cpu_cores) * 100. "
+            "Memory use in percent is overall_memory_usage_mb * 1048576 / "
+            "memory_size_bytes * 100 (MB against bytes). For one VM, use vmware.vm.info "
+            "or vmware.composite.performance.summary."
         ),
     },
 )
@@ -508,9 +507,10 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
 #: standalone-ESXi); and the incident-survival reads ``vm.info`` +
 #: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
-#: (#3701, tasks older than the recent list); and the SSO Admin API
-#: description read ``vcenter.sso_admin.api_file.get``. The tuple shape lets
-#: future typed reads join without touching the registrar.
+#: (#3701, tasks older than the recent list); the SSO Admin API
+#: description read ``vcenter.sso_admin.api_file.get``; and the snapshots of
+#: one VM, ``snapshot.list``. The tuple shape lets future typed reads join
+#: without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -521,6 +521,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_TASKS_RECENT_OP,
     VMWARE_TASKS_HISTORY_OP,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
+    VMWARE_SNAPSHOT_LIST_OP,
 )
 
 

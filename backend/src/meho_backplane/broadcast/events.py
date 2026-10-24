@@ -1186,6 +1186,41 @@ def is_secret_param_name(name: str) -> bool:
     return _is_secret_param_name(name)
 
 
+#: Each adjacent pair written as one word, for a name whose case is lost.
+_SECRET_NAME_PAIRS_JOINED: Final[frozenset[str]] = frozenset(
+    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS
+)
+
+
+def is_secret_param_name_lowercased(name: str) -> bool:
+    """True when *name* can be a secret-shaped name once its case is lost.
+
+    An HTML parser lowercases element and attribute names, so
+    ``licenseKey`` arrives as ``licensekey`` and the camelCase boundary
+    that :func:`is_secret_param_name` splits on is gone. This check asks
+    whether any placement of such boundaries makes the name secret: a
+    token that contains a secret word anywhere, a last token that ends in
+    a final-position word, or two pair words that touch, inside one
+    token or across two. It matches more names than the exact rule
+    (``passwordless`` counts); that replaces a value more, never less.
+    """
+    flat = name.replace("-", "_").replace(".", "_").lower()
+    tokens = [token for token in flat.split("_") if token]
+    if not tokens:
+        return False
+    if any(word in token for token in tokens for word in _SECRET_NAME_TOKENS_ANYWHERE):
+        return True
+    if any(tokens[-1].endswith(word) for word in _SECRET_NAME_TOKENS_FINAL):
+        return True
+    if any(pair in token for token in tokens for pair in _SECRET_NAME_PAIRS_JOINED):
+        return True
+    return any(
+        left.endswith(first) and right.startswith(second)
+        for left, right in itertools.pairwise(tokens)
+        for first, second in _SECRET_NAME_TOKEN_PAIRS
+    )
+
+
 def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
     """Replace values of secret-named keys; report whether any were found.
 

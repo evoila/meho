@@ -98,6 +98,7 @@ __all__ = [
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
+    "preview_failure_reason",
     "register_permission_preflight",
     "register_preview_builder",
 ]
@@ -146,8 +147,11 @@ _PREVIEW_ERROR_MAX_LEN: int = 500
 _PREVIEW_ERROR_WITHHELD: str = "<message withheld: redaction unavailable>"
 
 
-def _preview_failure_reason(exc: Exception) -> str:
+def preview_failure_reason(exc: Exception) -> str:
     """Render a builder fault as the short reviewer-facing reason string.
+
+    Public so a builder that keeps a failed read inside its preview (the VM
+    relocate copy-size preview, #4749) renders the reason the same way.
 
     Keeps the exception *message* front and centre (the type name alone
     is opaque -- the lesson of the ``connector_error`` flattening,
@@ -484,7 +488,7 @@ def _preview_unavailable_marker(
     The log line carries the same redacted reason as the row, not the
     raw exception: a builder fault can echo an upstream body (#3876).
     """
-    reason = _preview_failure_reason(exc)
+    reason = preview_failure_reason(exc)
     _log.warning(
         "proposed_effect_preview_failed",
         op_id=op_id,
@@ -690,8 +694,9 @@ async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | Non
     use (#3274 — the dispatch ``target``'s ``extras["vault_role"]``, or
     the settings-global ``meho-mcp`` role when the target names none) and
     issues ``POST sys/capabilities-self`` on the op's authorization path
-    to learn whether that token holds the ``create`` / ``update``
-    capability the write needs. Threading ``ctx.target`` is what makes the
+    to learn whether that token holds the capabilities the write needs
+    (``create`` / ``update`` for ``put``; ``read`` / ``update`` for
+    ``patch``, which reads before it writes). Threading ``ctx.target`` is what makes the
     banner reflect the role that will actually execute. The response
     carries only capability names -- no secret value -- so it is
     redaction-safe and runs even though ``vault.kv.put`` /

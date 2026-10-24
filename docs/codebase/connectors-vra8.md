@@ -231,7 +231,7 @@ deliberately not forwarded to the vendor either (vRA 8's casing for it is not
 uniform across services: IaaS `$orderBy` vs `$orderby`).
 
 **Operation contracts.** The 6 ops meet the VMware operation-contract check
-(`backend/tests/test_vmware_operation_contracts.py`) and have no entry in its gap
+(`backend/tests/test_operation_contracts.py`) and have no entry in its gap
 list:
 
 - Each description is at most about 300 characters; longer guidance lives in

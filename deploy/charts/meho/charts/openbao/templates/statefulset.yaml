@@ -1,0 +1,175 @@
+{{- $home := include "coreVault.home" . }}
+{{- $env := include "coreVault.envPrefix" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "coreVault.fullname" . }}
+  labels:
+    {{- include "coreVault.labels" . | nindent 4 }}
+spec:
+  # One server. Raft storage lets it grow to three later without a storage
+  # change.
+  replicas: 1
+  # A locked pod is never ready. With the default `OrderedReady`, Kubernetes
+  # would wait for it to be ready before it rolls out a change, and replace
+  # it right after someone unlocks it. The field cannot be changed after the
+  # first install.
+  podManagementPolicy: Parallel
+  serviceName: {{ include "coreVault.internalName" . }}
+  selector:
+    matchLabels:
+      {{- include "coreVault.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # The config is read at start. A changed ConfigMap restarts the pod
+        # on upgrade.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "coreVault.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.authDelegator }}
+      # The Kubernetes login method sends this pod's token to the cluster
+      # to check other tokens; the auth-delegator binding allows that.
+      serviceAccountName: {{ include "coreVault.fullname" . }}
+      automountServiceAccountToken: true
+      {{- else }}
+      automountServiceAccountToken: false
+      {{- end }}
+      # No `<SERVICE>_PORT` variables from other Services in the namespace:
+      # a Service named `vault` would otherwise set `VAULT_PORT` here.
+      enableServiceLinks: false
+      securityContext:
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
+      containers:
+        - name: {{ .Values.binary }}
+          image: {{ include "meho.core.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image's start script turns off core dumps and adds
+          # `-config=<home>/config`.
+          args: ["server"]
+          env:
+            # The pod is not root, so the start script must not try to
+            # change file owners.
+            - name: SKIP_CHOWN
+              value: "true"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: {{ $env }}_API_ADDR
+              value: "http://$(POD_NAME).{{ include "coreVault.internalName" . }}:8200"
+            - name: {{ $env }}_CLUSTER_ADDR
+              value: "https://$(POD_NAME).{{ include "coreVault.internalName" . }}:8201"
+            # For `status` in the readiness check and for `kubectl exec`.
+            - name: {{ $env }}_ADDR
+              value: "http://127.0.0.1:8200"
+          ports:
+            - name: http
+              containerPort: 8200
+              protocol: TCP
+            - name: cluster
+              containerPort: 8201
+              protocol: TCP
+          # `status` exits 2 while the server is locked ("sealed"), so a
+          # locked pod is not ready. No liveness check: restarting a locked
+          # server would not unlock it.
+          readinessProbe:
+            exec:
+              command: [{{ .Values.binary | quote }}, "status"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ $home }}/data
+            - name: config
+              mountPath: {{ $home }}/config
+              readOnly: true
+        # Unseals the server after every restart while the Secret
+        # `<release>-core-vault-unseal` exists (#4046). Deleting the Secret
+        # switches to "keyholder at boot": a person then unseals by hand.
+        - name: unseal
+          image: {{ include "meho.core.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          # The key goes from the file through `tr` (it drops white space,
+          # such as the line break `echo` adds) into `key=-` (stdin): it is
+          # never on a command line or in a shell variable, and nothing
+          # keeps it between passes, so a deleted Secret takes effect on the
+          # next pass. The unseal call's output is thrown away; only fixed
+          # lines are logged.
+          args:
+            - |
+              trap 'exit 0' TERM
+              last=""
+              while true; do
+                {{ .Values.binary }} status >/dev/null 2>&1
+                rc=$?
+                if [ "$rc" -eq 0 ]; then
+                  msg="unsealed"
+                elif [ "$rc" -ne 2 ]; then
+                  msg="the server does not answer yet"
+                elif [ ! -f /unseal/key ]; then
+                  msg="sealed, no unseal key in /unseal (keyholder mode, or not set up yet)"
+                elif tr -d '[:space:]' </unseal/key | {{ .Values.binary }} write sys/unseal key=- >/dev/null 2>&1; then
+                  msg="sealed, sent the unseal key"
+                else
+                  msg="sealed, the unseal call failed: a wrong key in the Secret, or the server is not set up (output hidden: it could hold the key)"
+                fi
+                if [ "$msg" != "$last" ]; then echo "unseal: $msg"; last="$msg"; fi
+                sleep 5 & wait $!
+              done
+          env:
+            - name: {{ $env }}_ADDR
+              value: "http://127.0.0.1:8200"
+          resources:
+            {{- toYaml .Values.unseal.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: unseal
+              mountPath: /unseal
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "coreVault.fullname" . }}-config
+        # `optional`: the pod also starts without the Secret (keyholder
+        # mode). No `subPath`, so the kubelet removes the file when the
+        # Secret is deleted and puts it back when the Secret returns.
+        - name: unseal
+          secret:
+            secretName: {{ printf "%s-core-vault-unseal" .Release.Name }}
+            optional: true
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  # The disk outlives `helm uninstall` on purpose (the default Retain
+  # policy): it holds every secret, and it opens only with the unlock key.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "coreVault.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}

@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 66 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 68 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -40,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 50 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 52 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -54,26 +54,29 @@ OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909 +
 three host-domain writes ``host.datastore_mount_nfs`` /
 ``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
 later Supervisor / #3281, storage-policy, content-library / #3495 and
-resource-pool / #3505 write families, the #3339 teardown deletes, and the
-DRS rule delete ``cluster.drs_rule.delete``) are
+resource-pool / #3505 write families, the #3339 teardown deletes, the
+DRS rule delete ``cluster.drs_rule.delete``, and the VM snapshot create +
+delete ``vm.snapshot.create`` / ``vm.snapshot.delete``) are
 all ``requires_approval=True``.
 32 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 8 pin
-``safety_level="caution"`` -- the datastore directory create
+clarity at the call site; the helper would default to it anyway). 9 pin
+``safety_level="caution"`` -- the VM snapshot create ``vm.snapshot.create``,
+the datastore directory create
 ``datastore.dir.create`` / #3339, the reversible VM allocation write
 ``vm.resource_allocation.set`` / #3880, the #3505 governed-allocation writes
 ``resource_pool.create`` + the VM-Host affinity
 ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
 ``storage_policy.create`` / ``content_library.subscribed.create`` /
 ``content_library.subscribed.sync`` (``resource_pool.delete`` is a
-``dangerous`` reparent, not a destroy). 10 pin
+``dangerous`` reparent, not a destroy). 11 pin
 ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
 destructive op -- the governed-delete tier, decision
 ``docs/decisions/governed-delete-operations.md``), ``namespace.delete``,
 ``storage_policy.delete``, the six #3339 teardown deletes
 (``network.portgroup.delete``, ``host.standard_portgroup.delete``,
 ``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
-``content_library.item.delete``) and ``cluster.drs_rule.delete``. (The
+``content_library.item.delete``), ``cluster.drs_rule.delete`` and the VM
+snapshot delete ``vm.snapshot.delete``. (The
 ``caution`` tier is not writes-only:
 ``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -104,6 +107,9 @@ from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_net_show_composite,
     guest_process_list_composite,
     guest_program_run_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._guest_event_perf_llm_instructions import (
+    GUEST_EVENT_PERF_LLM_INSTRUCTIONS,
 )
 from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
@@ -136,6 +142,10 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._snapshot import (
+    vm_snapshot_create_composite,
+    vm_snapshot_delete_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._storage_network_llm_instructions import (
     STORAGE_NETWORK_LLM_INSTRUCTIONS,
 )
@@ -148,6 +158,9 @@ from meho_backplane.connectors.vmware_rest.composites._supervisor import (
     supervisor_disable_composite,
     supervisor_enable_composite,
     supervisor_status_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._supervisor_library_llm_instructions import (
+    SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS,
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown import folder_delete_composite
 from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
@@ -322,6 +335,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA,
     VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA,
     VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA,
+    VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
+    VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA,
+    VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
+    VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
@@ -463,8 +480,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "optional inline guest customization), deploy an OVF/OVA "
         "content-library item to a new VM (deploy_from_library — "
         "OVF-network→portgroup mappings, ambiguity-rejecting name "
-        "lookup, structured deploy-report statuses), revert to a named "
-        "snapshot (ambiguity-rejecting), "
+        "lookup, structured deploy-report statuses), VM snapshots (take "
+        "one with vm.snapshot.create -- caution, needs approval; revert to "
+        "one by name or id; delete one with vm.snapshot.delete -- "
+        "destructive, always needs approval; list them with the typed read "
+        "vmware.snapshot.list), "
         "migrate via DRS or explicit host, bulk power across a "
         "filter, or a single-VM power verb (on/off/reset plus a "
         "Tools-mediated guest_shutdown/guest_reboot for one-off "
@@ -651,16 +671,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.event.tail",
         handler=event_tail_composite,
-        summary="Read vCenter events via EventManager.QueryEvents, with optional filters.",
+        summary="Read vCenter events, filtered by time, event type or one object.",
         description=(
-            "Calls EventManager.QueryEvents (vi-json) against the "
-            "EventManager singleton with an EventFilterSpec. Optional "
-            "filters: a time window (begin_time / end_time), event types "
-            "(event_type_ids) and one managed entity (entity). max_count "
-            "limits the result on the server. Each event comes back as a "
-            "short row: createdTime, eventTypeId, fullFormattedMessage, "
-            "entity. Equivalent of 'govc events' for the operator-facing "
-            "workflow. Read-only -- never mutates the event store."
+            "Reads events from the vCenter event log (EventManager.QueryEvents). Optional "
+            "filters: a time window, event types and one object. max_count limits the result on "
+            "the server. Each event is a short row: time, type, message and the object it is "
+            "about. Read-only."
         ),
         parameter_schema=EVENT_TAIL_PARAMETER_SCHEMA,
         response_schema=EVENT_TAIL_RESPONSE_SCHEMA,
@@ -668,19 +684,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "events", "vi-json"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.event.tail"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.performance.summary",
         handler=performance_summary_composite,
-        summary="Summarise performance metrics for one entity via PerformanceManager.",
+        summary="Read the performance counters and recent samples of one VM, host or cluster.",
         description=(
-            "Discovers available counters for the target entity via "
-            "PerformanceManager.QueryAvailablePerfMetric, then fetches "
-            "sample values via PerformanceManager.QueryPerf (both "
-            "vi-json). Returns the available-counter list plus the "
-            "capped sample list; the caller can post-filter to whichever "
-            "metric they need. Read-only -- never mutates counter "
-            "configuration."
+            "Lists the performance counters vCenter has for one object (QueryAvailablePerfMetric) "
+            "and reads their recent samples (QueryPerf). Counters are given by number. "
+            "max_samples limits the samples per counter for real-time data. Read-only."
         ),
         parameter_schema=PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
         response_schema=PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
@@ -688,6 +701,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "performance", "vi-json"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.performance.summary"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.datastore.usage",
@@ -818,11 +832,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.snapshot.revert",
         handler=vm_snapshot_revert_composite,
-        summary="Revert a VM to a named snapshot; reject on name ambiguity.",
+        summary="Revert a VM to a snapshot, by name or id; reject on name ambiguity.",
         description=(
-            "Puts a VM back to the snapshot with the given name. Everything since "
+            "Puts a VM back to a snapshot, given by name or by id. Everything since "
             "that snapshot is lost. If two snapshots share the name, nothing "
-            "changes. Like 'govc snapshot.revert'."
+            "changes; pass the id. Like 'govc snapshot.revert'."
         ),
         parameter_schema=VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
         response_schema=VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
@@ -831,6 +845,41 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.revert"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.snapshot.create",
+        handler=vm_snapshot_create_composite,
+        summary="Take a snapshot of one VM: name, description, with memory or not, quiesce or not.",
+        description=(
+            "Takes a snapshot of one VM and waits for the vCenter task. Returns the new "
+            "snapshot id. Disks only unless memory is set. When the VM already has a "
+            "snapshot with that name, nothing is created. Like 'govc snapshot.create'."
+        ),
+        parameter_schema=VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
+        response_schema=VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "snapshot", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.create"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.snapshot.delete",
+        handler=vm_snapshot_delete_composite,
+        summary="Delete one VM snapshot by id; its child snapshots stay unless asked.",
+        description=(
+            "Deletes one snapshot of a VM, by id. The VM keeps its present state; the "
+            "restore point is gone for good. Child snapshots stay unless remove_children "
+            "is set. A second person always approves, after a preview. Like 'govc "
+            "snapshot.remove'."
+        ),
+        parameter_schema=VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
+        response_schema=VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "snapshot", "vi-json"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.destroy",
@@ -1269,22 +1318,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.guest.customization_spec.create",
         handler=guest_customization_spec_create_composite,
-        summary="Create a reusable named guest customization (GOSC) spec.",
+        summary="Save a named guest customization spec (host name, IP per NIC, DNS).",
         description=(
-            "Creates a named GuestOS customization spec via "
-            "POST:/vcenter/guest/customization-specs from the tractable "
-            "provisioning subset: hostname (FIXED HostnameGenerator), "
-            "per-NIC static IP / prefix / gateways, and global DNS, for "
-            "either a Linux (linux_config) or Windows "
-            "(windows_config sysprep) guest. The spec a later "
-            "vmware.composite.vm.customize -- or a clone's "
-            "guest_customization_spec -- references by name so a cloned "
-            "VM comes up with its hostname and network identity. Windows "
-            "admin / product-key / domain-join credentials are consumed "
-            "into the sysprep body but never serialized onto any "
-            "reviewer / preview / broadcast / audit surface (#1503): the "
-            "op is credential-class and its park-time preview echoes "
-            "identity fields only."
+            "Saves a named guest customization spec in vCenter for a Linux or Windows guest: "
+            "host name, a fixed IP or DHCP per NIC, and DNS. vm.customize or a clone applies "
+            "it by name. Windows passwords and keys are used in the spec but never shown in "
+            "a preview, broadcast or audit row."
         ),
         parameter_schema=GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
         response_schema=GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
@@ -1292,26 +1331,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "guest", "customization", "provisioning"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
+            "vmware.composite.guest.customization_spec.create"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.customize",
         handler=vm_customize_composite,
-        summary="Apply a saved customization spec to a VM (by name); optional power-on.",
+        summary="Apply a saved guest customization spec to a VM by name; power it on if asked.",
         description=(
-            "Resolves a VM by display name via GET:/vcenter/vm, then "
-            "applies a saved customization spec via "
-            "PUT:/vcenter/vm/{vm}/guest/customization with the spec name. "
-            "vCenter only accepts a pending customization on a "
-            "powered-off VM, so the composite pre-checks the resolved "
-            "power state and refuses a powered-on VM with "
-            "status='precondition_failed' rather than letting the PUT "
-            "400. Ambiguous / missing names return "
-            "status='ambiguous' / 'not_found'. With power_on=True the VM "
-            "is powered on afterward via "
-            "POST:/vcenter/vm/{vm}/power?action=start so the "
-            "customization applies on that boot. The spec reference "
-            "carries no secret (the credential material lives in the "
-            "saved spec)."
+            "Finds the VM by name and sets the saved customization spec on it, so the guest "
+            "gets its host name and network settings on the next boot. A powered-on VM is "
+            "refused (precondition_failed). With power_on it starts the VM right after."
         ),
         parameter_schema=VM_CUSTOMIZE_PARAMETER_SCHEMA,
         response_schema=VM_CUSTOMIZE_RESPONSE_SCHEMA,
@@ -1319,6 +1350,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "guest", "vm", "customization"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.vm.customize"],
     ),
     # ----------------------------------------------------------------
     # Host-domain write composites (#3182) -- dangerous / requires approval
@@ -1384,15 +1416,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.process.list",
         handler=guest_process_list_composite,
-        summary="List processes running in a VM's guest OS via VMware Tools.",
+        summary="List the processes running in a VM's guest OS (needs VMware Tools).",
         description=(
-            "Lists the guest OS processes (name / pid / owner / cmdLine / "
-            "startTime / exitCode) via the vim GuestProcessManager "
-            "ListProcessesInGuest, authenticating with the guest credential "
-            "resolved from the target's secret_ref. The exec-status shape: "
-            "'what is running / did that service start / what exit code'. "
-            "Governed replacement for 'govc guest.ps'. Read-only -- never "
-            "mutates guest state. Requires VMware Tools in the guest."
+            "Lists the processes in the guest OS (ListProcessesInGuest): name, pid, owner, "
+            "command line, start time and, for programs started with vm.guest.program.run, "
+            "end time and exit code. Uses the guest login from the target's secret. max_processes "
+            "limits the list. Read-only."
         ),
         parameter_schema=GUEST_PROCESS_LIST_PARAMETER_SCHEMA,
         response_schema=GUEST_PROCESS_LIST_RESPONSE_SCHEMA,
@@ -1400,36 +1429,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "guest", "vi-json", "tools"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Inspect what is running inside a VM's guest OS -- verifying a "
-                "service started, checking a process's exit code, triaging a "
-                "first-boot appliance. Not for host/VM-level process state (that "
-                "is the ESXi/vCenter surface), only in-guest processes."
-            ),
-            "preconditions": (
-                "VMware Tools running in the guest; the target's Vault secret "
-                "carries guest_username / guest_password. No credential goes in "
-                "params."
-            ),
-            "result_shape": (
-                "{vm, process_manager_moid, processes[], count, "
-                "max_processes_applied}; the process list is JSONFlux-wrapped "
-                "into a result handle when large -- drill in with result_query."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS[
+            "vmware.composite.vm.guest.process.list"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.env.read",
         handler=guest_env_read_composite,
-        summary="Read environment variables from a VM's guest OS via VMware Tools.",
+        summary="Read environment variables from a VM's guest OS (needs VMware Tools).",
         description=(
-            "Reads the guest user's environment variables (as NAME=value "
-            "strings) via the vim GuestProcessManager "
-            "ReadEnvironmentVariableInGuest, authenticating with the guest "
-            "credential from the target's secret_ref. Omit 'names' for the whole "
-            "environment, or pass specific names. Read-only. Requires VMware "
-            "Tools in the guest."
+            "Reads the guest user's environment variables as NAME=value strings "
+            "(ReadEnvironmentVariableInGuest). Omit names to read all of them. Uses the guest "
+            "login from the target's secret. Read-only."
         ),
         parameter_schema=GUEST_ENV_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_ENV_READ_RESPONSE_SCHEMA,
@@ -1437,33 +1448,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "guest", "vi-json", "tools"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Read the guest OS environment of a running VM -- confirming a "
-                "PATH, a proxy variable, or a first-boot configuration value the "
-                "guest exports."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref (guest_username / guest_password). Never in params."
-            ),
-            "result_shape": (
-                "{vm, process_manager_moid, variables[], count}; variables is "
-                "JSONFlux-wrapped when large."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.env.read"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.net.show",
         handler=guest_net_show_composite,
-        summary="Show Tools-reported guest network state (no guest credentials).",
+        summary="Show the network settings VMware Tools reports for a guest OS (no guest login).",
         description=(
-            "Reads the VM's Tools-reported guest network state -- per-NIC IPs / "
-            "MAC / connected (guest.net, GuestNicInfo) and routes / DNS / "
-            "gateways (guest.ipStack, GuestStackInfo) -- via RetrievePropertiesEx. "
-            "This is reported state on the VM object, so it needs NO in-guest "
-            "authentication and runs nothing inside the guest: the 'read ip "
-            "addr / routes' diagnosis without a guest login. Read-only."
+            "Reads the guest network state VMware Tools reports on the VM: per NIC the IP "
+            "addresses, MAC and connected flag (guest.net), and the routes, DNS and gateways "
+            "(guest.ipStack). Needs no guest login and runs nothing in the guest. Read-only."
         ),
         parameter_schema=GUEST_NET_SHOW_PARAMETER_SCHEMA,
         response_schema=GUEST_NET_SHOW_RESPONSE_SCHEMA,
@@ -1471,39 +1465,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "guest", "vi-json", "networking"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "See what network configuration a guest actually has (addresses, "
-                "routes, DNS, gateways) as VMware Tools reports it -- e.g. "
-                "diagnosing why an appliance is unreachable. The only guest read "
-                "that needs no guest credentials."
-            ),
-            "preconditions": "VMware Tools running in the guest (reports the state).",
-            "result_shape": "{vm, nics[], ip_stacks[]}.",
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.net.show"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.file.read",
         handler=guest_file_read_composite,
-        summary="Read a guest file's metadata, or (opt-in) fetch its bytes inline.",
+        summary="Read a guest file's size and attributes, or (opt-in) the file itself.",
         description=(
-            "Initiates a guest file read via the vim GuestFileManager "
-            "InitiateFileTransferFromGuest, authenticating with the guest "
-            "credential from the target's secret_ref, for guest_path. With "
-            "fetch_content=false (default) it returns the FileTransferInformation "
-            "(file size, POSIX/Windows attributes, and a one-time transfer URL) -- "
-            "existence + size + attributes without MEHO proxying the bytes. With "
-            "fetch_content=true MEHO fetches the bytes server-side over the "
-            "one-time transfer URL and returns them as content_lines (utf-8 text, "
-            "or wide base64 chunks for binary, flagged by content_encoding), "
-            "capped by max_inline_bytes (default 1 MiB, hard cap 8 MiB) and "
-            "JSONFlux-wrapped into a result handle when large; a file over the cap "
-            "is refused (not truncated) with an error naming its size, and the "
-            "transfer URL + token are never returned or logged. Reads run as the "
-            "in-guest login from the target's secret_ref (often root / "
-            "Administrator) with no path allow-list, so the op is caution-tier: "
-            "it auto-parks for agent / service principals (a human operator diag "
-            "read still executes immediately). Requires VMware Tools in the guest."
+            "Starts a file download from the guest OS (InitiateFileTransferFromGuest). By default "
+            "it returns size, attributes and a one-time download link. With fetch_content=true "
+            "MEHO downloads the file and returns it as text or base64 parts, up to "
+            "max_inline_bytes. Needs VMware Tools."
         ),
         parameter_schema=GUEST_FILE_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_FILE_READ_RESPONSE_SCHEMA,
@@ -1519,57 +1491,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         # conservative posture chosen in review over per-param tiering).
         safety_level="caution",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Confirm a file's existence / size / attributes in a guest OS, "
-                "or obtain a one-time transfer URL for it. Set fetch_content=true "
-                "to get the bytes inline (as content_lines); large files return a "
-                "result handle to page with result_query. Files over "
-                "max_inline_bytes are refused, not truncated. Reads as the "
-                "in-guest user (often privileged) with no allow-list, so it can "
-                "disclose sensitive file contents; caution-tier -- auto-parks for "
-                "agent / service principals."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref. Guest user must be able to read guest_path."
-            ),
-            "result_shape": (
-                "{vm, file_manager_moid, guest_path, size_bytes, attributes} plus, "
-                "when fetch_content=false: {url, content_fetch='deferred'}; when "
-                "fetch_content=true: {content_fetch='inline', content_encoding, "
-                "content_lines} (content_lines JSONFlux-wrapped when large; url "
-                "omitted)."
-            ),
-            # Preserve the identifying/size scalars on the reduced summary when a
-            # large fetched file spills content_lines to a handle (#3084), so the
-            # metadata envelope survives alongside the handle.
-            "result_scalars": {
-                "keys": [
-                    "vm",
-                    "file_manager_moid",
-                    "guest_path",
-                    "size_bytes",
-                    "content_fetch",
-                    "content_encoding",
-                ]
-            },
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.file.read"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.file.write",
         handler=guest_file_write_composite,
-        summary="Write a file into a VM's guest OS (dangerous / approval-required).",
+        summary="Write a text file into a VM's guest OS (needs approval).",
         description=(
-            "Writes UTF-8 content to guest_path inside a VM's guest OS via the "
-            "vim GuestFileManager InitiateFileTransferToGuest (which mints a "
-            "one-time PUT URL) followed by a direct PUT of the bytes -- the vim "
-            "API's two-step design. Authenticates with the guest credential from "
-            "the target's secret_ref (never in params). The single WRITE of the "
-            "guest-ops channel: dangerous / approval-required, gated through the "
-            "standard approvals plane -- a parked / denied approval mints no URL "
-            "and PUTs no bytes. The park's proposed_effect echoes path + byte "
-            "size + overwrite only, never the content. Requires VMware Tools."
+            "Writes UTF-8 text to guest_path in the guest OS: InitiateFileTransferToGuest gives "
+            "a one-time upload link, then MEHO uploads the bytes. Uses the guest login from the "
+            "target's secret. A second person must approve; the preview shows path and size, "
+            "never the content."
         ),
         parameter_schema=GUEST_FILE_WRITE_PARAMETER_SCHEMA,
         response_schema=GUEST_FILE_WRITE_RESPONSE_SCHEMA,
@@ -1577,43 +1509,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "guest", "vi-json", "file"],
         safety_level="dangerous",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Place a config/repair file into a running guest OS (e.g. an "
-                "MTU/network drop-in) without out-of-band scp. Approval-gated -- "
-                "expect the call to park for a human decision unless a standing "
-                "grant auto-executes it."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref. Guest user must be able to write guest_path."
-            ),
-            "result_shape": (
-                "On execute: {status='written', vm, file_manager_moid, "
-                "guest_path, size_bytes, overwrite}. On gate: the approval "
-                "OperationResult verbatim (awaiting_approval / denied)."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.file.write"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.program.run",
         handler=guest_program_run_composite,
-        summary="Run a program in a VM's guest OS (dangerous / approval-required).",
+        summary="Run a program in a VM's guest OS (needs approval).",
         description=(
-            "Runs a program inside a VM's guest OS via the vim "
-            "GuestProcessManager StartProgramInGuest, authenticating with the "
-            "guest credential from the target's secret_ref (never in params). "
-            "The governed replacement for out-of-band 'govc guest.run': the "
-            "freeform in-guest execution tier #3100 deliberately deferred, now "
-            "lifted. StartProgramInGuest is fire-and-forget and returns only a "
-            "PID (no output is captured); with wait=true the op polls "
-            "ListProcessesInGuest until the process exits or timeout_seconds "
-            "elapses, returning the exit code and start/end times. "
-            "dangerous / approval-required, gated through the standard "
-            "approvals plane -- a parked / denied approval starts no program. "
-            "The 'arguments' string and 'env' values may carry secrets and are "
-            "redacted from the approval preview, the result, and logs. Requires "
-            "VMware Tools."
+            "Starts a program in the guest OS (StartProgramInGuest) with the guest login from "
+            "the target's secret. No output is captured. With wait=true it waits for the exit "
+            "code, up to timeout_seconds. A second person must approve. arguments and env are "
+            "never shown in the preview, the result or logs."
         ),
         parameter_schema=GUEST_PROGRAM_RUN_PARAMETER_SCHEMA,
         response_schema=GUEST_PROGRAM_RUN_RESPONSE_SCHEMA,
@@ -1621,31 +1527,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "guest", "vi-json", "exec"],
         safety_level="dangerous",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Execute a command inside a running guest OS (e.g. "
-                "Install-WindowsFeature, an AD DS promotion, a systemctl "
-                "invocation) without out-of-band govc guest.run. Approval-gated "
-                "-- expect the call to park for a human decision unless a "
-                "standing grant auto-executes it. Set wait=true to get the exit "
-                "code; note StartProgramInGuest captures no stdout, so redirect "
-                "to a file and read it back with guest.file.read if you need "
-                "output. Setting 'env' REPLACES the guest environment rather "
-                "than augmenting it."
-            ),
-            "preconditions": (
-                "VMware Tools running; guest credential in the target's "
-                "secret_ref. Guest user must be allowed to run the program."
-            ),
-            "result_shape": (
-                "On execute: {status, vm, process_manager_moid, program_path, "
-                "pid, exit_code, start_time, end_time, wait}. status is "
-                "'started' (wait=false), 'exited' (exit code captured), "
-                "'timeout' (still running at timeout), or 'exit_unknown' (exit "
-                "info aged out / Tools restarted). On gate: the approval "
-                "OperationResult verbatim (awaiting_approval / denied)."
-            ),
-        },
+        llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.program.run"],
     ),
     # ----------------------------------------------------------------
     # namespace-management -- Supervisor (WCP) lifecycle (#3281).
@@ -1654,24 +1536,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.supervisor.enable",
         handler=supervisor_enable_composite,
-        summary="Enable a vSphere Supervisor (WCP) on a single compute cluster.",
+        summary="Turn on a vSphere Supervisor (Kubernetes control plane) on one cluster.",
         description=(
-            "Enables the vSphere Supervisor on a cluster via "
-            "POST /vcenter/namespace-management/supervisors/{cluster}"
-            "?action=enable_on_compute_cluster (the current 9.x path; the "
-            "clusters/{cluster}?action=enable form is deprecated as of vSphere "
-            "9.0). Takes the nested EnableOnComputeClusterSpec (name + "
-            "control_plane + workloads + optional zone). Validates the spec "
-            "server-side -- the control-plane essentials (management network + "
-            "SPBM storage policy) and the workload network stack -- and refuses "
-            "an unknown network_type / edge provider loudly "
-            "(status='unknown_network_provider') before any write. The VDS + "
-            "Foundation LB model is network_type=VSPHERE + edge "
-            "provider=VSPHERE_FOUNDATION (no separate NSX edge cluster); NSX VPC "
-            "is NSX_VPC/NSX_VPC. Asynchronous: returns the new Supervisor id "
-            "immediately (status='enabling') and does NOT block on the 30-60 min "
-            "convergence -- poll vmware.composite.supervisor.status. Governed "
-            "replacement for out-of-band 'govc'/'kubectl-vsphere' enablement."
+            "Turns on a vSphere Supervisor on one cluster with the vCenter enable spec "
+            "(control_plane, workloads, optional zone). An unknown network type or edge "
+            "provider is refused before any change. It returns the new Supervisor id at "
+            "once; poll supervisor.status until it is ready."
         ),
         parameter_schema=SUPERVISOR_ENABLE_PARAMETER_SCHEMA,
         response_schema=SUPERVISOR_ENABLE_RESPONSE_SCHEMA,
@@ -1679,20 +1549,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "namespace-management", "supervisor", "wcp"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.supervisor.enable"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.supervisor.disable",
         handler=supervisor_disable_composite,
-        summary="Disable / tear down the vSphere Supervisor on a cluster.",
+        summary="Remove the vSphere Supervisor from a cluster.",
         description=(
-            "Tears the Supervisor down via "
-            "POST /vcenter/namespace-management/clusters/{cluster}?action=disable "
-            "(DELETE clusters/{cluster} 404s -- the action form is the documented "
-            "teardown). No request body; removes the control-plane VMs and worker "
-            "nodes but leaves the cluster's networking / zone intact for a fresh "
-            "re-enable. Asynchronous: returns status='disabling' immediately "
-            "-- poll vmware.composite.supervisor.status (config_status moves "
-            "through 'REMOVING'). Governed replacement for out-of-band teardown."
+            "Removes the Supervisor from a cluster: its control plane VMs and worker nodes "
+            "go away, the cluster's networking and zone stay. It returns at once "
+            "(status disabling); poll supervisor.status, which shows REMOVING while it runs."
         ),
         parameter_schema=SUPERVISOR_DISABLE_PARAMETER_SCHEMA,
         response_schema=SUPERVISOR_DISABLE_RESPONSE_SCHEMA,
@@ -1700,21 +1566,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "namespace-management", "supervisor", "wcp"],
         safety_level="dangerous",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.supervisor.disable"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.supervisor.status",
         handler=supervisor_status_composite,
-        summary="Read a cluster's Supervisor config + kubernetes status (poll-friendly).",
+        summary="Read the Supervisor state of a cluster (config and Kubernetes status, ready).",
         description=(
-            "Reads GET /vcenter/namespace-management/clusters/{cluster} and "
-            "reshapes Clusters.Info into a compact, inline-pollable envelope: the "
-            "scalar config_status (CONFIGURING/REMOVING/RUNNING/ERROR) + "
-            "kubernetes_status (READY/WARNING/ERROR) + a derived ready flag stay "
-            "top-level so a runbook OperationCallVerify step or a Sensor assertion "
-            "can poll config_status=='RUNNING' / ready==true directly. The "
-            "messages + conditions arrays are capped inline (messages_limit). "
-            "Read-only -- never mutates cluster state. The status op enable/disable "
-            "hand the caller for the asynchronous convergence poll."
+            "Reads the Supervisor of a cluster: config_status, kubernetes_status, a ready "
+            "flag (RUNNING and READY) and the latest messages and conditions. Use it to poll "
+            "after supervisor.enable or supervisor.disable. Read-only."
         ),
         parameter_schema=SUPERVISOR_STATUS_PARAMETER_SCHEMA,
         response_schema=SUPERVISOR_STATUS_RESPONSE_SCHEMA,
@@ -1722,6 +1583,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "namespace-management", "supervisor", "wcp"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.supervisor.status"],
     ),
     # namespace.* — governed vSphere Namespace create/delete (#3502).
     # The container a VKS guest cluster is created into on an enabled
@@ -1730,22 +1592,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.namespace.create",
         handler=namespace_create_composite,
-        summary="Create a vSphere Namespace on an enabled Supervisor (v2 create spec).",
+        summary="Create a vSphere Namespace on a ready Supervisor.",
         description=(
-            "Creates a vSphere Namespace via POST /vcenter/namespaces/instances/v2 "
-            "(the Namespaces.Instances.CreateSpecV2 body) on an enabled Supervisor "
-            "(#3281) -- the container a VKS guest cluster is created into and the "
-            "last vCenter-REST step before k8s.apply of the Cluster CR (#3502). "
-            "Binds the SPBM storage policy (storage_specs[].policy, from #3494), the "
-            "TKr/VKr content library (vm_service_spec.content_libraries[], from "
-            "#3495), VM classes, and an access_list -- all optional pass-through "
-            "sub-objects. safety_level='caution' + requires_approval=True: parked "
-            "for human approval before the write; the governed child POST flows "
-            "through the sub-op seam (its own audit row + grant point). Asynchronous "
-            "vCenter-side (config_status CONFIGURING -> RUNNING); the handler "
-            "read-backs GET /vcenter/namespaces/instances/v2/{namespace} to surface "
-            "config_status. Equivalent of an out-of-band 'kubectl'/raw-REST "
-            "namespace create, governed."
+            "Creates a vSphere Namespace on a Supervisor, the place a Kubernetes guest "
+            "cluster is created in. Optional: who may use it, storage policies, content "
+            "libraries and VM classes. vCenter sets it up in the background; poll "
+            "namespace.status."
         ),
         parameter_schema=NAMESPACE_CREATE_PARAMETER_SCHEMA,
         response_schema=NAMESPACE_CREATE_RESPONSE_SCHEMA,
@@ -1753,22 +1605,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "namespace-management", "namespace", "vks", "supervisor"],
         safety_level="caution",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.namespace.create"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.namespace.delete",
         handler=namespace_delete_composite,
-        summary="Delete a vSphere Namespace by name and read-back verify absent.",
+        summary="Delete a vSphere Namespace and everything in it, then check that it is gone.",
         description=(
-            "The teardown counterpart of namespace.create (#3502). Issues DELETE "
-            "/vcenter/namespaces/instances/{namespace}, then read-backs GET "
-            "/vcenter/namespaces/instances/v2/{namespace} to confirm absence. "
-            "safety_level='destructive' + requires_approval=True -- mandatory human "
-            "approval (a DELETE child is never grant-clearable, so it always parks). "
-            "Deleting a namespace cascades: it destroys every workload inside it "
-            "(VKS guest clusters, pods, PVCs). Asynchronous -- a read-back GET that "
-            "404s => status='deleted'; config_status='REMOVING' => status='removing' "
-            "(teardown draining); a non-REMOVING status => status='still_present'. "
-            "Equivalent of an out-of-band namespace delete, governed."
+            "Deletes a vSphere Namespace by name, then reads it again: deleted, removing "
+            "(still being torn down) or still_present. Everything in it is deleted too "
+            "(Kubernetes guest clusters, pods, volumes). A second person must always approve."
         ),
         parameter_schema=NAMESPACE_DELETE_PARAMETER_SCHEMA,
         response_schema=NAMESPACE_DELETE_RESPONSE_SCHEMA,
@@ -1783,25 +1629,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         ],
         safety_level="destructive",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.namespace.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.namespace.status",
         handler=namespace_status_composite,
-        summary="Read a vSphere Namespace's config status (poll-friendly, boot-enabled).",
+        summary="Read the state of a vSphere Namespace (exists, config status, ready).",
         description=(
-            "Reads GET /vcenter/namespaces/instances/v2/{namespace} and reshapes "
-            "Namespaces.Instances.InfoV2 into a compact, inline-pollable envelope: "
-            "the scalar config_status (CONFIGURING/REMOVING/RUNNING/ERROR) + a "
-            "derived ready flag + stats + description + capped messages stay "
-            "top-level so a runbook OperationCallVerify step or a Sensor "
-            "assertion can poll config_status=='RUNNING' / ready==true directly. "
-            "The governed, boot-enabled poll op namespace.create/.delete hand the "
-            "caller for the asynchronous convergence poll -- symmetric with "
-            "supervisor.status; a GET 404 returns exists=false rather than a "
-            "fault (the namespace is not yet visible mid-create, or gone after "
-            "delete). Read-only -- unlike the raw ingested get-by-name row (which "
-            "lands disabled behind per-deployment operator review), a typed read "
-            "composite is dispatchable at connector import on every deployment."
+            "Reads a vSphere Namespace: exists, config_status, a ready flag (RUNNING), usage "
+            "stats and the latest messages. A namespace that does not exist gives "
+            "exists=false, not an error. Use it to poll after namespace.create or "
+            "namespace.delete. Read-only."
         ),
         parameter_schema=NAMESPACE_STATUS_PARAMETER_SCHEMA,
         response_schema=NAMESPACE_STATUS_RESPONSE_SCHEMA,
@@ -1809,19 +1647,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "namespace-management", "namespace", "vks", "supervisor"],
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "result_scalars": {
-                "keys": [
-                    "namespace",
-                    "exists",
-                    "config_status",
-                    "ready",
-                    "description",
-                    "message_count",
-                ]
-            },
-            "result_objects": {"objects": {"stats": ["cpu_used", "memory_used", "storage_used"]}},
-        },
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.namespace.status"],
     ),
     # storage_policy.* — governed NFS tag-based SPBM policy (#3494)
     # ----------------------------------------------------------------
@@ -1887,19 +1713,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.create",
         handler=content_library_subscribed_create_composite,
-        summary="Create a SUBSCRIBED content library (e.g. the Supervisor TKr/VKr image source).",
+        summary="Create a subscribed content library, e.g. the Kubernetes release library.",
         description=(
-            "Resolves the ``datastore`` name to a moid, then POSTs a "
-            "``Content.LibraryModel`` to POST:/content/subscribed-library with a "
-            "DATASTORE storage backing and a subscription to the given publisher "
-            "URL (e.g. https://wp-content.vmware.com/v2/latest/lib.json for the "
-            "upstream VMware Tanzu Kubernetes release repo). Returns the new "
-            "library id — the value #3281's Supervisor enable spec consumes as "
-            "``default_kubernetes_service_content_library``. The create is "
-            "asynchronous vCenter-side (metadata syncs in the background; item "
-            "content lazily when ``on_demand``). The optional BASIC-auth "
-            "``password`` is kept off every preview / broadcast / audit-hash "
-            "surface. Approval-gated (caution)."
+            "Creates a content library on a datastore that copies a published library from "
+            "subscription_url, for example the Kubernetes releases a Supervisor uses. It "
+            "returns the new library id; vCenter syncs in the background. A BASIC password is "
+            "never shown in a preview, broadcast or audit row."
         ),
         parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
         response_schema=CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA,
@@ -1907,18 +1726,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "content-library", "subscribed", "tkr", "vks"],
         safety_level="caution",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
+            "vmware.composite.content_library.subscribed.create"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.sync",
         handler=content_library_subscribed_sync_composite,
-        summary="Force synchronisation of a SUBSCRIBED content library.",
+        summary="Start a sync of a subscribed content library now.",
         description=(
-            "Resolves ``library_id`` / ``library_name``, then forces a sync via "
-            "POST:/content/subscribed-library/{libraryId}?action=sync. "
-            "Asynchronous: returns as soon as the sync is accepted (a no-op if "
-            "one is already running); it respects the library's ``on_demand`` "
-            "setting. Confirm completion with content_library.subscribed.status "
-            "(last_sync_time) / .items.list. Approval-gated (caution)."
+            "Finds the subscribed library by id or name and tells vCenter to sync it with "
+            "the publisher now. It returns as soon as the sync starts; with on_demand only "
+            "the item list syncs. Check the result with content_library.subscribed.status."
         ),
         parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA,
         response_schema=CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA,
@@ -1926,18 +1745,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "content-library", "subscribed", "sync"],
         safety_level="caution",
         requires_approval=True,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
+            "vmware.composite.content_library.subscribed.sync"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.status",
         handler=content_library_subscribed_status_composite,
-        summary="Read a SUBSCRIBED content library's model + subscription state.",
+        summary="Read a subscribed content library: its subscription and when it last synced.",
         description=(
-            "Resolves ``library_id`` / ``library_name``, then reads the "
-            "Content.LibraryModel via GET:/content/subscribed-library/{libraryId}. "
-            "Surfaces name / type / subscription URL / sync mode and "
-            "``last_sync_time`` — the readiness signal, populated once the first "
-            "metadata sync completes. The API omits the subscription password "
-            "from the GET response, so this read carries no secret. Read-only."
+            "Finds the subscribed library by id or name and reads its name, subscription "
+            "URL, sync settings and last_sync_time. last_sync_time is set once the first "
+            "sync is done. vCenter does not return the password. Read-only."
         ),
         parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA,
         response_schema=CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA,
@@ -1945,20 +1764,19 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "content-library", "subscribed"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
+            "vmware.composite.content_library.subscribed.status"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.items.list",
         handler=content_library_subscribed_items_list_composite,
-        summary="List the items (synchronised TKr images) in a SUBSCRIBED library.",
+        summary="List the items of a subscribed content library, e.g. Kubernetes releases.",
         description=(
-            "Resolves ``library_id`` / ``library_name``, finds every item id "
-            "scoped to the library via POST:/content/library/item?action=find, "
-            "then reads each item's metadata. Each row carries the TKr-triage "
-            "fields — ``name`` (the TKr version), ``type``, ``version``, "
-            "``cached`` (whether the multi-GB image content is downloaded), "
-            "``size``, ``last_sync_time``. The set-shaped ``items`` list is "
-            "JSONFlux-reduced automatically once it crosses the dispatcher's "
-            "50-row / 4 KB threshold (drill in with result_query). Read-only."
+            "Finds the subscribed library by id or name and lists its items: name (for a "
+            "Kubernetes release library, the release version), type, version, cached (files "
+            "downloaded), size and last sync. A long list comes back as a result handle. "
+            "Read-only."
         ),
         parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA,
         response_schema=CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA,
@@ -1966,6 +1784,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "content-library", "subscribed", "tkr"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
+            "vmware.composite.content_library.subscribed.items.list"
+        ],
     ),
     # ----------------------------------------------------------------
     # Teardown deletes (#3339; content-library delete = the #3331 delete half)
@@ -2098,20 +1919,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=content_library_delete_composite,
         summary="Delete a content library (local or subscribed).",
         description=(
-            "Deletes one content library, found by id or by name. It reads the "
-            "library type first and uses the matching vCenter call (DELETE "
-            "/content/local-library/{id} or /content/subscribed-library/{id}). "
-            "Ids must be vCenter UUIDs. Refused before any change "
-            "(status='precondition_failed'): another library subscribes to it (on "
-            "this vCenter, or a subscription the library itself knows of on another "
-            "vCenter; listed in 'blockers'), a VM has one of its items in a CD-ROM or "
-            "floppy drive, or it still has items and delete_items is not true. A "
-            "library that does not exist gives status='unchanged'; a name that "
-            "matches more than one library gives status='invalid_request'. Then it "
-            "reads the library again: status='deleted'. Destructive: a second person "
-            "must always approve it, after seeing the number and size of the items "
-            "that will be deleted. Like "
-            "'govc library.rm'."
+            "Deletes one content library, found by id or name. Refused before any change "
+            "while another library subscribes to it, a VM has one of its items in a CD-ROM "
+            "or floppy drive, or it has items and delete_items is not true. A second person "
+            "must always approve."
         ),
         parameter_schema=CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA,
         response_schema=CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA,
@@ -2119,39 +1930,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "content-library", "teardown", "destroy", "destructive"],
         safety_level="destructive",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": (
-                "Use it to remove a content library that an environment created. Delete "
-                "subscribed libraries before the library they subscribe to."
-            ),
-            "parameter_hints": {
-                "library_id": "Library id, a UUID (preferred).",
-                "library_name": "Library name; a name that matches more than one is refused.",
-                "delete_items": "true to delete a library that still has items.",
-            },
-            "output_shape": (
-                "{status: deleted|unchanged|invalid_request|precondition_failed|"
-                "still_present, object: {kind, id, name, type, published, datastores, "
-                "item_count}, blockers: [{kind: subscribed_library, id, name}], guidance}."
-            ),
-        },
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
+            "vmware.composite.content_library.delete"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.content_library.item.delete",
         handler=content_library_item_delete_composite,
         summary="Delete one item of a local content library.",
         description=(
-            "Deletes one content-library item (DELETE /content/library/item/{id}), "
-            "found by id (a vCenter UUID) or by name inside a library. Refused "
-            "(status='precondition_failed') unless the item's library reads back as a "
-            "local library on this vCenter (a subscribed library's items come from the "
-            "publisher), and while a VM has the item in a CD-ROM or floppy drive. An "
-            "item that does not exist gives "
-            "status='unchanged'; a name that matches more than one item gives "
-            "status='invalid_request'. Then it reads the item again: "
-            "status='deleted'. Destructive: a second person must always approve it, "
-            "after seeing the item, its size and its files. Like 'govc library.rm' on "
-            "an item."
+            "Deletes one item of a local content library, found by id or by name in a "
+            "library. Refused before any change if the library is not local, or while a VM "
+            "has the item in a CD-ROM or floppy drive. A second person must always approve."
         ),
         parameter_schema=CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA,
         response_schema=CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA,
@@ -2159,18 +1949,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "content-library", "teardown", "destroy", "destructive"],
         safety_level="destructive",
         requires_approval=True,
-        llm_instructions={
-            "when_to_use": "Use it to remove one OVF, ISO or template item from a local library.",
-            "parameter_hints": {
-                "item_id": "Library item id, a UUID (preferred).",
-                "item_name": "Item name; also give library_id or library_name.",
-            },
-            "output_shape": (
-                "{status: deleted|unchanged|invalid_request|precondition_failed|"
-                "still_present, object: {kind, id, name, type, size_bytes, library_id, "
-                "library_name, library_type}, blockers: [], guidance}."
-            ),
-        },
+        llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
+            "vmware.composite.content_library.item.delete"
+        ],
     ),
 )
 
@@ -2188,12 +1969,13 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 66 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 68 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    50 write (the seven #3339 teardown composites -- six destructive deletes
+    52 write (the VM snapshot create (caution) + delete (destructive), the
+    seven #3339 teardown composites -- six destructive deletes
     + the caution ``datastore.dir.create`` -- + the destructive DRS rule delete
     ``cluster.drs_rule.delete`` + T6 / #509 + the caution VM
     allocation write

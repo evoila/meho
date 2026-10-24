@@ -296,7 +296,8 @@ split.
   ingest rejects these fragments), so a conversion would be a
   test-only artifact with no dispatch-fidelity value.
 - **Excluded (provider plane, 5 op_ids: `GET:/cloudapi/1.0.0/orgs`,
-  `GET:/cloudapi/vcf/regions`, `POST:/cloudapi/1.0.0/sessions/provider`,
+  `GET:/cloudapi/vcf/regions` (now also checked per version, see the
+  last bullet), `POST:/cloudapi/1.0.0/sessions/provider`,
   `GET:/api/versions`, and the CSP token mint
   `POST:/csp/gateway/am/api/login` — #3865; CSP identity sits outside
   `vra-sdk-go`, the same exclusion the vra8 lane carries for it).**
@@ -345,6 +346,16 @@ split.
   GET answers 405. The health op moved to the already-reconciled
   `GET:/cloudapi/1.0.0/orgs` plus the armed `GET:/iaas/api/about`, and
   `/site` left the manifest.
+- **Region path now checked per version (#4604).** The shelf now pins
+  one reference list per VCFA version, made from Broadcom's public
+  reference pages: the `provider-infrastructure-apis` TSV list in
+  `vcf-automation-9.0-reference/`, `vcf-automation-9.1/` and
+  `vcf-automation-9.1.1/`. The lane checks that the region path the
+  connector picks for each version is a `GET` line in that version's
+  list: `GET:/cloudapi/vcf/regions` on 9.0, `GET:/cloudapi/v1/regions`
+  on 9.1 and 9.1.1. CI requires the three lists, so a missing list fails
+  instead of skipping. The other provider op_ids stay in the exclusion
+  above; this change checks only the region path.
 
 ### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
 

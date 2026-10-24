@@ -8,10 +8,9 @@ The modern VCF 9 Fleet LCM Service ``/v1/*`` read core (#3047, initiative
 registered as typed ops (``source_kind="typed"``) so it dispatches on a
 fresh boot with **zero catalog state** — the read core is live the moment
 the connector loads, no operator ``meho connector ingest`` +
-``enable_reads`` step. This is what restores 9.0 fleet dispatch: a VCF
-Fleet 9.0 target resolves to ``fleet-lcm`` by the resolver's
-most-specific-version tie-break (``>=9.0,<10.0`` vs the legacy
-``fleet-rest`` ``>=8.0,<10.0``), and these ops give it a dispatchable
+``enable_reads`` step. A VCF Fleet 9.1 or newer target resolves to
+``fleet-lcm`` (``>=9.1,<10.0``; a 9.0 target resolves to the legacy
+``fleet-rest``, ``>=8.0,<9.1``), and these ops give it a dispatchable
 modern read surface.
 
 Each function here is the body a thin bound-method shim on
@@ -28,13 +27,11 @@ the full 51-op spec) owns the wider write / breadth surface as a follow-up.
 
 Every read is issued directly on the connector's own authenticated client
 via :meth:`HttpConnector._get_json`, which applies
-:meth:`FleetLcmConnector.auth_headers` per request — Bearer primary
-(``Authorization: Bearer <token>`` when the loaded credentials carry a
-``token``), HTTP-Basic fallback otherwise. A raw ``401`` propagates as
-:class:`httpx.HTTPStatusError` to the dispatcher's credential-recovery arm,
-which evicts the cached credentials via
-:meth:`FleetLcmConnector.invalidate_credentials` (#2396) and re-dispatches
-once.
+:meth:`FleetLcmConnector.auth_headers` per request — the Bearer token from
+the VCF Operations login, or a stored token (#4476). A raw ``401``
+propagates as :class:`httpx.HTTPStatusError` to the dispatcher, which calls
+:meth:`FleetLcmConnector.invalidate_session` (one new login) and runs the
+read once more.
 
 The 13-read set (each ``GET:/path`` reconciled against the pinned
 Apache-2.0 ``fleet-lcm-openapi.yaml`` on the operator's shelf by

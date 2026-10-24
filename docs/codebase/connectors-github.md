@@ -181,6 +181,77 @@ database id rather than its number. Per-handler unit tests live in
 `test_connectors_github_composites_sub_issues.py`; registration/posture
 assertions are in `test_connectors_github_composites_register.py`.
 
+### One repository (`gh.composite.repo_view`)
+
+`gh.composite.repo_view` reads one repository with
+`GET /repos/{owner}/{repo}` and returns a short summary, not the full
+vendor answer: `name`, `full_name`, `owner`, `owner_type`, `visibility`,
+`default_branch`, `archived`, `topics`, `open_issues_count`, `pushed_at`
+and `permissions`. `permissions` maps GitHub's `pull` / `push` / `admin`
+flags to `read` / `write` / `admin`, and is `null` when GitHub does not
+report them. `open_issues_count` counts open issues and open pull
+requests together, as GitHub does.
+
+- Handler: `repo_view_composite` in `composites/_read.py`. Same
+  direct-session substrate as the other reads (`connector._get_json`
+  through `mount_op_path`, no `endpoint_descriptor` lookup). A non-2xx
+  answer (404 for a repository the identity cannot see) propagates as an
+  `httpx.HTTPStatusError`; a payload that is not a JSON object raises
+  `RuntimeError`. Both reach the dispatcher's `connector_error` branch.
+- Group: `repos`, with its own "when to use" text.
+- Posture: `safety_level="safe"`, `requires_approval=False`. It runs at
+  once.
+- Contract: the registrar row carries `llm_instructions` (`when_to_call`,
+  `output_shape`, `next_step`) and one example call with placeholder
+  values, so the operation contract check passes with no gap.
+- Tests: `test_connectors_github_composites_read.py` drives the handler
+  with the saved answer in `tests/data/github_repo_view_response.json`;
+  `test_connectors_github_composites_register.py` checks the posture and
+  runs the contract rules against the registered row.
+
+### Create a repository in an organisation (`gh.composite.repo_create`)
+
+`gh.composite.repo_create` creates one repository in a GitHub
+organisation with `POST /orgs/{org}/repos`. Parameters: `org`, `name`,
+optional `description`, `visibility` (`private` when omitted; `public`
+only when the caller asks for it by name) and `with_readme` (when true,
+GitHub makes a first commit with an empty README, so the default branch
+exists at once). The result is small: `status`, `name`, `full_name`,
+`owner`, `url`, `visibility`, `default_branch` and a one-sentence
+`guidance`.
+
+- Safe to run twice: the handler reads `GET /repos/{org}/{name}` first.
+  When the repository exists, it returns `status="unchanged"` with the
+  existing repository's facts and writes nothing. Only a 404 on that
+  read leads to the create call. Any other error on the read (403, for
+  example) propagates, as does an error on the create call (403 when the
+  identity may not create repositories there, 422 when GitHub rejects
+  the name).
+- Names in the request path: `org` and `name` become path parts of the
+  two requests. The parameter schema allows letters, digits, `.`, `-`
+  and `_` only, so the dispatcher refuses anything else as
+  `invalid_params`. The handler checks both again before the first
+  request, refuses `.` and `..` (they would point at another API path),
+  and percent-encodes the values. `.github` is a valid name.
+- Handler: `repo_create_composite` in `composites/_repos.py`. Same
+  direct-session substrate as the other composites (`connector._get_json`
+  / `connector._post_json` through `mount_op_path`, no
+  `endpoint_descriptor` lookup).
+- Group: `repos`, shared with `repo_view`.
+- Posture: `safety_level="caution"`, `requires_approval=True`. Every
+  call waits for approval, from a person or from an agent.
+- Contract: the registrar row carries `llm_instructions` (`when_to_call`,
+  `preconditions`, `output_shape`, `next_step`) and one example call
+  (`example-org` / `example-repo`, values that pass the name rule), so
+  the operation contract check passes with no gap.
+- Tests: `test_connectors_github_composites_repos.py` drives the handler
+  with the saved answer in `tests/data/github_repo_create_response.json`
+  (and the saved `repo_view` answer for the existing-name path), checks
+  the exact request paths, and proves that an unsafe `org` or `name`
+  sends no request and fails the parameter schema;
+  `test_connectors_github_composites_register.py` checks the posture and
+  runs the contract rules against the registered row.
+
 ## Key types
 
 - **`GitHubRestConnector`** (`connector.py`) — `HttpConnector` subclass

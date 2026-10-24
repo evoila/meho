@@ -1,0 +1,5 @@
+# shellcheck settings for the form-2 install scripts.
+# install.sh sources the files in lib/ by a path that shellcheck cannot
+# compute, so it follows the "source=" directives from the script's folder.
+external-sources=true
+source-path=SCRIPTDIR

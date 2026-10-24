@@ -304,13 +304,9 @@ class KeycloakAdminClient:
                 "KEYCLOAK_ADMIN_CLIENT_SECRET is not set; "
                 "the agent-principal lifecycle surface is unavailable."
             )
-        # Derive the token endpoint from the issuer URL. The admin API URL
-        # is ``{issuer_url}/admin/realms/{realm}``; the token endpoint is
-        # at ``{protocol_root}/realms/{realm}/protocol/openid-connect/token``.
-        # Simpler: the backplane already has KEYCLOAK_ISSUER_URL; build
-        # the token URL from the issuer + the standard OIDC token path.
-        issuer = str(settings.keycloak_issuer_url).rstrip("/")
-        token_url = f"{issuer}/protocol/openid-connect/token"
+        # The realm's standard OIDC token path, under KEYCLOAK_DISCOVERY_URL
+        # when set (the in-cluster address), else under the issuer.
+        token_url = f"{settings.keycloak_discovery_base}/protocol/openid-connect/token"
         return cls(
             admin_url=settings.keycloak_admin_url,
             token_url=token_url,

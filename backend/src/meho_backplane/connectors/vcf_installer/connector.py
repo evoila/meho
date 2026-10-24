@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""InstallerConnector — hand-rolled HttpConnector subclass for VCF Installer 9.1.
+"""InstallerConnector — hand-rolled HttpConnector subclass for VCF Installer 9.0 and 9.1.
 
 Auth + fingerprint + probe + the G0.6 dispatch shim + the bound-method shims
 for the four governed submit/poll bring-up primitives (#3078 — bodies in
@@ -127,14 +127,17 @@ def _extract_access_token(resp: httpx.Response) -> str | None:
 
 
 class InstallerConnector(HttpConnector):
-    """VCF Installer 9.1 REST connector with profile-derived token-session auth."""
+    """VCF Installer 9.x REST connector with profile-derived token-session auth."""
 
     # G0.6 v2 registry metadata. ``"installer-rest-9.1"`` ->
     # (product="installer", version="9.1", impl_id="installer-rest").
+    # The range starts at 9.0: every path this connector calls is also in the
+    # pinned 9.0 installer API file (the 9.0 reconcile lane checks it), so a
+    # 9.0.x Installer resolves here too.
     product = "installer"
     version = "9.1"
     impl_id = "installer-rest"
-    supported_version_range = ">=9.1,<10.0"
+    supported_version_range = ">=9.0,<10.0"
     priority = 1
 
     def __init__(

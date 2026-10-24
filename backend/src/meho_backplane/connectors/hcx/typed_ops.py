@@ -3,15 +3,23 @@
 
 """Typed-op metadata + registrar for :class:`HcxConnector`.
 
-One read ships here: ``hcx.api_file.get``, the body of which lives in
-:mod:`meho_backplane.connectors.hcx.api_file`. The dataclass + tuple +
-registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
+``hcx.api_file.get`` is defined here (its body lives in
+:mod:`meho_backplane.connectors.hcx.api_file`); the reads of the manager,
+site pairings, service mesh, jobs, alerts and inventory are defined in
+:mod:`meho_backplane.connectors.hcx.read_ops`,
+:mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
+:mod:`meho_backplane.connectors.hcx.inventory_ops`. The dataclass +
+tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
+
+from meho_backplane.connectors.hcx.diagnostics_ops import HCX_DIAGNOSTICS_OPS
+from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
+from meho_backplane.connectors.hcx.op_types import HcxTypedOp
+from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS, HCX_READ_WHEN_TO_USE_BY_GROUP
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -26,23 +34,6 @@ __all__ = [
 _GROUP_API_DOCS = "hcx-api-docs"
 
 
-@dataclass(frozen=True)
-class HcxTypedOp:
-    """Metadata for one HCX typed op registered at lifespan startup."""
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: Curated ``when_to_use`` text per group. Says what the group holds; it
 #: makes no claim about the safety of the whole group.
 HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
@@ -54,6 +45,7 @@ HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "behind a result handle, so a vendor API file can be pinned and "
         "compared. It refuses every other path."
     ),
+    **HCX_READ_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -101,8 +93,15 @@ _API_FILE_GET = HcxTypedOp(
                 "type": ["string", "null"],
                 "description": "Content-Type header of the answer.",
             },
-            "size": {"type": "integer", "description": "Size of the file in bytes."},
-            "sha256": {"type": "string", "description": "SHA-256 of the file, hex."},
+            "size": {"type": "integer", "description": "Size of the checked copy in bytes."},
+            "sha256": {"type": "string", "description": "SHA-256 of the checked copy, hex."},
+            "secrets_replaced": {
+                "type": "integer",
+                "description": (
+                    "How many values under a secret name (password, token, licence key, "
+                    "...) were replaced by [REDACTED:param_name] in the copy."
+                ),
+            },
             "version": {
                 "type": ["string", "null"],
                 "description": "HCX Manager version as the Manager reports it.",
@@ -125,7 +124,9 @@ _API_FILE_GET = HcxTypedOp(
             "parts": {"type": "integer", "description": "How many text parts there are."},
             "items": {
                 "type": "array",
-                "description": "The text parts, in order. Joined, they are the exact file.",
+                "description": (
+                    "The text parts of the checked copy, in order. Joined, they are the copy."
+                ),
                 "items": _PART_ITEM_SCHEMA,
             },
         },
@@ -141,18 +142,22 @@ _API_FILE_GET = HcxTypedOp(
             "or to check which API calls an HCX Manager version serves."
         ),
         "output_shape": (
-            "{path, status, content_type, size, sha256, version, build, version_error, "
-            "redirect_to, parts, items: [{index, text}]}. items hold the text in parts of "
-            "at most 64 KiB, in order; a long file is behind a result handle. Join the "
-            "parts in order to rebuild the exact file; its SHA-256 equals sha256."
+            "{path, status, content_type, size, sha256, secrets_replaced, version, build, "
+            "version_error, redirect_to, parts, items: [{index, text}]}. items hold the "
+            "checked copy of the file in parts of at most 64 KiB, in order; a long file is "
+            "behind a result handle. The copy is the parsed file written back (JSON, YAML, "
+            "XML or HTML) with every value under a secret name replaced by "
+            "[REDACTED:param_name]; secrets_replaced counts them. Join the parts in order "
+            "to rebuild the copy; its SHA-256 equals sha256."
         ),
         "next_step": (
             "If redirect_to is set, call again with that path. If status is not 200, "
             "read the text for the Manager's message. To rebuild the file, page the "
             "result handle with result_query in index order and join the text fields. "
-            "A refused path means the path is outside the rule; fix the path. A read that "
-            "stops because the secret-redaction rules would change the file cannot return "
-            "that file exactly; report it instead of retrying."
+            "A refused path means the path is outside the rule; fix the path. A file that "
+            "does not parse, or is JavaScript, CSS or plain text, is refused; report it "
+            "instead of retrying. A read that stops because the secret-redaction rules "
+            "would change the copy cannot return it; report it instead of retrying."
         ),
         "result_scalars": {
             "keys": [
@@ -161,6 +166,7 @@ _API_FILE_GET = HcxTypedOp(
                 "content_type",
                 "size",
                 "sha256",
+                "secrets_replaced",
                 "version",
                 "build",
                 "version_error",
@@ -171,7 +177,12 @@ _API_FILE_GET = HcxTypedOp(
     },
 )
 
-HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (_API_FILE_GET,)
+HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
+    _API_FILE_GET,
+    *HCX_READ_OPS,
+    *HCX_DIAGNOSTICS_OPS,
+    *HCX_INVENTORY_OPS,
+)
 
 
 async def register_hcx_typed_operations(

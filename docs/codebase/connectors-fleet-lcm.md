@@ -19,20 +19,20 @@ Source: `backend/src/meho_backplane/connectors/fleet_lcm/`.
 The Fleet LCM Service (`https://vcf.broadcom.com/fleet-lcm` → `/v1/*`) is the
 VCF 9 successor to vRealize Suite Lifecycle Manager (vRSLCM) 8.x. It is a
 **distinct API surface** from the legacy `/lcm/lcops/api/v2/*` the `fleet-rest`
-impl dispatches; the legacy surface still answers on 9.0 appliances for
-back-compat, which is why both bands overlap at 9.0 and the resolver — not the
-connector — picks the surface per target.
+impl dispatches. The `/fleet-lcm/v1` API first ships with VCF 9.1 (its spec
+file is in the `9.1.0.0` tag of `vmware/vcf-api-specs`). A VCF 9.0 fleet
+appliance serves only the legacy `/lcm/*` API. So `fleet-lcm` covers
+`>=9.1,<10.0` and `fleet-rest` covers `>=8.0,<9.1`; the ranges do not overlap
+(#4442), and the resolver — not the connector — picks the surface per target.
 
 ## Scope: typed read core (#3047)
 
 The connector ships a curated **13-op typed read core** — the modern successor
 to the legacy `fleet-rest` read surface — registered as `source_kind="typed"`
-and **enabled at register time**, so a VCF Fleet 9.x target (which resolves
-here by most-specific-version) dispatches a modern `/v1/*` read op on a **fresh
-boot with zero catalog ingest**. This is what **restores 9.0 fleet dispatch**
-after the "modern default now" resolver decision (#3033): the #3036 skeleton
-left `fleet-lcm` registered but with no dispatchable ops, so a 9.0 target
-resolved to an impl that could not serve a call; the read core closes that gap.
+and **enabled at register time**, so a VCF Fleet 9.1 or newer target (which
+resolves here by version range) dispatches a modern `/v1/*` read op on a
+**fresh boot with zero catalog ingest**. The #3036 skeleton left `fleet-lcm`
+registered but with no dispatchable ops; the read core closes that gap.
 
 The read core covers the operator's "is it up, what's deployed, what's
 happening, what can we upgrade to" drill path across five groups:
@@ -48,8 +48,8 @@ happening, what can we upgrade to" drill path across five groups:
 **Why typed, not ingested.** The connector *is* the modern generic impl and its
 51-op spec is pinnable, but the read core is hand-coded typed (the harbor / nsx
 #2358 pattern) precisely so it is live on a fresh boot with **no** operational
-`meho connector ingest` + `enable_reads` step — merging the read core *is* the
-9.0-restoration, not a runbook the operator must still run. The wider surface
+`meho connector ingest` + `enable_reads` step — merging the read core makes it
+work, with no runbook the operator must still run. The wider surface
 (the full 51-op spec as `source_kind="ingested"` breadth + the component /
 upgrade / task **writes**) remains a follow-up, enabled operationally through
 the generic review flow (`ReviewService.enable_reads` over an ingest of the same
@@ -58,38 +58,37 @@ is also the load-bearing prerequisite for those future ingested rows to become
 dispatchable (a bare `GenericRestConnector` auto-shim is non-dispatchable — the
 `VmwareRestConnector` pattern).
 
-**Live-appliance dispatch verification remains a non-goal** (#1002 / #995 — no
-reachable Fleet LCM appliance). The read core is unit-tested end-to-end against
-a respx-mocked service (dispatch `status="ok"` through **both** the Bearer and
-Basic auth seams) and reconcile-guarded; live Bearer-auth verification against
-real hardware is the #3047 follow-up (see "Auth" below).
+**Not yet proved on a live system.** The read core and the login (see "Auth"
+below) are unit-tested end to end against a respx-mocked service and checked
+against the vendor files. A separate lab proof runs the login on VCF 9.1.0 and
+9.1.1.
 
 ## Key types
 
 - **`FleetLcmConnector`** (`connector.py`) — `HttpConnector` subclass.
   Class attributes: `product="fleet"`, `version="9.0"`, `impl_id="fleet-lcm"`,
-  `supported_version_range=">=9.0,<10.0"`, `priority=1`. The range is the
-  **narrower** of the two impls, so a 9.0 target resolves here by the
-  resolver's most-specific-version tie-break; `priority=1` equals the legacy
-  impl by design (the split is by version-specificity, not priority).
+  `supported_version_range=">=9.1,<10.0"`, `priority=1`. The range starts at
+  9.1, where the `/fleet-lcm/v1` API first ships, so a 9.0 target resolves to
+  the legacy `fleet-rest` instead (#4442); `priority=1` equals the legacy impl
+  by design (the split is by version range, not priority).
 - **`FleetLcmTargetLike`** / **`FleetLcmCredentialsLoader`** (`session.py`) —
   aliases of the shared `VcfTargetLike` Protocol and `VcfCredentialsLoader`
   type (the modern impl reads the same target fields as the legacy). The
   loader is injectable on construction
   (`FleetLcmConnector(credentials_loader=...)`) for unit / integration tests.
 - **`load_credentials_from_vault`** (`session.py`) — the fleet-lcm default
-  loader (#3047). An operator-context KV-v2 read (via the shared
-  `load_vault_secret_data`) that surfaces the required `{username, password}`
-  pair **plus an optional `token`** when the operator has staged one — the
-  Bearer token-provisioning seam. Mirrors the proxmox / github
-  field-discriminator loaders (pick the upstream credential protocol by
-  inspecting which fields the secret carries, not via `auth_model`).
+  loader. Reads the target's Vault secret under the operator's identity (via
+  the shared `load_vault_secret_data`). Returns the VCF Operations `username`
+  and `password` (required), plus `vcf_ops_url` and `token` when they are set.
+  A bad `vcf_ops_url` fails closed with an error that names the target.
+- **`mint_fleet_lcm_token`** (`session.py`) — the two-step VCF Operations
+  login (acquire, then exchange) on a given client. Returns the Bearer token.
 - Canonical constants (`__init__.py`): `FLEET_LCM_PRODUCT`,
   `FLEET_LCM_VERSION`, `FLEET_LCM_IMPL_ID`, `FLEET_LCM_CONNECTOR_ID`.
 
-The connector reuses `basic_auth_header`, `is_acceptable_auth_model`, and
-`CredentialsCache` from `meho_backplane.connectors._shared.vcf_auth` — the same
-scaffolding the legacy impl uses.
+The connector reuses `is_acceptable_auth_model`, `CredentialsCache`,
+`vcf_session_login` and `session_establish_auth_error` from
+`meho_backplane.connectors._shared.vcf_auth`.
 
 ## Control flow
 
@@ -103,33 +102,55 @@ class on that key would raise `RuntimeError` at import. One wildcard per
 product suffices (it only guarantees an unfingerprinted target resolves
 *something*); the versioned entries carry the real per-band matching.
 
-### Auth (Bearer primary, Basic fallback)
+### Auth (Bearer token from VCF Operations, #4476)
 
-Per the pinned spec's `securitySchemes`, the global scheme is `bearerToken`
-(HTTP Bearer), with `basicAuth` (HTTP Basic) also defined. `auth_headers`:
+The VCF 9.1 fleet lifecycle API takes a Bearer token. VCF Operations hands it
+out in two steps. `auth_headers` returns `Authorization: Bearer <token>`:
 
-1. Rejects any `target.auth_model` other than `shared_service_account` /
-   `None` via the shared `is_acceptable_auth_model`.
-2. Loads credentials via the shared `CredentialsCache` (which enforces the
-   `{username, password}` contract).
-3. If the loaded credentials carry a non-empty `"token"`, returns
-   `Authorization: Bearer <token>` (the spec's primary scheme); otherwise
-   returns `Authorization: Basic <b64>` off the username/password pair (the
-   spec's `basicAuth` alternative), reusing the shared `basic_auth_header`.
+1. It refuses any `target.auth_model` other than `shared_service_account` or
+   `None` (the shared `is_acceptable_auth_model`).
+2. It reads the credentials from Vault (kept per target by the shared
+   `CredentialsCache`).
+3. **Stored token (fallback).** If the secret has a `token`, MEHO sends it as
+   is and does not log in. This is the old way. A stored token expires, so
+   it is only a fallback.
+4. **Login (the normal way).** Otherwise MEHO logs in once per target and
+   keeps the token (`_session_tokens`, keyed by `(tenant_id, target.id)`):
+   - `POST /suite-api/api/auth/token/acquire` with
+     `{"username", "password"}` → `{"token": ...}` (a VCF Operations token).
+   - `POST /suite-api/api/auth/token/exchange` with
+     `Authorization: OpsToken <token>` and `{"serviceKeys": ["fleet-lcm"]}`
+     → `{"jwtToken": ...}`, the Bearer token.
 
-**The token-provisioning seam has landed; the live mint + verify has not
-(#3047).** The default `load_credentials_from_vault` now surfaces a
-Vault-staged `token`, so an operator opts a target into Bearer by adding a
-`token` field to its secret — no `auth_model` change. This is unit-tested end
-to end through the **real** default loader against an in-process Vault fake
-(`test_connectors_fleet_lcm_credread.py`: Basic when no token, Bearer when a
-token is staged, whitespace-strip, fail-closed on a missing pair) as well as
-via injected loaders (`test_connectors_fleet_lcm_auth.py`). What remains a
-seam is the **live** alternative provisioning path — a `POST`-`basicAuth` →
-mint-`bearerToken` exchange against the appliance's token endpoint — and the
-**live Bearer verification** against real hardware; both are gated on a
-reachable Fleet LCM appliance (#1002 / #995). Until then a target with no
-staged token authenticates with the Basic alternative.
+**Where the login goes.** The login paths start at the root of the host
+(`/suite-api/...`). By default MEHO logs in at the target's own host and port.
+A service path carried on the target's `host` (for example `/fleet-lcm`) is
+used for the fleet calls only, not for the login. When VCF Operations has a
+different address, put it in the secret as `vcf_ops_url` (`https://host` or
+`https://host:port`; https only, no path). An IPv6 address keeps its brackets,
+for example `https://[fd00::10]:8443`. The login always uses its own pooled
+client (`_LoginEndpoint`). It gets the same address check (SSRF guard) and the
+same TLS rules (`verify_tls`, `tls_ca_pin`) as the target. A target's
+`tls_server_name` is used only when the login goes to the target's own host.
+
+**Renewal.** When a fleet call answers `401`, the dispatcher calls
+`invalidate_session(target)` and runs the call once more. `invalidate_session`
+drops the kept token and the kept credentials, so the retry reads Vault again
+and logs in again. A second `401` ends as `connector_auth_failed`. A `401` or
+`403` at acquire or exchange raises `ConnectorAuthError` (also
+`connector_auth_failed`); the dispatcher then calls `invalidate_credentials`,
+so a fixed secret is picked up on the next call.
+
+**No secret in output.** The login does not go through the flight recorder
+(it uses `client.post` directly). Error texts name the target, the path and
+the HTTP status only. The log line `fleet_lcm_session_established` names the
+target and the login host only. Tests check that no password or token appears
+in a result, an error text or a log line.
+
+**The depot token (`VCF_FDS`).** The depot service takes its own token, with
+the service key `VCF_FDS`. This connector calls no depot API (all 13 reads
+are fleet lifecycle `/v1/*` calls), and neither vendor file names service keys.
+So there is no `VCF_FDS` token here. A future depot operation would add it.
 
 ### Fingerprint / probe
 
@@ -150,7 +171,7 @@ The typed read-core ops dispatch through `meho_backplane.operations.dispatch`
 resolves the persisted `module.ClassName.method` handler_ref to the connector's
 bound-method shim, threads `operator` / `target` / `params`, and the handler
 issues an authenticated `GET` on this connector's client — so the read rides
-`auth_headers` (Bearer primary, Basic fallback). `execute()` is the G0.6
+`auth_headers` (the Bearer token). `execute()` is the G0.6
 ABC-compatibility shim (builds a synthetic `Operator` and forwards to
 `dispatch`); it remains the path for any future `source_kind="ingested"` op.
 
@@ -188,7 +209,7 @@ So the read core needs no operator review — it is live the moment the connecto
 loads.
 
 **Operation contracts.** The 13 typed ops meet the VMware operation-contract
-check (`backend/tests/test_vmware_operation_contracts.py`): each response schema
+check (`backend/tests/test_operation_contracts.py`): each response schema
 names its main fields, each parameter schema carries one example call under
 `examples` (`{}` for the no-argument reads, a placeholder such as
 `<component-id>` for the by-id reads), and each `llm_instructions` blob has
@@ -213,26 +234,35 @@ otherwise (`tests/_spec_shelf.py` contract). (The wider ingested breadth is not
 reconciled here — reconciling ingested rows against the spec they were ingested
 from is tautological.)
 
+The same file also checks the two VCF Operations login paths (#4476):
+`POST:/suite-api/api/auth/token/acquire` against the pinned
+`vcf-operations-9.0/vcf-operations-openapi.ingestable.json`, and both login
+paths against `vcf-operations-9.1/vcf-operations-openapi.ingestable.json`
+(the exchange path is new in 9.1). The vendor's 9.1 file fails the same
+metaschema check as the 9.0 file, so the lane reads an `.ingestable.json`
+copy. The 9.1 check skips until that file is on the shelf.
+
 ## Dependencies
 
 - `meho_backplane.connectors.adapters.http.HttpConnector` — pooled
   `httpx.AsyncClient` per target, retry-on-idempotent transport, base-URL
   composition.
-- `meho_backplane.connectors._shared.vcf_auth` — `basic_auth_header`,
-  `is_acceptable_auth_model`, `CredentialsCache`, `load_credentials_from_vault`.
+- `meho_backplane.connectors._shared.vcf_auth` — `is_acceptable_auth_model`,
+  `CredentialsCache`, `vcf_session_login`, `session_establish_auth_error`,
+  `ConnectorAuthError`.
 - `meho_backplane.connectors.schemas` — `AuthModel`, `FingerprintResult`,
   `ProbeResult`, `OperationResult`.
 - `httpx`, `respx` (test-only). No new runtime deps.
 
 ## Known issues / follow-ups
 
-- **Live Bearer not verified; the token-provisioning seam has landed.** See
-  "Auth" — the default loader now surfaces a Vault-staged `token` (Bearer
-  opt-in), unit-tested through the real loader against a Vault fake. What
-  remains the #3047 follow-up, gated on reachable hardware (#1002 / #995), is
-  the **live** `basicAuth` → mint-`bearerToken` exchange and the live Bearer
-  handshake against a real appliance. Until then a target with no staged token
-  authenticates with the Basic alternative.
+- **The login is not yet proved live.** It follows the vendor's VCF Operations
+  9.1 file and is unit-tested with mocked answers. A separate lab proof runs it
+  on VCF 9.1.0 and 9.1.1. That proof also shows whether VCF Operations and the
+  fleet lifecycle API share one address (no `vcf_ops_url` needed) or not.
+- **The VCF Operations token is not released.** After the exchange MEHO does
+  not call `token/release`. VCF Operations ends an unused token after six
+  hours.
 - **Read core only; ingested breadth + writes are a follow-up.** The 13-op
   typed read core dispatches on a fresh boot. The wider 51-op `/v1/*` surface
   (as `source_kind="ingested"` breadth) and the component / upgrade / task
@@ -254,9 +284,13 @@ from is tautological.)
   (13-path reconcile lane).
 - Auth tests:
   [`test_connectors_fleet_lcm_auth.py`](../../backend/tests/test_connectors_fleet_lcm_auth.py)
-  (injected-loader header shapes) and
+  (the login steps, the stored-token fallback, `vcf_ops_url`, renewal, refused
+  logins, no secret in logs or errors) and
   [`test_connectors_fleet_lcm_credread.py`](../../backend/tests/test_connectors_fleet_lcm_credread.py)
-  (the real default loader's Bearer/Basic paths through a Vault fake).
+  (the real default loader through a Vault fake). The `401` → new login →
+  success path through `dispatch()` is in
+  [`test_connectors_fleet_lcm_typed_reads.py`](../../backend/tests/test_connectors_fleet_lcm_typed_reads.py).
+- Login Task: <https://github.com/evoila/meho/issues/4476>
 - Operator runbook: [`fleet-lcm-onboarding.md`](../cross-repo/fleet-lcm-onboarding.md).
 - Legacy impl: [`connectors-vcf-fleet.md`](connectors-vcf-fleet.md)
 - Spec provenance: `vmware/vcf-api-specs@c3f3b52c` (Apache-2.0); shelf

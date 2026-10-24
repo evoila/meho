@@ -96,7 +96,7 @@ typed and profiled paths is proven in
   open a query string or fragment (#S04).
   Mirrors `vmware_rest/typed_ops.py` (`vmware.host.usage`, #2257) and
   `argocd/ops.py`. Its contract meets the VMware operation-contract check
-  (`backend/tests/test_vmware_operation_contracts.py`): one example call under
+  (`backend/tests/test_operation_contracts.py`): one example call under
   `examples`, and a response schema whose event fields (`text`, `timestamp`,
   `timestampString`, `fields[]`) come from `events.get.response` in the pinned
   `vcf-operations-for-logs-openapi.json`. Host name and source are rows of

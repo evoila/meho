@@ -104,6 +104,7 @@ from meho_backplane.audit_query import (
     ReplayNode,
     UnsupportedFilterError,
     count_event_classes,
+    count_loose_rows_in_forest,
     parse_duration,
     query_audit,
     replay_session,
@@ -249,6 +250,7 @@ def _build_filters(
     cursor: str | None,
     agent_session_id: uuid.UUID | None = None,
     event_class: str = "",
+    principal_sub: str | None = None,
 ) -> AuditQueryFilters:
     """Construct the substrate filter object from the echoed form values.
 
@@ -265,6 +267,11 @@ def _build_filters(
     ``audit_log.agent_session_id = :agent_session_id`` predicate -- making
     ``/ui/audit?agent_session_id=<id>`` a usable session-scoped flat view
     (``query.py:201-202``) rather than the unfiltered tenant-wide page.
+
+    ``principal_sub`` has no form field either: the my-recent quick view
+    sets it to the session's own user id so the query matches that id
+    exactly. The ``principal`` form field matches the user id or the
+    name, partially (#4668), which is too wide for a self-only view.
     """
     now = datetime.now(UTC)
     since_dt = parse_duration(since, now=now) if since else None
@@ -272,6 +279,7 @@ def _build_filters(
     return AuditQueryFilters(
         target=target or None,
         principal=principal or None,
+        principal_sub=principal_sub,
         op_id=op_id or None,
         op_class=op_class or None,
         result_status=result_status or None,
@@ -481,10 +489,10 @@ async def _resolve_deep_link_drawer(
 async def _build_my_recent_context(session: UISessionContext) -> dict[str, object]:
     """Assemble the my-recent quick-view context (operator-self-scoped).
 
-    Binds ``principal=session.operator_sub`` so the query returns only the
-    calling operator's own rows -- a second operator's activity is never
-    surfaced through this route (mirrors the REST ``/api/v1/audit/my-recent``
-    ``principal=operator.sub`` binding, ``audit.py:380``). Reuses the T1 row
+    Binds ``principal_sub=session.operator_sub`` (exact match on the user
+    id) so the query returns only the calling operator's own rows -- a
+    second operator's activity is never surfaced through this route
+    (mirrors the REST ``/api/v1/audit/my-recent`` binding). Reuses the T1 row
     projection so each row renders through the shared row partial and opens
     the same detail drawer. A bad cursor / duration is impossible here (the
     window is the fixed ``_MY_RECENT_SINCE`` shorthand, no operator input).
@@ -492,7 +500,8 @@ async def _build_my_recent_context(session: UISessionContext) -> dict[str, objec
     is_admin = await is_ui_tenant_admin(session)
     filters = _build_filters(
         target="",
-        principal=session.operator_sub,
+        principal="",
+        principal_sub=session.operator_sub,
         op_id="",
         op_class="",
         result_status="",
@@ -534,6 +543,10 @@ async def _build_replay_context(
     and ``root=[]`` -- the empty state, **never a 404** -- so a foreign
     session is indistinguishable from an empty one (the same posture the REST
     route's ``root=[]`` / ``row_count=0`` 200 holds).
+
+    ``loose_row_count`` (#4670) is the number of nodes in the tree whose
+    parent id names no row in the tenant, the same number the REST and MCP
+    envelopes carry.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -548,6 +561,9 @@ async def _build_replay_context(
             "replay_row_cap": _REPLAY_ROW_CAP,
             "over_cap": False,
             "root": [],
+            # Nodes whose parent id names no row (#4670); set after the
+            # tree is built, 0 for the empty and over-cap states.
+            "loose_row_count": 0,
             # The T1 flat-query pivot the over-cap notice (and the page
             # header) link to: the supported ``agent_session_id`` filter
             # pre-bound to this session.
@@ -561,6 +577,11 @@ async def _build_replay_context(
 
         forest = await replay_session(
             session_id,
+            tenant_id=session.tenant_id,
+            session=db_session,
+        )
+        context["loose_row_count"] = await count_loose_rows_in_forest(
+            forest,
             tenant_id=session.tenant_id,
             session=db_session,
         )
@@ -830,7 +851,7 @@ async def _my_recent_handler(
     """``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.
 
     Returns the calling operator's last-24h rows
-    (``principal=session.operator_sub``) rendered through the same row
+    (``principal_sub=session.operator_sub``, exact match) rendered through the same row
     partial as the T1 result list, so each row opens the T2 detail
     drawer. ``OPERATOR``-self-scoped: a second operator's activity is
     never reachable here. HTMX-only fragment (no full-page chrome).

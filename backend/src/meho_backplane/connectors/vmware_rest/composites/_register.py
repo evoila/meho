@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 66 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 68 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -40,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 50 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 52 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -54,26 +54,29 @@ OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909 +
 three host-domain writes ``host.datastore_mount_nfs`` /
 ``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
 later Supervisor / #3281, storage-policy, content-library / #3495 and
-resource-pool / #3505 write families, the #3339 teardown deletes, and the
-DRS rule delete ``cluster.drs_rule.delete``) are
+resource-pool / #3505 write families, the #3339 teardown deletes, the
+DRS rule delete ``cluster.drs_rule.delete``, and the VM snapshot create +
+delete ``vm.snapshot.create`` / ``vm.snapshot.delete``) are
 all ``requires_approval=True``.
 32 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 8 pin
-``safety_level="caution"`` -- the datastore directory create
+clarity at the call site; the helper would default to it anyway). 9 pin
+``safety_level="caution"`` -- the VM snapshot create ``vm.snapshot.create``,
+the datastore directory create
 ``datastore.dir.create`` / #3339, the reversible VM allocation write
 ``vm.resource_allocation.set`` / #3880, the #3505 governed-allocation writes
 ``resource_pool.create`` + the VM-Host affinity
 ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
 ``storage_policy.create`` / ``content_library.subscribed.create`` /
 ``content_library.subscribed.sync`` (``resource_pool.delete`` is a
-``dangerous`` reparent, not a destroy). 10 pin
+``dangerous`` reparent, not a destroy). 11 pin
 ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
 destructive op -- the governed-delete tier, decision
 ``docs/decisions/governed-delete-operations.md``), ``namespace.delete``,
 ``storage_policy.delete``, the six #3339 teardown deletes
 (``network.portgroup.delete``, ``host.standard_portgroup.delete``,
 ``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
-``content_library.item.delete``) and ``cluster.drs_rule.delete``. (The
+``content_library.item.delete``), ``cluster.drs_rule.delete`` and the VM
+snapshot delete ``vm.snapshot.delete``. (The
 ``caution`` tier is not writes-only:
 ``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -138,6 +141,10 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     event_tail_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot import (
+    vm_snapshot_create_composite,
+    vm_snapshot_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_network_llm_instructions import (
     STORAGE_NETWORK_LLM_INSTRUCTIONS,
@@ -331,6 +338,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA,
     VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA,
     VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA,
+    VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
+    VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA,
+    VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
+    VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
@@ -472,8 +483,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "optional inline guest customization), deploy an OVF/OVA "
         "content-library item to a new VM (deploy_from_library — "
         "OVF-network→portgroup mappings, ambiguity-rejecting name "
-        "lookup, structured deploy-report statuses), revert to a named "
-        "snapshot (ambiguity-rejecting), "
+        "lookup, structured deploy-report statuses), VM snapshots (take "
+        "one with vm.snapshot.create -- caution, needs approval; revert to "
+        "one by name or id; delete one with vm.snapshot.delete -- "
+        "destructive, always needs approval; list them with the typed read "
+        "vmware.snapshot.list), "
         "migrate via DRS or explicit host, bulk power across a "
         "filter, or a single-VM power verb (on/off/reset plus a "
         "Tools-mediated guest_shutdown/guest_reboot for one-off "
@@ -821,11 +835,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.snapshot.revert",
         handler=vm_snapshot_revert_composite,
-        summary="Revert a VM to a named snapshot; reject on name ambiguity.",
+        summary="Revert a VM to a snapshot, by name or id; reject on name ambiguity.",
         description=(
-            "Puts a VM back to the snapshot with the given name. Everything since "
+            "Puts a VM back to a snapshot, given by name or by id. Everything since "
             "that snapshot is lost. If two snapshots share the name, nothing "
-            "changes. Like 'govc snapshot.revert'."
+            "changes; pass the id. Like 'govc snapshot.revert'."
         ),
         parameter_schema=VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
         response_schema=VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
@@ -834,6 +848,41 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.revert"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.snapshot.create",
+        handler=vm_snapshot_create_composite,
+        summary="Take a snapshot of one VM: name, description, with memory or not, quiesce or not.",
+        description=(
+            "Takes a snapshot of one VM and waits for the vCenter task. Returns the new "
+            "snapshot id. Disks only unless memory is set. When the VM already has a "
+            "snapshot with that name, nothing is created. Like 'govc snapshot.create'."
+        ),
+        parameter_schema=VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
+        response_schema=VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "snapshot", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.create"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.snapshot.delete",
+        handler=vm_snapshot_delete_composite,
+        summary="Delete one VM snapshot by id; its child snapshots stay unless asked.",
+        description=(
+            "Deletes one snapshot of a VM, by id. The VM keeps its present state; the "
+            "restore point is gone for good. Child snapshots stay unless remove_children "
+            "is set. A second person always approves, after a preview. Like 'govc "
+            "snapshot.remove'."
+        ),
+        parameter_schema=VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
+        response_schema=VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "snapshot", "vi-json"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.vm.destroy",
@@ -1926,12 +1975,13 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 66 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 68 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    50 write (the seven #3339 teardown composites -- six destructive deletes
+    52 write (the VM snapshot create (caution) + delete (destructive), the
+    seven #3339 teardown composites -- six destructive deletes
     + the caution ``datastore.dir.create`` -- + the destructive DRS rule delete
     ``cluster.drs_rule.delete`` + T6 / #509 + the caution VM
     allocation write

@@ -1658,6 +1658,7 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
         "network_mappings": {"nat": "dvportgroup-9"},
         "storage_provisioning": None,
         "ovf_property_keys": [],
+        "deployment_option": None,
         "power_on": False,
     }
 

@@ -1163,10 +1163,46 @@ async def test_cordon_uncordon_node_against_k3s(
 # ---------------------------------------------------------------------------
 
 
+def _busybox_image() -> str:
+    """Return a busybox image the k3s node can pull.
+
+    ``MEHO_TEST_BUSYBOX_IMAGE`` wins. Otherwise, when ``MEHO_TEST_K3S_IMAGE``
+    points at a registry mirror (``<mirror>/rancher/k3s:<tag>``), the
+    busybox image k3s itself ships is taken from the same mirror: a
+    cluster that cannot reach Docker Hub can usually reach that mirror.
+    Without either, Docker Hub's ``busybox:1.36`` is used.
+    """
+    explicit = os.environ.get("MEHO_TEST_BUSYBOX_IMAGE")
+    if explicit:
+        return explicit
+    mirror, found, _ = os.environ.get("MEHO_TEST_K3S_IMAGE", "").partition("/rancher/k3s")
+    if found and mirror:
+        return f"{mirror}/rancher/mirrored-library-busybox:1.36.1"
+    return "busybox:1.36"
+
+
+async def _newest_pod_reasons(
+    connector: KubernetesConnector, target: _K3sTarget, info: dict[str, Any]
+) -> list[str | None]:
+    """Return the container waiting / terminated reasons of the Job's newest pod."""
+    if not info["pods"]:
+        return []
+    detail = await connector.k8s_pod_info(
+        _make_k3d_operator(),
+        target,
+        {"pod_name": info["pods"][0]["name"], "namespace": "default"},
+    )
+    return [cs["reason"] for cs in detail["container_statuses"]]
+
+
 async def _wait_for_job_to_finish(
     connector: KubernetesConnector, target: _K3sTarget, job_name: str
 ) -> dict[str, Any]:
-    """Poll ``k8s.job.info`` until the Job is complete or failed (or skip)."""
+    """Poll ``k8s.job.info`` until the Job is complete or failed (or skip).
+
+    The skip message names the newest pod's container reason (for example
+    ``ImagePullBackOff``) so a skipped run in CI says why.
+    """
     import asyncio as _asyncio
 
     for _ in range(90):
@@ -1176,7 +1212,11 @@ async def _wait_for_job_to_finish(
         if info["state"] in {"complete", "failed"}:
             return info
         await _asyncio.sleep(2.0)
-    pytest.skip(f"Job {job_name} did not finish within 180s (image pull or scheduling)")
+    reasons = await _newest_pod_reasons(connector, target, info)
+    pytest.skip(
+        f"Job {job_name} did not finish within 180s; state={info['state']!r}, "
+        f"pods={len(info['pods'])}, newest pod container reasons={reasons!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1192,7 +1232,7 @@ async def test_job_info_against_k3s_reports_failed_and_complete_jobs(
     connector, target = k3s_connector
     api_client = await connector._get_api_client(target, _make_k3d_operator())
     batch_v1 = _client.BatchV1Api(api_client)
-    image = os.environ.get("MEHO_TEST_BUSYBOX_IMAGE", "busybox:1.36")
+    image = _busybox_image()
     suffix = uuid4().hex[:6]
     failing = f"meho-job-fail-{suffix}"
     succeeding = f"meho-job-ok-{suffix}"

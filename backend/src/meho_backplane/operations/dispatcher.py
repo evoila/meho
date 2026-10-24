@@ -358,6 +358,7 @@ from meho_backplane.operations._request_preview import (
 )
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
+    compute_audit_params_hash,
     compute_params_hash,
     ingested_schema_for_validation,
     policy_gate,
@@ -3052,7 +3053,9 @@ async def _handle_needs_approval(
                 op_id=op_id,
                 target=target,
                 params=params,
-                params_hash=params_hash,
+                # The approval check needs every value, so the request
+                # stores the full hash, not the audit hash in ``params_hash``.
+                params_hash=compute_params_hash(params),
                 run_id=run_id,
                 proposed_effect=proposed_effect,
                 preview_hash=preview_hash,
@@ -3205,7 +3208,10 @@ async def dispatch(
     if "reveal_secret" in params:
         params = {key: value for key, value in params.items() if key != "reveal_secret"}
     credential_read = classify_op(op_id) == "credential_read"
-    params_hash = compute_params_hash(params)
+    # The hash every audit row of this dispatch carries: keyed, with
+    # secret-named values left out. A parked approval stores the full
+    # approval hash instead (``_handle_needs_approval``).
+    params_hash = compute_audit_params_hash(params)
     product, version, impl_id = parse_connector_id(connector_id)
 
     # --- Step 2: descriptor lookup ----------------------------------------

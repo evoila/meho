@@ -200,6 +200,10 @@ work item, plus approval-bound minting.
   key → `MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE` (fail-closed). The
   DB consume latch (`consume_command`) is **retained unchanged** for
   at-most-once acceptance — the signature does not replace central state.
+  The signed `params_hash` is the work-item digest `params_digest`, a plain
+  SHA-256 of the params: the runner computes it again and holds no server
+  key. The approval lookup and the mint audit row use the keyed hashes
+  instead (see the params hash section in `docs/codebase/approvals.md`).
 - **Edge verification.** `_verify_remote_write_signature` (`runner/executor.py`)
   reconstructs the canonical payload from the delivered item, verifies the
   signature with the provisioned public key (integrity + target-scope), then

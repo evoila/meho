@@ -6,11 +6,13 @@
 Three small responsibilities the dispatcher (T5, #396) consults per
 call:
 
-* :func:`compute_params_hash` -- stable SHA-256 over canonicalised
-  params for the audit row's ``params_hash`` field. Two dispatches
-  with identical args produce identical hashes -- correlates retries,
-  composite sub-calls, and reruns without persisting the params
-  themselves to the audit row.
+* :func:`compute_audit_params_hash` / :func:`compute_params_hash` --
+  keyed hashes (HMAC-SHA256 with a server key) over canonicalised
+  params. The audit hash goes on audit records; it leaves secret-named
+  values out, so two calls with the same other values get the same
+  hash. The approval hash covers every value; an approval request
+  stores it and checks it again before the approved call runs.
+  :func:`params_hash_matches` does that check.
 * :func:`validate_params` -- jsonschema 2020-12 (OpenAPI 3.1
   compatible) validation. Returns a list of structured error dicts;
   empty list = valid.
@@ -26,6 +28,7 @@ call:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from typing import Any, Final
 
@@ -36,10 +39,12 @@ from referencing.exceptions import Unresolvable
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
+from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.sandbox_mode import sandbox_mode_active
+from meho_backplane.settings import get_settings
 
 # Read-class HTTP verbs — the same set the ingest layer pins as
 # ``READ_HTTP_METHODS`` (``operations/ingest/_internals.py``). Duplicated as
@@ -51,11 +56,18 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "InvalidOpSchemaError",
+    "compute_audit_params_hash",
     "compute_params_hash",
     "ingested_schema_for_validation",
+    "params_hash_candidates",
+    "params_hash_matches",
     "policy_gate",
     "validate_params",
 ]
+
+#: Label for the key derivation in :func:`_params_hash_key`. It keeps this
+#: key different from any other key made from the same secret.
+_PARAMS_HASH_KEY_LABEL: Final[bytes] = b"meho-params-hash-key-v1"
 
 
 class InvalidOpSchemaError(Exception):
@@ -82,23 +94,103 @@ class InvalidOpSchemaError(Exception):
         super().__init__(f"stored parameter_schema contains an unresolvable $ref: {missing_ref}")
 
 
-def compute_params_hash(params: dict[str, Any]) -> str:
-    """Return a stable SHA-256 hex hash over the canonicalised *params*.
+def _canonical_params(params: Any) -> bytes:
+    """Return the canonical JSON bytes of *params* that every params hash covers.
 
-    Used by the dispatcher's audit row so two dispatches with the same
-    args land identical ``params_hash`` values -- correlates retries,
-    composite sub-calls, and reruns without leaking the params
-    themselves into the row (the full params live in the broadcast
-    payload for non-sensitive op classes and never appear on the audit
-    row in v0.2 -- see :class:`AuditLog`).
-
-    Canonicalisation: ``json.dumps(..., sort_keys=True, default=str,
-    separators=(",", ":"))``. ``default=str`` covers non-JSON natives
-    (e.g. :class:`datetime` or :class:`uuid.UUID`) the caller may slip in
-    without forcing every call site to pre-stringify them.
+    ``json.dumps(..., sort_keys=True, default=str, separators=(",", ":"))``.
+    ``default=str`` covers non-JSON natives (e.g. :class:`datetime` or
+    :class:`uuid.UUID`) the caller may slip in without forcing every call
+    site to pre-stringify them.
     """
-    canonical = json.dumps(params, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return json.dumps(params, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+
+
+def _params_hash_key() -> bytes:
+    """Return the server key for the params hashes.
+
+    The key is derived from ``DATABASE_URL``, the one secret every install
+    has: HMAC-SHA256 of it under :data:`_PARAMS_HASH_KEY_LABEL`. It is never
+    stored or sent anywhere. Every pod of an install gets the same key, so
+    hashes stay comparable inside the install. When ``DATABASE_URL`` changes
+    (for example a new database password), the key changes too, and new
+    hashes no longer match the older ones.
+    """
+    source = get_settings().database_url.encode("utf-8")
+    return hmac.new(_PARAMS_HASH_KEY_LABEL, source, hashlib.sha256).digest()
+
+
+def _keyed_params_hash(params: Any) -> str:
+    """HMAC-SHA256 hex digest of the canonical *params* under the server key."""
+    return hmac.new(_params_hash_key(), _canonical_params(params), hashlib.sha256).hexdigest()
+
+
+def compute_params_hash(params: dict[str, Any]) -> str:
+    """Return the keyed hash that ties an approval request to the exact call.
+
+    HMAC-SHA256 under the server key (:func:`_params_hash_key`) over the
+    canonical JSON of *params*, with every value included. The approval
+    queue stores it on the request and checks it again before the approved
+    call runs (:func:`params_hash_matches`), so a call that differs in any
+    value, a secret value too, does not match. Without the server key the
+    hash cannot be computed again from the params.
+
+    For a hash that is only written to an audit record, use
+    :func:`compute_audit_params_hash`.
+    """
+    return _keyed_params_hash(params)
+
+
+def compute_audit_params_hash(params: Any) -> str:
+    """Return the keyed hash written to audit records as ``params_hash``.
+
+    Like :func:`compute_params_hash`, but every secret-named value is
+    replaced with a fixed marker first. The name check and the value rule
+    are the ones the broadcast params scrub and the approval preview use
+    (:func:`~meho_backplane.broadcast.events.scrub_secret_named_values`):
+    ``password``, ``client_secret``, ``api_key`` and similar names. So the
+    hash covers the parameter names and the other values only: two calls
+    with the same other values get the same hash, whatever their secret
+    values are. For params without secret-named values it equals
+    :func:`compute_params_hash`.
+
+    Two dispatches with the same params land the same hash, which
+    correlates retries, composite sub-calls and reruns without storing the
+    params on the audit row.
+    """
+    masked, _secret_found = scrub_secret_named_values(params)
+    return _keyed_params_hash(masked)
+
+
+def _unkeyed_params_hash(params: dict[str, Any]) -> str:
+    """The plain SHA-256 that approval requests stored before the keyed hash.
+
+    Only compared, never stored again: see :func:`params_hash_candidates`.
+    """
+    return hashlib.sha256(_canonical_params(params)).hexdigest()
+
+
+def params_hash_candidates(params: dict[str, Any]) -> tuple[str, str]:
+    """Return the hashes an approval request for *params* can carry.
+
+    The keyed :func:`compute_params_hash` first, then the plain SHA-256 that
+    earlier versions stored. A request that was already waiting for
+    approval when MEHO was upgraded carries the plain one; accepting it
+    keeps that request usable. Both cover every value, so the check is as
+    strict as before.
+    """
+    return compute_params_hash(params), _unkeyed_params_hash(params)
+
+
+def params_hash_matches(params: dict[str, Any], stored: str) -> bool:
+    """True when *stored* (an approval request's ``params_hash``) is a hash of *params*.
+
+    Accepts either value from :func:`params_hash_candidates`.
+    """
+    stored_bytes = stored.encode("utf-8")
+    return any(
+        hmac.compare_digest(stored_bytes, candidate.encode("utf-8"))
+        for candidate in params_hash_candidates(params)
+    )
 
 
 def validate_params(

@@ -93,6 +93,46 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## The params hash on requests and audit rows
+
+MEHO keeps a hash of a call's params, never the params themselves, on two
+kinds of rows:
+
+- **The approval request** (`approval_request.params_hash`) binds the exact
+  call. It is HMAC-SHA256 with a server key over every value
+  (`compute_params_hash` in `operations/_validate.py`). Before an approved
+  call runs, MEHO checks the params against it (`params_hash_matches`), so a
+  call that changed any value, a password too, does not match.
+- **Audit rows** (`payload.params_hash` on dispatch, MCP and hosted-agent
+  tool rows, and `operation_run.params_hash`) use the same keyed hash, but
+  each secret-named value (`password`, `client_secret`, `api_key` and
+  similar, the names the broadcast scrub uses) is replaced by a fixed marker
+  first (`compute_audit_params_hash`). Two calls with the same other values
+  get the same hash. For a call without secret-named values, both hashes are
+  equal.
+
+The server key is derived from `DATABASE_URL` (HMAC-SHA256 under a fixed
+label). Every install has that value, the key is never stored, and there is
+no new setting. What follows:
+
+- Hashes can be compared inside one install. Rows written before the keyed
+  hash hold a plain SHA-256: they stay readable, but they do not match new
+  hashes. The column format (64 hex characters) is unchanged, so there is no
+  migration.
+- A request that was already waiting for approval when MEHO was upgraded
+  holds the plain hash. The approval check accepts it for the request's own
+  params, so the request can still be approved.
+- When `DATABASE_URL` changes (for example a new database password), the key
+  changes: new hashes no longer match older ones, and a request that waits
+  for approval at that moment must be asked for again.
+- A client cannot compute these hashes itself, because they need the server
+  key. To match a request to a call, use the `approval_request_id` the call
+  returns, or the `preview_hash` of a destructive call.
+
+The satellite work item is the exception: `gateway_command.params_hash` is a
+plain SHA-256 (`params_digest`), because the runner checks it again and holds
+no server key. That row stores the params themselves anyway.
+
 ## Credential-write execution custody (#3537)
 
 For every operation classified as `credential_write`, the parked

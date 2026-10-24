@@ -12,8 +12,9 @@ Covers every acceptance criterion on issue #250:
   ``audit_log`` row with path=/mcp/resources/read/<uri>.
 * ``tools/call`` against an unknown tool writes a row with status_code=404
   and op_class=unknown.
-* ``compute_params_hash`` is deterministic across dict insertion order
-  and equivalent representations.
+* The ``params_hash`` (:func:`compute_audit_params_hash`) is deterministic
+  across dict insertion order, is keyed, and leaves secret-named argument
+  values out.
 * The chassis :class:`~meho_backplane.audit.AuditMiddleware` skips
   ``/mcp`` requests entirely (no duplicate row per JSON-RPC envelope).
 * Audit-write failure converts an otherwise-successful MCP call into a
@@ -36,10 +37,11 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
-from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
+from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
@@ -75,35 +77,46 @@ async def _audit_rows() -> list[AuditLog]:
 
 
 # ---------------------------------------------------------------------------
-# compute_params_hash — pure-function determinism
+# params_hash — pure-function determinism
 # ---------------------------------------------------------------------------
 
 
-def test_params_hash_empty_dict_is_stable() -> None:
-    """``compute_params_hash({})`` returns the canonical empty-object hash.
-
-    Regression-locks the hash so a future change to the canonicalisation
-    rule (separators, sort_keys) would surface here loudly instead of
-    silently invalidating every existing payload row's params_hash.
-    """
-    expected = (
-        # SHA-256("{}") — the canonical JSON encoding of an empty dict
-        # under ``sort_keys=True, separators=(",", ":")``.
-        "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
-    )
-    assert compute_params_hash({}) == expected
+def test_params_hash_empty_dict_is_keyed() -> None:
+    """The empty-arguments hash is keyed: not the plain SHA-256 of ``{}``."""
+    plain = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    digest = compute_audit_params_hash({})
+    assert digest != plain
+    assert len(digest) == 64
+    assert digest == compute_audit_params_hash({})
 
 
 def test_params_hash_is_order_independent() -> None:
     """Same dict-keys in different insertion orders → same hash."""
     a = {"foo": 1, "bar": 2}
     b = {"bar": 2, "foo": 1}
-    assert compute_params_hash(a) == compute_params_hash(b)
+    assert compute_audit_params_hash(a) == compute_audit_params_hash(b)
 
 
 def test_params_hash_differs_for_distinct_inputs() -> None:
     """``{x: 1}`` and ``{x: 2}`` produce different digests."""
-    assert compute_params_hash({"x": 1}) != compute_params_hash({"x": 2})
+    assert compute_audit_params_hash({"x": 1}) != compute_audit_params_hash({"x": 2})
+
+
+def test_params_hash_leaves_nested_secret_values_out() -> None:
+    """A ``call_operation`` password inside ``params`` does not change the hash."""
+
+    def arguments(password: str) -> dict[str, Any]:
+        return {
+            "connector_id": "vault-1.x",
+            "op_id": "vault.auth.userpass.update_password",
+            "params": {"username": "user-a", "password": password, "mount": "userpass"},
+        }
+
+    first = compute_audit_params_hash(arguments("first-test-value"))
+    assert first == compute_audit_params_hash(arguments("second-test-value"))
+    other_user = arguments("first-test-value")
+    other_user["params"]["username"] = "user-b"
+    assert first != compute_audit_params_hash(other_user)
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +168,7 @@ async def test_tools_call_meho_status_writes_one_mcp_audit_row(
     assert row.status_code == 200
     assert row.payload["op_id"] == "meho_status"
     assert row.payload["op_class"] == "read"
-    assert row.payload["params_hash"] == compute_params_hash({})
+    assert row.payload["params_hash"] == compute_audit_params_hash({})
 
 
 @pytest.mark.asyncio

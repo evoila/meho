@@ -55,6 +55,11 @@ hand-code a vRLI path:
   scheme's vRLI login endpoint the profiled connector POSTs. Hand-coded as a
   vRLI-specific literal even though it lives in the shared scheme module.
 
+The documentation page and folder that ``vrli.api_file.get`` reads
+(``api_file.DOCS_PAGES`` and ``api_file.DOCS_FOLDERS``) are listed as ``GET``
+too, marked "documentation path, not in the API file", and left out of the
+served check: an API file never lists the path that serves it.
+
 A red lane here is the guard surfacing a real finding, not harness noise —
 triage per docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -67,6 +72,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from meho_backplane.connectors._shared.profile_auth import _VRLI_SESSION_PATH
+from meho_backplane.connectors.vcf_logs import api_file as _api_file
 from meho_backplane.connectors.vcf_logs.profile import VRLI_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_logs.typed_ops import _EVENTS_PATH_PREFIX
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
@@ -77,6 +83,13 @@ if TYPE_CHECKING:
 _SPEC_DIR = "vcf-operations-9.0"
 _SPEC_FILE = "vcf-operations-for-logs-openapi.json"
 _SPEC_LABEL = f"{_SPEC_DIR}/{_SPEC_FILE}"
+
+#: Documentation paths, not in the API file: the page and folder that serve
+#: the API reference (``vrli.api_file.get``). Listed for completeness, left
+#: out of the served check.
+_DOCUMENTATION_OP_IDS = frozenset(
+    f"GET:{path}" for path in (*_api_file.DOCS_PAGES, *_api_file.DOCS_FOLDERS)
+)
 
 #: OpenAPI 3.x path-item keys that are HTTP operations (its fixed verb
 #: vocabulary); everything else on a path item (``parameters``, ``summary``,
@@ -123,6 +136,8 @@ def test_hand_coded_path_surface_is_pinned() -> None:
         "GET:/api/v2/events/{+path}",
         "POST:/api/v2/sessions",
     }
+    assert {"GET:/rest-api", "GET:/rest-api/"} == _DOCUMENTATION_OP_IDS
+    assert not _DOCUMENTATION_OP_IDS & _declared_op_ids()
 
 
 def _openapi3_served_op_ids(spec_path: Path) -> set[str]:

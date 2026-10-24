@@ -34,10 +34,12 @@ from meho_backplane.connectors.vrli8 import typed_ops as _typed_ops
 from meho_backplane.connectors.vrli8.connector import Vrli8Connector
 from meho_backplane.operations._handler_resolve import is_unbound_method
 
-#: The modern typed read op the 8.x impl reuses verbatim (#2295). vRLI types only
-#: the event query; the rest of its browse surface is generic-ingested on 9.x (no
-#: committable 8.x spec to ingest — see the module docstring).
-_EXPECTED_REUSED_OP_IDS = {"vrli.event.query"}
+#: The modern typed read ops the 8.x impl reuses verbatim: the event query
+#: (#2295) and the read of the API reference pages (``vrli.api_file.get``, which
+#: reads ``/rest-api`` on 8.18 and 9.0 alike). The rest of the 9.x browse surface
+#: is generic-ingested (no committable 8.x spec to ingest — see the module
+#: docstring).
+_EXPECTED_REUSED_OP_IDS = {"vrli.event.query", "vrli.api_file.get"}
 
 
 def test_vrli8_reuses_modern_typed_op_ids_verbatim() -> None:

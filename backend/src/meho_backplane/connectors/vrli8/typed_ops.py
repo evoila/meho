@@ -3,11 +3,12 @@
 
 """Typed-op registrar for :class:`Vrli8Connector` (legacy vRLI 8.x, #3068).
 
-The 8.x impl reuses the modern sibling's typed read op verbatim —
-:data:`~meho_backplane.connectors.vcf_logs.typed_ops.VRLI_TYPED_OPS` (today just
-``vrli.event.query``) issues the identical ``GET /api/v2/events/{constraints}``
-query on 8.x (the v2 API is stable since vRLI 8.0), and the handler is inherited
-on :class:`Vrli8Connector`. So this registrar upserts the *same op_id* under the
+The 8.x impl reuses the modern sibling's typed read ops verbatim —
+:data:`~meho_backplane.connectors.vcf_logs.typed_ops.VRLI_TYPED_OPS`:
+``vrli.event.query`` issues the identical ``GET /api/v2/events/{constraints}``
+query on 8.x (the v2 API is stable since vRLI 8.0), ``vrli.api_file.get`` reads
+the same ``/rest-api`` reference pages, and the handlers are inherited
+on :class:`Vrli8Connector`. So this registrar upserts the *same op_ids* under the
 8.x connector's own ``(vrli, 8.0, vrli-vrli8)`` triple rather than re-authoring
 it.
 

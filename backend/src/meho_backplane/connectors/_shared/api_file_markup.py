@@ -30,16 +30,14 @@ from typing import Any, Final
 import defusedxml.ElementTree as DefusedET
 from defusedxml import DefusedXmlException
 
-from meho_backplane.broadcast.events import (
-    is_secret_param_name,
-    is_secret_param_name_lowercased,
-)
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
     ApiFileFormatError,
     Scrubber,
     TextRule,
     dump_json,
+    is_secret_name,
+    is_secret_name_lowercased,
 )
 
 __all__ = ["check_html", "check_xml"]
@@ -145,7 +143,7 @@ class _XmlWriter:
         declarations = list(self._declared_on.get(id(el), ()))
         scopes = (*outer, declarations)
         uri, local = _split_tag(el.tag)
-        secret = _element_is_secret(local, el.attrib.items(), _split_tag, is_secret_param_name)
+        secret = _element_is_secret(local, el.attrib.items(), _split_tag, is_secret_name)
         name = self._qualify(local, uri, scopes, attribute=False)
         attributes = [
             (
@@ -201,7 +199,7 @@ class _XmlWriter:
         return f"{prefix}:{local}" if prefix else local
 
     def _attribute_value(self, local: str, value: str, element_is_secret: bool) -> str:
-        if is_secret_param_name(local) or (element_is_secret and not _is_label(local, value)):
+        if is_secret_name(local) or (element_is_secret and not _is_label(local, value)):
             self.scrubber.count += 1
             return REDACTED
         return self.scrubber.text(value)
@@ -260,7 +258,7 @@ def _element_is_secret(
     if name_is_secret(local):
         return True
     for key, value in attributes:
-        if split(key)[1] in _NAMING_ATTRIBUTES and value and is_secret_param_name(value):
+        if split(key)[1] in _NAMING_ATTRIBUTES and value and is_secret_name(value):
             return True
     return False
 
@@ -273,7 +271,7 @@ def _is_label(local: str, value: str | None) -> bool:
     replaced. Every other attribute of the element is replaced, also
     another naming attribute (``id="abc"``): its value can be anything.
     """
-    return local in _NAMING_ATTRIBUTES and bool(value) and is_secret_param_name(value or "")
+    return local in _NAMING_ATTRIBUTES and bool(value) and is_secret_name(value or "")
 
 
 def _xml_text(value: str) -> str:
@@ -360,14 +358,14 @@ def _html_children(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
 
 def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
     secret = _element_is_secret(
-        node.tag.rpartition(":")[2], node.attrs, _html_name, is_secret_param_name_lowercased
+        node.tag.rpartition(":")[2], node.attrs, _html_name, is_secret_name_lowercased
     )
     head = [f"<{node.tag}"]
     for key, value in node.attrs:
         if value is None:
             head.append(f" {key}")
             continue
-        if is_secret_param_name_lowercased(key) or (secret and not _is_label(key, value)):
+        if is_secret_name_lowercased(key) or (secret and not _is_label(key, value)):
             scrubber.count += 1
             value = REDACTED
         else:

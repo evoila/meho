@@ -709,7 +709,7 @@ async def test_file_that_does_not_parse_stops_with_an_error(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "spec_file", "expected_replaced"),
-    [("srm", "recovery-srm-v2.yaml", 6), ("configure", "appliance-configure-v2.yaml", 10)],
+    [("srm", "recovery-srm-v2.yaml", 7), ("configure", "appliance-configure-v2.yaml", 11)],
 )
 async def test_pinned_vendor_file_comes_back_through_the_read(
     _stub_embedding: AsyncMock,
@@ -722,7 +722,8 @@ async def test_pinned_vendor_file_comes_back_through_the_read(
 
     Runs only when the spec shelf is present. The SRM file has
     ``Authorization: Basic ...`` examples in its description text; the read
-    must return them replaced instead of stopping.
+    must return them replaced instead of stopping. Each count includes one
+    ``session_id`` schema field, which is a secret name.
     """
     spec_path = require_shelf_spec("vcf-protection-and-recovery-9.1", spec_file)
     content = spec_path.read_bytes()

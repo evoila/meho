@@ -31,7 +31,10 @@ What the helper does, in order:
 3. Walks the parsed file and replaces every secret value with
    :data:`REDACTED`, the placeholder the governed Vault read returns. A
    name is secret-named by MEHO's one rule for that,
-   :func:`~meho_backplane.broadcast.events.is_secret_param_name`.
+   :func:`~meho_backplane.broadcast.events.is_secret_param_name`, or
+   when it ends in a session id (``sessionId``): some appliances use the
+   session id as the login token
+   (:func:`~meho_backplane.connectors._shared.api_file_values.is_secret_name`).
 
    * JSON and YAML: the value of every secret-named key, at any depth,
      also inside lists. The whole value goes, whatever it is: text,
@@ -76,7 +79,6 @@ from urllib.parse import parse_qsl, urlencode
 
 import yaml
 
-from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors._shared.api_file_markup import check_html, check_xml
 from meho_backplane.connectors._shared.api_file_values import (
     REDACTED,
@@ -84,6 +86,7 @@ from meho_backplane.connectors._shared.api_file_values import (
     Scrubber,
     TextRule,
     dump_json,
+    is_secret_name,
 )
 
 __all__ = [
@@ -197,7 +200,7 @@ def scrub_query_string(path: str) -> tuple[str, int]:
     count = 0
     pairs: list[tuple[str, str]] = []
     for key, value in parse_qsl(query, keep_blank_values=True):
-        if is_secret_param_name(key):
+        if is_secret_name(key):
             pairs.append((key, REDACTED))
             count += 1
         else:
@@ -297,7 +300,7 @@ def _collect_secret_nodes(node: yaml.Node, secret: set[int], seen: set[int]) -> 
     seen.add(id(node))
     if isinstance(node, yaml.MappingNode):
         for key, value in node.value:
-            if isinstance(key, yaml.ScalarNode) and is_secret_param_name(str(key.value)):
+            if isinstance(key, yaml.ScalarNode) and is_secret_name(str(key.value)):
                 _mark_subtree(value, secret)
             else:
                 _collect_secret_nodes(value, secret, seen)

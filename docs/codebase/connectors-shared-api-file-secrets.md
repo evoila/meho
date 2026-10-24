@@ -20,8 +20,9 @@ parser sees the structure, so those tricks do not exist for it.
 Every API file read uses this helper (#4780): `fleet.api_file.get`,
 `hcx.api_file.get` and `vcenter.sso_admin.api_file.get` on main, and the
 reads of #4690 (VCF Operations) and #4731 (Aria Automation 8) after it.
-New API file reads use it from the start; `srm.api_file.get` does. That
-read also gives the helper MEHO's general redaction rules as a text rule
+New API file reads use it from the start; `srm.api_file.get` and
+`vrli.api_file.get` (Logs 8.18 and 9.0) do. Both reads also give the
+helper MEHO's general redaction rules as a text rule
 (`text_redactor` in `connectors/_shared/api_file_read.py`), so text they
 match comes back as a placeholder instead of stopping the read. The rule
 runs on each parsed text value before the copy is written back, so the
@@ -64,6 +65,15 @@ the name; and the pairs `api_key`, `access_key`, `private_key`,
 `encryption_key`, `license_key`, `licence_key`, `secret_id`,
 `secret_value`, `secret_data`. Names are read in snake, camel and kebab
 case. #4780 added the licence key.
+
+The helper adds one rule of its own (`is_secret_name` in
+`api_file_values.py`): a name that ends in a session id (`sessionId`,
+`session_id`, `X-Session-Id`, `JSESSIONID`) is a secret name too. Some
+appliances use the session id as the login token; the Logs session API
+returns its token as `sessionId`. The rule stays in the helper, not in
+MEHO's general rule, because elsewhere a `session_id` is often MEHO's own
+agent session, which is no secret. A name that only starts with
+`session` (`sessionTimeout`) is not a secret name.
 
 There is no exception for schema words. The value under a secret name
 is replaced even when it is the description of a field (`"password":

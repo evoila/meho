@@ -500,6 +500,24 @@ async def test_deployment_list_against_k3s_kube_system(
 
 
 @pytest.mark.asyncio
+async def test_job_list_against_k3s_all_namespaces(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.job.list --all-namespaces`` reaches ``BatchV1Api`` on a real cluster.
+
+    A fresh k3s cluster has no Jobs, so the assertion is on the envelope
+    shape, not on a row count: the call must succeed and return the
+    ``rows`` + ``total`` pair every list op emits.
+    """
+    connector, target = k3s_connector
+    result = await connector.k8s_job_list(_make_k3d_operator(), target, {"all_namespaces": True})
+    assert isinstance(result["rows"], list)
+    assert result["total"] == len(result["rows"])
+    for row in result["rows"]:
+        assert row["state"] in {"running", "complete", "failed", "suspended"}
+
+
+@pytest.mark.asyncio
 async def test_deployment_info_against_k3s_returns_full_detail(
     k3s_connector: tuple[KubernetesConnector, _K3sTarget],
 ) -> None:

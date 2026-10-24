@@ -3422,6 +3422,61 @@ class VmwareRestConnector(HttpConnector):
 
         return await license_assigned_list_impl(self, operator, target, params)
 
+    # The four ``vmware.appliance.local_account.*`` typed ops. Each delegates to
+    # :mod:`.appliance_local_accounts` (imported lazily, like the other typed ops).
+
+    async def appliance_local_account_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.list`` -- every local account of the appliance."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_list_impl,
+        )
+
+        return await local_account_list_impl(self, operator, target, params)
+
+    async def appliance_local_account_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.get`` -- one local account of the appliance."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_get_impl,
+        )
+
+        return await local_account_get_impl(self, operator, target, params)
+
+    async def appliance_local_account_password_set(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.password.set`` -- a new password from Vault."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_password_set_impl,
+        )
+
+        return await local_account_password_set_impl(self, operator, target, params)
+
+    async def appliance_local_account_policy_set(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.policy.set`` -- the password expiry rules."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_policy_set_impl,
+        )
+
+        return await local_account_policy_set_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

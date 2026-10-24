@@ -871,6 +871,115 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   All three share the group `vmware-licensing`. Its text is one constant,
   `license_common.LICENSE_WHEN_TO_USE`, that both registrars pass, so the
   group row reads the same whichever registrar creates it first.
+- **`vmware.appliance.local_account.*`** (metadata in
+  `typed_ops_appliance_local_accounts.py`, handlers in
+  `appliance_local_accounts.py`, password handling in
+  `appliance_local_account_password.py`) — the local accounts of the vCenter
+  appliance: its own operating-system accounts, such as `root`. `root` is the
+  login for the appliance console, SSH and the management page on port 5480.
+  When its password expires, these logins stop working until someone sets a
+  new one. Four typed operations in the group
+  `vmware-appliance-local-accounts`, registered through `VMWARE_TYPED_OPS`,
+  so they are on both catalogs.
+
+  | Operation | What it does | Vendor call | Risk |
+  |---|---|---|---|
+  | `vmware.appliance.local_account.list` | Every local account, one row each. | `GET /api/appliance/local-accounts`, then `GET /api/appliance/local-accounts/{username}` per account | `safe` |
+  | `vmware.appliance.local_account.get` | One account. A missing account answers `not_found`. | `GET /api/appliance/local-accounts/{username}` | `safe` |
+  | `vmware.appliance.local_account.password.set` | Sets a new password that MEHO reads from a Vault path. | `PATCH /api/appliance/local-accounts/{username}` with `password` | `dangerous`, `requires_approval=True` |
+  | `vmware.appliance.local_account.policy.set` | Changes when the password expires and when the account locks. Only the fields the call passes change. | the same `PATCH` with `password_expires`, `max_days_between_password_change`, `min_days_between_password_change`, `warn_days_before_password_expiration`, `inactive_after_password_expiration`, `days_after_password_expiration` | `dangerous`, `requires_approval=True` |
+
+  | Versions | Catalog |
+  |---|---|
+  | vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+  | vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+  The vendor API exists since vCenter 6.7. A vCenter 7.0 target resolves to
+  `vmware-rest-9.0`, and typed operations run there, but 7.0 is not proven.
+  The `PATCH` body is the flat `UpdateConfig` that `/api` takes; a vCenter
+  that serves only the old `/rest` API (before 7.0 U2) refuses it.
+
+  - **One account row** (list and get): `username`, `roles`, `enabled`,
+    `has_password`, `last_password_change`, `password_expires_at`,
+    `password_expired`, `days_until_password_expires`,
+    `max_days_between_password_change`, `min_days_between_password_change`,
+    `warn_days_before_password_expiration`, `inactive_at`. Times are ISO 8601,
+    as vCenter sends them. No expiry date means the password never expires
+    (`password_expired: false`). MEHO works out `password_expired` and the
+    whole days left from the expiry date. vCenter reports when the account
+    locks (`inactive_at`), not a number of days. A list row whose account read
+    failed has null fields and a `read_note` (vCenter can answer HTTP 500
+    instead of 403 for an account the caller may not read). No field holds a
+    password: vCenter sends only `has_password`.
+  - **The policy change** reads the account first (a missing account stops the
+    call before any change), sends only the given fields, and reads the
+    account again. It returns `requested`, `before` and `after`. The day
+    fields take -1 to 99999, the range vCenter documents for its password
+    policy. To stop the password from expiring, set `password_expires: false`,
+    or set a large `max_days_between_password_change` such as 9999.
+  - **How the new password stays secret.**
+    - The call never carries the password. It names a Vault path
+      (`password_secret_ref`, with `password_secret_mount`, default `secret`,
+      and `password_secret_key`, default `password`). The handler reads the
+      password with `load_param_secret_data` under the identity of the person
+      whose call runs. The Keycloak and VCF Automation user writes use the
+      same seam. A refused or missing path answers
+      `vault_credentials_read_error`; a secret with no text under the key stops
+      the call. In both cases nothing goes to vCenter.
+    - After an approval, MEHO runs the change under the approver's login, so
+      the approver needs read access to the Vault path.
+    - The op id is pinned as `credential_write` in `broadcast/events.py`. So
+      the flight recorder keeps no request or response body for the call (its
+      `*password*` op-id pattern and the `password` tag do the same), the
+      broadcast shows no params, and a waiting approval keeps the params in
+      the encrypted handoff store instead of `approval_request.params`. That
+      store needs `APPROVAL_HANDOFF_ENCRYPTION_KEY` (chart: `approvalHandoff`).
+      Without it, MEHO refuses the call instead of letting it wait. `GET
+      /ready` shows the state under `features.approval_custody`.
+    - Because of the pin, the generic params echo does not reach the approver.
+      A preview builder shows the account, `password_source: vault` and the
+      Vault path, never the password.
+    - Every vCenter error answer to the two changes (also to the first read
+      of the policy change) goes through one rule, `change_error`, before it
+      leaves the handler. A 404 answers `not_found`. A 401 stays an
+      `httpx.HTTPStatusError` with status 401, so the dispatcher still logs in
+      again and retries once; but its response holds only the vAPI error type
+      and messages, and its request has neither the session header nor the
+      body. Any other status becomes `ConnectorUpstreamError` with the HTTP
+      status and the same safe text (a 403 also names the SSO group the
+      service account needs). When any vendor text holds the password (as is,
+      JSON-escaped, URL-encoded or HTML-escaped), all vendor text is dropped.
+      The new error is raised after the `except` block, so it does not keep
+      the original error (raw response and request) as its context. A failed
+      read after a change gives a `read_note` with the same safe text.
+    - The result is `{username, password_set, password_expires_at,
+      read_note}`.
+  - **The service account of the target needs an appliance role.** The vendor
+    maps three levels to SSO groups: `operator` and `admin` to
+    `SystemConfiguration.Administrators`, and `superAdmin` to
+    `SystemConfiguration.BashShellAdministrators`
+    ([Authorization Model Mapping to the vCenter Single Sign-On Domain](https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-0/administration-sdks-cli-and-tools/introduction-to-the-vcf-programming-guide/introduction-to-the-vsphere-automation-rest-apis/vcenter-server-management/authorization-model-for-administration-of-vcenter-server/authorization-model-mapping-to-the-vcenter-single-sign-on-domain.html)).
+    The vendor says the super administrator level "is required for adding or
+    altering user accounts"
+    ([Using the SuperAdmin Role](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere-sdks-tools/8-0/vmware-vsphere-automation-rest-programming-guide-8-0/vcenter-server-management-1/authorization-model-for-administration-of-vcenter-server-1/using-the-superadmin-role-1.html)).
+    So both changes need the service account in
+    `SystemConfiguration.BashShellAdministrators`. The vendor names no level
+    for the reads; a service account in neither group gets HTTP 403 on the
+    list. Members of `SystemConfiguration.BashShellAdministrators` can also
+    open the appliance Bash shell with near-root rights, so keep the group
+    small.
+  - **Tests.** `tests/test_connectors_vmware_rest_typed_appliance_local_accounts.py`
+    (rows and expiry, refused names and values, `not_found`, the Vault read,
+    the error rule for every status, the approval preview, the
+    flight-recorder span); `tests/test_connectors_vmware_rest_appliance_password_e2e.py`
+    (one password change through the dispatcher, the approval queue and the
+    real connector over respx: the password is in the `PATCH` body and not in
+    the params, the approval request, the audit rows, the result, the
+    flight-recorder spans or the logs; and two 401 answers that echo the
+    password: the login retry runs once and nothing leaks); and the reconcile lane
+    `tests/test_connectors_vmware_rest_appliance_local_accounts_reconcile.py`
+    (the three paths in the pinned 8.0 and 9.0 `vcenter.yaml`, and the flat
+    `UpdateConfig` body in the 9.0 file).
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the

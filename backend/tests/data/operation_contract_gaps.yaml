@@ -356,7 +356,6 @@ k8s:
     - examples
   k8s.configmap.list:
     - summary
-    - field_descriptions
     - llm_instructions
     - examples
   k8s.cordon:
@@ -386,12 +385,10 @@ k8s:
     - examples
   k8s.deployment.list:
     - summary
-    - field_descriptions
     - llm_instructions
     - examples
   k8s.event.list:
     - summary
-    - field_descriptions
     - llm_instructions
     - examples
   k8s.exec:
@@ -400,7 +397,6 @@ k8s:
     - examples
   k8s.ingress.list:
     - summary
-    - field_descriptions
     - llm_instructions
     - examples
   k8s.job.create:
@@ -438,7 +434,6 @@ k8s:
     - examples
   k8s.persistentvolumeclaim.list:
     - summary
-    - field_descriptions
     - llm_instructions
     - examples
   k8s.pod.info:
@@ -448,7 +443,6 @@ k8s:
     - examples
   k8s.pod.list:
     - summary
-    - field_descriptions
     - llm_instructions
     - examples
   k8s.rollout.restart:
@@ -470,7 +464,6 @@ k8s:
     - examples
   k8s.service.list:
     - summary
-    - field_descriptions
     - llm_instructions
     - examples
   k8s.storageclass.list:

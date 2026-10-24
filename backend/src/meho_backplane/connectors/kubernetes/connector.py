@@ -1455,6 +1455,36 @@ class KubernetesConnector(Connector):
 
         return await _k8s_deployment_info(self, target, operator, params)
 
+    async def k8s_job_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.job.list`` op.
+
+        ``operator`` is forwarded to the module-level handler; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_job import k8s_job_list as _k8s_job_list
+
+        return await _k8s_job_list(self, target, operator, params)
+
+    async def k8s_job_info(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.job.info`` op.
+
+        ``operator`` is forwarded to the module-level handler; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_job import k8s_job_info as _k8s_job_info
+
+        return await _k8s_job_info(self, target, operator, params)
+
     async def k8s_scale(
         self,
         operator: Operator,

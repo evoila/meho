@@ -337,6 +337,8 @@ real operator through the same loader.
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
+| `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
+| `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
 | `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
@@ -600,7 +602,7 @@ and nothing is written to Vault on failure.
 ### Shared list-op request shape (`ops_listparams.py`)
 
 Every namespaced list op on this connector
-(`k8s.pod.list`, `k8s.deployment.list`, `k8s.event.list`,
+(`k8s.pod.list`, `k8s.deployment.list`, `k8s.job.list`, `k8s.event.list`,
 `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list`) shares
 the same input-parameter shape via the building blocks in
 [`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
@@ -613,7 +615,7 @@ the same input-parameter shape via the building blocks in
 - `label_selector` -- forwarded server-side; same K8s selector syntax
   for every op.
 
-Pod / deployment list additionally use the full base via
+Pod / deployment / job list additionally use the full base via
 `LIST_BASE_PROPERTIES`, which adds `field_selector` + `limit` +
 `continue_token`. The operator passes `limit=N` plus optional
 `continue_token=<cursor>` on each call; the response carries
@@ -640,10 +642,11 @@ See [`docs/codebase/api-shape-conventions.md`](api-shape-conventions.md)
 list-op request-shape parity); the rule applies across connectors
 once siblings adopt the pattern.
 
-### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info`)
+### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info` / `k8s.job.info`)
 
-Both `info` ops accept an exact name or a unique prefix within the
-namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`):
+All three `info` ops accept an exact name or a unique prefix within the
+namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`,
+reused by `resolve_job_name` in `ops_job.py`):
 
 1. Exact match wins -- `foo-bar` resolves to the literal `foo-bar`
    pod even when `foo-bar-x` also exists.
@@ -656,7 +659,7 @@ namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`):
    hint without parsing the error string.
 
 The resolver pages via `list_namespaced_pod` /
-`list_namespaced_deployment` without server-side pagination -- the
+`list_namespaced_deployment` / `list_namespaced_job` without server-side pagination -- the
 operator-facing namespaces are typically O(10..100) objects which
 fits in one unpaginated response. Heavy-tenancy namespaces with
 hundreds of workload objects are not the prefix-resolver's target
@@ -682,6 +685,42 @@ place the reason shows up, and Kubernetes drops events after one
 hour by default. The container status keeps the reason for as long as
 the pod exists. The change is additive: `state` and `last_state` keep
 their one-word shape.
+
+### Job reads (`ops_job.py`)
+
+`k8s.job.list` and `k8s.job.info` answer "did the Job finish, and did it
+work?" for migration, backup and one-off batch Jobs. Both are safe reads
+in the `workload` group over `BatchV1Api`.
+
+- `state` is one word from the Job's conditions, in this order: `failed`
+  when the `Failed` condition is true, `complete` when `Complete` is
+  true, `suspended` when `Suspended` is true, else `running`. `failed`
+  wins so a Job that failed after a partial success reads as failed.
+- `pods_active` / `pods_succeeded` / `pods_failed` come from `status`;
+  `completions` from `spec` (`null` = any one success completes the
+  Job). `start_time` and `completion_time` are UTC ISO 8601 strings;
+  `completion_time` is set only when the Job succeeded.
+- `k8s.job.info` adds `conditions` (`type` / `status` / `reason` /
+  `message` / `last_transition_time` -- a failed Job says
+  `BackoffLimitExceeded` or `DeadlineExceeded` here), `backoff_limit`,
+  `active_deadline_seconds`, the template `containers` (name + image),
+  `pod_selector` and `pods`.
+- `pod_selector` is the Job's own `spec.selector` rendered as a selector
+  string (`label_selector_string`). The API server sets that field on
+  every stored Job; when it is missing the Job-name label
+  `batch.kubernetes.io/job-name=<name>` is the fallback, so `pods` is
+  never silently empty.
+- `pods` are found with one `CoreV1Api.list_namespaced_pod` call using
+  that selector, projected through `pod_row` (the `k8s.pod.list` row
+  shape), ordered newest first and cut at `JOB_INFO_MAX_PODS` (50).
+  `pods_truncated: true` says the list was cut; `k8s.pod.list` with
+  `label_selector=<pod_selector>` returns all of them.
+- The op declares `llm_instructions.result_scalars` so the state and
+  the counts stay inline if the JSONFlux reducer ever spills the pod
+  list to a handle.
+
+Not covered: CronJob reads, and `k8s.ls /<namespace>` does not count
+Jobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
 
 ### ConfigMap privacy split
 

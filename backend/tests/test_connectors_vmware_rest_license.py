@@ -8,8 +8,10 @@
   person approves.
 
 A licence key is a secret. Each test that feeds vendor data checks that no
-full key reaches the result, a log line, the gate params, the preview, a
-raised error, an audit row, an approval row or a flight-recorder span.
+full key reaches the result, a log line, the gate params, the preview, an
+audit row, an approval row or a flight-recorder span. An error of the write
+is raised as it is; the dispatcher's shared rule for operations that send a
+secret keeps the vendor's text out of the error result and the audit row.
 
 Every vCenter answer is a hand-written fake in the VI-JSON shape of the pinned
 vendor files. The keys are made up (they start with ``FAKE``); the host and
@@ -60,12 +62,11 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_WHEN_TO_USE,
     assignment_row,
-    hide_license_keys,
     license_row,
     mask_license_key,
     query_assigned_licenses,
 )
-from meho_backplane.connectors.vmware_rest.soap import SoapFault, attach_soap_fault, soap_fault_of
+from meho_backplane.connectors.vmware_rest.soap import SoapFault, attach_soap_fault
 from meho_backplane.connectors.vmware_rest.typed_ops_license import (
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
     VMWARE_LICENSE_LIST_OP,
@@ -82,6 +83,7 @@ from meho_backplane.operations._errors import result_connector_auth_failed
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.operations.approval_queue import approve_request
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from meho_backplane.settings import get_settings
@@ -403,18 +405,6 @@ def test_mask_hides_a_short_value_in_full_and_ignores_non_strings() -> None:
     assert mask_license_key(12345) is None
 
 
-def test_hide_license_keys_masks_the_given_key_and_any_key_shaped_value() -> None:
-    text = (
-        f"InvalidLicense: key {_KEY_ENT.lower()} refused; also tried {_KEY_ENT_2} "
-        "for host-12 at 2026-10-01"
-    )
-    hidden = hide_license_keys(text, _KEY_ENT)
-    _assert_no_full_key(hidden)
-    assert "*****-*****-*****-*****-ab12c" in hidden
-    assert "*****-*****-*****-*****-CD34E" in hidden
-    assert "host-12 at 2026-10-01" in hidden
-
-
 # ---------------------------------------------------------------------------
 # Row shapes
 # ---------------------------------------------------------------------------
@@ -652,18 +642,11 @@ _UPDATE_URL = (
     "https://vc.test.invalid/sdk/vim25/8.0.3.0/LicenseAssignmentManager/"
     "LicenseAssignmentManager/UpdateAssignedLicense"
 )
-_TIMEOUTS = {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 5.0}
-_MASKED_ENT = "*****-*****-*****-*****-AB12C"
 
 
 def _key_bearing_request() -> httpx.Request:
     """The request a real write sends: the full key in its JSON body."""
-    return httpx.Request(
-        "POST",
-        _UPDATE_URL,
-        json={"entity": "host-12", "licenseKey": _KEY_ENT},
-        extensions={"timeout": _TIMEOUTS},
-    )
+    return httpx.Request("POST", _UPDATE_URL, json={"entity": "host-12", "licenseKey": _KEY_ENT})
 
 
 def _vi_json_fault(
@@ -691,77 +674,9 @@ def _auth_error(cause: httpx.HTTPStatusError) -> ConnectorAuthError:
     return error
 
 
-def _assert_http_error_hides_the_key(err: httpx.HTTPStatusError) -> None:
-    _assert_no_full_key(err.response.text)
-    _assert_no_full_key(str(err))
-    assert err.request.content == b"", "the request body held the key"
-    assert err.response.request is err.request
-    assert err.request.extensions["timeout"] == _TIMEOUTS
-
-
-@pytest.mark.parametrize("status", [401, 403, 429, 500])
-async def test_assign_http_error_keeps_its_class_and_status_but_not_the_key(
-    gate: _GateRecorder, status: int
-) -> None:
-    fault = _vi_json_fault(
-        status,
-        "InvalidLicense",
-        f"The license key {_KEY_ENT} is not valid for this host",
-        licenseContent=_KEY_ENT,
-    )
-    conn = _FakeVcenter(update_error=fault)
-    with pytest.raises(httpx.HTTPStatusError) as raised:
-        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
-    # The same error and status, so the dispatcher sorts it as before (a 401
-    # still leads to a new login and one retry).
-    assert raised.value is fault
-    assert raised.value.response.status_code == status
-    body = raised.value.response.json()
-    assert body["_typeName"] == "InvalidLicense"
-    assert body["faultstring"] == f"The license key {_MASKED_ENT} is not valid for this host"
-    assert body["licenseContent"] == _MASKED_ENT
-    _assert_http_error_hides_the_key(raised.value)
-
-
-async def test_assign_auth_fault_keeps_its_class_but_masks_the_attached_answer(
-    gate: _GateRecorder,
-) -> None:
-    cause = _vi_json_fault(
-        500,
-        "NoPermission",
-        f"Permission to assign {_KEY_ENT} was denied",
-        privilegeId="Global.Licenses",
-    )
-    auth = _auth_error(cause)
-    conn = _FakeVcenter(update_error=auth)
-    with pytest.raises(ConnectorAuthError) as raised:
-        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
-    # Class and classification fields stay, so the dispatcher still answers
-    # connector_auth_failed.
-    assert raised.value is auth
-    assert (auth.stage, auth.cause, auth.status_code) == ("call", "vim_fault_NoPermission", 500)
-    assert auth.__cause__ is cause
-    assert f"Permission to assign {_MASKED_ENT} was denied" in cause.response.text
-    _assert_http_error_hides_the_key(cause)
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        RuntimeError(
-            f"vmware vim UpdateAssignedLicense failed: vim fault InvalidLicense: {_KEY_ENT}"
-        ),
-        ConnectorAuthError(
-            "vmware vim UpdateAssignedLicense failed on target 'test-esx'",
-            status_code=401,
-            cause="session_establish_NoPermission",
-        ),
-    ],
-    ids=["write-fault", "auth-fault"],
-)
-async def test_assign_single_host_fault_keeps_its_class_but_masks_the_attached_fault(
-    gate: _GateRecorder, error: RuntimeError
-) -> None:
+def _soap_fault_error() -> RuntimeError:
+    """A single-host write fault with the parsed SOAP fault attached."""
+    error = RuntimeError("vmware vim UpdateAssignedLicense failed: vim fault InvalidLicense")
     attach_soap_fault(
         error,
         SoapFault(
@@ -770,45 +685,42 @@ async def test_assign_single_host_fault_keeps_its_class_but_masks_the_attached_f
             fault_type="InvalidLicense",
         ),
     )
+    return error
+
+
+def _invalid_license(status: int) -> httpx.HTTPStatusError:
+    return _vi_json_fault(
+        status,
+        "InvalidLicense",
+        f"The license key {_KEY_ENT} is not valid for this host",
+        licenseContent=_KEY_ENT,
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        *(_invalid_license(status) for status in (401, 403, 429, 500)),
+        _auth_error(_vi_json_fault(500, "NoPermission", f"Permission to assign {_KEY_ENT}")),
+        _soap_fault_error(),
+        httpx.ReadTimeout("timed out", request=_key_bearing_request()),
+        SessionLoginError("NotAuthenticated after a new login"),
+    ],
+    ids=["401", "403", "429", "500", "auth-fault", "soap-fault", "timeout", "login-fault"],
+)
+async def test_assign_raises_the_write_error_as_it_is(
+    gate: _GateRecorder, error: BaseException
+) -> None:
+    """The same error object, so the dispatcher sorts it as before.
+
+    A 401 still leads to a new login and one retry; a 403 or 429 gets its own
+    result. The dispatcher hides the vendor's text of this operation (the
+    tests through the dispatcher below).
+    """
     conn = _FakeVcenter(update_error=error)
     with pytest.raises(type(error)) as raised:
         await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
     assert raised.value is error
-    fault = soap_fault_of(error)
-    assert fault is not None
-    assert fault.faultstring == f"License key {_MASKED_ENT} is not valid"
-    assert fault.fault_type == "InvalidLicense"
-    _assert_no_full_key(str(error))
-
-
-async def test_assign_timeout_keeps_its_class_and_timeouts_but_drops_the_request_body(
-    gate: _GateRecorder,
-) -> None:
-    timeout = httpx.ReadTimeout("timed out", request=_key_bearing_request())
-    conn = _FakeVcenter(update_error=timeout)
-    with pytest.raises(httpx.ReadTimeout) as raised:
-        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
-    assert raised.value is timeout
-    assert timeout.request.content == b""
-    assert timeout.request.extensions["timeout"] == _TIMEOUTS
-
-
-async def test_assign_parse_error_masks_the_answer_it_keeps(gate: _GateRecorder) -> None:
-    parse_error = json.JSONDecodeError("Expecting value", f'{{"licenseKey": "{_KEY_ENT}", ', 32)
-    conn = _FakeVcenter(update_error=parse_error)
-    with pytest.raises(json.JSONDecodeError) as raised:
-        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
-    assert raised.value is parse_error
-    _assert_no_full_key(parse_error.doc)
-    assert _MASKED_ENT in parse_error.doc
-
-
-async def test_assign_login_fault_passes_through(gate: _GateRecorder) -> None:
-    login_fault = SessionLoginError("NotAuthenticated after a new login")
-    conn = _FakeVcenter(update_error=login_fault)
-    with pytest.raises(SessionLoginError) as raised:
-        await _assign(conn, entity_id="host-12", license_name="vSphere 8 Enterprise Plus")
-    assert raised.value is login_fault
 
 
 # ---------------------------------------------------------------------------
@@ -1182,37 +1094,40 @@ async def test_dispatch_of_an_auth_fault_stays_auth_failed_and_no_row_holds_a_ke
     def answer() -> httpx.HTTPStatusError:
         return _vi_json_fault(500, "NoPermission", f"Permission to assign {_KEY_ENT} was denied")
 
-    # Control: the dispatcher's formatter reads the attached answer, so an
-    # unmasked one would put the key into the result.
-    unmasked = result_connector_auth_failed(_ASSIGN_OP, _auth_error(answer()), None, 1.0)
-    assert _KEY_ENT in unmasked.model_dump_json()
+    # Control: the dispatcher's formatter reads the attached answer, so
+    # without the shared rule the key would be in the result.
+    unhidden = result_connector_auth_failed(_ASSIGN_OP, _auth_error(answer()), None, 1.0)
+    assert _KEY_ENT in unhidden.model_dump_json()
 
     result = await _dispatch_failing_assign(_auth_error(answer()), stub_embedding_service)
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_auth_failed"
-    assert _MASKED_ENT in result.extras["upstream_message"]
+    assert result.extras["cause"] == "vim_fault_NoPermission"
+    assert result.extras["upstream_message"] == VENDOR_TEXT_WITHHELD
+    assert result.extras["upstream_fault"]["type"] == "NoPermission"
     _assert_no_full_key(result.model_dump_json())
     rows = await _db_rows_text()
-    assert "AB12C" in rows
+    assert VENDOR_TEXT_WITHHELD in rows
     _assert_no_full_key(rows)
 
 
-async def test_dispatch_of_a_vendor_fault_shows_the_fault_and_no_row_holds_a_key(
+@pytest.mark.parametrize(
+    ("error", "fault_type"),
+    [(_invalid_license(500), "InvalidLicense"), (_soap_fault_error(), "InvalidLicense")],
+    ids=["vi-json-fault", "soap-fault"],
+)
+async def test_dispatch_of_a_vendor_fault_keeps_the_fault_type_and_no_row_holds_a_key(
     _clean_registry: None,
     stub_embedding_service: AsyncMock,
+    error: BaseException,
+    fault_type: str,
 ) -> None:
-    fault = _vi_json_fault(
-        500,
-        "InvalidLicense",
-        f"The license key {_KEY_ENT} is not valid for this host",
-        licenseContent=_KEY_ENT,
-    )
-    result = await _dispatch_failing_assign(fault, stub_embedding_service)
+    result = await _dispatch_failing_assign(error, stub_embedding_service)
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_error"
     assert result.extras["upstream_fault"] == {
-        "type": "InvalidLicense",
-        "faultstring": f"The license key {_MASKED_ENT} is not valid for this host",
+        "type": fault_type,
+        "faultstring": VENDOR_TEXT_WITHHELD,
     }
     _assert_no_full_key(result.model_dump_json())
     _assert_no_full_key(await _db_rows_text())

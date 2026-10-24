@@ -66,6 +66,7 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _EXEMPT: dict[str, str] = {
     "argocd.app.set": "An Argo CD app spec names a Git source and a cluster; no login in it.",
     "k8s.deployment.list": "continue_token is the paging cursor of the list, not a secret.",
+    "k8s.job.list": "continue_token is the paging cursor of the list, not a secret.",
     "k8s.pod.list": "continue_token is the paging cursor of the list, not a secret.",
     "sddc.network_pool.create": "A network pool spec holds VLANs, subnets and IP ranges only.",
     "vmware.composite.namespace.create": "Its specs name storage policies, libraries, VM classes.",

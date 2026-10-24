@@ -2027,7 +2027,10 @@ jobs:
         # self-checks also run (again) here — seconds, harmless. Lane
         # placement rule + amortisation pattern:
         # docs/decisions/spec-reconcile-guards-standard.md.
-        run: uv run pytest -x tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
+        # -rs prints the reason of every skipped test. The k3s tests skip
+        # when the cluster cannot pull an image; without the reason a green
+        # lane hides that nothing ran on the cluster.
+        run: uv run pytest -x -rs tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
 
   python-migration-tests:
     name: Python (database migrations)

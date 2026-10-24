@@ -663,6 +663,26 @@ hundreds of workload objects are not the prefix-resolver's target
 audience; the agent typically reaches them via the list path with
 explicit pagination.
 
+### Container status detail in `k8s.pod.info` (#4828)
+
+Each entry of `container_statuses` and `init_container_statuses` is
+built by `container_status_row()` in `ops_workload.py`:
+
+| field | source | meaning |
+| --- | --- | --- |
+| `name`, `image`, `ready`, `restart_count` | top-level `V1ContainerStatus` | `image` is the image the pod asked for. |
+| `image_id` | `imageID` | Digest of the image the container really runs (`repo@sha256:...`). Empty until the image is pulled. Compare it with the pinned digest after an upgrade. |
+| `state`, `last_state` | populated branch of the `V1ContainerState` union | One word: `running`, `waiting` or `terminated`; `None` when absent. |
+| `reason`, `message` | `state.waiting` or `state.terminated` | Why the container waits (`ImagePullBackOff`, `ErrImagePull`, `CrashLoopBackOff`, `CreateContainerConfigError`) or stopped (`OOMKilled`, `Error`), with the error text. `None` while running. |
+| `exit_code` | `state.terminated.exitCode` | Set only when the current state is `terminated`. |
+| `last_reason`, `last_exit_code` | `last_state` | Why the container stopped the last time. For a `CrashLoopBackOff` container this is the real cause (e.g. `OOMKilled` / 137). |
+
+The reason fields matter because `k8s.event.list` is the only other
+place the reason shows up, and Kubernetes drops events after one
+hour by default. The container status keeps the reason for as long as
+the pod exists. The change is additive: `state` and `last_state` keep
+their one-word shape.
+
 ### ConfigMap privacy split
 
 `k8s.configmap.list` and `k8s.configmap.info` deliberately split the

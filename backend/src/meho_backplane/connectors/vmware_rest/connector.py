@@ -3227,6 +3227,30 @@ class VmwareRestConnector(HttpConnector):
 
         return await vm_info_impl(self, operator, target, params)
 
+    async def snapshot_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.snapshot.list`` -- the snapshots of one VM, as a flat list.
+
+        A ``source_kind="typed"`` read: the dispatcher binds this method to the
+        connector instance and invokes it with ``(operator, target, params)``
+        (see :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        the VM's ``snapshot`` property through PropertyCollector on the
+        connector session, so it works with zero catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_snapshot_list.snapshot_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_snapshot_list import (
+            snapshot_list_impl,
+        )
+
+        return await snapshot_list_impl(self, operator, target, params)
+
     async def vm_question_get(
         self,
         operator: Operator,

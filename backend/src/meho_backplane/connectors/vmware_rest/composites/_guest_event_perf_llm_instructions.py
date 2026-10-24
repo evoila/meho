@@ -20,7 +20,9 @@ _P = "vmware.composite."
 
 _GUEST_LOGIN = (
     "VMware Tools must run in the guest. The guest login (guest_username and "
-    "guest_password) comes from the target's secret, never from params."
+    "guest_password) comes from the target's secret, never from params. If this "
+    "VM has its own guest login stored under the target's secret namespace, pass "
+    "its reference in guest_secret_ref; the value itself is never a parameter."
 )
 
 GUEST_EVENT_PERF_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {

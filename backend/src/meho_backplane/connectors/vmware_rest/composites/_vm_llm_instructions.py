@@ -116,6 +116,11 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "parameter_hints": {
             "library_name": "Only narrows a library_item_name lookup to one library.",
             "network_mappings": "{<OVF network name>: <network moid>}.",
+            "deployment_option": (
+                "The OVF deployment option key, for example a size profile. Omit it for "
+                "the OVF default. A key the item does not offer returns "
+                "invalid_reference, with the offered keys in candidates."
+            ),
         },
         "output_shape": (
             "{status: deployed|deploy_failed|deploy_error|invalid_reference|"
@@ -165,22 +170,70 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         ),
     },
     _P + "vm.snapshot.revert": {
-        "when_to_call": (
-            "Call to put a VM back to a named snapshot, for example after a failed change."
-        ),
+        "when_to_call": ("Call to put a VM back to a snapshot, for example after a failed change."),
         "preconditions": (
-            "Everything the VM did after the snapshot is lost. The snapshot name must "
-            "be unique on the VM: this op takes no snapshot id, so if two snapshots "
-            "share the name it refuses with status ambiguous."
+            "Everything the VM did after the snapshot is lost. Give snapshot_name or "
+            "snapshot_id (from vmware.snapshot.list), not both. If two snapshots share "
+            "the name, it refuses with status ambiguous; then pass the snapshot_id."
         ),
         "output_shape": (
             "{status: reverted|ambiguous|not_found|timeout, snapshot_id, "
             "candidates: [{name, snapshot}], guidance, issues}."
         ),
         "next_step": (
-            "On ambiguous, rename one of the snapshots (outside MEHO) and call again. "
-            "On timeout, check the task with vmware.tasks.recent. Then check the VM "
-            "with vmware.vm.info."
+            "On ambiguous, call again with snapshot_id set to one candidate's snapshot. "
+            "On not_found, list the snapshots with vmware.snapshot.list. On timeout, "
+            "check the task with vmware.tasks.recent. Then check the VM with "
+            "vmware.vm.info."
+        ),
+    },
+    _P + "vm.snapshot.create": {
+        "when_to_call": (
+            "Call to take a snapshot of a VM before a risky change, such as an upgrade or "
+            "a password reset, so you can go back with vm.snapshot.revert."
+        ),
+        "preconditions": (
+            "vm is the moid, not the name (vmware.vm.info finds it). Pick a snapshot_name "
+            "the VM does not use yet. The call waits for approval before it runs. "
+            "memory=true also saves the memory of a running VM; quiesce=true needs VMware "
+            "Tools in the guest. A snapshot is not a backup: keep it only for the change."
+        ),
+        "parameter_hints": {
+            "snapshot_name": "A short name that says why, e.g. 'before-upgrade'.",
+        },
+        "output_shape": (
+            "{status: created|unchanged|not_found|invalid_request|timeout, vm, vm_name, "
+            "snapshot_id, snapshot: {snapshot_id, name, description, created, "
+            "power_state, quiesced, current, parent_snapshot_id}, task, task_state, "
+            "guidance, issues}."
+        ),
+        "next_step": (
+            "On created, keep snapshot_id: pass it to vm.snapshot.revert to go back, or to "
+            "vm.snapshot.delete when the change worked. On unchanged, a snapshot with that "
+            "name already exists (its snapshot_id is in the answer). On timeout, check the "
+            "task with vmware.tasks.recent, then call vmware.snapshot.list."
+        ),
+    },
+    _P + "vm.snapshot.delete": {
+        "when_to_call": (
+            "Call to delete a snapshot that is no longer needed, for example after a change worked."
+        ),
+        "preconditions": (
+            "Give vm and snapshot_id (from vmware.snapshot.list). The VM keeps its present "
+            "state; only the restore point goes, for good. Child snapshots stay unless "
+            "remove_children is true. Run preview_operation first and pass its "
+            "preview_hash. A second person must always approve; an AI agent cannot run it "
+            "alone. vCenter merges the snapshot's disk changes, which can take long."
+        ),
+        "parameter_hints": {"snapshot_id": "Snapshot moid, e.g. 'snapshot-12'."},
+        "output_shape": (
+            "{status: deleted|unchanged|invalid_request|still_present|timeout, object: "
+            "{kind, vm, vm_name, snapshot_id, remove_children, name, description, created, "
+            "power_state, current, child_count}, blockers, task, task_state, guidance}."
+        ),
+        "next_step": (
+            "On deleted, check with vmware.snapshot.list. On timeout, the delete may still "
+            "finish: check the task with vmware.tasks.recent, then list the snapshots."
         ),
     },
     _P + "vm.destroy": {

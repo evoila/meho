@@ -3330,6 +3330,156 @@ async def test_deploy_from_library_without_name_and_no_ovf_name_refuses(
     assert gate.calls == []
 
 
+def _ovf_summary_with_options(*keys: str) -> dict[str, Any]:
+    """An OVF summary whose ``DeploymentOptionParams`` lists *keys* (#4035)."""
+    return {
+        **_OVF_SUMMARY,
+        "additional_params": [
+            {"type": "PropertyParams", "properties": []},
+            {
+                "type": "DeploymentOptionParams",
+                "deployment_options": [
+                    {"key": key, "label": key, "description": key, "default_choice": i == 0}
+                    for i, key in enumerate(keys)
+                ],
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deployment_option_sent_as_selected_key(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A listed ``deployment_option`` rides the deploy as ``selected_key`` (#4035).
+
+    With ``name`` set the summary is read only to check the key. The option
+    entry follows the ``PropertyParams`` entry of ``ovf_properties``.
+    """
+    conn = _RecordingConnector(
+        {
+            _FILTER_PATH: _ovf_summary_with_options("small", "medium", "large"),
+            _DEPLOY_PATH: _deployment_result(succeeded=True),
+        },
+        vmomi=_rename_vmomi("vm-ovf-9"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "ovf_properties": {"guestinfo.hostname": "router-01"},
+            "deployment_option": "medium",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _FILTER_PATH),
+        ("POST", _DEPLOY_PATH),
+    ]
+    spec = conn.calls[1]["body"]["deployment_spec"]
+    assert spec["name"] == _DEPLOY_NAME
+    assert spec["additional_parameters"] == [
+        {
+            "type": "PropertyParams",
+            "properties": [{"id": "guestinfo.hostname", "value": "router-01"}],
+        },
+        {"type": "DeploymentOptionParams", "selected_key": "medium"},
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deployment_option_without_name_uses_one_summary_read(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """Without ``name`` one summary read gives both the default name and the option check."""
+    conn = _RecordingConnector(
+        {
+            _FILTER_PATH: _ovf_summary_with_options("small", "large"),
+            _DEPLOY_PATH: _deployment_result(succeeded=True),
+        },
+        vmomi=_rename_vmomi("vm-ovf-9"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "resource_pool": "resgroup-8",
+            "deployment_option": "large",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert [c["path"] for c in conn.calls] == [_FILTER_PATH, _DEPLOY_PATH]
+    spec = conn.calls[1]["body"]["deployment_spec"]
+    assert spec["name"] == _OVF_DEFAULT_DEPLOY_NAME
+    assert spec["additional_parameters"] == [
+        {"type": "DeploymentOptionParams", "selected_key": "large"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("summary", "offered"),
+    [
+        (_ovf_summary_with_options("small", "medium"), ["small", "medium"]),
+        # An OVF with no DeploymentOptionSection offers no option at all.
+        (_OVF_SUMMARY, []),
+    ],
+)
+@pytest.mark.asyncio
+async def test_deploy_from_library_unknown_deployment_option_refused(
+    gate: _GateRecorder, summary: dict[str, Any], offered: list[str]
+) -> None:
+    """A key the OVF does not offer → ``invalid_reference`` with the offered keys; no deploy."""
+    conn = _RecordingConnector({_FILTER_PATH: summary})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "deployment_option": "huge",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_reference"
+    assert out["library_item_id"] == "li-ovf"
+    assert out["vm_id"] is None
+    assert out["candidates"] == offered
+    assert out["issues"][0]["category"] == "input"
+    assert "'huge'" in out["issues"][0]["message"]
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deployment_option_summary_fault_is_resolve_error(
+    gate: _GateRecorder,
+) -> None:
+    """A faulted summary read while checking the option → ``resolve_error``; no deploy."""
+    conn = _RecordingConnector([httpx.ReadTimeout("")])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "deployment_option": "small",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "resolve_error"
+    assert out["issues"][0]["category"] == "resolve"
+    assert gate.calls == []
+
+
 @pytest.mark.asyncio
 async def test_deploy_from_library_without_name_cleans_up_by_deploy_name(
     gate: _GateRecorder, deploy_token: str

@@ -539,6 +539,16 @@ async def test_execution_get_replaces_secret_values_in_properties_entries(
             assert secret not in rendered
 
 
+def _syslogs_answer(lines: list[dict[str, Any]]) -> Any:
+    """A syslogs mock that sends no more lines than ``maxResult`` asks for."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        limit = int(request.url.params["maxResult"])
+        return httpx.Response(200, json={"logs": lines[:limit]})
+
+    return answer
+
+
 @pytest.mark.asyncio
 async def test_execution_logs_cap_lines_and_text(
     _stub_embedding: AsyncMock, session: AsyncSession
@@ -557,15 +567,16 @@ async def test_execution_logs_cap_lines_and_text(
         },
         {"entry": {"severity": "info", "short-description": "<wrapped>"}},
         {"severity": "info", "short-description": "<third>"},
+        {"severity": "info", "short-description": "<fourth>"},
     ]
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
-        route = mock.get(f"{_RUN_PATH}/syslogs").respond(200, json={"logs": lines})
+        route = mock.get(f"{_RUN_PATH}/syslogs").mock(side_effect=_syslogs_answer(lines))
         result = await _dispatch(
             "vro.execution.logs", {"workflow_id": _WF, "execution_id": _RUN, "max_lines": 2}
         )
 
     assert result.status == "ok", result.error
-    assert route.calls[0].request.url.params["maxResult"] == "2"
+    assert route.calls[0].request.url.params["maxResult"] == "3"
     body = result.result
     assert body["lines"] == 2
     assert body["more_lines"] is True
@@ -575,6 +586,23 @@ async def test_execution_logs_cap_lines_and_text(
     assert first["cut"] is True
     assert second["short_description"] == "<wrapped>"
     assert second["cut"] is False
+
+
+@pytest.mark.asyncio
+async def test_execution_logs_with_exactly_max_lines_has_no_more_lines(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register(_stub_embedding)
+    lines = [{"severity": "info", "short-description": f"<line-{i}>"} for i in range(2)]
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(f"{_RUN_PATH}/syslogs").mock(side_effect=_syslogs_answer(lines))
+        result = await _dispatch(
+            "vro.execution.logs", {"workflow_id": _WF, "execution_id": _RUN, "max_lines": 2}
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result["lines"] == 2
+    assert result.result["more_lines"] is False
 
 
 # ---------------------------------------------------------------------------

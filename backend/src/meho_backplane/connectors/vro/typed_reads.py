@@ -449,8 +449,9 @@ async def vro_execution_logs_impl(
 ) -> dict[str, Any]:
     """``vro.execution.logs`` -- the log lines of one run, size-capped.
 
-    Asks for at most ``max_lines`` lines (``maxResult``) and keeps at most
-    that many even if the server sends more. Each text is cut at
+    Asks for ``max_lines + 1`` lines (``maxResult``) and keeps at most
+    ``max_lines``; the extra line only tells whether ``more_lines`` is true.
+    Each text is cut at
     :data:`LOG_TEXT_MAX` characters; a cut row has ``cut: true``.
     """
     workflow_id = _segment("workflow", params.get("workflow_id"))
@@ -460,7 +461,7 @@ async def vro_execution_logs_impl(
         target,
         _SYSLOGS_PATH.format(workflowId=workflow_id, executionId=execution_id),
         operator=operator,
-        params={"maxResult": max_lines},
+        params={"maxResult": max_lines + 1},
     )
     logs = payload.get("logs")
     entries = [entry for entry in logs or [] if isinstance(entry, dict)]

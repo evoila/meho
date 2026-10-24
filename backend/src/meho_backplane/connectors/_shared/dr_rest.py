@@ -18,7 +18,15 @@ Protection and Recovery appliance serves both. The two APIs share:
 :class:`DrRestConnector` holds this shared part. A subclass sets the
 product, the version range and the paths: :attr:`DrRestConnector.api_base`,
 :attr:`DrRestConnector.session_path`, :attr:`DrRestConnector.info_path` and
-:attr:`DrRestConnector.api_files`.
+:attr:`DrRestConnector.api_files`. It also defines the two operation entry
+methods, ``about`` and ``api_file_get``, which call the shared code here
+(:meth:`DrRestConnector.server_about` and
+:func:`~meho_backplane.connectors._shared.dr_api_file.dr_api_file_get`).
+The entry methods are not on this base class on purpose: the stored
+handler of an operation names the class that defines the method, and the
+dispatcher binds it only to a connector of that class. So ``srm.about``
+cannot run on a ``vr`` target, and ``vr.about`` cannot run on an ``srm``
+target: the dispatcher stops before any HTTP request.
 
 Sessions are cached per target and tenant (``target_cache_key``), so two
 targets on one address (a 9.1 appliance registered once as ``srm`` and
@@ -176,7 +184,9 @@ class DrRestConnector(HttpConnector):
 
     Not registered itself. A subclass sets ``product``, ``version``,
     ``impl_id``, ``supported_version_range``, :attr:`api_base`,
-    :attr:`session_path`, :attr:`info_path` and :attr:`api_files`.
+    :attr:`session_path`, :attr:`info_path` and :attr:`api_files`, and
+    defines the operation entry methods ``about`` and ``api_file_get``
+    (see the module docstring for why they are not defined here).
     """
 
     #: Base path of the REST API, for example ``/api/rest/srm/v2``.
@@ -388,21 +398,10 @@ class DrRestConnector(HttpConnector):
             params=params,
         )
 
-    async def about(
-        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``<product>.about`` -- ``GET`` the server summary, reduced."""
-        del params  # the schema declares no parameters
+    async def server_about(self, operator: Operator, target: DrTargetLike) -> dict[str, Any]:
+        """``GET`` the server summary, reduced. The body of each ``<product>.about``."""
         payload = await self._get_json(target, self.info_path, operator=operator)
         return summarise_server_info(payload)
-
-    async def api_file_get(
-        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``<product>.api_file.get`` shim; the body lives in :mod:`.dr_api_file`."""
-        from meho_backplane.connectors._shared.dr_api_file import dr_api_file_get
-
-        return await dr_api_file_get(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached sessions, then tear down the httpx pool."""

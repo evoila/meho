@@ -14,6 +14,9 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
   connector classes, and each uses its own login;
 * a ``401`` on the ``vr`` target makes a new login for that target only;
   the ``srm`` target keeps its session;
+* an ``srm.*`` op with a ``vr`` target, and a ``vr.*`` op with an ``srm``
+  target, end with an error and send no HTTP request; each product's
+  stored handler names its own connector class;
 * ``vr.api_file.get`` for both files; an unknown file name sends no HTTP
   request; the pinned 9.1 vendor file comes back with its example
   secrets replaced (only when the spec shelf is present);
@@ -384,6 +387,84 @@ async def test_401_on_the_vr_target_logs_in_again_for_it_only(
     assert srm_login.call_count == 1
     assert [c.request.headers["x-dr-session"] for c in vr_info.calls] == ["vr-1", "vr-1", "vr-2"]
     assert [c.request.headers["x-dr-session"] for c in srm_info.calls] == ["srm-1", "srm-1"]
+
+
+# ---------------------------------------------------------------------------
+# An op of one product never runs on the other product's target
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connector_id", "op_id", "params", "target_product", "target_version"),
+    [
+        (SRM_CONNECTOR_ID, "srm.about", {}, VR_PRODUCT, VR_VERSION),
+        (SRM_CONNECTOR_ID, "srm.api_file.get", {"file": "srm"}, VR_PRODUCT, VR_VERSION),
+        (VR_CONNECTOR_ID, "vr.about", {}, SRM_PRODUCT, SRM_VERSION),
+        (VR_CONNECTOR_ID, "vr.api_file.get", {"file": "vr"}, SRM_PRODUCT, SRM_VERSION),
+    ],
+)
+async def test_an_op_of_one_product_sends_nothing_to_the_other_products_target(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    connector_id: str,
+    op_id: str,
+    params: dict[str, Any],
+    target_product: str,
+    target_version: str,
+) -> None:
+    """``srm.*`` with a ``vr`` target, and the reverse, stop before any HTTP request.
+
+    The target resolves to the other product's connector. The stored
+    handler names the op's own class, so the dispatcher cannot bind it to
+    that connector and answers with an error instead of running the other
+    product's read under this op's name.
+    """
+    await _register_and_resolve(_stub_embedding)
+    await register_srm_typed_operations()
+    _srm_instance()
+    target = _Target(product=target_product, version=target_version)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.route().respond(200, json={"session_id": "never-used"})
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+        )
+
+    assert result.status == "error"
+    assert result.op_id == op_id
+    assert result.error is not None and result.error.startswith("connector_error")
+    assert mock.calls.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_each_product_stores_a_handler_on_its_own_class(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await register_vr_typed_operations()
+    await register_srm_typed_operations()
+    rows = (
+        (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.product.in_([VR_PRODUCT, SRM_PRODUCT]),
+                    EndpointDescriptor.impl_id.in_([VR_IMPL_ID, SRM_IMPL_ID]),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 4
+    class_by_product = {VR_PRODUCT: "VrConnector", SRM_PRODUCT: "SrmConnector"}
+    for row in rows:
+        attr = "about" if row.op_id.endswith(".about") else "api_file_get"
+        assert row.handler_ref is not None
+        assert row.handler_ref.endswith(f".{class_by_product[row.product]}.{attr}"), row.handler_ref
 
 
 # ---------------------------------------------------------------------------

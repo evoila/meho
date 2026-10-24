@@ -69,8 +69,14 @@ other modes raise `NotImplementedError`.
 
 - `SrmConnector` (`connector.py`) -- the connector class, a subclass of
   `DrRestConnector` (`connectors/_shared/dr_rest.py`). It sets the SRM
-  paths (`api_base`, `session_path`, `info_path`, `api_files`). The base
-  caches one session id per target and tenant (`target_cache_key`).
+  paths (`api_base`, `session_path`, `info_path`, `api_files`) and
+  defines the entry methods `about` and `api_file_get`, which call the
+  shared code. The entry methods live on this class, not on the base, so
+  the stored handler of `srm.about` names `SrmConnector`. MEHO binds it
+  only to an `SrmConnector`, so an `srm.*` operation cannot run on a `vr`
+  target (the call ends with a `connector_error` before any HTTP
+  request). The base caches one session id per target and tenant
+  (`target_cache_key`).
 - `SrmTargetLike` (`session.py`) -- the minimum target shape: `id`,
   `tenant_id`, `name`, `host`, `port`, `secret_ref`, `auth_model`.
 - `SrmSessionLoader` (`session.py`) -- an async callable

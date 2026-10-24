@@ -36,14 +36,23 @@ backs ``fingerprint`` and the ``vr.api_file.get`` answer. The operation
 Operations
 ----------
 
-``vr.about`` and ``vr.api_file.get`` (body in
-:mod:`meho_backplane.connectors._shared.dr_api_file`). Both exist on 8.8,
-9.0 and 9.1, so no operation needs a version check yet.
+``vr.about`` and ``vr.api_file.get``. The entry methods are defined on
+this class and call the shared code (``server_about`` on the base class
+and :func:`~meho_backplane.connectors._shared.dr_api_file.dr_api_file_get`).
+Defining them here, not on the base class, is what keeps a ``vr.*``
+operation from running on an ``srm`` target: the stored handler names
+this class, and the dispatcher binds it only to a ``VrConnector``. Both
+operations exist on 8.8, 9.0 and 9.1, so no operation needs a version
+check yet.
 """
 
 from __future__ import annotations
 
-from meho_backplane.connectors._shared.dr_rest import DrRestConnector
+from typing import Any
+
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.dr_api_file import dr_api_file_get
+from meho_backplane.connectors._shared.dr_rest import DrRestConnector, DrTargetLike
 
 __all__ = ["API_BASE", "API_FILES", "VrConnector"]
 
@@ -71,3 +80,16 @@ class VrConnector(DrRestConnector):
     session_path = f"{API_BASE}/session"
     info_path = f"{API_BASE}/info"
     api_files = API_FILES
+
+    async def about(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.about`` -- ``GET /api/rest/vr/v2/info``, reduced."""
+        del params  # the schema declares no parameters
+        return await self.server_about(operator, target)
+
+    async def api_file_get(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.api_file.get``; the body is :func:`dr_api_file_get` in ``_shared/dr_api_file``."""
+        return await dr_api_file_get(self, operator, target, params)

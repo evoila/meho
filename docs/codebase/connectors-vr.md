@@ -41,7 +41,7 @@ read. This shared part lives in:
 
 - `connectors/_shared/dr_rest.py` -- the base class `DrRestConnector`
   (login, session cache, `invalidate_session`, version read,
-  fingerprint, probe, `about`, `api_file_get`), `DrTargetLike`,
+  fingerprint, probe, `server_about`), `DrTargetLike`,
   `DrSessionLoader`, `DrServerVersion`, `parse_server_version`,
   `summarise_server_info`;
 - `connectors/_shared/dr_api_file.py` -- `dr_api_file_get`, the body of
@@ -49,9 +49,18 @@ read. This shared part lives in:
 - `connectors/_shared/dr_rest_schemas.py` -- the response schemas and the
   `llm_instructions` texts both connectors use.
 
-`VrConnector` and `SrmConnector` only set the product, the version range
-and the paths (`api_base`, `session_path`, `info_path`, `api_files`).
-`docs/codebase/connectors-srm.md` describes the shared steps in detail.
+`VrConnector` and `SrmConnector` set the product, the version range and
+the paths (`api_base`, `session_path`, `info_path`, `api_files`). Each
+class also defines its own operation entry methods, `about` and
+`api_file_get`, which call the shared code. The entry methods are not on
+the base class on purpose. MEHO stores, for each operation, the name of
+the class that defines its method, and binds that method only to a
+connector of that class. So `srm.about` cannot run on a `vr` target, and
+`vr.about` cannot run on an `srm` target: the call ends with a
+`connector_error` before any HTTP request, and the policy check and the
+audit record never name one product's operation for the other product's
+read. `docs/codebase/connectors-srm.md` describes the shared steps in
+detail.
 
 ## Registering targets
 

@@ -483,6 +483,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "proxmox-api",
         "rabbitmq-management",
         "rke2-ssh",
+        "salt-raas",
         "sddc-rest",
         "sddc-vcf5",
         "secret-broker",

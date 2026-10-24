@@ -35361,6 +35361,7 @@
               "proxmox",
               "rabbitmq",
               "rke2",
+              "salt",
               "sddc",
               "srm",
               "tempo",

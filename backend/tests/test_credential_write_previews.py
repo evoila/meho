@@ -9,6 +9,10 @@ user, secret, host or patch) and must never show a secret value. Each test
 runs the real registered builder through :func:`build_proposed_effect` and
 checks both: the fields the approver needs, and that a made-up secret
 value appears nowhere in the stored effect.
+
+The builders are registered when each connector package is imported. The
+session fixture ``_force_import_connector_modules`` in ``conftest.py``
+imports every connector package, so this file does not import them.
 """
 
 from __future__ import annotations
@@ -20,13 +24,6 @@ from typing import Any
 
 import pytest
 
-# Imported for the side-effect: each package registers its preview builders.
-import meho_backplane.connectors.holodeck
-import meho_backplane.connectors.keycloak
-import meho_backplane.connectors.kubernetes
-import meho_backplane.connectors.sddc_manager
-import meho_backplane.connectors.vault
-import meho_backplane.connectors.vmware_rest.composites  # noqa: F401
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.operations._preview import (
     PreviewContext,

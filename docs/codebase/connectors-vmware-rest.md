@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 70 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 71 hand-authored composites
 that orchestrate cross-spec workflows: 16 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -18,7 +18,7 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880`) and 54 write
+reservation read `vm.resource_allocation.show` / `#3880`) and 55 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -58,12 +58,13 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 `#3339` -- six destructive deletes `network.portgroup.delete`,
 `host.standard_portgroup.delete`, `folder.delete`, `datastore.file.delete`,
 `content_library.delete`, `content_library.item.delete`, plus the caution
-`datastore.dir.create` (see **Governed teardown deletes**), and the destructive
+`datastore.dir.create` (see **Governed teardown deletes**), the destructive
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
-Tools installer unmount**), and the VM snapshot writes `vm.snapshot.create` (caution)
-+ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**)). The
+Tools installer unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
++ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), and the
+licence assign `license.assign` (see **vSphere licences**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -470,9 +471,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 70
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 71
   `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 44 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 45 dangerous/destructive
   writes + 10 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -809,6 +810,20 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     (the SSO Admin folder is a documentation path that the pinned 8.0 and
     9.0 `vcenter.yaml` do not serve; both serve
     `GET /appliance/system/version`).
+- **vSphere licences** (`license_common.py`, `typed_ops_license.py`,
+  `composites/_license.py`) — two typed reads and one write, on both
+  catalogs. See **vSphere licences** under Control flow.
+  - **`vmware.license.list`** (handler `license_list`, `safe`) — the
+    licences in the vCenter's licence inventory.
+  - **`vmware.license.assigned.list`** (handler `license_assigned_list`,
+    `safe`) — which licence each asset uses.
+  - **`vmware.composite.license.assign`** (`dangerous`,
+    `requires_approval=True`) — assign a licence to a host or to the
+    vCenter.
+
+  All three share the group `vmware-licensing`. Its text is one constant,
+  `license_common.LICENSE_WHEN_TO_USE`, that both registrars pass, so the
+  group row reads the same whichever registrar creates it first.
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the
@@ -965,12 +980,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 70 `vmware.composite.*` rows with
+   queued registrar and upserts: the 71 `vmware.composite.*` rows with
    `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 54 writes, all `requires_approval=True`
-   (33 `safety_level="dangerous"`; 10 `safety_level="caution"` —
+   service principals), and 55 writes, all `requires_approval=True`
+   (34 `safety_level="dangerous"`; 10 `safety_level="caution"` —
    `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1359,7 +1374,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 70 composites (16 reads + 54 writes) land as `source_kind="composite"`
+The 71 composites (16 reads + 55 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1426,7 +1441,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 70 composites are hand-authored aggregators the connector ships as
+The 71 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2843,6 +2858,65 @@ source mechanics are proven by mock-transport unit tests
 (`test_connectors_vmware_rest_ovf_import.py` /
 `test_connectors_vmware_rest_library_download.py`).
 
+### Copy helper: vCenter download to a destination URL (`_transfer.py`, #4343)
+
+`_transfer.copy_files` copies files from a vCenter download (a content
+library download session, a host configuration download, a datastore file)
+to a destination URL that accepts HTTP `PUT`. It adds no operation. The
+content library export, the host configuration backup and restore, and the
+datastore file export use it. Other connectors keep their own upload code.
+
+The calling operation owns the vCenter side. It passes the source files
+(name, download URL, expected size when known), the destination
+(`Destination`: an `https://` base URL plus a Vault reference to its token),
+a keep-alive callback, a clean-up callback, and optionally a callback that
+lists and removes leftovers from an earlier run.
+
+Before the first copy it checks every name: a safe path, listed once, and
+not ending in `.meho-partial`. MEHO keeps that ending for its temporary
+files; a file called `disk.meho-partial` would be removed as a leftover when
+`disk` is copied after it.
+
+Per file, one at a time:
+
+1. `HEAD` the final path: `401` / `403` stops (no write access); a file that
+   is there stops unless `overwrite` is set.
+2. `HEAD` `<name>.meho-partial`: a partial file from an earlier run is
+   deleted. A destination without `DELETE` (`405` / `501`) keeps it and the
+   new `PUT` replaces it. Any other error answer to this check or to the
+   delete stops the run before the upload.
+3. Stream the `GET` into a `PUT` of `<name>.meho-partial`, in chunks of at
+   most 8 MiB, counting bytes and computing SHA-256. It stops at the per-file
+   or total size limit, on a size that does not match, or on an error answer.
+   The `GET` sends `Accept-Encoding: identity`, so vCenter sends the raw
+   bytes and `Content-Length` is the size the copy counts.
+4. `MOVE` the partial file to its final name. A destination without `MOVE`
+   (`405` / `501`) keeps the temporary name and the row says `partial`.
+
+Each result row has `name`, `size`, `sha256`, `destination_path` (a path, no
+token) and `status` (`done`, `partial`, `failed`). On a stop it raises
+`TransferError`, which carries the rows so far.
+
+**Credentials.** No redirect is followed: a `3xx` from the source or the
+destination stops the run, so the token goes only to the destination host and
+the vCenter session only to vCenter. The destination host passes the same
+address screen as a target host (`targets/ssrf_guard.py`, through the
+address-pinning transport). Rows, errors and logs never carry the
+vCenter download URL or a token; a transport error shows only its class name.
+`httpx` logs one line per request with the URL; the production logging
+(`meho_backplane/logging.py`) cuts that URL down to its scheme and host.
+
+**Clean-up.** The clean-up callback runs in a `finally` block on success,
+error and cancel. When the MEHO process dies, it cannot run. What is left, and
+how it goes away:
+
+- the vCenter download session expires after its own timeout;
+- a temporary library item or session carries a name from `meho_temp_name`
+  (prefix `meho-transfer-`); the next run of the same operation lists and
+  removes it through `remove_leftovers`;
+- a `.meho-partial` file at the destination is removed or replaced by the
+  next run. It never looks like a complete file.
+
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 
 Two more vim-only writes ride the #2893 substrate (Task E). Neither has a
@@ -3558,6 +3632,99 @@ The line has the same text as the error above. The handler still
 refuses the call after approval.
 
 Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
+
+### vSphere licences (`license.list`, `license.assigned.list`, `license.assign`)
+
+Three operations for the licences of a vCenter (part 1 of #4384). A licence
+key is a secret. **No result, log line, audit row, approval request or
+flight-recorder span holds a full key.**
+
+| Operation | What it does | Vendor call | Risk |
+|---|---|---|---|
+| `vmware.license.list` | The licences in the vCenter's licence inventory: name, edition, product, used and total units, cost unit, end date, labels, masked key. | `RetrievePropertiesEx` of `LicenseManager.licenses` | `safe` |
+| `vmware.license.assigned.list` | Which licence each asset uses (the vCenter, every host, vSAN clusters), for every asset or one `entity_id`: asset id and name, product, licence name, masked key, evaluation or not, end date. | `LicenseAssignmentManager.QueryAssignedLicenses` | `safe` |
+| `vmware.composite.license.assign` | Assigns one licence from the inventory to one asset: a host or the vCenter. | `LicenseAssignmentManager.UpdateAssignedLicense` | `dangerous`; waits until a second person approves |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How they call vCenter.** Through the VI-JSON path (`_post_vmomi_json`),
+  like the other vim reads. VI-JSON exists since vCenter 8.0 U1, so vCenter
+  8.0 GA and 7.0 are not served. The `LicenseManager` moId is the fixed
+  vCenter singleton `LicenseManager` (like `TaskManager` in
+  `tasks.recent`); the `LicenseAssignmentManager` moId comes from its
+  property in the same read. So the operations are for vCenter targets only.
+  On vCenter 9, licences are usually managed in VCF Operations
+  (`vrops.licensing.*`). The guidance of the write says so; if vCenter 9
+  refuses the change, the caller gets the vendor fault as an error.
+- **The mask.** `license_common.mask_license_key` keeps the last 5
+  characters and turns every other letter and digit into `*`; dashes stay,
+  for example `*****-*****-*****-*****-AB12C`. A value of 10 characters or
+  fewer is hidden in full. It is the same "last 5" rule as
+  `vrops.license.info`. The field is `key_masked`: a name with `license`
+  and `key` next to each other would be replaced by the secret-name scrubs.
+- **Vendor answers.** `LicenseManager.licenses`, `QueryAssignedLicenses` and
+  the `UpdateAssignedLicense` answer hold full keys. The handlers build their
+  rows with `license_row` / `assignment_row`, which mask the key; a raw
+  vendor object never leaves a handler. So the result, a stored result
+  handle and the audit row (which keeps the handler's own return) hold
+  masked keys only.
+- **Flight recorder.** All three operations carry the tag `license-key`. Its
+  `key` token is in `SECRET_FAMILY_TAGS`, so `classify_body_exclusion` drops
+  the request and answer bodies of every vCenter call they make (the
+  `vrops.license.info` way). There is no `classify_op` pin: for a read, a pin
+  would also run the secret-name scrub on the caller's copy, which the
+  masked rows do not need.
+- **The write.** The caller names the licence by `license_name` (letter case
+  does not matter), by `key_suffix` (the last 5 characters of `key_masked`),
+  or by both. The handler finds the full key in the inventory itself. The key
+  is only in the `UpdateAssignedLicense` request body. The gate
+  (`_write_vmomi_sub_op` params, and so any approval request of the child op)
+  gets `entity_id`, `license_name` and `key_masked`. The park-time preview
+  shows the asset's licence now and the one it would get, both masked, plus
+  the `outcome`. The parameter schema has `additionalProperties: false`, so a
+  key cannot be passed in.
+- **Errors of the write.** A fault of `UpdateAssignedLicense` can echo the
+  key (the vSphere `InvalidLicense` fault has a `licenseContent` field), and
+  the dispatcher copies text out of an error into the result and the audit
+  row. So `_hide_key_in_error` masks the key in place in everything the error
+  carries, and then the same error is raised again:
+  - its message;
+  - the vendor answer of an HTTP error, also when that error is the cause of
+    a `ConnectorAuthError` (the VI-JSON `NoPermission` / `InvalidLogin` /
+    `NotAuthenticated` path, whose answer the `connector_auth_failed` result
+    shows);
+  - the SOAP fault the single-host path attaches;
+  - the text a JSON parse error keeps.
+
+  It also drops the request body (it held the key) from every HTTP error,
+  keeping the method, URL and timeouts. Masking uses `hide_license_keys`
+  (the key itself, and any value in the 5x5 key shape). The class, the
+  status and the auth fields stay, so the dispatcher sorts the error as
+  before: `connector_auth_failed`, a new login and one retry on a 401, the
+  403 and 429 results, `connector_error` with the masked `upstream_fault`.
+- **Assign flow.** One property read (inventory and
+  `LicenseAssignmentManager`); pick the licence (`license_not_found`, or
+  `license_ambiguous` with the masked `candidates`); `QueryAssignedLicenses`
+  for the asset (`asset_not_found`; `unchanged` when it already uses that
+  licence); then the gated write. Those four statuses stop the call before
+  any change and stay `ok` (soft refusals, no `error` issue).
+  `UpdateAssignedLicense` is synchronous (no task). The result carries
+  `before` and `license`, both masked. The governed child op is
+  `POST:/LicenseAssignmentManager/{moId}/UpdateAssignedLicense`.
+- **Not in this part.** Adding and removing licence keys (`AddLicense`,
+  `RemoveLicense`), and the performance counters and statistics intervals of
+  #4384, are still open.
+
+Tests: `tests/test_connectors_vmware_rest_license.py` (fakes, and mocked HTTP
+on the vCenter 8.0.3 and 9.0 paths; the dispatcher path from waiting for
+approval to the assignment, with a check that no audit or approval row holds
+a key; flight-recorder spans, with a control case without the tag),
+`tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
+`vi-json.yaml`) and the source scan in
+`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
 
 ## Dependencies
 

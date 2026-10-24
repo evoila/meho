@@ -64,7 +64,7 @@ https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/:
 * ``sddc.manager.list`` -- ``GET /v1/sddc-managers`` (SDDC Manager
   appliance inventory).
 * ``sddc.license.list`` -- ``GET /v1/license-keys`` (the license-key
-  inventory).
+  inventory). Each key comes back masked, as ``key_masked``.
 """
 
 from __future__ import annotations
@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.sddc_manager.session import SddcTargetLike
 
 if TYPE_CHECKING:
@@ -480,10 +481,38 @@ async def sddc_license_list_impl(
     """``sddc.license.list`` -- ``GET /v1/license-keys``.
 
     Lists the license keys registered with SDDC Manager -- their product
-    type, key, description, and usage. The read for a licensing-compliance
-    question ('is this VCF stack licensed', 'which keys are near their
-    limit'). ``{elements: [...]}`` with ``key`` / ``productType`` /
-    ``description`` / ``licenseKeyUsage`` per key.
+    type, description, usage, and the key itself, masked. The read for a
+    licensing-compliance question ('is this VCF stack licensed', 'which
+    keys are near their limit'). ``{elements: [...]}`` with ``key_masked``
+    / ``productType`` / ``description`` / ``licenseKeyUsage`` per key.
+
+    Each row's ``key`` is replaced by ``key_masked`` before the result
+    leaves the handler (see :func:`_mask_license_keys`). Every other field
+    stays.
     """
     del params  # schema declares the param object empty
-    return await connector._get_json(target, _LICENSE_KEYS_PATH, operator=operator)
+    payload = await connector._get_json(target, _LICENSE_KEYS_PATH, operator=operator)
+    return cast(dict[str, Any], _mask_license_keys(payload))
+
+
+def _mask_license_keys(node: Any) -> Any:
+    """Return *node* with every ``key`` field replaced by ``key_masked``.
+
+    In the ``GET /v1/license-keys`` answer only the license rows have a
+    ``key`` field, and it holds the license key. ``key_masked`` shows only
+    its last 5 characters
+    (:func:`~meho_backplane.connectors._shared.license_key.mask_license_key`).
+    The walk covers the whole answer, not only ``elements[]``, so a key in
+    an answer of another shape is masked too.
+    """
+    if isinstance(node, dict):
+        masked: dict[str, Any] = {}
+        for name, value in node.items():
+            if name == "key":
+                masked["key_masked"] = mask_license_key(value)
+            else:
+                masked[name] = _mask_license_keys(value)
+        return masked
+    if isinstance(node, list):
+        return [_mask_license_keys(item) for item in node]
+    return node

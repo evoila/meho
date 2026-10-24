@@ -20,6 +20,11 @@ timestamp, contextvar-merged ``request_id`` (when in a request
 context), and locals-stripped structured tracebacks. Nothing on the
 backplane emits plain-text log lines any more.
 
+httpx logs one line per request at INFO with the full URL. The URL can be
+a credential (a vCenter download URL, a pre-signed URL, a token in the
+query), so :class:`_HttpxUrlFilter` cuts every URL in that line down to
+its scheme and host before the bridge writes it.
+
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
 replaced, not stacked). Tests that need a clean slate call it again
@@ -32,6 +37,7 @@ import logging
 import sys
 from typing import TextIO
 
+import httpx
 import structlog
 from structlog.tracebacks import ExceptionDictTransformer
 
@@ -41,6 +47,30 @@ from structlog.tracebacks import ExceptionDictTransformer
 #: line). Named rather than clearing all root handlers, so pytest's own
 #: ``caplog`` handler survives a mid-test :func:`configure_logging` call.
 _STDLIB_BRIDGE_HANDLER_NAME = "meho-stdlib-json-bridge"
+
+
+class _HttpxUrlFilter(logging.Filter):
+    """Keep only the scheme and the host of a URL in an httpx log record.
+
+    httpx logs ``HTTP Request: GET <url> "HTTP/1.1 200 OK"`` at INFO with the
+    full :class:`httpx.URL` as an argument. The path and the query of that
+    URL can be a credential (CWE-532): a vCenter download URL holds the
+    download session, a pre-signed URL holds its signature. The method, the
+    host and the status stay, so the line is still useful for triage.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and any(isinstance(a, httpx.URL) for a in record.args):
+            record.args = tuple(
+                f"{a.scheme}://{a.netloc.decode()}" if isinstance(a, httpx.URL) else a
+                for a in record.args
+            )
+        return True
+
+
+#: One instance, so a repeated :func:`configure_logging` call adds no second
+#: filter (``Logger.addFilter`` skips a filter that is already installed).
+_HTTPX_URL_FILTER = _HttpxUrlFilter()
 
 
 class _LazyStdoutHandler(logging.StreamHandler[TextIO]):
@@ -142,6 +172,7 @@ def _bridge_stdlib_logging(level: int, shared: list[structlog.typing.Processor])
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
+    logging.getLogger("httpx").addFilter(_HTTPX_URL_FILTER)
 
     for name in ("uvicorn", "uvicorn.error"):
         bridged = logging.getLogger(name)

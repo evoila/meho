@@ -337,7 +337,7 @@ jobs:
         # The Python version comes from backend/.python-version (3.14, the
         # same as the image's python:3.14-slim). uv reads that file for every
         # uv command in CI: they all run in backend/ or pass --project backend.
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa  # v10.3.1
         with:
           version: "0.13.0"
           enable-cache: true
@@ -710,7 +710,7 @@ jobs:
         # same lockfile are near-instant, so the four shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa  # v10.3.1
         with:
           version: "0.13.0"
           enable-cache: true
@@ -1398,7 +1398,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa  # v10.3.1
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1651,7 +1651,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa  # v10.3.1
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1996,7 +1996,7 @@ jobs:
           cache-dependency-path: cli/go.sum
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa  # v10.3.1
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -2095,7 +2095,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa  # v10.3.1
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -2323,7 +2323,7 @@ jobs:
         # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
         # and calls app.openapi()), so the backend env must resolve. Same
         # action + cache shape as the Python lanes.
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa  # v10.3.1
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"

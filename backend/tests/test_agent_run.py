@@ -26,6 +26,7 @@ call, depending on whether the agent was configured with an ``output_type``.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -49,6 +50,7 @@ from meho_backplane.agent import (
     PydanticAgentRun,
     find_runbook_instruction,
 )
+from meho_backplane.agent.run import _MAX_SCANNED_CHARS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -675,6 +677,87 @@ async def test_find_runbook_instruction_scans_every_text() -> None:
         == "disk-cleanup"
     )
     assert find_runbook_instruction("you are helpful", "list open incidents") is None
+
+
+def _long_prompt(head: str, unit: str = "a") -> str:
+    """*head* repeated (or kept) up to 100,000 characters, padded with *unit*."""
+    return (head + unit * 100_000)[:100_000]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # One very long word, then a named hit near the end of the part
+        # the check reads.
+        (
+            _long_prompt("a" * (_MAX_SCANNED_CHARS - 100) + "1 use runbook x-1 ", unit="b "),
+            "x-1",
+        ),
+        # Thousands of hits in one clause, each with "we" before its verb.
+        (_long_prompt("", unit="we use runbook,"), None),
+        # Thousands of hits in one clause after a single "never".
+        (_long_prompt("never ", unit="use runbook,"), None),
+    ],
+    ids=["long-word-then-hit", "many-hits-after-we", "many-hits-after-never"],
+)
+async def test_find_runbook_instruction_is_fast_on_a_long_prompt(
+    text: str,
+    expected: str | None,
+) -> None:
+    """A 100,000-character prompt of the slowest shapes is checked in under 50 ms.
+
+    The check runs at the start of every agent run, so it must stay fast
+    for any prompt: its time grows in line with the length it reads, and it
+    reads at most ``_MAX_SCANNED_CHARS`` characters of each text. Each shape
+    fills the part the check reads. The best of three runs counts, so one
+    slow moment on a busy CI machine does not fail the test.
+    """
+    assert len(text) == 100_000
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        found = find_runbook_instruction(text)
+        best = min(best, time.perf_counter() - started)
+        assert found == expected
+    assert best < 0.05, f"the check took {best * 1000:.1f} ms"
+
+
+async def test_find_runbook_instruction_reads_only_the_start_of_each_text() -> None:
+    """Only the first ``_MAX_SCANNED_CHARS`` characters of each text are checked."""
+    filler = "x " * (_MAX_SCANNED_CHARS // 2)
+    instruction = "use runbook disk-cleanup-1"
+    assert find_runbook_instruction(instruction + " " + filler) == "disk-cleanup-1"
+    assert find_runbook_instruction(filler + instruction) is None
+    # The cap applies to each text on its own: a long system prompt does
+    # not hide an instruction in the run input.
+    assert find_runbook_instruction(filler, instruction) == "disk-cleanup-1"
+
+
+@pytest.mark.parametrize(
+    ("phrase", "kept"),
+    [
+        # The cut falls just before the "s" of "runbooks".
+        ("use the runbooks page to review history", "use the runbook"),
+        # The cut falls just before "templates", the word that makes it prose.
+        ("explain how to use runbook templates", "explain how to use runbook "),
+        # The cut falls inside the word after "runbook": "to" is not "tomorrow".
+        ("you can use a runbook tomorrow", "you can use a runbook to"),
+    ],
+    ids=["cut-inside-runbooks", "cut-before-templates", "cut-inside-next-word"],
+)
+async def test_find_runbook_instruction_ignores_a_hit_that_the_cut_reaches(
+    phrase: str,
+    kept: str,
+) -> None:
+    """Cutting a long text never turns prose into a runbook instruction.
+
+    The words after the cut can change what a hit means, so a hit that
+    the cut reaches is not used. Here the cut keeps only *kept* of *phrase*.
+    """
+    text = "x" * (_MAX_SCANNED_CHARS - len(kept) - 1) + " " + phrase
+    assert text[:_MAX_SCANNED_CHARS].endswith(" " + kept)
+    assert find_runbook_instruction(phrase) is None
+    assert find_runbook_instruction(text) is None
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,7 @@ __all__ = [
     "SECRET_OP_CLASSES",
     "BodyExclusion",
     "classify_body_exclusion",
+    "secret_tag_tokens",
 ]
 
 
@@ -183,6 +184,22 @@ def _tag_tokens(tag: str) -> set[str]:
     return {token for token in re.split(r"[^a-z0-9]+", tag.lower()) if token}
 
 
+def secret_tag_tokens(tags: Iterable[str]) -> set[str]:
+    """The tokens of *tags* that are in :data:`SECRET_FAMILY_TAGS`.
+
+    Empty when no tag marks the op as secret-bearing. The dispatcher uses the
+    same check to hide the vendor's error text of such an op
+    (:mod:`meho_backplane.operations._vendor_text`), so both agree.
+    """
+    return {
+        token
+        for tag in tags
+        if tag and tag.strip()
+        for token in _tag_tokens(tag.strip())
+        if token in SECRET_FAMILY_TAGS
+    }
+
+
 def _classify_op_class(op_id: str) -> str | None:
     """Return the sensitivity class from the authoritative classifier.
 
@@ -264,9 +281,7 @@ def classify_body_exclusion(
         )
 
     # --- secret-bearing: descriptor tag tokens -------------------------
-    matched_tag_tokens = {
-        token for tag in tag_set for token in _tag_tokens(tag) if token in SECRET_FAMILY_TAGS
-    }
+    matched_tag_tokens = secret_tag_tokens(tag_set)
     if matched_tag_tokens:
         return BodyExclusion(
             excluded=True,

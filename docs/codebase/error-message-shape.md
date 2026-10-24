@@ -228,6 +228,42 @@ the envelope verbatim. Redaction runs first so a secret straddling
 the cap boundary cannot survive truncation as a cleartext fragment
 the patterns no longer match. See `docs/codebase/redaction.md`.
 
+**An operation that sends a secret keeps no vendor text (#4854).** Some
+operations send a secret: a licence key, a new password, a secret value.
+The vendor's error text can repeat it (for example "the license key
+<key> is not valid"). So for these operations MEHO drops the vendor's
+text from the error result, in one shared place.
+
+- **Which operations.** An operation sends a secret when
+  `broadcast.events.classify_op` pins it as `credential_write`, or when
+  one of its tags has a word from `SECRET_FAMILY_TAGS` (for example the
+  `key` in `license-key`). The flight recorder uses the same tag list,
+  so both agree. A new connector gets the rule by tagging its operation.
+  It needs no code of its own.
+- **Where.** `dispatcher._audit_error_and_return` runs every error
+  result through `operations/_vendor_text.py::withhold_vendor_text`
+  before it writes the audit row. So the caller's answer, the audit row
+  (`payload["error"]`) and the stored result of an approved run
+  (`resume_result`) hold the same text.
+- **What goes.** `extras.upstream_message`, `extras.exception_message`,
+  `extras.raw_message`, `extras.upstream_fault.faultstring`, the
+  `validation_errors` of a `connector_http_422`, and the end of the
+  `error` summary after "Upstream said:" or "Vault said:". Each gets the
+  fixed text `<vendor text withheld: this operation sends a secret>`, so
+  the shape of the result stays the same.
+- **What stays.** Every field MEHO writes itself: `error_code`,
+  `exception_class`, `http_status`, `cause`, `remediation`, `host`,
+  `target` and the fault type `upstream_fault.type`. They still say what
+  kind of error it was. The cost: the vendor's own words are gone, for
+  example a password-rule message. A connector that has its own next
+  step for the operator (MEHO's text, no secret) sets a `remediation`
+  attribute on the error it raises; `result_connector_error` copies it
+  to `extras.remediation`, and it stays. `vcfa.provider.api_token.create`
+  uses this to say whether the minted token was revoked.
+- **Retries are unchanged.** The rule works on the built result, not on
+  the raised error. So the new login and one retry after HTTP 401, and
+  the 403 and 429 results, work as before.
+
 **Non-httpx upstream status: `ConnectorUpstreamError` (#3876).** A
 connector whose client library does not raise `httpx.HTTPStatusError`
 reads the HTTP status and the upstream's message at its own boundary and

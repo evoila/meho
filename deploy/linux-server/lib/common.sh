@@ -18,6 +18,7 @@ HOST_ROOT="${MEHO_TEST_ROOT:-}"
 readonly MEHO_STATE_DIR=/var/lib/meho
 readonly MEHO_CONFIG_DIR=/etc/meho
 readonly MEHO_JOIN_TOKEN_FILE=/etc/meho/join-token
+readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
 readonly RKE2_CONFIG_FILE=/etc/rancher/rke2/config.yaml
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
@@ -28,6 +29,7 @@ readonly RKE2_MANIFESTS_DIR=/var/lib/rancher/rke2/server/manifests
 # install.sh. The layout is the one of the form-2 design, section 4.
 readonly MEHO_IMAGES_ARCHIVE=images/meho-images.linux-amd64.tar.zst
 readonly STORAGE_MANIFEST=storage/local-path-storage.yaml
+readonly MEHO_HOST_FILE=meho-host
 readonly DOWNLOAD_FILES=(
     rke2/install.sh
     rke2/rke2.linux-amd64.tar.gz
@@ -35,6 +37,7 @@ readonly DOWNLOAD_FILES=(
     rke2/sha256sum-amd64.txt
     "$MEHO_IMAGES_ARCHIVE"
     "$STORAGE_MANIFEST"
+    "$MEHO_HOST_FILE"
 )
 
 readonly RKE2_LOG_COMMAND="journalctl -u rke2-server -e"

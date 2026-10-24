@@ -16,7 +16,7 @@ from pathlib import Path
 from download_harness import LINUX_SERVER, FakeLayout, PackagingTestCase, write_tar
 
 TOP = "meho-linux-0.36.0-amd64"
-EXECUTABLES = {"install.sh", "rke2/install.sh", "bin/helm", "bin/meho"}
+EXECUTABLES = {"install.sh", "meho-host", "rke2/install.sh", "bin/helm", "bin/meho"}
 
 
 class LayoutTests(PackagingTestCase):

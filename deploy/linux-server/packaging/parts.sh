@@ -18,10 +18,11 @@ fetch() {
 
 add_scripts() {
     install -m 0755 "$LINUX_SERVER_DIR/install.sh" "$STAGE/install.sh"
+    install -m 0755 "$LINUX_SERVER_DIR/meho-host" "$STAGE/meho-host"
     install -m 0644 "$LINUX_SERVER_DIR"/lib/*.sh "$STAGE/lib/"
     install -m 0644 "$LINUX_SERVER_DIR/storage/local-path-storage.yaml" "$STAGE/storage/"
     install -m 0644 "$LINUX_SERVER_DIR/values-single-node.yaml" "$STAGE/chart/"
-    ok "install.sh, lib/, storage/ and chart/values-single-node.yaml"
+    ok "install.sh, meho-host, lib/, storage/ and chart/values-single-node.yaml"
 }
 
 # Helm goes into the download, and the build uses the same binary to pull
@@ -164,7 +165,7 @@ folder) and the place of its source code. The container images also hold
 the software of their base operating system (for example Debian, Alpine or
 Red Hat UBI), each under its own licence.
 
-MEHO $VERSION: install.sh, lib/, storage/, the Helm chart $CHART_VERSION
+MEHO $VERSION: install.sh, meho-host, lib/, storage/, the Helm chart $CHART_VERSION
 (chart/) and the meho CLI (bin/meho)
   Licence: Apache-2.0.txt and MEHO-NOTICE.txt
   Source:  https://github.com/evoila/meho

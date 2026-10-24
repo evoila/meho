@@ -100,10 +100,16 @@ def _assert_composite_coverage(
 ) -> None:
     """Fail closed when a registry entry is absent from a required map."""
     approval_ids = {spec.op_id for spec in _COMPOSITES if spec.requires_approval}
+    # An op that can wait for approval: every requires_approval op, plus a
+    # caution or riskier op, which waits for an agent's call (#4850 — the
+    # caution read vm.guest.file.read). Each needs a preview builder.
+    parkable_ids = {
+        spec.op_id for spec in _COMPOSITES if spec.requires_approval or spec.safety_level != "safe"
+    }
     assert set(typed_metadata) == registry_ids
     assert _NO_PREVIEW <= approval_ids <= registry_ids
     assert _NO_GOVERNED_SUBOPS <= approval_ids <= registry_ids
-    assert set(preview_builders) | _NO_PREVIEW == approval_ids
+    assert set(preview_builders) | _NO_PREVIEW == parkable_ids
     assert set(governed_subops) | _NO_GOVERNED_SUBOPS == approval_ids
     assert set(preview_builders).isdisjoint(_NO_PREVIEW)
     assert set(governed_subops).isdisjoint(_NO_GOVERNED_SUBOPS)

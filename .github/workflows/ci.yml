@@ -949,14 +949,17 @@ jobs:
           # measured file times are stale — refresh tests/_unit_shard_durations.json
           # (see tests/_unit_shard_split.py) rather than bumping only this budget.
           # Add a shard (matrix + TOTAL) only when all shards are near the budget.
-          budget_s=660
+          # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
+          # node), shards that pass every test can take 674-710 s, and 660 s
+          # dropped good pull requests from the merge queue.
+          budget_s=900
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
           # in each xdist worker, so a test that stops making progress fails
           # on its own after 180 s with its name and a stack dump of every
           # thread, instead of sitting silent (one dot per test, no names)
           # until the 20-min job cap. The shard then still lands inside the
-          # 660 s budget below. Mirrors the python-coverage job's guard;
+          # 900 s budget below. Mirrors the python-coverage job's guard;
           # --timeout-method=signal (NOT thread) is load-bearing under xdist:
           # thread calls os._exit(), which xdist reads as a worker crash and
           # whose stack dump it swallows. 180 s is ~3x the slowest honest

@@ -212,6 +212,7 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _alarm,
     _datastore_browse,
     _read,
+    _snapshot,
     _teardown_network,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
@@ -269,6 +270,8 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _teardown_network._DVS_PORT_CRITERIA_TYPE,
     _datastore_browse._SEARCH_SPEC_TYPE,
     _datastore_browse._FILE_QUERY_FLAGS_TYPE,
+    # The VM snapshot create's quiesce request.
+    _snapshot._GUEST_QUIESCE_SPEC_TYPE,
     # #3706 event.tail QueryEvents filter.
     _read._EVENT_FILTER_SPEC_TYPE,
     _read._EVENT_FILTER_SPEC_BY_TIME_TYPE,

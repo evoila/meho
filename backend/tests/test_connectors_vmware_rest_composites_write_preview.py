@@ -75,6 +75,8 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.deploy_from_library",
         "vmware.composite.vm.clone_from_template",
         "vmware.composite.vm.snapshot.revert",
+        "vmware.composite.vm.snapshot.create",
+        "vmware.composite.vm.snapshot.delete",
         "vmware.composite.vm.destroy",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power",

@@ -17,13 +17,17 @@ SSH, no in-guest agent of MEHO's own.
 
 Design (see ``docs/codebase/connectors-vmware-rest-guest-ops.md``):
 
-* **Guest credentials via ``secret_ref`` only, never in params.** Guest
-  OS credentials are read from the target's Vault secret under the
+* **Guest credentials via a secret reference only, never in params.**
+  Guest OS credentials are read from the target's Vault secret under the
   operator's identity
   (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
   with the ``guest_username`` / ``guest_password`` fields) -- exactly as
   the connector already reads the vCenter service account from the same
-  secret. The credential lives only as the ephemeral
+  secret. A call may instead name another secret through the optional
+  ``guest_secret_ref`` parameter (#3364) -- a reference string read the
+  same way, under the operator's identity, and bounded to the target's
+  allowed prefix (:mod:`._guest_secret_ref`) so VMs behind one vCenter can
+  carry distinct guest logins. The credential lives only as the ephemeral
   ``NamePasswordAuthentication`` object the vim request body carries; it
   never enters params, a result, an audit row, a preview, or a log line.
 * **Structured sub-ops, not freeform shell.** Each op is a discrete
@@ -76,6 +80,9 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
+from meho_backplane.connectors.vmware_rest.composites._guest_secret_ref import (
+    load_guest_override_credentials,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
@@ -221,19 +228,37 @@ def _name_password_auth(username: str, password: str) -> dict[str, Any]:
 
 
 async def _guest_auth(
-    connector: VmwareRestConnector, target: Any, operator: Operator
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    guest_secret_ref: str | None,
 ) -> dict[str, Any]:
-    """Resolve the guest OS credential from the target's ``secret_ref``.
+    """Resolve the guest OS credential for one call.
 
-    Reads the ``guest_username`` / ``guest_password`` fields off the same
-    KV-v2 secret the connector reads the vCenter session credential from,
-    under the operator's identity. Raises
+    Without ``guest_secret_ref`` this reads the ``guest_username`` /
+    ``guest_password`` fields off the same KV-v2 secret the connector reads
+    the vCenter session credential from, under the operator's identity,
+    and raises
     :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
     when the secret is unset or missing a guest field -- the dispatcher
     wraps it ``connector_error`` for the caller.
+
+    With ``guest_secret_ref`` (#3364) the same two fields are read from
+    that reference instead, through
+    :func:`~._guest_secret_ref.load_guest_override_credentials`: the
+    reference must fall under the target's allowed prefix (else
+    :class:`~._guest_secret_ref.GuestSecretRefScopeError`, no store read),
+    and a store denial raises ``SecretRefReadError``. There is never a
+    fallback to the target's own secret.
     """
     del connector  # credentials resolve off the target, not the session
-    creds = await load_basic_credentials(target, operator, fields=_GUEST_CRED_FIELDS)
+    if guest_secret_ref:
+        creds = await load_guest_override_credentials(
+            guest_secret_ref, target, operator, fields=_GUEST_CRED_FIELDS
+        )
+    else:
+        creds = await load_basic_credentials(target, operator, fields=_GUEST_CRED_FIELDS)
     return _name_password_auth(creds["guest_username"], creds["guest_password"])
 
 
@@ -325,7 +350,9 @@ async def guest_process_list_composite(
     vm_moid = params["vm"]
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
     max_processes = int(params.get("max_processes", _DEFAULT_MAX_PROCESSES))
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_PROCESS_MANAGER
     )
@@ -369,7 +396,9 @@ async def guest_env_read_composite(
     vm_moid = params["vm"]
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
     names = params.get("names")
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_PROCESS_MANAGER
     )
@@ -477,7 +506,9 @@ async def guest_file_read_composite(
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
     fetch_content = bool(params.get("fetch_content", False))
     max_inline_bytes = _bounded_max_inline_bytes(params.get("max_inline_bytes"))
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_FILE_MANAGER
     )
@@ -585,7 +616,9 @@ async def guest_file_write_composite(
     if gate is not None:
         return gate
 
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_FILE_MANAGER
     )
@@ -1006,6 +1039,7 @@ async def guest_program_run_composite(
         working_directory=working_directory,
         env=env,
         top_moid=top_moid,
+        guest_secret_ref=params.get("guest_secret_ref"),
     )
     result: dict[str, Any] = {
         "status": "started",
@@ -1047,6 +1081,7 @@ async def _start_guest_program(
     working_directory: Any,
     env: Any,
     top_moid: str,
+    guest_secret_ref: str | None,
 ) -> tuple[str, dict[str, Any], int]:
     """Resolve guest creds + the GuestProcessManager, then ``StartProgramInGuest``.
 
@@ -1055,7 +1090,7 @@ async def _start_guest_program(
     the started process's PID. Raises :class:`RuntimeError` if the vim call
     returns no usable PID.
     """
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(connector, target, operator, guest_secret_ref=guest_secret_ref)
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_PROCESS_MANAGER
     )

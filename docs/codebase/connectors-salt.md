@@ -127,7 +127,11 @@ next call logs in again. `fingerprint()` and `probe()` use it.
 - **`salt.minion.list`** reads one page of keys (sorted by minion id),
   then one presence read and one grains read for the same `master_id` /
   `minion_id` filter, each with a limit of 2000 rows. It joins them by
-  master and minion. On an estate with more than 2000 minions, presence
+  master and minion. A minion id can exist under two masters, so a key
+  row that names its master takes only the presence and grains of that
+  pair; when the pair is missing, the fields stay `null`. Only a key row
+  with no master id falls back to the minion id alone, and only when it
+  is unique. On an estate with more than 2000 minions, presence
   and OS can be missing for some rows; then `details_complete` is false
   and the agent should narrow the read with `master_id` or `minion_id`.
 - **`salt.job.result`** keeps the return of each minion only when it is
@@ -146,8 +150,13 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   data, like `salt.target.list`: for `pillar.*`, `config.get`,
   `config.option` and `config.items` the return is `null` with
   `return_bytes` and `return_withheld: true`, and a `pillar` argument in
-  `fun_args` reads `[REDACTED:param_name]`. The dispatcher's redaction
-  then runs over the whole answer as for every connector.
+  `fun_args` reads `[REDACTED:param_name]`. A positional argument has no
+  name the scrubber could match (`user.setpassword <user> <password>`), so
+  `fun_args` is shown only for functions of the modules `grains`,
+  `pillar`, `pkg`, `service`, `state` and `test`, whose arguments are
+  names and keys. For every other function `fun_args` is `null` with
+  `fun_args_withheld: true`. The dispatcher's redaction then runs over the
+  whole answer as for every connector.
 - Each read returns a dict with one list of flat rows, so MEHO stores a
   long list behind a result handle; `result_scalars` keeps the counts
   inline.

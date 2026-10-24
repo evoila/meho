@@ -189,7 +189,17 @@ _JOB_RESULT = SaltTypedOp(
                         "fun": _text("Salt function that ran."),
                         "fun_args": {
                             "type": ["array", "object", "null"],
-                            "description": "Function arguments; null when longer than 2 KiB.",
+                            "description": (
+                                "Function arguments; null when withheld or longer than 2 KiB."
+                            ),
+                        },
+                        "fun_args_withheld": {
+                            "type": "boolean",
+                            "description": (
+                                "True when fun_args is null because the function is not "
+                                "one of grains, pillar, pkg, service, state or test, whose "
+                                "arguments hold no secret."
+                            ),
                         },
                         "success": {"type": ["boolean", "null"], "description": "Success flag."},
                         "retcode": {"type": ["integer", "null"], "description": "Return code."},
@@ -248,14 +258,16 @@ _JOB_RESULT = SaltTypedOp(
         ),
         "output_shape": (
             "{jid, count, failed_minions, results: [{minion_id, master_id, jid, fun, "
-            "fun_args, success, retcode, has_errors, alter_time, return, return_bytes, "
-            "return_truncated, return_withheld, states_total, states_failed, failed_states: "
-            "[{state, name, comment}]}]}. return is null when it is bigger than 8 KiB; "
-            "failed_states still names what failed. return is also null, with "
+            "fun_args, fun_args_withheld, success, retcode, has_errors, alter_time, return, "
+            "return_bytes, return_truncated, return_withheld, states_total, states_failed, "
+            "failed_states: [{state, name, comment}]}]}. return is null when it is bigger "
+            "than 8 KiB; failed_states still names what failed. return is also null, with "
             "return_withheld true, for pillar reads (pillar.*, config.get, config.option, "
-            "config.items), and a pillar argument in fun_args reads [REDACTED:param_name], "
-            "as pillar data holds secrets. Values under a secret name read "
-            "[REDACTED:param_name]."
+            "config.items), as pillar data holds secrets. fun_args is shown only for "
+            "grains, pillar, pkg, service, state and test functions; for every other "
+            "function it is null with fun_args_withheld true, because a positional "
+            "argument can be a password. A pillar argument in fun_args and every value "
+            "under a secret name read [REDACTED:param_name]."
         ),
         "next_step": (
             "Report the failed minions with the comments of their failed states. When "

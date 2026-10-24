@@ -196,9 +196,14 @@ def _grains_map(ret: Any) -> tuple[dict[tuple[Any, Any], dict[str, Any]], bool]:
 def _lookup(
     table: dict[tuple[Any, Any], dict[str, Any]], master: Any, minion: Any
 ) -> dict[str, Any]:
-    hit = table.get((master, minion))
-    if hit is not None:
-        return hit
+    """The row of (*master*, *minion*); by minion id alone only when the key names no master.
+
+    A minion id can exist under two masters. When the master is known, a
+    missing pair stays missing: a row of the other master would report the
+    wrong presence or OS.
+    """
+    if master is not None:
+        return table.get((master, minion), {})
     same_minion = [value for (_, name), value in table.items() if name == minion]
     return same_minion[0] if len(same_minion) == 1 else {}
 
@@ -330,6 +335,20 @@ def _reads_pillar(fun: Any) -> bool:
     return isinstance(fun, str) and (fun.startswith("pillar.") or fun in _PILLAR_CONFIG_FUNS)
 
 
+#: Salt modules whose function arguments are known to hold no secret: state
+#: names, package and service names, grain and pillar keys. A positional
+#: argument has no name the scrubber could match (``user.setpassword <user>
+#: <password>``), so the arguments of every other function stay out.
+_SAFE_ARG_MODULES: Final[frozenset[str]] = frozenset(
+    {"grains", "pillar", "pkg", "service", "state", "test"}
+)
+
+
+def _keeps_args(fun: Any) -> bool:
+    """True when the arguments of the Salt function *fun* can be shown."""
+    return isinstance(fun, str) and fun.partition(".")[0] in _SAFE_ARG_MODULES
+
+
 def _hide_pillar_args(node: Any) -> Any:
     """Replace the value of every ``pillar`` argument (a dict key or ``pillar=...`` text)."""
     if isinstance(node, dict):
@@ -352,9 +371,9 @@ def _result_row(row: dict[str, Any]) -> dict[str, Any]:
     raw_return = row["return"] if "return" in row else full.get("return")
     scrubbed = Scrubber().tree(raw_return, {})
     size = _json_size(scrubbed)
-    fun_args = _hide_pillar_args(
-        Scrubber().tree(_first(row, "fun_args") or full.get("fun_args"), {})
-    )
+    args_withheld = not _keeps_args(fun)
+    raw_args = None if args_withheld else _first(row, "fun_args") or full.get("fun_args")
+    fun_args = _hide_pillar_args(Scrubber().tree(raw_args, {}))
     fun_args_kept = fun_args if _json_size(fun_args) <= _FUN_ARGS_BYTES_LIMIT else None
     kept = not withheld and size <= RETURN_BYTES_LIMIT
     return {
@@ -363,6 +382,7 @@ def _result_row(row: dict[str, Any]) -> dict[str, Any]:
         "jid": _first(row, "jid") or full.get("jid"),
         "fun": fun,
         "fun_args": fun_args_kept,
+        "fun_args_withheld": args_withheld,
         "success": full.get("success"),
         "retcode": full.get("retcode"),
         "has_errors": row.get("has_errors"),

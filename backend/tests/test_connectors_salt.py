@@ -13,7 +13,8 @@ What is covered, with a respx-mocked RaaS server and no ingested catalog:
 * an RPC ``error`` answer and an HTTP error reach the answer;
 * a ``401`` on an RPC call logs in again for that target only and the read
   then succeeds;
-* secret-named values in a job return are replaced, a big return is left
+* secret-named values in a job return are replaced, positional arguments of
+  functions outside a short safe list are withheld, a big return is left
   out with its size, and failed states are named;
 * no password, cookie or xsrf value in a result; registration shape;
   version parsing; fingerprint.
@@ -559,6 +560,34 @@ async def test_minion_list_with_no_keys_makes_one_call(
 
 
 @pytest.mark.asyncio
+async def test_minion_list_keeps_the_master_match_for_a_minion_id_under_two_masters(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A missing pair must not take the presence or OS of the other master."""
+    await _register(_stub_embedding)
+    answers = {
+        **_ALL_ANSWERS,
+        ("minions", "get_minion_key_state"): {
+            "results": [
+                {"minion": "<minion-1>", "master": "<master-1>", "key_state": "accepted"},
+                {"minion": "<minion-1>", "master": "<master-2>", "key_state": "accepted"},
+            ],
+            "count": 2,
+        },
+    }
+    result, _, _ = await _run("salt.minion.list", {}, answers)
+    assert result.status == "ok", result.error
+    first, second = result.result["minions"]
+    assert (first["master_id"], first["presence"], first["os"]) == (
+        "<master-1>",
+        "present",
+        "Made-Up-OS",
+    )
+    assert second["master_id"] == "<master-2>"
+    assert (second["presence"], second["last_seen"], second["os"]) == (None, None, None)
+
+
+@pytest.mark.asyncio
 async def test_minion_list_reports_incomplete_details_on_a_big_estate(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
@@ -666,7 +695,11 @@ async def test_job_result_names_failed_states_and_replaces_secrets(
         }
     ]
     assert failed["return_truncated"] is False
+    assert failed["fun_args"] == ["made-up-state"]
+    assert failed["fun_args_withheld"] is False
     assert good["return"] == {"db_password": "[REDACTED:param_name]", "out": "done"}
+    assert good["fun_args"] is None
+    assert good["fun_args_withheld"] is True
     assert good["states_total"] is None
     assert "plain-secret-value" not in json.dumps(body)
 
@@ -717,8 +750,36 @@ async def test_job_result_withholds_a_pillar_get_string_return(
     assert row["return_truncated"] is False
     assert row["return_bytes"] == len(json.dumps("plain-pillar-value-1"))
     assert row["fun_args"] == ["app:db:pw"]
+    assert row["fun_args_withheld"] is False
     assert row["states_total"] is None
     assert "plain-pillar-value-1" not in json.dumps(result.result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fun", "fun_args"),
+    [
+        ("user.setpassword", ["<user>", "plain-secret-value-6"]),
+        ("cmd.run", ["mysql -u root -pplain-secret-value-7 -e 'select 1'"]),
+        (None, ["plain-secret-value-8"]),
+    ],
+)
+async def test_job_result_withholds_positional_arguments_of_other_functions(
+    _stub_embedding: AsyncMock, session: AsyncSession, fun: str | None, fun_args: list[str]
+) -> None:
+    """A positional argument has no name, so it can be a password: it is not shown."""
+    await _register(_stub_embedding)
+    answers = _one_return(
+        {"minion_id": "<minion-1>", "jid": "1", "fun": fun, "fun_args": fun_args, "return": True}
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["fun"] == fun
+    assert row["fun_args"] is None
+    assert row["fun_args_withheld"] is True
+    assert row["return"] is True
+    assert "plain-secret-value" not in json.dumps(result.result)
 
 
 @pytest.mark.asyncio

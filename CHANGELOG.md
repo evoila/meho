@@ -125,6 +125,18 @@ back up the database, then follow its Breaking changes.
   check its trace retention, and change (rotate) the passwords and keys
   that went through these operations if needed.
 
+### Security
+
+- The container image now has `filelock` 4.2.4 (#4865). It fixes
+  CVE-2026-112940 (high): a file could be overwritten through an
+  insecure file reopen. filelock comes in through other libraries, such
+  as the Hugging Face client.
+- The image scan now also skips CVE-2026-112398, a critical Pillow
+  finding published after the earlier list, until 2026-11-30 (#4865). As
+  for the other Pillow findings: Pillow 13 fixes it, but `fastembed`
+  does not allow Pillow 13 yet, and MEHO never opens image files. The
+  real fix is tracked in #4729.
+
 ### Breaking changes
 
 - `sddc.license.list` now returns `key_masked` instead of `key` (#4853).
@@ -218,6 +230,17 @@ back up the database, then follow its Breaking changes.
   item offers before it creates a VM; an unknown key is refused with
   `invalid_reference` and the list of valid keys. The approval preview
   shows the chosen option. On both vCenter connectors.
+- Three hand-written operations for a VM's hardware, on both vCenter
+  connectors, with no API file to load (#4695 / #4843).
+  `vmware.vm.hardware.show` (safe) shows CPU, memory, each CD drive,
+  each SCSI, SATA and NVMe controller, and whether the VMware Tools
+  installer is mounted; a part that cannot be read is `null`, and
+  `read_notes` says why. `vmware.composite.vm.cdrom.add` adds an empty
+  CD drive or one with an ISO file; it is `dangerous` and waits for
+  approval. `vmware.composite.vm.tools.installer.unmount` takes the
+  Tools installer out and waits for approval. Both changes take the VM
+  id (`vm`, for example `vm-42`) only, so a change runs on the VM the
+  approver saw.
 - For contributors: a tested helper copies vCenter downloads to a PUT
   destination, for the coming content-library export, host configuration
   backup and datastore file export operations (#4343 / #4840). It

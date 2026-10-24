@@ -657,6 +657,12 @@ a raised exception across the boundary, and never a launched loop.
   misses degrades to the old behaviour; a phrasing it catches turns a
   fabricated success into an honest typed failure.
 
+  The check runs at the start of every run, so it is kept fast. It
+  reads only the first 16,384 characters (16 KiB) of each text
+  (`_MAX_SCANNED_CHARS`), and its time grows in line with the length it
+  reads. So it takes at most a few milliseconds for any prompt. A
+  runbook instruction after the first 16 KiB of a longer text is not seen.
+
   Capability (`toolset_admits_runbook_execution` in `agent/toolset.py`)
   is intersected explicitly: `RUNBOOK_EXECUTION_META_TOOL_NAMES` is an
   (intentionally empty) subset of the meta-tool catalog. A future

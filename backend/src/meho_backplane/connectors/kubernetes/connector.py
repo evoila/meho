@@ -137,9 +137,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "deployment detail via workload-group ops)."
     ),
     "workload": (
-        "Use for per-namespace pod and deployment drill-in: "
+        "Use for per-namespace pod, deployment and Job drill-in: "
         "``k8s.pod.list`` / ``k8s.pod.info`` / ``k8s.deployment.list`` "
-        "/ ``k8s.deployment.info``. The right group once the operator "
+        "/ ``k8s.deployment.info`` / ``k8s.job.list`` / ``k8s.job.info`` "
+        "(did a migration or batch Job finish, and did it work?). The "
+        "right group once the operator "
         "knows the namespace (typically picked from the 'inventory' "
         "group first). Pair with the 'logs' group when investigating "
         "a CrashLoopBackOff pod, with 'events' when the failure is "

@@ -802,10 +802,7 @@ async def test_job_result_withholds_a_pillar_get_string_return(
         (None, ["plain-secret-value-8"]),
         ("grains.setval", ["api_token", "plain-secret-value-9"]),
         ("test.echo", ["plain-secret-value-10"]),
-        (
-            "pkg.install",
-            ["tool", {"sources": [{"tool": "https://u:plain-secret-value-11@h/t.rpm"}]}],
-        ),
+        ("pkg.install", ["tool", {"fromrepo": "plain-secret-value-11", "__kwarg__": True}]),
     ],
 )
 async def test_job_result_withholds_positional_arguments_of_other_functions(

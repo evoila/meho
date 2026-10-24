@@ -500,6 +500,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "vrli-vrli8",
         "vrops-rest",
         "vrops-vrops8",
+        "vro-rest",
         "windns-ssh",
         "winsrv-ssh",
         "wsfc-ssh",

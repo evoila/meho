@@ -86,7 +86,7 @@ surface: ``vcfa.vra8.project.list`` / ``.deployment.list`` / ``.deployment.get``
 with **zero catalog ingest**. Set-shaped results are reduced to a JSONFlux handle by
 the dispatcher. A write surface is deliberately out of scope for this read core.
 
-One more read, ``vcfa.vra8.api_file.get`` (:mod:`.api_file`, group ``api-files``),
+One more read, ``vcfa.vra8.api_file.get`` (:mod:`.api_file`, group ``vcfa-vra8-api-files``),
 reads one API description page or file the appliance serves, so the 8.18 files can be
 pinned with their size, SHA-256 and the build the Orchestrator reports
 (``GET /vco/api/about``).

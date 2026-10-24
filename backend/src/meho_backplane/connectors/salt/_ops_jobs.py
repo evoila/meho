@@ -212,6 +212,13 @@ _JOB_RESULT = SaltTypedOp(
                             "type": "boolean",
                             "description": "True when the return was too big and left out.",
                         },
+                        "return_withheld": {
+                            "type": "boolean",
+                            "description": (
+                                "True for a pillar read (pillar.*, config.get, config.option, "
+                                "config.items): the return holds pillar data and is null."
+                            ),
+                        },
                         "states_total": {
                             "type": ["integer", "null"],
                             "description": "States in a state run; null for other functions.",
@@ -242,9 +249,13 @@ _JOB_RESULT = SaltTypedOp(
         "output_shape": (
             "{jid, count, failed_minions, results: [{minion_id, master_id, jid, fun, "
             "fun_args, success, retcode, has_errors, alter_time, return, return_bytes, "
-            "return_truncated, states_total, states_failed, failed_states: [{state, name, "
-            "comment}]}]}. return is null when it is bigger than 8 KiB; failed_states still "
-            "names what failed. Values under a secret name read [REDACTED:param_name]."
+            "return_truncated, return_withheld, states_total, states_failed, failed_states: "
+            "[{state, name, comment}]}]}. return is null when it is bigger than 8 KiB; "
+            "failed_states still names what failed. return is also null, with "
+            "return_withheld true, for pillar reads (pillar.*, config.get, config.option, "
+            "config.items), and a pillar argument in fun_args reads [REDACTED:param_name], "
+            "as pillar data holds secrets. Values under a secret name read "
+            "[REDACTED:param_name]."
         ),
         "next_step": (
             "Report the failed minions with the comments of their failed states. When "

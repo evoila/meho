@@ -691,6 +691,92 @@ async def test_job_result_leaves_out_a_big_return_with_its_size(
     assert row["return_bytes"] > RETURN_BYTES_LIMIT
 
 
+def _one_return(row: dict[str, Any]) -> _Answers:
+    return {("ret", "get_returns"): {"count": 1, "results": [row]}}
+
+
+@pytest.mark.asyncio
+async def test_job_result_withholds_a_pillar_get_string_return(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register(_stub_embedding)
+    answers = _one_return(
+        {
+            "minion_id": "<minion-1>",
+            "jid": "1",
+            "fun": "pillar.get",
+            "fun_args": ["app:db:pw"],
+            "return": "plain-pillar-value-1",
+        }
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["return"] is None
+    assert row["return_withheld"] is True
+    assert row["return_truncated"] is False
+    assert row["return_bytes"] == len(json.dumps("plain-pillar-value-1"))
+    assert row["fun_args"] == ["app:db:pw"]
+    assert row["states_total"] is None
+    assert "plain-pillar-value-1" not in json.dumps(result.result)
+
+
+@pytest.mark.asyncio
+async def test_job_result_withholds_nested_pillar_items(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register(_stub_embedding)
+    pillar = {"mysql": {"root_pw": "plain-pillar-value-2", "port": 3306}, "pw": "plain-pv-3"}
+    answers = _one_return(
+        {"full_ret": {"id": "<minion-1>", "jid": "1", "fun": "pillar.items", "return": pillar}}
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["fun"] == "pillar.items"
+    assert row["return"] is None
+    assert row["return_withheld"] is True
+    assert row["return_bytes"] > 0
+    text = json.dumps(result.result)
+    assert "plain-pillar-value-2" not in text
+    assert "plain-pv-3" not in text
+
+
+@pytest.mark.asyncio
+async def test_job_result_hides_a_pillar_argument_of_a_state_run(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    await _register(_stub_embedding)
+    state_return = {"cmd_|-hello_|-echo hi_|-run": {"result": True, "name": "echo hi"}}
+    answers = _one_return(
+        {
+            "minion_id": "<minion-1>",
+            "jid": "1",
+            "fun": "state.apply",
+            "fun_args": [
+                "web",
+                {"pillar": {"site": {"pw": "plain-pillar-value-4"}}, "__kwarg__": True},
+                "pillar={'pw': 'plain-pillar-value-5'}",
+            ],
+            "return": state_return,
+        }
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["fun_args"] == [
+        "web",
+        {"pillar": "[REDACTED:param_name]", "__kwarg__": True},
+        "pillar=[REDACTED:param_name]",
+    ]
+    assert row["return"] == state_return
+    assert row["return_withheld"] is False
+    assert row["states_total"] == 1
+    text = json.dumps(result.result)
+    assert "plain-pillar-value-4" not in text
+    assert "plain-pillar-value-5" not in text
+
+
 @pytest.mark.asyncio
 async def test_job_result_needs_a_jid(_stub_embedding: AsyncMock, session: AsyncSession) -> None:
     await _register(_stub_embedding)

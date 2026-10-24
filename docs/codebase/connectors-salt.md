@@ -142,7 +142,11 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   function arguments, every value under a secret-shaped key (`password`,
   `token`, `private_key`, ...) and every PEM private key is replaced by
   `[REDACTED:param_name]` (the shared `Scrubber` of
-  `connectors/_shared/api_file_values.py`). The dispatcher's redaction
+  `connectors/_shared/api_file_values.py`). Job results withhold pillar
+  data, like `salt.target.list`: for `pillar.*`, `config.get`,
+  `config.option` and `config.items` the return is `null` with
+  `return_bytes` and `return_withheld: true`, and a `pillar` argument in
+  `fun_args` reads `[REDACTED:param_name]`. The dispatcher's redaction
   then runs over the whole answer as for every connector.
 - Each read returns a dict with one list of flat rows, so MEHO stores a
   long list behind a result handle; `result_scalars` keeps the counts

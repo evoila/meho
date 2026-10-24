@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors._shared.api_file_values import Scrubber, dump_json
+from meho_backplane.connectors._shared.api_file_values import REDACTED, Scrubber, dump_json
 from meho_backplane.connectors.salt.connector import (
     CMDS_RPC,
     GET_VERSIONS_RPC,
@@ -319,28 +319,59 @@ def _state_summary(value: Any) -> dict[str, Any]:
     }
 
 
+#: Salt functions outside ``pillar.*`` that return pillar values.
+_PILLAR_CONFIG_FUNS: Final[frozenset[str]] = frozenset(
+    {"config.get", "config.option", "config.items"}
+)
+
+
+def _reads_pillar(fun: Any) -> bool:
+    """True when the Salt function returns pillar data, which holds secrets."""
+    return isinstance(fun, str) and (fun.startswith("pillar.") or fun in _PILLAR_CONFIG_FUNS)
+
+
+def _hide_pillar_args(node: Any) -> Any:
+    """Replace the value of every ``pillar`` argument (a dict key or ``pillar=...`` text)."""
+    if isinstance(node, dict):
+        return {
+            key: REDACTED if key == "pillar" else _hide_pillar_args(value)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_hide_pillar_args(item) for item in node]
+    if isinstance(node, str) and node.startswith("pillar="):
+        return f"pillar={REDACTED}"
+    return node
+
+
 def _result_row(row: dict[str, Any]) -> dict[str, Any]:
     full_ret = row.get("full_ret")
     full: dict[str, Any] = full_ret if isinstance(full_ret, dict) else {}
+    fun = _first(row, "fun") or full.get("fun")
+    withheld = _reads_pillar(fun)
     raw_return = row["return"] if "return" in row else full.get("return")
     scrubbed = Scrubber().tree(raw_return, {})
     size = _json_size(scrubbed)
-    fun_args = Scrubber().tree(_first(row, "fun_args") or full.get("fun_args"), {})
+    fun_args = _hide_pillar_args(
+        Scrubber().tree(_first(row, "fun_args") or full.get("fun_args"), {})
+    )
     fun_args_kept = fun_args if _json_size(fun_args) <= _FUN_ARGS_BYTES_LIMIT else None
+    kept = not withheld and size <= RETURN_BYTES_LIMIT
     return {
         "minion_id": _first(row, "minion_id") or full.get("id"),
         "master_id": _first(row, "master") or full.get("master_id"),
         "jid": _first(row, "jid") or full.get("jid"),
-        "fun": _first(row, "fun") or full.get("fun"),
+        "fun": fun,
         "fun_args": fun_args_kept,
         "success": full.get("success"),
         "retcode": full.get("retcode"),
         "has_errors": row.get("has_errors"),
         "alter_time": row.get("alter_time"),
-        "return": scrubbed if size <= RETURN_BYTES_LIMIT else None,
+        "return": scrubbed if kept else None,
         "return_bytes": size,
         "return_truncated": size > RETURN_BYTES_LIMIT,
-        **_state_summary(scrubbed),
+        "return_withheld": withheld,
+        **_state_summary(None if withheld else scrubbed),
     }
 
 

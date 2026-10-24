@@ -1790,9 +1790,9 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 def _register_vmware_write_preview_builders() -> None:
     """Wire the 51 write-composite park-time preview builders. Import-time.
 
-    The 13 read composites register no builder — they are
-    ``requires_approval=False`` and never park, so a preview would be
-    dead code.
+    The read composites register no builder here. The one read that can
+    wait for approval, the ``caution`` ``vm.guest.file.read``, registers
+    its own in :mod:`._guest_file_read_preview` (#4850).
     """
     for op_id, builder in _WRITE_PREVIEW_BUILDERS.items():
         register_preview_builder(op_id, builder)

@@ -14,7 +14,9 @@ Both reads use ``RetrievePropertiesEx`` on the VI-JSON base through
 :meth:`VmwareRestConnector._post_vmomi_json`. The question read must succeed:
 a property vCenter could not read (a ``missingSet`` fault) raises, so a read
 failure is never reported as "no question". The task read is best effort: when
-it fails, the result says so in ``tasks_error`` and keeps the question.
+it fails, or vCenter could not read the ``info`` of one of the tasks, the result
+says so in ``tasks_error`` and keeps the question. An unreadable task is never
+reported as "no running task".
 """
 
 from __future__ import annotations
@@ -117,20 +119,31 @@ def _unreadable_props(retrieve_result: Any) -> dict[str, str]:
     return unreadable
 
 
-def _task_infos(retrieve_result: Any) -> dict[str, dict[str, Any]]:
+def _task_infos(retrieve_result: Any) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """``(Task.info by task moid, fault type name by task moid)``.
+
+    A task whose ``info`` vCenter could not read is not in ``propSet``; it is
+    in that object's ``missingSet`` with a fault, and lands in the second dict.
+    """
     payload = _unwrap_value(retrieve_result)
     objects = payload.get("objects", []) if isinstance(payload, dict) else payload
     infos: dict[str, dict[str, Any]] = {}
+    faults: dict[str, str] = {}
     for obj in objects if isinstance(objects, list) else []:
         if not isinstance(obj, dict) or not isinstance(obj.get("obj"), dict):
             continue
         moid = obj["obj"].get("value")
+        if not isinstance(moid, str):
+            continue
         for prop in obj.get("propSet", []) or []:
             if isinstance(prop, dict) and prop.get("name") == _PROP_INFO:
                 info = unwrap_vim_value(prop.get("val"))
-                if isinstance(moid, str) and isinstance(info, dict):
+                if isinstance(info, dict):
                     infos[moid] = info
-    return infos
+        for entry in obj.get("missingSet") or []:
+            if isinstance(entry, dict) and entry.get("path") == _PROP_INFO:
+                faults[moid] = fault_type_name(entry.get("fault")) or "unknown fault"
+    return infos, faults
 
 
 async def read_vm_wait_state(
@@ -150,9 +163,10 @@ async def read_vm_wait_state(
     When vCenter could not read ``runtime.question`` (a ``missingSet`` fault,
     for example no permission), this raises :class:`RuntimeError`: the caller
     must not take a read failure for "no question". The task read is best
-    effort. When ``recentTask`` was unreadable or the ``Task.info`` read fails,
-    ``running_tasks`` is empty and ``tasks_error`` says why; the question is
-    still returned.
+    effort. When ``recentTask`` was unreadable, the ``Task.info`` read fails,
+    or vCenter could not read the ``info`` of one of the tasks (a ``missingSet``
+    fault, or no answer for it), ``running_tasks`` is empty and ``tasks_error``
+    says why; the question is still returned.
     """
     vm_result = await connector._post_vmomi_json(
         target,
@@ -202,12 +216,16 @@ async def _read_running_tasks(
     """``(running tasks, error)``: the queued and running ones of *task_moids*.
 
     Best effort: when the ``Task.info`` read fails, the list is empty and the
-    error names why (redacted and shortened like a preview read error).
+    error names why (redacted and shortened like a preview read error). The
+    same when vCenter answered but could not read the ``info`` of one of the
+    tasks, or left one out: that task may still run, so the list is empty and
+    the error names the fault types. Only a read that covers every task
+    reports running tasks.
     """
     if not task_moids:
         return [], None
     try:
-        infos = _task_infos(
+        infos, faults = _task_infos(
             await connector._post_vmomi_json(
                 target,
                 _RETRIEVE_PROPERTIES_PATH,
@@ -217,6 +235,13 @@ async def _read_running_tasks(
         )
     except Exception as exc:
         return [], f"the task read failed: {preview_failure_reason(exc)}"
+    unreadable = [moid for moid in task_moids if moid not in infos]
+    if unreadable:
+        reasons = ", ".join(sorted({faults.get(moid, "no answer") for moid in unreadable}))
+        return [], (
+            f"vCenter could not read {_PROP_INFO} of {len(unreadable)} of "
+            f"{len(task_moids)} task(s) ({reasons}); whether they still run is unknown"
+        )
     running: list[dict[str, Any]] = []
     for moid in task_moids:
         info = infos.get(moid, {})

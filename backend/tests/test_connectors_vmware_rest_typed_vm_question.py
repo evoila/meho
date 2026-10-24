@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.result_handle_store import SpillResult
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._write import vm_device_cdrom_composite
 from meho_backplane.connectors.vmware_rest.typed_ops import (
@@ -35,6 +36,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (
     vm_question_answer_preview,
     vm_question_get_impl,
 )
+from meho_backplane.jsonflux.query.json_pointer import parse_json_pointer, resolve_json_pointer
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
@@ -93,13 +95,27 @@ def _vm_result(props: dict[str, Any], missing: dict[str, str] | None = None) -> 
     return {"objects": [obj]}
 
 
-def _tasks_result(infos: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "objects": [
-            {"obj": {"type": "Task", "value": moid}, "propSet": [{"name": "info", "val": info}]}
-            for moid, info in infos.items()
-        ]
-    }
+def _tasks_result(
+    infos: dict[str, dict[str, Any]], faults: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """One ``Task`` object per moid: ``info`` in ``propSet``, or a ``missingSet`` fault."""
+    objects: list[dict[str, Any]] = []
+    for moid, info in infos.items():
+        obj: dict[str, Any] = {"obj": {"type": "Task", "value": moid}}
+        fault = (faults or {}).get(moid)
+        if fault is None:
+            obj["propSet"] = [{"name": "info", "val": info}]
+        else:
+            obj["propSet"] = []
+            obj["missingSet"] = [
+                {
+                    "_typeName": "MissingProperty",
+                    "path": "info",
+                    "fault": {"_typeName": "LocalizedMethodFault", "fault": {"_typeName": fault}},
+                }
+            ]
+        objects.append(obj)
+    return {"objects": objects}
 
 
 def _fault(type_name: str) -> httpx.HTTPStatusError:
@@ -120,6 +136,7 @@ class _FakeConnector:
         write_error: Exception | None = None,
         task_read_error: Exception | None = None,
         missing: dict[str, str] | None = None,
+        task_faults: dict[str, str] | None = None,
     ) -> None:
         self.question = question
         self.tasks = tasks or {}
@@ -127,6 +144,7 @@ class _FakeConnector:
         self.write_error = write_error
         self.task_read_error = task_read_error
         self.missing = missing
+        self.task_faults = task_faults
         self.vmomi_calls: list[tuple[str, dict[str, Any] | None]] = []
         self.write_calls: list[str] = []
 
@@ -159,7 +177,7 @@ class _FakeConnector:
         if prop_spec["type"] == "Task":
             if self.task_read_error is not None:
                 raise self.task_read_error
-            return _tasks_result(self.tasks)
+            return _tasks_result(self.tasks, self.task_faults)
         props: dict[str, Any] = {"name": "rhel-1"}
         if self.question is not None:
             props["runtime.question"] = self.question
@@ -265,6 +283,73 @@ async def test_get_over_4kb_keeps_the_whole_question_inline_through_the_reducer(
     assert "result_object_truncations" not in reduced
 
 
+class _RecordingStore:
+    """Stand-in for the handle store: records what the reducer keeps with the rows."""
+
+    def __init__(self) -> None:
+        self.documents: list[dict[str, Any] | None] = []
+
+    async def spill(self, *, rows: list[dict[str, Any]], **kwargs: Any) -> SpillResult:
+        self.documents.append(kwargs.get("document"))
+        return SpillResult(
+            stored_rows=len(rows), document_stored=kwargs.get("document") is not None
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_settings_env")
+async def test_get_with_a_long_question_keeps_the_whole_question_in_the_handle() -> None:
+    """Choices the inline projection cuts are still there for ``result_query``.
+
+    A question with many long choice summaries does not fit the reducer's
+    inline budget for a hinted object. The inline copy is cut and says so;
+    the complete question is stored with the rows, so a ``path`` read of
+    ``/question`` (or ``/question/choices``) returns every choice.
+    """
+    choices = [
+        {
+            "_typeName": "ElementDescription",
+            "key": str(i),
+            "label": f"option {i}",
+            "summary": "s" * 120,
+        }
+        for i in range(30)
+    ]
+    question = {**_QUESTION, "choice": {"choiceInfo": choices, "defaultIndex": 0}}
+    tasks = {f"task-{i}": _RUNNING for i in range(60)}
+    conn = _FakeConnector(question=question, tasks=tasks)
+    out = await vm_question_get_impl(conn, _operator(), _Target(), {"vm": "vm-42"})  # type: ignore[arg-type]
+    assert len(out["question"]["choices"]) == 30
+
+    store = _RecordingStore()
+    context = {
+        "op_id": VMWARE_VM_QUESTION_GET_OP.op_id,
+        "operator_sub": "op-vm-question",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        "result_objects": VMWARE_VM_QUESTION_GET_OP.llm_instructions["result_objects"],  # type: ignore[index]
+    }
+    reduced, handle = await JsonFluxReducer(
+        sample_size=5,
+        store=store,  # type: ignore[arg-type]
+        max_spill_rows=10000,
+    ).reduce(out, None, context)
+
+    assert handle is not None
+    assert reduced["question"]["id"] == "_vmx1"
+    inline_choices = reduced["question"]["choices"]
+    assert 0 < len(inline_choices) < 30
+    assert reduced["result_object_truncations"] == {"question": ["choices"]}
+    assert 'query={"path": "/question"}' in reduced["result_object_note"]
+    document = store.documents[0]
+    assert document is not None
+    assert document["question"] == out["question"]
+    omitted = resolve_json_pointer(document, parse_json_pointer("/question/choices"))[
+        len(inline_choices) :
+    ]
+    assert omitted
+    assert omitted[-1] == {"key": "29", "label": "option 29", "summary": "s" * 120}
+
+
 @pytest.mark.asyncio
 async def test_get_keeps_the_question_when_only_the_task_read_fails() -> None:
     conn = _FakeConnector(tasks={"task-7": _RUNNING}, task_read_error=httpx.ConnectError("down"))
@@ -276,6 +361,52 @@ async def test_get_keeps_the_question_when_only_the_task_read_fails() -> None:
     assert out["tasks_error"] is not None
     assert "ConnectError" in out["tasks_error"]
     assert len(conn.vmomi_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_reports_a_task_whose_info_vcenter_could_not_read() -> None:
+    """The HTTP read succeeds, but one ``Task.info`` comes back as a ``missingSet`` fault.
+
+    That task may still run, so the result must not look like "no running
+    task": ``running_tasks`` is empty and ``tasks_error`` names the fault. The
+    question is kept.
+    """
+    conn = _FakeConnector(
+        tasks={"task-7": _RUNNING, "task-6": _DONE}, task_faults={"task-7": "NoPermission"}
+    )
+    out = await vm_question_get_impl(conn, _operator(), _Target(), {"vm": "vm-42"})  # type: ignore[arg-type]
+
+    assert out["pending"] is True
+    assert out["question"]["id"] == "_vmx1"
+    assert out["running_tasks"] == []
+    assert out["tasks_error"] == (
+        "vCenter could not read info of 1 of 2 task(s) (NoPermission); "
+        "whether they still run is unknown"
+    )
+    assert len(conn.vmomi_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_reports_a_task_vcenter_left_out_of_its_answer() -> None:
+    """A task with neither ``info`` nor a fault in the answer is unknown, not finished."""
+    conn = _FakeConnector(tasks={"task-7": _RUNNING, "task-6": _DONE})
+    full_result = conn._post_vmomi_json
+
+    async def _drop_one(target: Any, path: str, **kwargs: Any) -> Any:
+        result = await full_result(target, path, **kwargs)
+        if kwargs["json"]["specSet"][0]["propSet"][0]["type"] == "Task":
+            result["objects"] = [o for o in result["objects"] if o["obj"]["value"] != "task-7"]
+        return result
+
+    conn._post_vmomi_json = _drop_one  # type: ignore[method-assign]
+    out = await vm_question_get_impl(conn, _operator(), _Target(), {"vm": "vm-42"})  # type: ignore[arg-type]
+
+    assert out["question"]["id"] == "_vmx1"
+    assert out["running_tasks"] == []
+    assert out["tasks_error"] == (
+        "vCenter could not read info of 1 of 2 task(s) (no answer); "
+        "whether they still run is unknown"
+    )
 
 
 @pytest.mark.asyncio

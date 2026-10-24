@@ -319,6 +319,9 @@ _GET_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
 #: Fields of ``question`` that stay inline when a long ``running_tasks`` list
 #: makes JSONFlux reduce the result to a handle. Without this the caller would
 #: lose the question id and choices it needs for ``vmware.vm.question.answer``.
+#: The inline copy is bounded; the reducer also stores the whole ``question``
+#: with the rows, so when ``result_object_truncations`` names it, a
+#: ``result_query`` read with ``path="/question"`` returns every choice.
 _GET_RESULT_OBJECTS: Final[dict[str, Any]] = {
     "objects": {"question": ["id", "text", "choices", "default_choice", "messages"]}
 }

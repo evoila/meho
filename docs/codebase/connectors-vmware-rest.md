@@ -683,9 +683,17 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       `Task.info` read fails, `running_tasks` is empty and `tasks_error`
       says why; the question is still returned.
     - When a long `running_tasks` list makes JSONFlux reduce the result to
-      a handle, the `result_objects` hint keeps the whole `question` (`id`,
+      a handle, the `result_objects` hint keeps the `question` (`id`,
       `text`, `choices`, `default_choice`, `messages`) inline, so the caller
-      still has what it needs to answer.
+      still has what it needs to answer. The inline copy is bounded: a
+      question with many long choices is cut, `result_object_truncations`
+      names the cut field, and `result_object_note` says how to get the
+      whole question. The reducer stores it complete with the rows, so
+      `result_query` with `path="/question"` returns every choice.
+    - When vCenter answers the `Task.info` read but could not read the
+      `info` of one task (a `missingSet` fault), or left a task out, that
+      task may still run: `running_tasks` is empty and `tasks_error` names
+      the fault, so an unreadable task never looks like "no running task".
   - **Answer** (`dangerous`, waits for approval). Params `vm` (moid only,
     checked against `[A-Za-z0-9-]+` because it goes into the URL path, and
     percent-encoded), `question_id` and `answer` (a choice key). It reads

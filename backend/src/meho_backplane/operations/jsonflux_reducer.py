@@ -313,6 +313,7 @@ _RESERVED_SUMMARY_KEYS = frozenset(
         "sample_bytes",
         "source_key",
         "result_object_truncations",
+        "result_object_note",
         "omitted_scalar_count",
         "result_record",
         "root_type",
@@ -355,6 +356,9 @@ _RESULT_OBJECT_BYTE_BUDGET = 4096
 _RESULT_OBJECT_VALUE_BYTE_BUDGET = 1024
 _RESULT_OBJECT_LIST_ITEMS = 16
 _RESULT_OBJECT_TRUNCATIONS_KEY = "result_object_truncations"
+#: Summary key carrying the plain-language note on how to get a truncated
+#: hinted object whole (a ``path`` read on the handle), or that it cannot be.
+_RESULT_OBJECT_NOTE_KEY = "result_object_note"
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,8 +504,15 @@ class JsonFluxReducer:
 
         materialized = self._materialize(rows, context)
         preserved_scalars, omitted_scalars = _preserved_scalars(payload, envelope_key, context)
-        spill_outcome = await self._spill(materialized, context, omitted_scalars)
-        preserved_scalars.update(_preserved_objects(payload, envelope_key, context))
+        hinted_objects = _hinted_objects(payload, envelope_key, context)
+        kept_fields = {
+            **omitted_scalars,
+            **{key: value for key, (value, _fields) in hinted_objects.items()},
+        }
+        spill_outcome = await self._spill(materialized, context, kept_fields)
+        preserved_scalars.update(
+            _project_hinted_objects(hinted_objects, stored=spill_outcome.omitted_fields_stored)
+        )
         digest = _row_digest(rows, envelope_key, digest_spec)
         summary, handle = self._assemble(
             materialized, envelope_key, context, spill_outcome, preserved_scalars, digest
@@ -775,17 +786,21 @@ class JsonFluxReducer:
         self,
         materialized: _MaterializedSet,
         context: dict[str, Any] | None,
-        omitted_scalars: dict[str, Any] | None = None,
+        kept_fields: dict[str, Any] | None = None,
     ) -> _SpillOutcome:
         """Persist the full materialized rows to the read-back store.
 
-        *omitted_scalars* (#3633) are the payload's top-level scalars the
-        default rule left out of the inline summary. They are stored with
-        the rows so ``result_query`` can read them back with a ``path``; a
-        set that leaves no room for the rows under the record cap is
-        dropped by the store (logged) and the rows are still kept. The
-        outcome's ``omitted_fields_stored`` says which happened, so the
-        drill-in prose only advertises the ``path`` read when it works.
+        *kept_fields* are the payload's top-level fields that are stored
+        with the rows so ``result_query`` can read them back with a
+        ``path``: the scalars the default rule left out of the inline
+        summary (#3633), and the whole objects a ``result_objects`` hint
+        names (the inline copy of those is a bounded projection, so the
+        caller can always get the complete object from the handle). A set
+        that leaves no room for the rows under the record cap is dropped
+        by the store (logged) and the rows are still kept. The outcome's
+        ``omitted_fields_stored`` says which happened, so the drill-in
+        prose and the truncation note only advertise the ``path`` read
+        when it works.
 
         Returns a :class:`_SpillOutcome`: ``stored_rows`` when the rows
         were persisted (so :meth:`_assemble` can build the drill-in
@@ -837,7 +852,7 @@ class JsonFluxReducer:
             total_rows=materialized.total_rows,
             ttl_seconds=self._ttl_seconds,
             max_rows=max_rows,
-            document=omitted_scalars or None,
+            document=kept_fields or None,
         )
         if not spilled.stored_rows:
             return self._skip("result_store_unavailable", materialized, context)
@@ -1357,6 +1372,8 @@ def _preserved_objects(
     payload: Any,
     envelope_key: str | None,
     context: dict[str, Any] | None,
+    *,
+    stored: bool = False,
 ) -> dict[str, Any]:
     """Copy bounded identity fields from explicitly named top-level objects.
 
@@ -1368,9 +1385,29 @@ def _preserved_objects(
     and short lists of flat objects whose values are scalars (a VM question's
     ``choices: [{key, label}]``, which the caller needs to answer it). Nested
     maps, deeper lists, and values outside the fixed byte budget are left out
-    (a list is cut and flagged under ``result_object_truncations``). Invalid
-    hints are logged and ignored; reduction must never turn an otherwise
-    successful connector read into an error.
+    (a list is cut and flagged under ``result_object_truncations``). The whole
+    object is stored with the rows (see :meth:`JsonFluxReducer._spill`), so a
+    ``path`` read on the handle returns everything the projection left out;
+    *stored* says whether that copy exists, and the ``result_object_note``
+    that rides with a truncation tells the caller how to read it, or that it
+    cannot. Invalid hints are logged and ignored; reduction must never turn
+    an otherwise successful connector read into an error.
+    """
+    return _project_hinted_objects(_hinted_objects(payload, envelope_key, context), stored=stored)
+
+
+def _hinted_objects(
+    payload: Any,
+    envelope_key: str | None,
+    context: dict[str, Any] | None,
+) -> dict[str, tuple[dict[str, Any], list[str]]]:
+    """``{object key: (the whole object, its listed fields)}`` from the ``result_objects`` hint.
+
+    Validates the hint once for both consumers: the spill stores each object
+    whole, the projection copies the listed fields inline. An invalid hint
+    logs a warning and yields nothing; keys that are not direct dict children
+    of *payload*, alias the reduced collection, or shadow a reducer key are
+    skipped.
     """
     if not context:
         return {}
@@ -1387,11 +1424,8 @@ def _preserved_objects(
     if not isinstance(payload, dict):
         return {}
 
-    objects = raw["objects"]
-    preserved: dict[str, Any] = {}
-    truncations: dict[str, list[str]] = {}
-    used_bytes = 0
-    for object_key, fields in list(objects.items())[:_MAX_RESULT_OBJECTS]:
+    hinted: dict[str, tuple[dict[str, Any], list[str]]] = {}
+    for object_key, fields in list(raw["objects"].items())[:_MAX_RESULT_OBJECTS]:
         if (
             not isinstance(object_key, str)
             or object_key == envelope_key
@@ -1401,8 +1435,19 @@ def _preserved_objects(
         ):
             continue
         value = payload.get(object_key)
-        if not isinstance(value, dict):
-            continue
+        if isinstance(value, dict):
+            hinted[object_key] = (value, fields)
+    return hinted
+
+
+def _project_hinted_objects(
+    hinted: dict[str, tuple[dict[str, Any], list[str]]], *, stored: bool
+) -> dict[str, Any]:
+    """The bounded inline projection of :func:`_hinted_objects`, plus its truncation note."""
+    preserved: dict[str, Any] = {}
+    truncations: dict[str, list[str]] = {}
+    used_bytes = 0
+    for object_key, (value, fields) in hinted.items():
         projected: dict[str, Any] = {}
         for field in fields[:_MAX_RESULT_OBJECT_FIELDS]:
             child = value.get(field)
@@ -1422,7 +1467,23 @@ def _preserved_objects(
             preserved[object_key] = projected
     if truncations:
         preserved[_RESULT_OBJECT_TRUNCATIONS_KEY] = truncations
+        preserved[_RESULT_OBJECT_NOTE_KEY] = _result_object_note(truncations, stored)
     return preserved
+
+
+def _result_object_note(truncations: dict[str, list[str]], stored: bool) -> str:
+    """Tell the caller how to get a cut object whole, or that it cannot (#4841)."""
+    cut = ", ".join(f"{key}.{field}" for key, fields in truncations.items() for field in fields)
+    if stored:
+        reads = " or ".join(f'query={{"path": "/{key}"}}' for key in truncations)
+        return (
+            f"{cut} was cut to fit inline. The whole object is kept with the rows: "
+            f"read it with result_query, {reads}."
+        )
+    return (
+        f"{cut} was cut to fit inline, and the whole object could not be kept with the "
+        "rows, so it is not retrievable from this handle."
+    )
 
 
 def _is_scalar(value: Any) -> bool:

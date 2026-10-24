@@ -59,13 +59,20 @@ def sends_secret(op_id: str, tags: Iterable[str] | None) -> bool:
 
 
 def _summary_without_vendor_text(error: str | None) -> str | None:
+    """Cut the summary at the first marker in the text, whichever marker it is.
+
+    The vendor text itself can hold a later marker (a Vault message that
+    says "Upstream said:"). Cutting at the first marker found in list order
+    would keep the vendor text in front of that later marker.
+    """
     if error is None:
         return None
-    for marker in _SUMMARY_MARKERS:
-        index = error.find(marker)
-        if index != -1:
-            return f"{error[:index]}{marker}{VENDOR_TEXT_WITHHELD}"
-    return error
+    hits = [(error.find(marker), marker) for marker in _SUMMARY_MARKERS]
+    found = [(index, marker) for index, marker in hits if index != -1]
+    if not found:
+        return error
+    index, marker = min(found)
+    return f"{error[:index]}{marker}{VENDOR_TEXT_WITHHELD}"
 
 
 def _extras_without_vendor_text(extras: dict[str, Any]) -> dict[str, Any]:

@@ -19,6 +19,7 @@ No absolute host path is stored or returned.
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Sequence
@@ -50,7 +51,7 @@ class KbIngestRootError(ValueError):
     """The requested ingest directory resolves outside ``KB_INGEST_ROOT``.
 
     Raised by :meth:`KbService.ingest_directory` before any file is
-    read when the supplied directory -- after :meth:`Path.resolve`
+    read when the supplied directory -- after :func:`os.path.realpath`
     follows every symlink and normalises ``..`` segments -- does not
     land within the configured :attr:`~meho_backplane.settings.Settings.kb_ingest_root`.
     This is the path-traversal / local-file-inclusion guard for the
@@ -69,22 +70,26 @@ def _resolve_within_ingest_root(directory: Path) -> Path:
     """Resolve *directory* and confirm it lands within ``KB_INGEST_ROOT``.
 
     Both the configured root and the requested directory are resolved
-    -- :meth:`Path.resolve` follows symlinks and collapses ``..`` --
+    -- :func:`os.path.realpath` follows symlinks and collapses ``..`` --
     so a traversal payload (``<root>/../../etc``) and an escaping
     symlink (a link inside the root pointing at ``/etc``) both resolve
-    outside the root and are rejected. Returns the resolved directory
-    (the walker re-resolves idempotently); raises
-    :class:`KbIngestRootError` when it escapes the root (#101 L8 + L14).
+    outside the root and are rejected. Both resolved paths end with a
+    separator before the prefix check, so a sibling folder such as
+    ``<root>-old`` does not count as inside ``<root>``. The requested
+    directory may itself be a link when its real location is inside
+    the root. Returns the resolved directory (the walker re-resolves
+    idempotently); raises :class:`KbIngestRootError` when it escapes
+    the root (#101 L8 + L14).
     """
-    root = Path(get_settings().kb_ingest_root).resolve()
-    resolved = directory.resolve()
-    if not resolved.is_relative_to(root):
+    root_dir = os.path.join(os.path.realpath(get_settings().kb_ingest_root), "")
+    real_dir = os.path.join(os.path.realpath(directory), "")
+    if not real_dir.startswith(root_dir):
         raise KbIngestRootError(
             f"kb_ingest_path_outside_root: {directory} resolves to "
-            f"{resolved}, which is outside the configured ingest root "
-            f"{root}"
+            f"{real_dir}, which is outside the configured ingest root "
+            f"{root_dir}"
         )
-    return resolved
+    return Path(real_dir)
 
 
 _IngestAction = Literal["inserted", "updated", "skipped"]
@@ -119,7 +124,9 @@ async def ingest_directory(
         by :func:`_resolve_within_ingest_root` (raises
         :class:`KbIngestRootError` on escape, #101). Must exist and
         be a directory; otherwise :class:`NotADirectoryError` /
-        :class:`FileNotFoundError` propagates.
+        :class:`FileNotFoundError` propagates. Inside it, only
+        regular files are read; links and special files are skipped
+        (see :mod:`meho_backplane.kb.file_walker`).
     tenant_id
         The tenant on whose behalf the corpus is being ingested.
         Bound by the caller from the operator's JWT.

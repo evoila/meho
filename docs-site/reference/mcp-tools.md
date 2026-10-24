@@ -37,7 +37,7 @@ The default agent surface. No elevation required.
 | `meho_runbook_next` | beta | — | Advance one step in an in-progress runbook run. |
 | `meho_runbook_show_template` | beta | — | Read the full body of a runbook template, including step contents. |
 | `meho_runbook_start` | beta | — | Start a new runbook run. |
-| `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) plus the MEHO backplane's dependency status: Vault federation chain (reachable + KV read OK?) and DB migration state, the OAuth scopes this session holds, and which working-surface tools it should see versus the ones it lists. |
+| `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) plus the MEHO backplane's dependency status: Vault federation chain (reachable + KV read OK?), DB migration state with the database's revision and the revision this build expects, the readiness checks /ready reports (name, ok, detail), the approval settings in force (approval key state, whether a second person must approve), the gated features and the setting names they still need, the OAuth scopes this session holds, and which working-surface tools it should see versus the ones it lists. |
 | `preview_operation` | ga | — | Preview an operation WITHOUT running it. |
 | `query_topology` | beta | — | Query the topology graph. |
 | `read_docs` | experimental | capability `meho-docs` | Read more around a vendor-document hit: the text before and after it, the whole page, or the section it sits in. |

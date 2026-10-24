@@ -128,6 +128,28 @@ def test_tools_call_meho_status_returns_health_response_shape(
     # ``_default_database_url`` fixture in conftest). The probe should
     # report healthy because conftest ran ``alembic upgrade head``.
     assert payload["db"]["migrated"] is True
+    # #4830: the revisions ride along as values, equal when migrated.
+    assert payload["db"]["revision"] == payload["db"]["head"]
+    assert payload["db"]["detail"] == f"revision={payload['db']['head']}"
+
+    # #4830: the lifespan registered the real readiness probes, so the
+    # checks ``/ready`` would show are in the response — ``db`` among them.
+    readiness = payload["readiness"]
+    assert isinstance(readiness["ready"], bool)
+    names = {check["name"] for check in readiness["checks"]}
+    assert "db" in names
+    assert all({"name", "ok", "detail"} == set(check) for check in readiness["checks"])
+
+    # #4830: approval settings as state words, never a key value.
+    approvals = payload["approvals"]
+    assert approvals["custody"] in {"configured", "missing", "malformed"}
+    assert approvals["effective_posture"] in {"four_eyes_enforced", "single_operator_break_glass"}
+    assert approvals["delegated_decision_posture"] in {
+        "production_own_hand_only",
+        "lab_class_delegation_allowed",
+    }
+    feature_names = {entry["name"] for entry in payload["features"]}
+    assert feature_names >= {"approval_custody", "approval_queue"}
 
 
 def test_tools_call_meho_status_rejects_extra_arguments(
@@ -249,3 +271,9 @@ def test_health_response_defaults_keep_old_shape_decodable() -> None:
     assert response.granted_scopes == []
     assert response.surface_summary.listed_working_tools == []
     assert response.surface_summary.operator_surface_listed is False
+    # #4830: an older backplane sends none of these.
+    assert response.db.revision is None
+    assert response.db.head is None
+    assert response.readiness is None
+    assert response.approvals is None
+    assert response.features == []

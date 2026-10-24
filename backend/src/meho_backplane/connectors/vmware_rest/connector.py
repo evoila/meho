@@ -3352,6 +3352,42 @@ class VmwareRestConnector(HttpConnector):
 
         return await sso_admin_api_file_get_impl(self, operator, target, params)
 
+    async def license_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.license.list`` -- the licences in the vCenter's licence inventory.
+
+        A ``source_kind="typed"`` read. Every key is masked to its last 5
+        characters. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_license.license_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_license import license_list_impl
+
+        return await license_list_impl(self, operator, target, params)
+
+    async def license_assigned_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.license.assigned.list`` -- which licence each asset uses.
+
+        A ``source_kind="typed"`` read. Every key is masked to its last 5
+        characters. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_license.license_assigned_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_license import (
+            license_assigned_list_impl,
+        )
+
+        return await license_assigned_list_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

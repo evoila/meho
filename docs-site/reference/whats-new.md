@@ -17,10 +17,11 @@ notes.
   passwords and licence keys. MEHO now leaves them out. Traces written
   before the upgrade keep them until they expire: check your trace
   retention, and change those passwords and keys if needed.
-- **More VMware work through MEHO.** VM snapshots, vSphere licences, the
-  vCenter appliance's local accounts and vCenter alarms. Every change
-  waits for approval. A second person approves snapshot deletes, licence
-  assignments and appliance password changes.
+- **More VMware work through MEHO.** VM snapshots, a VM's hardware and
+  CD drives, vSphere licences, the vCenter appliance's local accounts
+  and vCenter alarms. Every change waits for approval. A second person
+  approves snapshot deletes, licence assignments and appliance password
+  changes.
 - **Licence keys stay masked.** The vSphere, SDDC Manager and VCF
   Operations licence reads show only the last 5 characters of a key.
   `sddc.license.list` now returns `key_masked` instead of `key`, so

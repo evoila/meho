@@ -8,8 +8,7 @@ When you finish, you will have:
 
 - an agent with its own identity;
 - an agent definition: its prompt, its tools, and its limits;
-- permission grants that make the agent read-only when it runs as
-  itself;
+- permission grants that make the agent read-only, in every run;
 - one finished run, and the audit rows that show what the agent did.
 
 !!! note "Prerequisites, roles, and maturity"
@@ -276,26 +275,25 @@ on one thing, you add grants. See the recipe below.
 ### Who the grants apply to
 
 Grants belong to the agent principal (`agent:pod-reader`). They apply
-when the agent runs **as itself**:
+to every run of the agent:
 
 - **A run started by the [scheduler](scheduler.md)**, or by an
   [event trigger](event-ingestion.md). The agent logs in with its own
   identity. Its grants apply. The audit rows show the agent's sub.
 - **A run you start by hand** with `meho agent run`. The run acts on
-  your behalf. **Your** permissions apply, not the agent's grants. The
-  audit rows show your sub.
+  your behalf. MEHO checks each call against your permissions and
+  against the agent's grants. The stricter answer wins. So the run may
+  do only what both you and the agent may do. The audit rows show your
+  sub.
 
-The safety-level table above and the grants apply only when the agent
-acts as itself. In a run you start by hand, MEHO checks each call the
-same way it checks a call you make yourself. See
-[Approvals and break-glass](approvals-and-break-glass.md) for which
+The safety-level table above applies to both kinds of run. With no
+grant, a `caution` operation waits until a second person approves, and
+a `dangerous` operation is denied, even when you may run it yourself.
+See [Approvals and break-glass](approvals-and-break-glass.md) for which
 calls wait for a second person.
 
-In a run you start by hand, the toolset from Step 3 still limits the
-agent to the tools and connectors you listed. It does not limit the
-operations. The agent may run any operation on `k8s-1.x` that you may
-run, including writes. So the read-only recipe below only holds when
-the agent runs as itself. Step 6 shows both ways to start a run.
+So the read-only recipe below works for both ways to start a run.
+Step 6 shows both ways.
 
 ### How a grant works
 
@@ -387,26 +385,25 @@ stops working.
 
 ## Step 6 — Run the agent
 
-There are two ways to start a run. They use different permissions.
+There are two ways to start a run. The grants from Step 5 apply to both.
 
 | How you start the run | Whose permissions apply | Whose sub is in the audit rows |
 |---|---|---|
-| By hand, with `meho agent run` | **Yours.** The grants from Step 5 do not apply. | Yours |
+| By hand, with `meho agent run` | **Yours and the agent's.** The grants from Step 5 apply. The stricter answer wins. | Yours |
 | Through the scheduler, with `meho scheduler create` | **The agent's.** The grants from Step 5 apply. | The agent's |
 
-### A run by hand, with your permissions
+### A run by hand, on your behalf
 
 Any user with the `operator` or `tenant_admin` role can run a
 definition in their tenant.
 
-!!! warning "A run by hand is not limited by the grants"
+!!! note "A run by hand is limited by you and by the agent"
 
-    This run acts as you. It may run every operation on `k8s-1.x` that
-    you may run, including writes. The system prompt tells the agent to
-    only read, but a prompt is not a permission check. Use a run by
-    hand to test the prompt and the toolset. For the read-only result
-    from Step 5, start the run through the scheduler (see
-    [below](#a-run-as-the-agent-with-its-grants)).
+    This run acts on your behalf. Each call must be allowed for you and
+    by the agent's grants from Step 5. The stricter answer wins. So
+    `pod-reader` can only run `k8s.pod.list` on `cluster-a`, even when
+    you may run more. `meho agent run-status <run-id>` shows both, for
+    example `identity: agent:pod-reader for <your sub>`.
 
 ```bash
 meho agent run pod-reader \
@@ -455,8 +452,8 @@ meho agent run-events pod-reader --input "..." # start a run and watch each step
 
 The [scheduler](scheduler.md) starts runs with the agent's own
 identity. In such a run the grants from Step 5 apply, so `pod-reader`
-can only run `k8s.pod.list` on `cluster-a`. This is the run that is
-truly read-only.
+can only run `k8s.pod.list` on `cluster-a`. Use it for runs that start
+without a person.
 
 The scheduler takes the definition's id, not its name. Look the id up
 first:
@@ -553,7 +550,7 @@ In each row, check:
 | The agent says it has no tool for something | The tool is not in `meta_tools`, the name is misspelled, or hosted agents do not have that tool. | Check the tool table in Step 3. |
 | The agent says a connector is not allowed | The connector is not in the `connectors` list. | Add the connector id to `connectors`, or remove the list. |
 | A call is `denied` | A grant or the safety level denies it. | Check `meho agent grant list --principal agent:<name>` and the operation's `safety_level`. |
-| A run you started by hand ran an operation the grants deny | A run by hand acts as you. The grants do not apply to it. | Start the run through the scheduler, so the agent runs as itself. |
+| A run you started by hand is denied an operation that you may run | The agent's grants deny it. In a run by hand, the stricter answer wins. | Add a grant with `meho agent grant create --principal agent:<name>`, or run the operation yourself. |
 | The run fails with `turn budget exhausted` | The agent used all its turns. | Raise `--turn-budget` with `meho agent edit`, or make the task smaller. |
 | The run fails right away and the error names a runbook | The prompt or input tells the agent to run a runbook. Hosted agents cannot run runbooks. | Remove that instruction. |
 | `agent run` gives back a run id but no output | The run took longer than the wait limit, so it went on in the background. | Run `meho agent run-status <run-id>`. |

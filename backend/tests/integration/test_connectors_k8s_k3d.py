@@ -1155,3 +1155,94 @@ async def test_cordon_uncordon_node_against_k3s(
     finally:
         uncordoned = await connector.k8s_cordon(op, target, {"name": node_name, "uncordon": True})
         assert uncordoned["unschedulable"] is False
+
+
+# ---------------------------------------------------------------------------
+# k8s.job.info -- live k3s exercise: a Job that fails after its retries
+# and a Job that succeeds, read back through the connector.
+# ---------------------------------------------------------------------------
+
+
+async def _wait_for_job_to_finish(
+    connector: KubernetesConnector, target: _K3sTarget, job_name: str
+) -> dict[str, Any]:
+    """Poll ``k8s.job.info`` until the Job is complete or failed (or skip)."""
+    import asyncio as _asyncio
+
+    for _ in range(90):
+        info = await connector.k8s_job_info(
+            _make_k3d_operator(), target, {"job_name": job_name, "namespace": "default"}
+        )
+        if info["state"] in {"complete", "failed"}:
+            return info
+        await _asyncio.sleep(2.0)
+    pytest.skip(f"Job {job_name} did not finish within 180s (image pull or scheduling)")
+
+
+@pytest.mark.asyncio
+async def test_job_info_against_k3s_reports_failed_and_complete_jobs(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """A Job that exits 1 with ``backoffLimit: 1`` reads as failed with
+    ``BackoffLimitExceeded`` and two failed pods; a Job that runs ``true``
+    reads as complete with a ``completion_time``.
+    """
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    api_client = await connector._get_api_client(target, _make_k3d_operator())
+    batch_v1 = _client.BatchV1Api(api_client)
+    image = os.environ.get("MEHO_TEST_BUSYBOX_IMAGE", "busybox:1.36")
+    suffix = uuid4().hex[:6]
+    failing = f"meho-job-fail-{suffix}"
+    succeeding = f"meho-job-ok-{suffix}"
+    manifests = {
+        failing: (["sh", "-c", "exit 1"], 1),
+        succeeding: (["true"], 0),
+    }
+    for name, (command, backoff_limit) in manifests.items():
+        body = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": name, "namespace": "default"},
+            "spec": {
+                "backoffLimit": backoff_limit,
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [{"name": "run", "image": image, "command": command}],
+                    }
+                },
+            },
+        }
+        await batch_v1.create_namespaced_job(namespace="default", body=body)
+
+    try:
+        failed = await _wait_for_job_to_finish(connector, target, failing)
+        assert failed["state"] == "failed"
+        reasons = {c["reason"] for c in failed["conditions"] if c["type"] == "Failed"}
+        assert "BackoffLimitExceeded" in reasons, failed["conditions"]
+        assert failed["pods_failed"] == 2
+        assert len(failed["pods"]) == 2
+        assert failed["pods_truncated"] is False
+        assert failed["completion_time"] is None
+
+        complete = await _wait_for_job_to_finish(connector, target, succeeding)
+        assert complete["state"] == "complete"
+        assert complete["completion_time"] is not None
+        assert complete["pods_succeeded"] == 1
+
+        listing = await connector.k8s_job_list(
+            _make_k3d_operator(), target, {"namespace": "default"}
+        )
+        states = {row["name"]: row["state"] for row in listing["rows"]}
+        assert states[failing] == "failed"
+        assert states[succeeding] == "complete"
+    finally:
+        for name in manifests:
+            with contextlib.suppress(Exception):
+                await batch_v1.delete_namespaced_job(
+                    name=name,
+                    namespace="default",
+                    body=_client.V1DeleteOptions(propagation_policy="Background"),
+                )

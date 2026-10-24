@@ -36,7 +36,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 from uuid import UUID
 
 import httpx
@@ -51,6 +51,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "UPSTREAM_SAID",
+    "VAULT_SAID",
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
@@ -111,6 +113,14 @@ _UPSTREAM_MESSAGE_CAP: int = 2048
 #: on the never-raises error path. Returning the raw text instead would
 #: reintroduce exactly the passthrough this sanitizer exists to close.
 _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
+
+
+#: What joins the vendor's text to the end of an ``error`` summary. The
+#: dispatcher finds the vendor's part by these markers when it hides the
+#: vendor's text of an operation that sends a secret (#4854,
+#: :mod:`meho_backplane.operations._vendor_text`).
+UPSTREAM_SAID: Final = " Upstream said: "
+VAULT_SAID: Final = " Vault said: "
 
 
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
@@ -1772,7 +1782,7 @@ def result_connector_http_403(
         "convention."
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_http_403",
         "http_status": 403,
@@ -1839,7 +1849,7 @@ def result_connector_http_422(
         "convention."
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_http_422",
         "http_status": 422,
@@ -2179,7 +2189,7 @@ def result_connector_auth_failed(
         relogin=relogin,
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_auth_failed",
         "cause": cause,
@@ -2298,7 +2308,7 @@ def result_connector_vault_forbidden(
     if msg:
         # hvac renders Forbidden as "permission denied, on GET <url>" —
         # the URL is the operator-supplied path, never secret material.
-        summary = f"{summary} Vault said: {msg}"
+        summary = f"{summary}{VAULT_SAID}{msg}"
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -2432,7 +2442,7 @@ def result_connector_vault_write_forbidden(
     if msg:
         # hvac renders Forbidden as "permission denied, on POST <url>" — the
         # URL is the operator-supplied data path, never secret material.
-        summary = f"{summary} Vault said: {msg}"
+        summary = f"{summary}{VAULT_SAID}{msg}"
     return OperationResult(
         status="error",
         op_id=op_id,

@@ -121,6 +121,9 @@ MEHO stores a long list behind a result handle; the agent reads it with
   `***REDACTED***`.
 - Every answer, and every vendor answer the flight recorder stores
   (`trace_response_body`), has secret-named fields replaced at any depth.
+- The same goes for `{key, value}` entries, the shape a `Properties`
+  value uses: when the key is a secret name, the value is replaced, at
+  any depth. Entries shaped `{name, value}` are handled the same way.
 
 ### Shutdown
 

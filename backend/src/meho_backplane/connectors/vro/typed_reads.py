@@ -153,7 +153,10 @@ def redact_secrets(value: Any) -> Any:
         return [redact_secrets(item) for item in value]
     if not isinstance(value, dict):
         return value
-    secret_param = "value" in value and "name" in value and _is_secret_parameter(value)
+    # Parameters are ``{name, type, value}``; Properties entries are ``{key, value}``.
+    secret_param = "value" in value and (
+        ("name" in value and _is_secret_parameter(value)) or _is_secret_name(value.get("key"))
+    )
     return {
         key: (
             REDACTED

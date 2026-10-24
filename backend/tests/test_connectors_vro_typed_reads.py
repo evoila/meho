@@ -486,6 +486,60 @@ async def test_execution_get_returns_state_error_and_replaces_secret_values(
 
 
 @pytest.mark.asyncio
+async def test_execution_get_replaces_secret_values_in_properties_entries(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    connector = await _register(_stub_embedding)
+    payload = {
+        "id": _RUN,
+        "state": "completed",
+        "inputParameters": [
+            {
+                "name": "inputProperties",
+                "type": "Properties",
+                "value": {
+                    "properties": {
+                        "property": [
+                            {"key": "hostName", "value": {"string": {"value": "<host-name>"}}},
+                            {"key": "adminPassword", "value": {"string": {"value": _PASSWORD}}},
+                            {
+                                "key": "customProperties",
+                                "value": {
+                                    "properties": {
+                                        "property": [
+                                            {
+                                                "key": "api_token",
+                                                "value": {"string": {"value": "made-up-tok"}},
+                                            }
+                                        ]
+                                    }
+                                },
+                            },
+                        ]
+                    }
+                },
+            }
+        ],
+        "outputParameters": [],
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_RUN_PATH).respond(200, json=payload)
+        result = await _dispatch("vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN})
+
+    assert result.status == "ok", result.error
+    entries = result.result["inputs"][0]["value"]["properties"]["property"]
+    assert entries[0]["value"] == {"string": {"value": "<host-name>"}}
+    assert entries[1]["value"] == REDACTED
+    nested = entries[2]["value"]["properties"]["property"]
+    assert nested[0]["value"] == REDACTED
+    trace = connector.trace_response_body(httpx.Response(200, json=payload))
+    for rendered in (json.dumps(result.result), json.dumps(trace)):
+        assert "<host-name>" in rendered
+        for secret in (_PASSWORD, "made-up-tok"):
+            assert secret not in rendered
+
+
+@pytest.mark.asyncio
 async def test_execution_logs_cap_lines_and_text(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:

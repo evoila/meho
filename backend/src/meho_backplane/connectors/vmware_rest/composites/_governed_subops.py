@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Final
 
 from meho_backplane.connectors.vmware_rest.composites import (
+    _alarm,
     _datastore_files,
     _drs_rule_delete,
     _host,
@@ -161,6 +162,9 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
     ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
+    # #4383 alarm changes: one AlarmManager write each, after two reads.
+    "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
+    "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
 }
 
 

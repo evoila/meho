@@ -75,6 +75,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VCENTER_SSO_ADMIN_API_FILE_GET_OP",
+    "VMWARE_ALARM_TRIGGERED_LIST_OP",
     "VMWARE_HOST_NETWORK_UPLINKS_OP",
     "VMWARE_HOST_STORAGE_DEVICES_OP",
     "VMWARE_HOST_USAGE_OP",
@@ -377,6 +378,16 @@ async def host_usage_impl(
 # defined -- to break the import cycle (the sibling modules import both
 # names from this module). E402 is expected: moving these to the top
 # would re-introduce the cycle.
+from meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered import (  # noqa: E402
+    ALARM_TRIGGERED_GROUP_KEY,
+    ALARM_TRIGGERED_WHEN_TO_USE,
+    VMWARE_ALARM_TRIGGERED_LIST_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_appliance_local_accounts import (  # noqa: E402
+    APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY,
+    APPLIANCE_LOCAL_ACCOUNTS_OPS,
+    APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import (  # noqa: E402
     HOST_NETWORK_UPLINKS_GROUP_KEY,
     HOST_NETWORK_UPLINKS_WHEN_TO_USE,
@@ -461,6 +472,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     SNAPSHOT_LIST_GROUP_KEY: SNAPSHOT_LIST_WHEN_TO_USE,
     # Shared with the licence assign composite: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
+    APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
+    ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -526,9 +539,12 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
 #: (#3701, tasks older than the recent list); the SSO Admin API
 #: description read ``vcenter.sso_admin.api_file.get``; the snapshots of
-#: one VM, ``snapshot.list``; and the two licence reads ``license.list`` +
-#: ``license.assigned.list`` (keys masked). The tuple shape lets future typed
-#: reads join without touching the registrar.
+#: one VM, ``snapshot.list``; the two licence reads ``license.list`` +
+#: ``license.assigned.list`` (keys masked); the four
+#: ``vmware.appliance.local_account.*`` operations (two reads, two changes
+#: that wait for approval); and the triggered-alarm list
+#: ``alarm.triggered.list`` (#4383). The tuple shape lets future typed ops
+#: join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -543,6 +559,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_SNAPSHOT_LIST_OP,
     VMWARE_LICENSE_LIST_OP,
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
+    *APPLIANCE_LOCAL_ACCOUNTS_OPS,
+    VMWARE_ALARM_TRIGGERED_LIST_OP,
 )
 
 

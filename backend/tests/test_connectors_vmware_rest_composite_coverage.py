@@ -83,6 +83,10 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.namespace.status",
         "vmware.composite.content_library.subscribed.sync",
         "vmware.composite.content_library.subscribed.status",
+        # #4383: ``.acknowledge`` / ``.reset`` are not classifier suffixes ->
+        # ``other``, like ``host.service_control``.
+        "vmware.composite.alarm.acknowledge",
+        "vmware.composite.alarm.reset",
     }
 )
 

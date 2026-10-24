@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 71 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 73 hand-authored composites
 that orchestrate cross-spec workflows: 16 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -18,7 +18,7 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880`) and 55 write
+reservation read `vm.resource_allocation.show` / `#3880`) and 57 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -63,8 +63,9 @@ DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), th
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
 Tools installer unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
-+ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), and the
-licence assign `license.assign` (see **vSphere licences**)). The
++ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
+assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
+`alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -471,10 +472,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 71
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 73
   `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 45 dangerous/destructive
-  writes + 10 caution writes); each row carries its
+  writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -824,6 +825,123 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   All three share the group `vmware-licensing`. Its text is one constant,
   `license_common.LICENSE_WHEN_TO_USE`, that both registrars pass, so the
   group row reads the same whichever registrar creates it first.
+- **`vmware.appliance.local_account.*`** (metadata in
+  `typed_ops_appliance_local_accounts.py`, handlers in
+  `appliance_local_accounts.py`, password handling in
+  `appliance_local_account_password.py`) — the local accounts of the vCenter
+  appliance: its own operating-system accounts, such as `root`. `root` is the
+  login for the appliance console, SSH and the management page on port 5480.
+  When its password expires, these logins stop working until someone sets a
+  new one. Four typed operations in the group
+  `vmware-appliance-local-accounts`, registered through `VMWARE_TYPED_OPS`,
+  so they are on both catalogs.
+
+  | Operation | What it does | Vendor call | Risk |
+  |---|---|---|---|
+  | `vmware.appliance.local_account.list` | Every local account, one row each. | `GET /api/appliance/local-accounts`, then `GET /api/appliance/local-accounts/{username}` per account | `safe` |
+  | `vmware.appliance.local_account.get` | One account. A missing account answers `not_found`. | `GET /api/appliance/local-accounts/{username}` | `safe` |
+  | `vmware.appliance.local_account.password.set` | Sets a new password that MEHO reads from a Vault path. | `PATCH /api/appliance/local-accounts/{username}` with `password` | `dangerous`, `requires_approval=True` |
+  | `vmware.appliance.local_account.policy.set` | Changes when the password expires and when the account locks. Only the fields the call passes change. | the same `PATCH` with `password_expires`, `max_days_between_password_change`, `min_days_between_password_change`, `warn_days_before_password_expiration`, `inactive_after_password_expiration`, `days_after_password_expiration` | `dangerous`, `requires_approval=True` |
+
+  | Versions | Catalog |
+  |---|---|
+  | vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+  | vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+  The vendor API exists since vCenter 6.7. A vCenter 7.0 target resolves to
+  `vmware-rest-9.0`, and typed operations run there, but 7.0 is not proven.
+  The `PATCH` body is the flat `UpdateConfig` that `/api` takes; a vCenter
+  that serves only the old `/rest` API (before 7.0 U2) refuses it.
+
+  - **One account row** (list and get): `username`, `roles`, `enabled`,
+    `has_password`, `last_password_change`, `password_expires_at`,
+    `password_expired`, `days_until_password_expires`,
+    `max_days_between_password_change`, `min_days_between_password_change`,
+    `warn_days_before_password_expiration`, `inactive_at`. Times are ISO 8601,
+    as vCenter sends them. No expiry date means the password never expires
+    (`password_expired: false`). MEHO works out `password_expired` and the
+    whole days left from the expiry date. vCenter reports when the account
+    locks (`inactive_at`), not a number of days. A list row whose account read
+    failed has null fields and a `read_note` (vCenter can answer HTTP 500
+    instead of 403 for an account the caller may not read). No field holds a
+    password: vCenter sends only `has_password`.
+  - **The policy change** reads the account first (a missing account stops the
+    call before any change), sends only the given fields, and reads the
+    account again. It returns `requested`, `before` and `after`. The day
+    fields take -1 to 99999, the range vCenter documents for its password
+    policy. To stop the password from expiring, set `password_expires: false`,
+    or set a large `max_days_between_password_change` such as 9999.
+  - **How the new password stays secret.**
+    - The call never carries the password. It names a Vault path
+      (`password_secret_ref`, with `password_secret_mount`, default `secret`,
+      and `password_secret_key`, default `password`). The handler reads the
+      password with `load_param_secret_data` under the identity of the person
+      whose call runs. The Keycloak and VCF Automation user writes use the
+      same seam. A refused or missing path answers
+      `vault_credentials_read_error`; a secret with no text under the key stops
+      the call. In both cases nothing goes to vCenter.
+    - After an approval, MEHO runs the change under the approver's login, so
+      the approver needs read access to the Vault path.
+    - The op id is pinned as `credential_write` in `broadcast/events.py`. So
+      the flight recorder keeps no request or response body for the call (its
+      `*password*` op-id pattern and the `password` tag do the same), the
+      broadcast shows no params, and a waiting approval keeps the params in
+      the encrypted handoff store instead of `approval_request.params`. That
+      store needs `APPROVAL_HANDOFF_ENCRYPTION_KEY` (chart: `approvalHandoff`).
+      Without it, MEHO refuses the call instead of letting it wait. `GET
+      /ready` shows the state under `features.approval_custody`.
+    - Because of the pin, the generic params echo does not reach the approver.
+      A preview builder shows the account, `password_source: vault` and the
+      Vault path, never the password.
+    - Every vCenter error answer to the two changes (also to the first read
+      of the policy change) goes through one rule, `change_error`, before it
+      leaves the handler. A 404 answers `not_found`. A 401 stays an
+      `httpx.HTTPStatusError` with status 401, so the dispatcher still logs in
+      again and retries once; but its response holds only the vAPI error type
+      and messages, and its request has neither the session header nor the
+      body. Any other status becomes `ConnectorUpstreamError` with the HTTP
+      status and the same safe text (a 403 also names the SSO group the
+      service account needs). When any vendor text holds the password (as is,
+      JSON-escaped, URL-encoded or HTML-escaped), all vendor text is dropped.
+      The new error is raised after the `except` block, so it does not keep
+      the original error (raw response and request) as its context. A failed
+      read after a change gives a `read_note` with the same safe text.
+    - The result is `{username, password_set, password_expires_at,
+      read_note}`.
+  - **The service account of the target needs an appliance role.** The vendor
+    maps three levels to SSO groups: `operator` and `admin` to
+    `SystemConfiguration.Administrators`, and `superAdmin` to
+    `SystemConfiguration.BashShellAdministrators`
+    ([Authorization Model Mapping to the vCenter Single Sign-On Domain](https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-0/administration-sdks-cli-and-tools/introduction-to-the-vcf-programming-guide/introduction-to-the-vsphere-automation-rest-apis/vcenter-server-management/authorization-model-for-administration-of-vcenter-server/authorization-model-mapping-to-the-vcenter-single-sign-on-domain.html)).
+    The vendor says the super administrator level "is required for adding or
+    altering user accounts"
+    ([Using the SuperAdmin Role](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere-sdks-tools/8-0/vmware-vsphere-automation-rest-programming-guide-8-0/vcenter-server-management-1/authorization-model-for-administration-of-vcenter-server-1/using-the-superadmin-role-1.html)).
+    So both changes need the service account in
+    `SystemConfiguration.BashShellAdministrators`. The vendor names no level
+    for the reads; a service account in neither group gets HTTP 403 on the
+    list. Members of `SystemConfiguration.BashShellAdministrators` can also
+    open the appliance Bash shell with near-root rights, so keep the group
+    small.
+  - **Tests.** `tests/test_connectors_vmware_rest_typed_appliance_local_accounts.py`
+    (rows and expiry, refused names and values, `not_found`, the Vault read,
+    the error rule for every status, the approval preview, the
+    flight-recorder span); `tests/test_connectors_vmware_rest_appliance_password_e2e.py`
+    (one password change through the dispatcher, the approval queue and the
+    real connector over respx: the password is in the `PATCH` body and not in
+    the params, the approval request, the audit rows, the result, the
+    flight-recorder spans or the logs; and two 401 answers that echo the
+    password: the login retry runs once and nothing leaks); and the reconcile lane
+    `tests/test_connectors_vmware_rest_appliance_local_accounts_reconcile.py`
+    (the three paths in the pinned 8.0 and 9.0 `vcenter.yaml`, and the flat
+    `UpdateConfig` body in the 9.0 file).
+- **Alarms** (`alarm_state.py`, `typed_ops_alarm_triggered.py`,
+  `composites/_alarm.py`, `#4383` part 1) — one read and two changes in the
+  group `alarms`. The read `vmware.alarm.triggered.list` is a typed op
+  (`safe`, handler `alarm_triggered_list`). The changes
+  `vmware.composite.alarm.acknowledge` and `vmware.composite.alarm.reset` are
+  composites (`caution`, they wait for approval). All three are on both
+  catalogs. See **Alarms: list, acknowledge, reset to green** under Control
+  flow.
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the
@@ -980,13 +1098,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 71 `vmware.composite.*` rows with
+   queued registrar and upserts: the 73 `vmware.composite.*` rows with
    `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 55 writes, all `requires_approval=True`
-   (34 `safety_level="dangerous"`; 10 `safety_level="caution"` —
-   `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
+   service principals), and 57 writes, all `requires_approval=True`
+   (34 `safety_level="dangerous"`; 12 `safety_level="caution"` —
+   `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
@@ -1374,7 +1492,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 71 composites (16 reads + 55 writes) land as `source_kind="composite"`
+The 73 composites (16 reads + 57 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1441,7 +1559,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 71 composites are hand-authored aggregators the connector ships as
+The 73 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -3581,6 +3699,123 @@ shelf-gated lane checks each rule against the pinned 8.0 and 9.0
 `vcenter.yaml` and the 9.0 `vi-json.yaml`) and
 `test_connectors_vmware_rest_vm_relocate_dispatch.py` (a person's call
 waits for approval with the copy size on the row).
+
+### Alarms: list, acknowledge, reset to green (`#4383`, part 1)
+
+What an operator or agent can do now, through MEHO:
+
+- See every alarm that is red or yellow now, for the whole vCenter or under
+  one object.
+- Acknowledge one alarm on one object, so its actions (emails, SNMP traps)
+  stop while someone works on the cause. The alarm stays red or yellow.
+- Reset alarms to green after the cause is fixed. This is for alarms whose
+  rule has no green condition: they stay red until someone resets them.
+
+| Operation | Risk | vSphere call | Versions |
+|---|---|---|---|
+| `vmware.alarm.triggered.list` | `safe` | `ManagedEntity.triggeredAlarmState`, `Alarm.info.name` + `.expression`, `ManagedEntity.name` (all through `PropertyCollector.RetrievePropertiesEx`) | vCenter 8.0 U1, U2, U3; 9.0, 9.1, 9.1.1 |
+| `vmware.composite.alarm.acknowledge` | `caution`, waits for approval | `AlarmManager.AcknowledgeAlarm` | the same |
+| `vmware.composite.alarm.reset` | `caution`, waits for approval | `AlarmManager.ClearTriggeredAlarms` | the same |
+
+**The reads** (`alarm_state.py`, shared by all three operations).
+`ServiceInstance.RetrieveServiceContent` gives the root folder and the alarm
+manager; their ids are read, never guessed. vCenter copies every triggered
+alarm up the inventory tree, so the root folder's `triggeredAlarmState` holds
+the triggered alarms of the whole vCenter. Each entry names the object the
+alarm is triggered on. Two more reads add the alarm names and rules and the
+object names. When one of them fails, or vCenter could not read some names
+(a `missingSet` fault), the rows keep their ids and `read_note` says which
+read failed. A long list is stored behind a result handle, like every other
+list.
+
+**An unreadable list is never an empty list.** vCenter can answer a
+`RetrievePropertiesEx` call and still not give a property: the property is
+then in the object's `missingSet`, usually with a fault such as
+`NoPermission`. When that happens to `triggeredAlarmState`, or the answer has
+no entry for the object, the read raises `AlarmStateUnreadableError`. The
+list operation then fails (`connector_error`), and so do acknowledge and
+reset before they change anything. The read after a change gives
+`not_verified`, so a reset never reports alarms as cleared that it could not
+read. An unset property has no `missingSet` entry and means no triggered
+alarms.
+
+**Every page is read.** vCenter may split a large answer into pages: a
+`RetrieveResult` with some objects and a `token`. Every alarm read follows
+each token with `PropertyCollector.ContinueRetrievePropertiesEx`, on the
+session of the first call (vCenter accepts a token only there and only once),
+until a page comes back without a token; at most 100 pages. A failed page
+fails the whole read: the list or the change fails, the read after a change
+gives `not_verified`, and a failed name read shows in `read_note`, with no
+names of that object type used. So a lost page never leaves names or trigger
+kinds silently empty.
+
+**Trigger kind.** Each row has `trigger_kind`, from the alarm rule
+(`Alarm.info.expression`): `event` (only event conditions), `metric` (only
+metric or state conditions), `mixed` (both) or null (not known). The reset
+filter needs it.
+
+**Why the reset takes a filter.** The public vSphere API cannot reset one
+alarm on one object. vCenter's own manual reset uses
+`AlarmManager.setAlarmStatus` (the pinned spec names it once, in the note on
+`AlarmState.eventKey`). That call is in neither pyVmomi 8.0.3 nor the pinned
+VI-JSON files of 8.0 U1 to U3 and 9.0, so MEHO cannot call or check it.
+`alarm.reset` uses `ClearTriggeredAlarms` with an `AlarmFilterSpec`: one or
+more statuses (`red`, `yellow`), an object kind (`all`, `host`, `vm`) and a
+trigger kind (`all`, `event`, `metric`). It resets every triggered alarm in
+the vCenter that matches. An alarm on the vCenter itself, a cluster or a
+datastore needs object kind `all`.
+
+**What the reset answers.** The handler reads the triggered alarms before
+and after the call:
+
+- `cleared`: the alarms with the asked status and object kind that were
+  triggered before and are not now. This can include alarms the caller did
+  not mean, so the guidance tells the agent to report them.
+- `still_triggered`: matching alarms that are still triggered. Their cause
+  is still there, or vCenter did not count them under this trigger kind.
+- `unchanged`, and no call to vCenter, when no triggered alarm matches.
+  `not_verified`, with an error issue, when the read after the call fails
+  or vCenter cannot give the list.
+
+**Acknowledge.** Takes `alarm_id` and `entity_id` from a list row. The
+handler checks that the alarm is triggered on that object (else
+`not_triggered`, with an error issue), does nothing for an acknowledged
+alarm (`unchanged`), sends `AcknowledgeAlarm` with the two object
+references, and reads again: `acknowledged` with who and when, or
+`not_verified` with an error issue when the read fails or does not show it
+acknowledged.
+
+**Risk and approval.** Both changes are `caution` with
+`requires_approval=True`, like every other VMware write composite; the
+operation contract check requires the flag for every operation that is not
+`safe`. A person's call waits for approval. The same person may approve a
+`caution` request only where the install allows self-approval
+(`APPROVAL_ALLOW_SELF_APPROVAL`); else a second person approves. An agent's
+call waits too. Inside the composite, the one change goes through the shared
+write seam (`_write_vmomi_sub_op`) like in the other composites, and the
+child-op list is in `composites/_governed_subops.py`. The approval request
+shows the alarm (acknowledge) or the triggered alarms the filter matches at
+that time, at most 25 (reset): the preview builders read vCenter when the call
+waits for approval. `preview_operation` (the CLI `meho operation preview`)
+does not contact vCenter, so both builders decline there, and the preview
+answers `plan_shown: false` with a note that the plan is shown on the
+approval request.
+
+**Not covered.** A standalone ESXi host target (not tested; the changes
+answer `no_alarm_manager` when the ServiceContent has no alarm manager).
+vCenter 7.0 (no `vmware-rest` catalog, and VI-JSON starts at 8.0 U1). Alarm
+definitions, and reading or cancelling one task, are the rest of `#4383`.
+
+**Tests.** `tests/test_connectors_vmware_rest_alarms.py` (a fake VI-JSON
+seam: the read, both changes, an unreadable list before and after a
+change, the previews, `preview_operation`, the rows on both catalogs, the
+contract rules, and a reset that waits for approval and then runs once).
+`tests/test_connectors_vmware_rest_alarms_reconcile.py` checks the methods,
+the filter enum values and the object types against the pinned 9.0
+`vi-json.yaml`; the source scan of
+`test_connectors_vmware_rest_8_0_spec_reconcile.py` checks the methods
+against 8.0 U1 to U3. `AlarmFilterSpec` is in the type-name list of
+`test_connectors_vmware_rest_composites_write_body_reconcile.py`.
 
 ### Version check for typed operations (`_version_gate.py`, #4316)
 

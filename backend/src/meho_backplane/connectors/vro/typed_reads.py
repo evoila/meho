@@ -20,10 +20,16 @@ result handle and the agent can filter it with ``result_query``.
 
 **Secrets.** A workflow run's inputs and outputs can hold passwords. A
 parameter whose type is ``SecureString``, whose ``encrypt-value`` flag is
-set, or whose name says password, secret, token, private key or licence
-key comes back with its value replaced by :data:`REDACTED`. Any field
-with such a name, at any depth, is replaced too. The connector masks the
-same fields before the flight recorder records a vendor answer.
+set, or whose name says password, secret, token, API key, secret key,
+private key or licence key comes back with its value replaced by
+:data:`REDACTED`. Any field with such a name, at any depth, is replaced
+too. The connector masks the same fields before the flight recorder
+records a vendor answer.
+
+**Log text.** A log line's text is cut at :data:`LOG_TEXT_MAX` characters.
+The shared secret rules run on the whole text first: they need the label
+and the whole value, and a cut could leave a fragment too short for them
+to find later.
 
 The paths come from the vendor's Orchestrator REST API reference (9.0 and
 9.1); the reconcile lane checks every path in :data:`VENDOR_CALLS`.
@@ -35,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.api_file_read import text_redactor
+from meho_backplane.connectors._shared.api_file_values import TextRule
 from meho_backplane.connectors.vro.session import VroTargetLike
 from meho_backplane.operations._rfc6570 import has_dot_segment
 
@@ -88,6 +96,7 @@ DEFAULT_LIST_LIMIT: Final = 500
 _DEFAULT_LOG_LINES: Final = 200
 #: Longest log text kept per line; a longer text is cut and the row is marked.
 LOG_TEXT_MAX: Final = 2000
+_LOGS_OP_ID: Final = "vro.execution.logs"
 
 #: Written in place of a secret value; the key stays, so the shape is stable.
 REDACTED: Final = "***REDACTED***"
@@ -105,6 +114,8 @@ _SECRET_KEYS: Final[frozenset[str]] = frozenset(
         "refreshtoken",
         "sessiontoken",
         "authorization",
+        "apikey",
+        "secretkey",
         "privatekey",
         "licensekey",
         "licencekey",
@@ -118,6 +129,8 @@ _SECRET_SUFFIXES: Final[tuple[str, ...]] = (
     "passwd",
     "secret",
     "token",
+    "apikey",
+    "secretkey",
     "privatekey",
     "licensekey",
     "licencekey",
@@ -418,18 +431,27 @@ async def vro_execution_get_impl(
     )
 
 
-def _cut(text: Any) -> tuple[Any, bool]:
-    if isinstance(text, str) and len(text) > LOG_TEXT_MAX:
-        return text[:LOG_TEXT_MAX], True
-    return text, False
+def _cut(text: Any, redact: TextRule) -> tuple[Any, bool]:
+    """Cut *text* at :data:`LOG_TEXT_MAX`; the secret rules run on the whole text first.
+
+    The rules need the label and the whole value. A cut could leave a
+    fragment of a labelled secret too short for them to find later, so
+    they run before the cut. A text that fits is left to the dispatcher.
+    """
+    if not isinstance(text, str) or len(text) <= LOG_TEXT_MAX:
+        return text, False
+    text, _ = redact(text)
+    if len(text) <= LOG_TEXT_MAX:
+        return text, False
+    return text[:LOG_TEXT_MAX], True
 
 
-def _log_row(entry: dict[str, Any]) -> dict[str, Any]:
+def _log_row(entry: dict[str, Any], redact: TextRule) -> dict[str, Any]:
     # Older servers wrap each line in an ``entry`` object.
     wrapped = entry.get("entry")
     line: dict[str, Any] = wrapped if isinstance(wrapped, dict) else entry
-    short, short_cut = _cut(line.get("short-description"))
-    long, long_cut = _cut(line.get("long-description"))
+    short, short_cut = _cut(line.get("short-description"), redact)
+    long, long_cut = _cut(line.get("long-description"), redact)
     return {
         "time_stamp": line.get("time-stamp"),
         "severity": line.get("severity"),
@@ -451,8 +473,8 @@ async def vro_execution_logs_impl(
 
     Asks for ``max_lines + 1`` lines (``maxResult``) and keeps at most
     ``max_lines``; the extra line only tells whether ``more_lines`` is true.
-    Each text is cut at
-    :data:`LOG_TEXT_MAX` characters; a cut row has ``cut: true``.
+    Each text is cut at :data:`LOG_TEXT_MAX` characters, after the shared
+    secret rules ran on the whole text; a cut row has ``cut: true``.
     """
     workflow_id = _segment("workflow", params.get("workflow_id"))
     execution_id = _segment("execution", params.get("execution_id"))
@@ -463,9 +485,12 @@ async def vro_execution_logs_impl(
         operator=operator,
         params={"maxResult": max_lines + 1},
     )
+    redact = text_redactor(
+        operator, connector_id=f"{connector.impl_id}-{connector.version}", op_id=_LOGS_OP_ID
+    )
     logs = payload.get("logs")
     entries = [entry for entry in logs or [] if isinstance(entry, dict)]
-    rows = [_log_row(entry) for entry in entries[:max_lines]]
+    rows = [_log_row(entry, redact) for entry in entries[:max_lines]]
     return {
         "items": redact_secrets(rows),
         "lines": len(rows),

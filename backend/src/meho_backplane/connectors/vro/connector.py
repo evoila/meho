@@ -20,9 +20,12 @@ Chosen per target with ``extras["login"]`` (see
   ``Authorization: Bearer <token>``.
 
 The ``Authorization`` value is cached per target and tenant
-(``target_cache_key``). On ``401`` the dispatcher calls
-:meth:`invalidate_session`, which drops only this target's value, and
-dispatches once more; the next call logs in again.
+(``target_cache_key``). Only a caller with an operator JWT, other than the
+synthesised system operator, reads or fills the cache; any other caller
+runs the credential loader, which checks it, and its login is not kept.
+On ``401`` the dispatcher calls :meth:`invalidate_session`, which drops
+only this target's value, and dispatches once more; the next call logs in
+again.
 
 Version
 -------
@@ -57,7 +60,10 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
-from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.system_operator import (
+    is_system_operator,
+    synthesise_system_operator,
+)
 from meho_backplane.connectors._shared.vcf_auth import basic_auth_header, is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
@@ -140,12 +146,21 @@ class VroConnector(HttpConnector):
         return {"Authorization": await self._authorization(target, operator)}
 
     async def _authorization(self, target: VroTargetLike, operator: Operator) -> str:
-        """Return the cached ``Authorization`` value for *target*, logging in on first use."""
+        """Return the cached ``Authorization`` value for *target*, logging in on first use.
+
+        Only a caller with an operator JWT who is not the synthesised system
+        operator reads or fills the cache. Any other caller runs the
+        credential loader, which checks it (the Vault loader fails closed
+        without a valid JWT), and its login is not kept: a value an
+        authenticated caller primed is never served to a system or
+        unauthenticated caller, and such a caller never primes it.
+        """
         mode = login_mode(target)
         cache_key = target_cache_key(target)
+        checked = bool(operator.raw_jwt) and not is_system_operator(operator)
         async with self._auth_lock:
             cached = self._authorizations.get(cache_key)
-            if cached is not None:
+            if cached is not None and checked:
                 return cached
             creds = await self._credentials_loader(target, operator)
             if mode == LOGIN_AUTOMATION:
@@ -165,7 +180,8 @@ class VroConnector(HttpConnector):
                         f"dict missing required key {exc.args[0]!r}; need "
                         "{'username': str, 'password': str}"
                     ) from exc
-            self._authorizations[cache_key] = value
+            if checked:
+                self._authorizations[cache_key] = value
             _log.info("vro_login_ready", target=target.name, host=target.host, login=mode)
             return value
 

@@ -8,11 +8,14 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
 * the two logins: HTTP Basic (the default) and the Aria Automation token
   (``extras.login = automation``); a ``401`` drops the login of that
   target and the read then succeeds; an unknown login mode stops early;
+  a system or unauthenticated caller never reads or fills the login cache;
 * every read through ``dispatch()``: ``vro.about``, ``vro.health``,
   ``vro.workflow.list`` (flat rows, the name and category conditions,
   paging), ``vro.workflow.get`` (both calls, no default values),
-  ``vro.execution.list``, ``vro.execution.get`` (secret values replaced)
-  and ``vro.execution.logs`` (line and text caps);
+  ``vro.execution.list``, ``vro.execution.get`` (secret values replaced,
+  also API key and secret key names, in parameters and Properties entries)
+  and ``vro.execution.logs`` (line and text caps; a labelled secret that
+  crosses the text cut is removed before the cut);
 * every call asks for JSON; a vendor error reaches the answer; an id with
   a ``..`` segment sends no request; a long list goes behind a result
   handle; no password or token in a result; registration and fingerprint.
@@ -35,6 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.vro import (
@@ -276,6 +280,81 @@ async def test_unknown_login_mode_stops_before_any_request(
     assert result.status == "error"
     assert about.call_count == 0
     assert "extras.login" in json.dumps(result.extras, default=str) + (result.error or "")
+
+
+def _unauthenticated_operator() -> Operator:
+    return Operator(
+        sub="op-reads-vro-no-jwt",
+        name=None,
+        email=None,
+        raw_jwt="",
+        tenant_id=UUID("00000000-0000-0000-0000-0000000000d4"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+@pytest.mark.asyncio
+async def test_system_caller_does_not_reuse_a_cached_basic_login() -> None:
+    """A warm Basic login is served only to a caller with an operator JWT.
+
+    The system operator and an operator without a JWT run the loader
+    again (the Vault loader fails closed for them) and leave the cache as
+    it was; the real operator still reuses its own login afterwards.
+    """
+    callers: list[str] = []
+
+    async def loader(target: Any, operator: Operator) -> dict[str, str]:
+        callers.append(operator.sub)
+        return {"username": "vro-reads-svc", "password": _PASSWORD}
+
+    connector = VroConnector(credentials_loader=loader)
+    target = _Target()
+    warm = await connector.auth_headers(target, _operator())
+    assert await connector.auth_headers(target, _operator()) == warm
+    assert callers == ["op-reads-vro"]
+
+    await connector.auth_headers(target, synthesise_system_operator())
+    await connector.auth_headers(target, _unauthenticated_operator())
+    assert callers == ["op-reads-vro", "system:connector-probe", "op-reads-vro-no-jwt"]
+
+    assert await connector.auth_headers(target, _operator()) == warm
+    assert len(callers) == 3
+    assert len(connector._authorizations) == 1
+
+
+@pytest.mark.asyncio
+async def test_system_caller_does_not_reuse_a_cached_automation_login() -> None:
+    """A warm Aria Automation token is not handed to the system operator.
+
+    The system caller logs in again and gets its own token, which is not
+    kept; the real operator keeps using the first token.
+    """
+    callers: list[str] = []
+
+    async def loader(target: Any, operator: Operator) -> dict[str, str]:
+        callers.append(operator.sub)
+        return {"username": "vro-reads-svc", "password": _PASSWORD}
+
+    connector = VroConnector(credentials_loader=loader)
+    target = _Target(login="automation")
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/csp/gateway/am/api/login").respond(
+            200, json={"refresh_token": "made-up-refresh"}
+        )
+        iaas = mock.post("/iaas/api/login")
+        iaas.side_effect = [
+            httpx.Response(200, json={"tokenType": "Bearer", "token": _TOKEN}),
+            httpx.Response(200, json={"tokenType": "Bearer", "token": "vro-reads-bearer-2"}),
+        ]
+        warm = await connector.auth_headers(target, _operator())
+        system = await connector.auth_headers(target, synthesise_system_operator())
+        again = await connector.auth_headers(target, _operator())
+
+    assert warm == {"Authorization": f"Bearer {_TOKEN}"}
+    assert system == {"Authorization": "Bearer vro-reads-bearer-2"}
+    assert again == warm
+    assert iaas.call_count == 2
+    assert callers == ["op-reads-vro", "system:connector-probe"]
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +618,84 @@ async def test_execution_get_replaces_secret_values_in_properties_entries(
             assert secret not in rendered
 
 
+@pytest.mark.asyncio
+async def test_api_key_and_secret_key_values_are_replaced_in_parameters_and_properties(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    connector = await _register(_stub_embedding)
+    secrets = {
+        "apiKey": "made-up-api-key-1",
+        "secretKey": "made-up-secret-key-1",
+        "vcenterApiKey": "made-up-api-key-2",
+        "aws_secret_key": "made-up-secret-key-2",
+    }
+    payload = {
+        "id": _RUN,
+        "state": "completed",
+        "inputParameters": [
+            {"name": "vmName", "type": "string", "value": {"string": {"value": "<vm-name>"}}},
+            {"name": "apiKey", "type": "string", "value": {"string": {"value": secrets["apiKey"]}}},
+            {
+                "name": "secretKey",
+                "type": "string",
+                "value": {"string": {"value": secrets["secretKey"]}},
+            },
+            {
+                "name": "inputProperties",
+                "type": "Properties",
+                "value": {
+                    "properties": {
+                        "property": [
+                            {"key": "region", "value": {"string": {"value": "<region>"}}},
+                            {
+                                "key": "vcenterApiKey",
+                                "value": {"string": {"value": secrets["vcenterApiKey"]}},
+                            },
+                            {
+                                "key": "nested",
+                                "value": {
+                                    "properties": {
+                                        "property": [
+                                            {
+                                                "key": "aws_secret_key",
+                                                "value": {
+                                                    "string": {"value": secrets["aws_secret_key"]}
+                                                },
+                                            }
+                                        ]
+                                    }
+                                },
+                            },
+                        ]
+                    }
+                },
+            },
+        ],
+        "outputParameters": [
+            {"name": "apiKey", "type": "string", "value": {"string": {"value": "made-up-out-1"}}}
+        ],
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_RUN_PATH).respond(200, json=payload)
+        result = await _dispatch("vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN})
+
+    assert result.status == "ok", result.error
+    inputs = {p["name"]: p["value"] for p in result.result["inputs"]}
+    assert inputs["vmName"] == {"string": {"value": "<vm-name>"}}
+    assert inputs["apiKey"] == REDACTED
+    assert inputs["secretKey"] == REDACTED
+    entries = inputs["inputProperties"]["properties"]["property"]
+    assert entries[0]["value"] == {"string": {"value": "<region>"}}
+    assert entries[1]["value"] == REDACTED
+    assert entries[2]["value"]["properties"]["property"][0]["value"] == REDACTED
+    assert result.result["outputs"][0]["value"] == REDACTED
+    trace = connector.trace_response_body(httpx.Response(200, json=payload))
+    for rendered in (json.dumps(result.result), json.dumps(trace)):
+        assert "<region>" in rendered
+        for secret in (*secrets.values(), "made-up-out-1"):
+            assert secret not in rendered
+
+
 def _syslogs_answer(lines: list[dict[str, Any]]) -> Any:
     """A syslogs mock that sends no more lines than ``maxResult`` asks for."""
 
@@ -603,6 +760,38 @@ async def test_execution_logs_with_exactly_max_lines_has_no_more_lines(
     assert result.status == "ok", result.error
     assert result.result["lines"] == 2
     assert result.result["more_lines"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["short-description", "long-description"])
+async def test_execution_logs_remove_a_secret_that_crosses_the_cut(
+    _stub_embedding: AsyncMock, session: AsyncSession, field: str
+) -> None:
+    """A labelled secret that straddles the text cut is removed before the cut.
+
+    Cut first, only five characters of the value would remain; the shared
+    rules need at least eight and would miss them.
+    """
+    await _register(_stub_embedding)
+    secret = "vro-log-secret-value-0001"
+    label = "password: "
+    prefix = "x" * (LOG_TEXT_MAX - len(label) - 6) + " "
+    text = f"{prefix}{label}{secret} {'y' * 100}"
+    assert text[:LOG_TEXT_MAX].endswith(label + secret[:5])
+    lines = [{"severity": "info", field: text}]
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(f"{_RUN_PATH}/syslogs").mock(side_effect=_syslogs_answer(lines))
+        result = await _dispatch(
+            "vro.execution.logs", {"workflow_id": _WF, "execution_id": _RUN, "max_lines": 1}
+        )
+
+    assert result.status == "ok", result.error
+    row = result.result["items"][0]
+    kept = row[field.replace("-", "_")]
+    assert len(kept) == LOG_TEXT_MAX
+    assert row["cut"] is True
+    assert kept.startswith(prefix + "[REDACTED:")
+    assert secret[:5] not in json.dumps(result.result)
 
 
 # ---------------------------------------------------------------------------

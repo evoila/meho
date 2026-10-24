@@ -88,9 +88,14 @@ The login mode comes from the target's `extras["login"]`:
 - Any other value stops the call before any request, with an error that
   names the allowed values.
 
-The `Authorization` value is cached per target and tenant. A `401` reaches
-the dispatcher, which calls `invalidate_session(target)` (drops only this
-target's value) and runs the call once more; the connector logs in again.
+The `Authorization` value is cached per target and tenant. Only a caller
+with an operator JWT, other than the synthesised system operator, reads or
+fills the cache. Any other caller (a probe, a background job) runs the
+credential loader, which checks it: the Vault loader fails closed without
+a valid JWT. Its login is not kept, so a login a real operator primed is
+never served to a system caller. A `401` reaches the dispatcher, which
+calls `invalidate_session(target)` (drops only this target's value) and
+runs the call once more; the connector logs in again.
 
 Every call sends `Accept: application/json`. The API answers XML when no
 `Accept` header is sent.
@@ -117,13 +122,18 @@ MEHO stores a long list behind a result handle; the agent reads it with
   they can hold secrets and are not needed to call a workflow.
 - `vro.execution.get` replaces the value of a parameter whose type is
   `SecureString`, whose `encrypt-value` flag is set, or whose name says
-  password, secret, token, private key or licence key, with
+  password, secret, token, API key, secret key, private key or licence
+  key (for example `apiKey`, `secretKey`, `adminPassword`), with
   `***REDACTED***`.
 - Every answer, and every vendor answer the flight recorder stores
   (`trace_response_body`), has secret-named fields replaced at any depth.
 - The same goes for `{key, value}` entries, the shape a `Properties`
   value uses: when the key is a secret name, the value is replaced, at
   any depth. Entries shaped `{name, value}` are handled the same way.
+- `vro.execution.logs` cuts a text at 2000 characters. The shared secret
+  rules (the ones the dispatcher runs on every answer) run on the whole
+  text first. They need the label and the whole value; a cut could leave
+  a fragment too short for them to find later.
 
 ### Shutdown
 

@@ -303,27 +303,6 @@ def _json_size(value: Any) -> int:
     return len(dump_json(value).encode("utf-8"))
 
 
-def _state_summary(value: Any) -> dict[str, Any]:
-    """Count the states of a state run return and name the failed ones."""
-    if not isinstance(value, dict) or not value:
-        return {"states_total": None, "states_failed": None, "failed_states": []}
-    states = [(key, item) for key, item in value.items() if isinstance(item, dict)]
-    if len(states) != len(value) or not all("result" in item for _, item in states):
-        return {"states_total": None, "states_failed": None, "failed_states": []}
-    failed = [(key, item) for key, item in states if item.get("result") is False]
-    failed_states = []
-    for key, item in failed[:_FAILED_STATES_LIMIT]:
-        comment = item.get("comment")
-        if isinstance(comment, str) and len(comment) > _COMMENT_LIMIT:
-            comment = comment[:_COMMENT_LIMIT] + "..."
-        failed_states.append({"state": key, "name": item.get("name"), "comment": comment})
-    return {
-        "states_total": len(states),
-        "states_failed": len(failed),
-        "failed_states": failed_states,
-    }
-
-
 #: Salt functions outside ``pillar.*`` that return pillar values.
 _PILLAR_CONFIG_FUNS: Final[frozenset[str]] = frozenset(
     {"config.get", "config.option", "config.items"}
@@ -335,18 +314,61 @@ def _reads_pillar(fun: Any) -> bool:
     return isinstance(fun, str) and (fun.startswith("pillar.") or fun in _PILLAR_CONFIG_FUNS)
 
 
-#: Salt modules whose function arguments are known to hold no secret: state
-#: names, package and service names, grain and pillar keys. A positional
-#: argument has no name the scrubber could match (``user.setpassword <user>
-#: <password>``), so the arguments of every other function stay out.
-_SAFE_ARG_MODULES: Final[frozenset[str]] = frozenset(
-    {"grains", "pillar", "pkg", "service", "state", "test"}
+#: Salt functions whose arguments are only names and keys: state names,
+#: package and service names, grain and pillar keys. A positional argument
+#: has no name the scrubber could match (``user.setpassword <user>
+#: <password>``), and one module can mix name arguments with value
+#: arguments (``grains.setval <key> <value>``, ``pkg.install sources=<url>``),
+#: so the list names functions, not modules. The arguments of every other
+#: function stay out.
+_SAFE_ARG_FUNS: Final[frozenset[str]] = frozenset(
+    {
+        "grains.get",
+        "grains.has_value",
+        "grains.item",
+        "grains.items",
+        "grains.ls",
+        "pillar.get",
+        "pillar.item",
+        "pillar.items",
+        "pillar.keys",
+        "pkg.latest_version",
+        "pkg.list_pkgs",
+        "pkg.list_upgrades",
+        "pkg.purge",
+        "pkg.refresh_db",
+        "pkg.remove",
+        "pkg.upgrade",
+        "pkg.version",
+        "service.available",
+        "service.disable",
+        "service.disabled",
+        "service.enable",
+        "service.enabled",
+        "service.get_all",
+        "service.reload",
+        "service.restart",
+        "service.running",
+        "service.start",
+        "service.status",
+        "service.stop",
+        "state.apply",
+        "state.highstate",
+        "state.show_highstate",
+        "state.show_sls",
+        "state.show_top",
+        "state.sls",
+        "state.test",
+        "test.ping",
+        "test.version",
+        "test.versions_report",
+    }
 )
 
 
 def _keeps_args(fun: Any) -> bool:
     """True when the arguments of the Salt function *fun* can be shown."""
-    return isinstance(fun, str) and fun.partition(".")[0] in _SAFE_ARG_MODULES
+    return isinstance(fun, str) and fun in _SAFE_ARG_FUNS
 
 
 def _hide_pillar_args(node: Any) -> Any:
@@ -363,19 +385,90 @@ def _hide_pillar_args(node: Any) -> Any:
     return node
 
 
+#: The fields of one state in a state run return that the row keeps. The
+#: ``changes`` of a state (a file diff, a command's output) are free text
+#: that no rule can check, so the row keeps only whether there were any.
+_STATE_FIELDS: Final[tuple[str, ...]] = (
+    "result",
+    "name",
+    "comment",
+    "__sls__",
+    "__id__",
+    "__run_num__",
+    "start_time",
+    "duration",
+)
+
+
+def _state_run(value: Any) -> dict[str, Any] | None:
+    """The states of a state run return (every value has a ``result``), else ``None``."""
+    if not isinstance(value, dict) or not value:
+        return None
+    if not all(isinstance(item, dict) and "result" in item for item in value.values()):
+        return None
+    return value
+
+
+def _state_entry(item: dict[str, Any]) -> dict[str, Any]:
+    entry = {field: item.get(field) for field in _STATE_FIELDS}
+    comment = entry["comment"]
+    if isinstance(comment, str) and len(comment) > _COMMENT_LIMIT:
+        entry["comment"] = comment[:_COMMENT_LIMIT] + "..."
+    entry["changed"] = bool(item.get("changes"))
+    return entry
+
+
+def _checked_return(value: Any, states: dict[str, Any] | None) -> tuple[Any, bool]:
+    """The return the row may show, and whether its content could be checked.
+
+    A state run is shown with the known fields of each state. A number, a
+    boolean or ``None`` holds no secret. Everything else (a text such as
+    ``file.read`` or ``cmd.run`` returns, a list, any other dict) can hold
+    a secret under no name, so it is not shown.
+    """
+    if states is not None:
+        return {key: _state_entry(item) for key, item in states.items()}, True
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, True
+    return None, False
+
+
+def _state_summary(states: dict[str, Any] | None) -> dict[str, Any]:
+    """Count the states of a state run return and name the failed ones."""
+    if states is None:
+        return {"states_total": None, "states_failed": None, "failed_states": []}
+    failed = [(key, item) for key, item in states.items() if item.get("result") is False]
+    failed_states = []
+    for key, item in failed[:_FAILED_STATES_LIMIT]:
+        entry = _state_entry(item)
+        failed_states.append({"state": key, "name": entry["name"], "comment": entry["comment"]})
+    return {
+        "states_total": len(states),
+        "states_failed": len(failed),
+        "failed_states": failed_states,
+    }
+
+
 def _result_row(row: dict[str, Any]) -> dict[str, Any]:
     full_ret = row.get("full_ret")
     full: dict[str, Any] = full_ret if isinstance(full_ret, dict) else {}
     fun = _first(row, "fun") or full.get("fun")
-    withheld = _reads_pillar(fun)
+    pillar = _reads_pillar(fun)
     raw_return = row["return"] if "return" in row else full.get("return")
     scrubbed = Scrubber().tree(raw_return, {})
     size = _json_size(scrubbed)
+    states = None if pillar else _state_run(scrubbed)
+    shown, checked = _checked_return(scrubbed, states)
+    withheld = pillar or not checked
+    truncated = size > RETURN_BYTES_LIMIT
     args_withheld = not _keeps_args(fun)
-    raw_args = None if args_withheld else _first(row, "fun_args") or full.get("fun_args")
+    raw_args = None
+    if not args_withheld:
+        raw_args = row.get("fun_args")
+        if raw_args is None:
+            raw_args = full.get("fun_args")
     fun_args = _hide_pillar_args(Scrubber().tree(raw_args, {}))
     fun_args_kept = fun_args if _json_size(fun_args) <= _FUN_ARGS_BYTES_LIMIT else None
-    kept = not withheld and size <= RETURN_BYTES_LIMIT
     return {
         "minion_id": _first(row, "minion_id") or full.get("id"),
         "master_id": _first(row, "master") or full.get("master_id"),
@@ -387,11 +480,11 @@ def _result_row(row: dict[str, Any]) -> dict[str, Any]:
         "retcode": full.get("retcode"),
         "has_errors": row.get("has_errors"),
         "alter_time": row.get("alter_time"),
-        "return": scrubbed if kept else None,
+        "return": shown if not withheld and not truncated else None,
         "return_bytes": size,
-        "return_truncated": size > RETURN_BYTES_LIMIT,
+        "return_truncated": truncated,
         "return_withheld": withheld,
-        **_state_summary(None if withheld else scrubbed),
+        **_state_summary(states),
     }
 
 

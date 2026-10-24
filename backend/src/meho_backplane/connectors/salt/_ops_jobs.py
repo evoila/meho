@@ -144,7 +144,8 @@ _JOB_RESULT = SaltTypedOp(
     description=(
         "Calls ret.get_returns for one jid. One row per minion: success, return code, "
         "errors, the failed states with their comments, and the return itself when it "
-        "is small. Values under a secret name are replaced."
+        "is small and its content can be checked (a state run, a number or a boolean). "
+        "Values under a secret name are replaced."
     ),
     parameter_schema={
         "type": "object",
@@ -197,8 +198,9 @@ _JOB_RESULT = SaltTypedOp(
                             "type": "boolean",
                             "description": (
                                 "True when fun_args is null because the function is not "
-                                "one of grains, pillar, pkg, service, state or test, whose "
-                                "arguments hold no secret."
+                                "on the short list of functions whose arguments are only "
+                                "names and keys (state.apply, pkg.remove, service.restart, "
+                                "grains.get, pillar.get, test.ping and the like)."
                             ),
                         },
                         "success": {"type": ["boolean", "null"], "description": "Success flag."},
@@ -211,7 +213,12 @@ _JOB_RESULT = SaltTypedOp(
                         "return": {
                             "description": (
                                 f"The return, when at most {RETURN_BYTES_LIMIT} bytes as "
-                                "JSON; else null."
+                                "JSON and its content can be checked; else null. A state "
+                                "run is shown per state with result, name, comment, "
+                                "__sls__, __id__, __run_num__, start_time, duration and "
+                                "changed (true when the state changed something); the "
+                                "changes text is left out. A number or a boolean is shown "
+                                "as is."
                             ),
                         },
                         "return_bytes": {
@@ -225,8 +232,10 @@ _JOB_RESULT = SaltTypedOp(
                         "return_withheld": {
                             "type": "boolean",
                             "description": (
-                                "True for a pillar read (pillar.*, config.get, config.option, "
-                                "config.items): the return holds pillar data and is null."
+                                "True when the return is null because its content cannot "
+                                "be checked: a pillar read (pillar.*, config.get, "
+                                "config.option, config.items), a text (file.read, cmd.run), "
+                                "a list, or a dict that is not a state run."
                             ),
                         },
                         "states_total": {
@@ -260,14 +269,19 @@ _JOB_RESULT = SaltTypedOp(
             "{jid, count, failed_minions, results: [{minion_id, master_id, jid, fun, "
             "fun_args, fun_args_withheld, success, retcode, has_errors, alter_time, return, "
             "return_bytes, return_truncated, return_withheld, states_total, states_failed, "
-            "failed_states: [{state, name, comment}]}]}. return is null when it is bigger "
-            "than 8 KiB; failed_states still names what failed. return is also null, with "
-            "return_withheld true, for pillar reads (pillar.*, config.get, config.option, "
-            "config.items), as pillar data holds secrets. fun_args is shown only for "
-            "grains, pillar, pkg, service, state and test functions; for every other "
-            "function it is null with fun_args_withheld true, because a positional "
-            "argument can be a password. A pillar argument in fun_args and every value "
-            "under a secret name read [REDACTED:param_name]."
+            "failed_states: [{state, name, comment}]}]}. return is shown only when its "
+            "content can be checked: a state run, per state {result, name, comment, "
+            "__sls__, __id__, __run_num__, start_time, duration, changed} without the "
+            "changes text, or a number or boolean. Every other return (a pillar read, a "
+            "text such as file.read or cmd.run returns, a list, another dict) is null "
+            "with return_withheld true, because it can hold a secret under no name. "
+            "return is also null when it is bigger than 8 KiB (return_truncated true); "
+            "failed_states still names what failed. fun_args is shown only for a short "
+            "list of functions whose arguments are only names and keys (state.apply, "
+            "pkg.remove, service.restart, grains.get, pillar.get, test.ping and the "
+            "like); for every other function it is null with fun_args_withheld true, "
+            "because a positional argument can be a password. A pillar argument in "
+            "fun_args and every value under a secret name read [REDACTED:param_name]."
         ),
         "next_step": (
             "Report the failed minions with the comments of their failed states. When "

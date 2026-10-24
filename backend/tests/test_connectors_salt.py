@@ -13,9 +13,11 @@ What is covered, with a respx-mocked RaaS server and no ingested catalog:
 * an RPC ``error`` answer and an HTTP error reach the answer;
 * a ``401`` on an RPC call logs in again for that target only and the read
   then succeeds;
-* secret-named values in a job return are replaced, positional arguments of
-  functions outside a short safe list are withheld, a big return is left
-  out with its size, and failed states are named;
+* a job return is shown only when its content can be checked (a state run
+  reduced to known fields, a number or a boolean), secret-named values are
+  replaced, the arguments of functions outside a short list are withheld,
+  a big return is left out with its size, and failed states are named;
+* the stored trace of a call holds nothing a read withholds;
 * no password, cookie or xsrf value in a result; registration shape;
   version parsing; fingerprint.
 
@@ -57,7 +59,8 @@ from meho_backplane.connectors.salt.connector import parse_server_version, unwra
 from meho_backplane.connectors.salt.reads import JOIN_LIMIT, RETURN_BYTES_LIMIT
 from meho_backplane.connectors.salt.typed_ops import JOB_STATES, KEY_STATES
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import DispatchTrace, DispatchTraceSpan, EndpointDescriptor, Tenant
+from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -154,7 +157,12 @@ _STATE_RETURN = {
         "comment": "Source file not found",
         "changes": {},
     },
-    "pkg_|-tool_|-tool_|-installed": {"result": True, "name": "tool", "comment": "ok"},
+    "pkg_|-tool_|-tool_|-installed": {
+        "result": True,
+        "name": "tool",
+        "comment": "ok",
+        "changes": {"tool": {"old": "", "new": "1.0"}},
+    },
 }
 _RETURNS = {
     "count": 2,
@@ -695,13 +703,44 @@ async def test_job_result_names_failed_states_and_replaces_secrets(
         }
     ]
     assert failed["return_truncated"] is False
+    assert failed["return_withheld"] is False
+    assert failed["return"] == {
+        "file_|-cfg_|-/etc/made-up.conf_|-managed": _state_entry(
+            result=False, name="/etc/made-up.conf", comment="Source file not found"
+        ),
+        "pkg_|-tool_|-tool_|-installed": _state_entry(
+            result=True, name="tool", comment="ok", changed=True
+        ),
+    }
     assert failed["fun_args"] == ["made-up-state"]
     assert failed["fun_args_withheld"] is False
-    assert good["return"] == {"db_password": "[REDACTED:param_name]", "out": "done"}
+    assert good["return"] is None
+    assert good["return_withheld"] is True
     assert good["fun_args"] is None
     assert good["fun_args_withheld"] is True
     assert good["states_total"] is None
     assert "plain-secret-value" not in json.dumps(body)
+
+
+def _one_return(row: dict[str, Any]) -> _Answers:
+    return {("ret", "get_returns"): {"count": 1, "results": [row]}}
+
+
+def _state_entry(
+    *, result: bool, name: str, comment: str | None, changed: bool = False
+) -> dict[str, Any]:
+    """The reduced form of one state in a shown state run return."""
+    return {
+        "result": result,
+        "name": name,
+        "comment": comment,
+        "__sls__": None,
+        "__id__": None,
+        "__run_num__": None,
+        "start_time": None,
+        "duration": None,
+        "changed": changed,
+    }
 
 
 @pytest.mark.asyncio
@@ -709,23 +748,22 @@ async def test_job_result_leaves_out_a_big_return_with_its_size(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     await _register(_stub_embedding)
-    big = {"out": "x" * (RETURN_BYTES_LIMIT + 10)}
-    answers = {
-        ("ret", "get_returns"): {
-            "count": 1,
-            "results": [{"minion_id": "<minion-1>", "jid": "1", "return": big}],
-        }
+    big = {
+        f"cmd_|-step-{i}_|-echo {i}_|-run": {"result": True, "name": f"echo {i}", "comment": "ok"}
+        for i in range(200)
     }
+    answers = _one_return(
+        {"minion_id": "<minion-1>", "jid": "1", "fun": "state.apply", "return": big}
+    )
     result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
     assert result.status == "ok", result.error
     row = result.result["results"][0]
     assert row["return"] is None
     assert row["return_truncated"] is True
+    assert row["return_withheld"] is False
     assert row["return_bytes"] > RETURN_BYTES_LIMIT
-
-
-def _one_return(row: dict[str, Any]) -> _Answers:
-    return {("ret", "get_returns"): {"count": 1, "results": [row]}}
+    assert row["states_total"] == 200
+    assert row["states_failed"] == 0
 
 
 @pytest.mark.asyncio
@@ -762,12 +800,22 @@ async def test_job_result_withholds_a_pillar_get_string_return(
         ("user.setpassword", ["<user>", "plain-secret-value-6"]),
         ("cmd.run", ["mysql -u root -pplain-secret-value-7 -e 'select 1'"]),
         (None, ["plain-secret-value-8"]),
+        ("grains.setval", ["api_token", "plain-secret-value-9"]),
+        ("test.echo", ["plain-secret-value-10"]),
+        (
+            "pkg.install",
+            ["tool", {"sources": [{"tool": "https://u:plain-secret-value-11@h/t.rpm"}]}],
+        ),
     ],
 )
 async def test_job_result_withholds_positional_arguments_of_other_functions(
-    _stub_embedding: AsyncMock, session: AsyncSession, fun: str | None, fun_args: list[str]
+    _stub_embedding: AsyncMock, session: AsyncSession, fun: str | None, fun_args: list[Any]
 ) -> None:
-    """A positional argument has no name, so it can be a password: it is not shown."""
+    """A positional argument has no name, so it can be a password: it is not shown.
+
+    This holds also for a function of a module whose other functions take
+    only names and keys (``grains.setval`` next to ``grains.get``).
+    """
     await _register(_stub_embedding)
     answers = _one_return(
         {"minion_id": "<minion-1>", "jid": "1", "fun": fun, "fun_args": fun_args, "return": True}
@@ -779,6 +827,66 @@ async def test_job_result_withholds_positional_arguments_of_other_functions(
     assert row["fun_args"] is None
     assert row["fun_args_withheld"] is True
     assert row["return"] is True
+    assert "plain-secret-value" not in json.dumps(result.result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fun", "fun_args"),
+    [
+        ("pkg.remove", ["tool"]),
+        ("service.restart", ["made-up-svc"]),
+        ("grains.get", ["os"]),
+        ("test.ping", []),
+    ],
+)
+async def test_job_result_keeps_the_arguments_of_name_only_functions(
+    _stub_embedding: AsyncMock, session: AsyncSession, fun: str, fun_args: list[str]
+) -> None:
+    await _register(_stub_embedding)
+    answers = _one_return(
+        {"minion_id": "<minion-1>", "jid": "1", "fun": fun, "fun_args": fun_args, "return": True}
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["fun_args"] == fun_args
+    assert row["fun_args_withheld"] is False
+    assert row["return"] is True
+    assert row["return_withheld"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fun", "fun_args", "ret"),
+    [
+        ("file.read", ["/etc/made-up.secret"], "plain-secret-value-13"),
+        ("cmd.run", ["cat /etc/made-up.secret"], "plain-secret-value-14\n"),
+        ("grains.items", [], {"custom_grain": "plain-secret-value-15"}),
+        ("cmd.run_all", [], ["plain-secret-value-16"]),
+    ],
+)
+async def test_job_result_withholds_a_return_whose_content_cannot_be_checked(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    fun: str,
+    fun_args: list[str],
+    ret: Any,
+) -> None:
+    """A text, a list or a dict that is not a state run can hold a secret under no name."""
+    await _register(_stub_embedding)
+    answers = _one_return(
+        {"minion_id": "<minion-1>", "jid": "1", "fun": fun, "fun_args": fun_args, "return": ret}
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["fun"] == fun
+    assert row["return"] is None
+    assert row["return_withheld"] is True
+    assert row["return_truncated"] is False
+    assert row["return_bytes"] > 0
+    assert row["states_total"] is None
     assert "plain-secret-value" not in json.dumps(result.result)
 
 
@@ -808,7 +916,13 @@ async def test_job_result_hides_a_pillar_argument_of_a_state_run(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     await _register(_stub_embedding)
-    state_return = {"cmd_|-hello_|-echo hi_|-run": {"result": True, "name": "echo hi"}}
+    state_return = {
+        "cmd_|-hello_|-echo hi_|-run": {
+            "result": True,
+            "name": "echo hi",
+            "changes": {"stdout": "plain-secret-value-12", "retcode": 0},
+        }
+    }
     answers = _one_return(
         {
             "minion_id": "<minion-1>",
@@ -830,12 +944,17 @@ async def test_job_result_hides_a_pillar_argument_of_a_state_run(
         {"pillar": "[REDACTED:param_name]", "__kwarg__": True},
         "pillar=[REDACTED:param_name]",
     ]
-    assert row["return"] == state_return
+    assert row["return"] == {
+        "cmd_|-hello_|-echo hi_|-run": _state_entry(
+            result=True, name="echo hi", comment=None, changed=True
+        )
+    }
     assert row["return_withheld"] is False
     assert row["states_total"] == 1
     text = json.dumps(result.result)
     assert "plain-pillar-value-4" not in text
     assert "plain-pillar-value-5" not in text
+    assert "plain-secret-value-12" not in text
 
 
 @pytest.mark.asyncio
@@ -897,6 +1016,126 @@ async def test_results_hold_no_password_cookie_or_xsrf(
     assert result.status == "ok", result.error
     rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
     for secret in (_PASSWORD, _XSRF, _SESSION_COOKIE):
+        assert secret not in rendered
+
+
+async def _enable_trace_capture(session: AsyncSession) -> None:
+    """Seed the operator's tenant with the flight recorder on."""
+    session.add(
+        Tenant(
+            id=_make_operator().tenant_id,
+            slug="salt-reads",
+            name="salt-reads",
+            flight_recorder_enabled=True,
+        )
+    )
+    await session.commit()
+    reset_flight_recorder_config_cache_for_testing()
+
+
+async def _vendor_call_spans(audit_id: UUID) -> list[DispatchTraceSpan]:
+    async with get_sessionmaker()() as s:
+        trace = (
+            await s.execute(select(DispatchTrace).where(DispatchTrace.audit_id == audit_id))
+        ).scalar_one()
+        spans = (
+            await s.execute(
+                select(DispatchTraceSpan)
+                .where(DispatchTraceSpan.trace_id == trace.id)
+                .order_by(DispatchTraceSpan.seq.asc())
+            )
+        ).scalars()
+        return [span for span in spans if span.span_kind == "vendor_call"]
+
+
+def _render(spans: list[DispatchTraceSpan]) -> str:
+    return json.dumps([f"{span.name}|{span.attributes}" for span in spans], default=str)
+
+
+@pytest.mark.asyncio
+async def test_job_result_trace_holds_only_what_the_answer_shows(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """The recorded vendor answer passes the same rules as the read: no withheld value in it."""
+    await _register(_stub_embedding)
+    await _enable_trace_capture(session)
+    answers: _Answers = {
+        ("ret", "get_returns"): {
+            "count": 3,
+            "results": [
+                {
+                    "minion_id": "<minion-1>",
+                    "jid": "1",
+                    "fun": "pillar.get",
+                    "fun_args": ["app:db:pw"],
+                    "return": "plain-pillar-value-1",
+                },
+                {
+                    "minion_id": "<minion-2>",
+                    "jid": "1",
+                    "fun": "file.read",
+                    "fun_args": ["/etc/made-up.secret"],
+                    "return": "plain-secret-value-13",
+                },
+                {
+                    "minion_id": "<minion-3>",
+                    "jid": "1",
+                    "fun": "grains.setval",
+                    "fun_args": ["api_token", "plain-secret-value-9"],
+                    "return": {"api_token": "plain-secret-value-9"},
+                },
+            ],
+        }
+    }
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    assert result.audit_id is not None
+    spans = await _vendor_call_spans(result.audit_id)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.name == f"POST {_BASE_URL}{_RPC}"
+    assert span.attributes["body_recorded"] is True
+    recorded = span.attributes["response_body"]
+    assert recorded["error"] is None
+    assert recorded["ret"]["count"] == 3
+    rows = recorded["ret"]["results"]
+    assert [row["fun"] for row in rows] == ["pillar.get", "file.read", "grains.setval"]
+    assert [row["return"] for row in rows] == [None, None, None]
+    assert [row["return_withheld"] for row in rows] == [True, True, True]
+    assert rows[0]["fun_args"] == ["app:db:pw"]
+    assert rows[2]["fun_args"] is None
+    assert rows[2]["fun_args_withheld"] is True
+    rendered = _render(spans)
+    for secret in ("plain-pillar-value-1", "plain-secret-value", _PASSWORD, _XSRF, _SESSION_COOKIE):
+        assert secret not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("salt.about", {}),
+        ("salt.minion.list", {}),
+        ("salt.key.list", {}),
+        ("salt.job.list", {}),
+        ("salt.job.result", {"jid": "20260101000000000001"}),
+        ("salt.target.list", {}),
+    ],
+)
+async def test_traces_hold_no_withheld_value(
+    _stub_embedding: AsyncMock, session: AsyncSession, op_id: str, params: dict[str, Any]
+) -> None:
+    """Server settings, pillar data and secret-named values stay out of every stored trace."""
+    await _register(_stub_embedding)
+    await _enable_trace_capture(session)
+    result, calls, _ = await _run(op_id, params)
+    assert result.status == "ok", result.error
+    assert result.audit_id is not None
+    spans = await _vendor_call_spans(result.audit_id)
+    assert len(spans) == len(calls)
+    assert all(span.attributes["body_recorded"] is True for span in spans)
+    rendered = _render(spans)
+    for secret in (_PASSWORD, _XSRF, _SESSION_COOKIE, "<db-host>", "secret_pillar", "plain-secret"):
         assert secret not in rendered
 
 

@@ -41,11 +41,20 @@ Operations
 
 Six reads; their bodies live in :mod:`meho_backplane.connectors.salt.reads`.
 All exist on every covered version, so no operation needs a version check.
+
+Traces
+------
+
+The flight recorder stores each ``/rpc`` answer only after
+:meth:`SaltConnector.trace_response_body` has run it through the same
+secret rules as the read that made the call, so a value a read withholds
+never reaches the stored trace.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -447,6 +456,25 @@ class SaltConnector(HttpConnector):
         from meho_backplane.connectors.salt.reads import target_list_impl
 
         return await target_list_impl(self, operator, target, params)
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Filter a vendor answer before the flight recorder records it.
+
+        The shared redaction knows secrets by shape and by op family. A
+        pillar value in a job return, or a password a job read from a file,
+        is neither, so every ``/rpc`` answer passes the rules of the read
+        that made the call (:func:`~meho_backplane.connectors.salt.trace.trace_payload`)
+        before the trace stores it. A body that is not JSON is recorded as
+        the shared engine sees fit.
+        """
+        from meho_backplane.connectors.salt.trace import trace_payload
+
+        try:
+            request = json.loads(response.request.content)
+            payload = response.json()
+        except (RuntimeError, ValueError):
+            return None
+        return trace_payload(request, payload)
 
     async def aclose(self) -> None:
         """Clear cached sessions, then tear down the httpx pool."""

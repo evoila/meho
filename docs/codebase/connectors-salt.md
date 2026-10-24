@@ -71,6 +71,7 @@ accepted; other modes raise `NotImplementedError`.
 - `*_RPC` constants (`connector.py`) -- every RPC method the connector
   calls, as `(resource, method)`. The reconcile lane reads them.
 - `reads.py` -- the bodies of the six reads.
+- `trace.py` -- the filter the flight recorder runs on every `/rpc` answer.
 - `SALT_TYPED_OPS`, `register_salt_typed_operations` (`typed_ops.py`) --
   the op list, the group texts and the registrar. The op metadata itself
   is in `_ops_minions.py` (server, minions, keys, saved targets) and
@@ -134,12 +135,20 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   is unique. On an estate with more than 2000 minions, presence
   and OS can be missing for some rows; then `details_complete` is false
   and the agent should narrow the read with `master_id` or `minion_id`.
-- **`salt.job.result`** keeps the return of each minion only when it is
-  at most 8 KiB as JSON; a bigger return is `null`, with `return_bytes`
-  and `return_truncated: true`. For a state run (a return whose every
-  value has a `result`), `states_total`, `states_failed` and up to 20
-  `failed_states` (state id, name, comment cut to 500 characters) are
-  always filled, so a failure is visible without the full return.
+- **`salt.job.result`** shows the return of each minion only when it is
+  at most 8 KiB as JSON and its content can be checked. A state run (a
+  return whose every value has a `result`) is shown per state with
+  `result`, `name`, `comment` (cut to 500 characters), `__sls__`, `__id__`,
+  `__run_num__`, `start_time`, `duration` and `changed`; the `changes`
+  text of a state (a file diff, a command's output) is left out. A number,
+  `true`, `false` or `null` is shown as is. Every other return (a text, a
+  list, a dict that is not a state run) is `null` with
+  `return_withheld: true`, because `file.read` or `cmd.run` can return a
+  password under no name that a rule could match. A bigger return is
+  `null` with `return_bytes` and `return_truncated: true`. For a state
+  run, `states_total`, `states_failed` and up to 20 `failed_states` (state
+  id, name, comment) are always filled, so a failure is visible without
+  the full return.
 - **Secrets.** `salt.about` returns no part of `opts` (the RaaS server
   settings, which hold database settings). `salt.target.list` asks for no
   pillar data and drops `pillars` and `metadata`. In job returns and
@@ -151,12 +160,22 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   `config.option` and `config.items` the return is `null` with
   `return_bytes` and `return_withheld: true`, and a `pillar` argument in
   `fun_args` reads `[REDACTED:param_name]`. A positional argument has no
-  name the scrubber could match (`user.setpassword <user> <password>`), so
-  `fun_args` is shown only for functions of the modules `grains`,
-  `pillar`, `pkg`, `service`, `state` and `test`, whose arguments are
-  names and keys. For every other function `fun_args` is `null` with
+  name the scrubber could match (`user.setpassword <user> <password>`), and
+  one module can mix name arguments with value arguments
+  (`grains.setval <key> <value>`), so `fun_args` is shown only for a short
+  list of functions whose arguments are only names and keys
+  (`_SAFE_ARG_FUNS` in `reads.py`: `state.apply`, `pkg.remove`,
+  `service.restart`, `grains.get`, `pillar.get`, `test.ping` and the
+  like). For every other function `fun_args` is `null` with
   `fun_args_withheld: true`. The dispatcher's redaction then runs over the
   whole answer as for every connector.
+- **Traces.** The flight recorder stores the answer of each `/rpc` call
+  only after `SaltConnector.trace_response_body` has run it through the
+  same rules as the read (`trace_payload` in `trace.py`): job returns and
+  arguments pass the `salt.job.result` rules, saved targets lose `pillars`
+  and `metadata`, the versions answer loses `opts`, and every other value
+  is scrubbed of secret-named values. A value a read withholds never
+  reaches the stored trace.
 - Each read returns a dict with one list of flat rows, so MEHO stores a
   long list behind a result handle; `result_scalars` keeps the counts
   inline.
@@ -180,8 +199,9 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   login and headers, each read through `dispatch()` (the RPC calls sent
   and the rows returned), an RPC error and an HTTP error reaching the
   answer, a `401` that logs in again for one target only, secret
-  replacement and the size cap in job results, no password, cookie or
-  xsrf value in a result, registration shape, version parsing,
+  replacement, the checked returns, the withheld arguments and the size
+  cap in job results, no password, cookie or xsrf value in a result, no
+  withheld value in a stored trace, registration shape, version parsing,
   fingerprint.
 - `backend/tests/test_connectors_salt_spec_reconcile.py` -- every `*_RPC`
   method is in the pinned RaaS 8.18 reference list

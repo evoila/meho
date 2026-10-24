@@ -46,6 +46,8 @@ _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "vm.resource_allocation.set": schemas.VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA,
     "vm.resource_allocation.show": schemas.VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA,
     "vm.snapshot.revert": schemas.VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
+    "vm.snapshot.create": schemas.VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
+    "vm.snapshot.delete": schemas.VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
     "folder.create": schemas.FOLDER_CREATE_PARAMETER_SCHEMA,
     "folder.delete": schemas.FOLDER_DELETE_PARAMETER_SCHEMA,
 }

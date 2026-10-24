@@ -43,7 +43,11 @@ resolved VM + host group sets).
 ``vm.clone_from_template`` echo: source_template, new_vm_name, folder,
                           resource_pool, datastore, host, power_on,
                           customization_spec_name
-``vm.snapshot.revert``    echo: vm, snapshot_name
+``vm.snapshot.revert``    echo: vm, snapshot_name or snapshot_id
+``vm.snapshot.create``    echo: vm, snapshot_name, memory, quiesce
+``vm.snapshot.delete``    live-read: the mandatory ``blast_radius`` from the
+                          handler's plan -- the snapshot, the snapshots below
+                          it when ``remove_children`` is set
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
 ``vm.disk.grow``          live-read: vm, name, disk, disk_label,
@@ -183,8 +187,13 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_preview,
     content_library_item_delete_preview,
 )
+from meho_backplane.connectors.vmware_rest.composites._license import license_assign_preview
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     _OP_GET_NAMESPACE,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot import (
+    vm_snapshot_create_preview,
+    vm_snapshot_delete_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _OP_STORAGE_POLICIES_LIST,
@@ -447,12 +456,13 @@ async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any]
 
     Param-echo: the params name the blast radius — which library item (id or
     name, plus scoping library), where it lands (resource pool / host / folder
-    / datastore), the OVF-network→portgroup map, provisioning, and whether it
-    powers on. ``ovf_properties`` may carry secret values (appliance
-    passwords), so only its **keys** (property ids) are echoed, never the
-    values (#1503 secret-hygiene). No live read is issued, so the preview
-    cannot drift from the approved dispatch. Declines (``None``) when neither
-    library reference nor the required ``resource_pool`` is a string.
+    / datastore), the OVF-network→portgroup map, provisioning, the OVF
+    deployment option, and whether it powers on. ``ovf_properties`` may
+    carry secret values (appliance passwords), so only its **keys**
+    (property ids) are echoed, never the values (#1503 secret-hygiene). No
+    live read is issued, so the preview cannot drift from the approved
+    dispatch. Declines (``None``) when neither library reference nor the
+    required ``resource_pool`` is a string.
     """
     library_item = ctx.params.get("library_item")
     library_item_name = ctx.params.get("library_item_name")
@@ -489,6 +499,11 @@ async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any]
         ),
         "ovf_property_keys": (
             sorted(str(k) for k in ovf_properties) if isinstance(ovf_properties, dict) else []
+        ),
+        "deployment_option": (
+            ctx.params.get("deployment_option")
+            if isinstance(ctx.params.get("deployment_option"), str)
+            else None
         ),
         "power_on": bool(ctx.params.get("power_on", False)),
     }
@@ -536,13 +551,18 @@ async def _vm_clone_from_template_preview(ctx: PreviewContext) -> dict[str, Any]
 async def _vm_snapshot_revert_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``vm.snapshot.revert`` — echo the revert coordinates (no I/O).
 
-    The destructive scope is "this VM reverts to the snapshot named X",
-    which the params fully convey; match/ambiguity resolution stays the
-    handler's job (it refuses ambiguous or missing names safely).
+    The destructive scope is "this VM reverts to the snapshot named X" (or
+    "with id X"), which the params fully convey; match/ambiguity resolution
+    stays the handler's job (it refuses ambiguous or missing snapshots safely).
     """
     vm = ctx.params.get("vm")
     snapshot_name = ctx.params.get("snapshot_name")
-    if not isinstance(vm, str) or not isinstance(snapshot_name, str):
+    snapshot_id = ctx.params.get("snapshot_id")
+    if not isinstance(vm, str):
+        return None
+    if isinstance(snapshot_id, str):
+        return {"vm": vm, "snapshot_id": snapshot_id}
+    if not isinstance(snapshot_name, str):
         return None
     return {"vm": vm, "snapshot_name": snapshot_name}
 
@@ -1705,6 +1725,10 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.deploy_from_library": _vm_deploy_from_library_preview,
     "vmware.composite.vm.clone_from_template": _vm_clone_from_template_preview,
     "vmware.composite.vm.snapshot.revert": _vm_snapshot_revert_preview,
+    "vmware.composite.vm.snapshot.create": vm_snapshot_create_preview,
+    # The snapshot delete is destructive: its blast radius is the handler's own
+    # plan (the snapshot, and the snapshots below it when they go too).
+    "vmware.composite.vm.snapshot.delete": vm_snapshot_delete_preview,
     "vmware.composite.vm.migrate": _vm_migrate_preview,
     "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
@@ -1749,11 +1773,14 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     # The DRS rule delete is destructive too: its blast radius is the
     # handler's own plan (the rule, its type, its VMs or groups).
     "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
+    # Licence assign: live-read of the asset's licence now and the licence it
+    # would get, from the handler's own plan. Keys are masked.
+    "vmware.composite.license.assign": license_assign_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 46 write-composite park-time preview builders. Import-time.
+    """Wire the 48 write-composite park-time preview builders. Import-time.
 
     The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

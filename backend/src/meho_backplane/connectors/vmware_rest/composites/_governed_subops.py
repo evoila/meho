@@ -36,7 +36,9 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _host,
     _library,
     _library_delete,
+    _license,
     _namespace,
+    _snapshot,
     _storage_policy,
     _supervisor,
     _teardown,
@@ -63,6 +65,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _write._SUB_OPS_VM_IMPORT_FROM_LIBRARY + _write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY
     ),
     "vmware.composite.vm.snapshot.revert": _write._VIM_SUB_OPS_VM_SNAPSHOT_REVERT,
+    "vmware.composite.vm.snapshot.create": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_CREATE,
+    # The RemoveSnapshot_Task child is delete-shaped, so the discovery surface
+    # flags it un-grantable -- a human always decides.
+    "vmware.composite.vm.snapshot.delete": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_DELETE,
     "vmware.composite.vm.destroy": _write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
     "vmware.composite.vm.migrate": _write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,
@@ -149,6 +155,7 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
         + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
     ),
+    "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
 }
 
 

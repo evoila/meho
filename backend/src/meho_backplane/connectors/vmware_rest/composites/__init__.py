@@ -88,6 +88,9 @@ Scope:
   ``govc library.deploy``) (#2909).
 * the destructive DRS rule delete ``cluster.drs_rule.delete``
   (``_drs_rule_delete``): removes one DRS rule from a cluster, by name.
+* the VM snapshot writes (``_snapshot``): ``vm.snapshot.create`` (caution,
+  waits for approval) and the destructive ``vm.snapshot.delete``. The list is
+  the typed read ``vmware.snapshot.list``; the revert lives in ``_write``.
 """
 
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
@@ -120,6 +123,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._license import license_assign_composite
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
@@ -136,6 +140,10 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
     register_vmware_composite_operations_8_0,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot import (
+    vm_snapshot_create_composite,
+    vm_snapshot_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     storage_policy_create_composite,
@@ -230,6 +238,7 @@ __all__ = [
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "host_standard_portgroup_delete_composite",
+    "license_assign_composite",
     "namespace_create_composite",
     "namespace_delete_composite",
     "namespace_status_composite",
@@ -264,5 +273,7 @@ __all__ = [
     "vm_resize_composite",
     "vm_resource_allocation_set_composite",
     "vm_resource_allocation_show_composite",
+    "vm_snapshot_create_composite",
+    "vm_snapshot_delete_composite",
     "vm_snapshot_revert_composite",
 ]

@@ -1432,12 +1432,15 @@ _LICENSE_LIST = SddcTypedOp(
         "license keys",
         {
             "id": _field("string", "The license key id."),
-            "key_masked": _field(
-                "string",
-                "The license key with only its last 5 characters visible, for "
-                "example '*****-*****-*****-*****-AB12C'. MEHO never returns a "
-                "full key.",
-            ),
+            "key_masked": {
+                "type": ["string", "null"],
+                "description": (
+                    "The license key with only its last 5 characters visible, for "
+                    "example '*****-*****-*****-*****-AB12C'. Null when SDDC Manager "
+                    "sends an empty key or a key that is not text. MEHO never returns "
+                    "a full key."
+                ),
+            },
             "productType": _field(
                 "string", "The product, for example VCENTER, VSAN, ESXI, NSXT or WCP."
             ),

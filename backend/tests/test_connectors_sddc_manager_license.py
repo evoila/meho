@@ -12,6 +12,9 @@ body of the vendor call. These tests check that no full key reaches:
 * a flight-recorder span. A control case without the tag shows the key in the
   span, so that check is not empty.
 
+They also check that the rows match the published response schema, where
+``key_masked`` is text or null.
+
 Every SDDC Manager answer is a hand-written fake in the shape of the vendor
 ``PageOfLicenseKey`` schema. The keys are made up (they start with ``FAKE``);
 the host uses the reserved ``.invalid`` domain. No live system is called.
@@ -29,6 +32,7 @@ from uuid import UUID
 
 import pytest
 import respx
+from jsonschema import Draft202012Validator
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -307,6 +311,28 @@ async def test_the_handler_masks_every_key_field(
 
     monkeypatch.setattr(connector, "_get_json", _fake_get_json)
     assert await connector.license_list(_operator(), _SddcTarget(), {}) == expected
+
+
+@pytest.mark.asyncio
+async def test_masked_rows_match_the_published_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``key_masked`` is text, or null when SDDC Manager sends an empty key or no text."""
+    connector = SddcManagerConnector()
+    answer = _answer(
+        _ROW_ESXI,
+        {"id": "license-0003", "key": ""},
+        {"id": "license-0004", "key": None},
+    )
+
+    async def _fake_get_json(target: Any, path: str, **_: Any) -> Any:
+        return answer
+
+    monkeypatch.setattr(connector, "_get_json", _fake_get_json)
+    result = await connector.license_list(_operator(), _SddcTarget(), {})
+
+    assert [row["key_masked"] for row in result["elements"]] == [_MASKED_ESXI, None, None]
+    schema = _license_op().response_schema
+    Draft202012Validator.check_schema(schema)
+    assert list(Draft202012Validator(schema).iter_errors(result)) == []
 
 
 # ---------------------------------------------------------------------------

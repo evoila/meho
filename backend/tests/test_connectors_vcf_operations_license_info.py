@@ -11,6 +11,7 @@ tests check that:
 * the op runs end to end through ``dispatch`` on a database with no ingested
   spec, against saved vendor answers (respx, no live system);
 * the licence key never appears in clear text in the result;
+* the result matches the published response schema, also for an empty key;
 * the op is ``safe`` with ``requires_approval=False``;
 * only the 9.x connector registers it (the 8.x connector reuses
   ``VROPS_TYPED_OPS``, which does not hold it).
@@ -30,6 +31,7 @@ from uuid import UUID
 
 import pytest
 import respx
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -204,6 +206,34 @@ async def test_license_info_without_a_key_passes_through(monkeypatch: pytest.Mon
     monkeypatch.setattr(connector, "_get_json", _fake_get_json)
     result = await connector.license_info(_make_operator(), _Target(), {})
     assert result == {"productLicensingEdition": "ENTERPRISE", "licensed": False}
+
+
+@pytest.mark.parametrize(
+    ("license_key", "masked"),
+    [
+        pytest.param(_LICENSE_KEY, "*****-*****-*****-*****-EEEEE", id="key"),
+        pytest.param("", None, id="empty-key"),
+        pytest.param(None, None, id="null-key"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_license_info_matches_the_published_schema(
+    monkeypatch: pytest.MonkeyPatch, license_key: Any, masked: Any
+) -> None:
+    """``licenseKey`` is text, or null when the vendor sends an empty key or no text."""
+    connector = VcfOperationsConnector()
+    info = {**_INFO_RESPONSE, "licenseKey": license_key}
+
+    async def _fake_get_json(target: Any, path: str, **_: Any) -> dict[str, Any]:
+        return _EDITION_RESPONSE if path == _EDITION_PATH else info
+
+    monkeypatch.setattr(connector, "_get_json", _fake_get_json)
+    result = await connector.license_info(_make_operator(), _Target(), {})
+
+    assert result["licenseKey"] == masked
+    schema = VROPS_LICENSE_INFO_OP.response_schema
+    Draft202012Validator.check_schema(schema)
+    assert list(Draft202012Validator(schema).iter_errors(result)) == []
 
 
 @pytest.mark.parametrize(

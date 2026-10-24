@@ -690,6 +690,7 @@ const (
 	TargetCreateProductVcd        TargetCreateProduct = "vcd"
 	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
 	TargetCreateProductVmware     TargetCreateProduct = "vmware"
+	TargetCreateProductVr         TargetCreateProduct = "vr"
 	TargetCreateProductVrli       TargetCreateProduct = "vrli"
 	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 	TargetCreateProductWindns     TargetCreateProduct = "windns"

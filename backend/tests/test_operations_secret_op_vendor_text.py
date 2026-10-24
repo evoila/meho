@@ -496,3 +496,21 @@ async def test_dispatch_of_an_op_that_sends_no_secret_keeps_the_vendor_text(
     assert VENDOR_TEXT_WITHHELD not in result.model_dump_json()
     for key, value in kept.items():
         assert result.extras[key] == value, key
+
+
+class _RemediationError(RuntimeError):
+    def __init__(self, message: str, remediation: str) -> None:
+        super().__init__(message)
+        self.remediation = remediation
+
+
+def test_a_connector_remediation_stays_when_the_message_is_withheld() -> None:
+    """A connector can put MEHO's own next step on the error; it is kept."""
+    error = _RemediationError(_VENDOR_TEXT, "the token was revoked; run the op again")
+    built = result_connector_error("op", error, 1.0)
+    assert built.extras["remediation"] == "the token was revoked; run the op again"
+
+    out = withhold_vendor_text(built, op_id=_SECRET_TAG_OP, tags=_SECRET_TAGS)
+    assert out.extras["exception_message"] == VENDOR_TEXT_WITHHELD
+    assert out.extras["remediation"] == "the token was revoked; run the op again"
+    assert _SECRET not in out.model_dump_json()

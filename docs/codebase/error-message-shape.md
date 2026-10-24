@@ -255,7 +255,11 @@ text from the error result, in one shared place.
   `exception_class`, `http_status`, `cause`, `remediation`, `host`,
   `target` and the fault type `upstream_fault.type`. They still say what
   kind of error it was. The cost: the vendor's own words are gone, for
-  example a password-rule message.
+  example a password-rule message. A connector that has its own next
+  step for the operator (MEHO's text, no secret) sets a `remediation`
+  attribute on the error it raises; `result_connector_error` copies it
+  to `extras.remediation`, and it stays. `vcfa.provider.api_token.create`
+  uses this to say whether the minted token was revoked.
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.

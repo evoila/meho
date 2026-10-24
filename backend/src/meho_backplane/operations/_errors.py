@@ -1174,6 +1174,11 @@ def result_connector_error(
             else None
         )
     _add_attached_upstream_fault(extras, exc)
+    remediation = getattr(exc, "remediation", None)
+    if isinstance(remediation, str) and remediation:
+        # MEHO's own next step, set by the raising connector. It stays when the
+        # dispatcher withholds the vendor text of an op that sends a secret.
+        extras["remediation"] = _sanitize_free_text(remediation, cap=_UPSTREAM_MESSAGE_CAP)
     return OperationResult(
         status="error",
         op_id=op_id,

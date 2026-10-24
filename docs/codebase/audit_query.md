@@ -473,8 +473,9 @@ unchanged (the substrate's first WHERE clause is always
 `audit_log.tenant_id`; `show` → 404 on a foreign
 `audit_id`, per the module and `show` docstrings in
 `backend/src/meho_backplane/api/v1/audit.py`), and dispatch rows carry
-`payload.params_hash` — a SHA-256 over the canonicalised params
-(`operations/_validate.py::compute_params_hash`) — instead of the raw
+`payload.params_hash` — a keyed hash of the canonicalised params with
+secret-named values left out
+(`operations/_validate.py::compute_audit_params_hash`) — instead of the raw
 params, so a cross-principal-visible row never exposes sensitive
 operation arguments. Same shelf as the `who-touched` shortcut and the
 aggregate-only broadcast redaction; same category-2 doc-resolution

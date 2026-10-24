@@ -502,15 +502,17 @@ def get_dispatch_child(
     return _dispatch_child
 
 
-def _subop_resume_cleared(*, op_id: str, params_hash: str) -> bool:
+def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     """Return ``True`` when an approval-resume just cleared *this* sub-op (#3351).
 
     Reads :data:`composite_resume_var`, set only on the ``_approved=True``
     re-dispatch of a parent composite whose governed sub-op a human approved.
-    When the current sub-op's ``(op_id, params_hash)`` matches the approved
-    one, the gate clears — the composite reproduces the approved step on the
+    When the current sub-op's op_id and *params* match the approved
+    ``(op_id, params_hash)`` (checked with
+    :func:`~meho_backplane.operations._validate.params_hash_matches`), the
+    gate clears — the composite reproduces the approved step on the
     direct seam — and the var is consumed (set to ``None``) so the same
-    ``(op_id, params_hash)`` cannot clear twice in one re-entry. Matching on
+    sub-op cannot clear twice in one re-entry. Matching on
     the params-hash (not op_id alone) pins the clear to the exact entity
     approved. This clears **exactly one** sub-op: the resume then relies on the
     reviewer auto-executing every other governed sub-op in the same pass (all
@@ -522,8 +524,10 @@ def _subop_resume_cleared(*, op_id: str, params_hash: str) -> bool:
     step marked ``after_main_effect`` (#4217): it saved where to continue, so
     it may wait for its own approval during the resume.
     """
+    from meho_backplane.operations._validate import params_hash_matches
+
     approved = composite_resume_var.get()
-    if approved is not None and approved == (op_id, params_hash):
+    if approved is not None and approved[0] == op_id and params_hash_matches(params, approved[1]):
         composite_resume_var.set(None)
         _log.info("composite_subop_resume_cleared", op_id=op_id)
         return True
@@ -660,7 +664,11 @@ async def enforce_subop_policy(
         result_denied,
     )
     from meho_backplane.operations._lookup import parse_connector_id
-    from meho_backplane.operations._validate import compute_params_hash, policy_gate
+    from meho_backplane.operations._validate import (
+        compute_audit_params_hash,
+        compute_params_hash,
+        policy_gate,
+    )
     from meho_backplane.operations.approval_queue import (
         create_pending_request,
         record_approval_step_event,
@@ -675,7 +683,9 @@ async def enforce_subop_policy(
 
     started = time.monotonic()
     product, version, impl_id = parse_connector_id(connector_id)
-    params_hash = compute_params_hash(params)
+    # The hash this step's audit rows carry (secret-named values left out).
+    # A parked step stores the full approval hash instead (below).
+    params_hash = compute_audit_params_hash(params)
 
     # #4217: a step that continues after the main change must save the state
     # its resume continues from; without it an approval would re-run the
@@ -691,7 +701,7 @@ async def enforce_subop_policy(
     # here — reproducing the approved step through the governed path — instead
     # of re-parking forever. Checked before ``policy_gate`` so a service /
     # agent principal whose sub-op parked resumes without a standing grant.
-    if _subop_resume_cleared(op_id=op_id, params_hash=params_hash):
+    if _subop_resume_cleared(op_id=op_id, params=params):
         return None
 
     # #4217: the approved step runs after the composite's main change, so its
@@ -867,7 +877,7 @@ async def enforce_subop_policy(
                     op_id=op_id,
                     target=target,
                     params=params,
-                    params_hash=params_hash,
+                    params_hash=compute_params_hash(params),
                     run_id=run_id,
                     # #294: stamp the resolved effect so the row carries its
                     # severity + blast-radius/preview instead of the identifier-only

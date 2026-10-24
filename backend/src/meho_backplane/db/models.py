@@ -4334,8 +4334,9 @@ class OperationRun(Base):
       the poll surface so an operator sees what a run executed.
     * ``target_name`` -- the submitted target name (NULL for target-less
       ops); the *name*, not the resolved id, mirroring the ``/call`` body.
-    * ``params_hash`` -- hex SHA-256 of the submitted params (secret-safe
-      correlation to the dispatch audit row's ``params_hash``); NULL for
+    * ``params_hash`` -- the keyed audit hash of the submitted params
+      (:func:`~meho_backplane.operations._validate.compute_audit_params_hash`,
+      computed like the dispatch audit row's ``params_hash``); NULL for
       a param-less op.
     * ``approval_request_id`` -- soft-FK to ``approval_request.id`` for an
       ``approval_resume`` run; NULL for a ``direct`` run.
@@ -6383,11 +6384,15 @@ class ApprovalRequest(Base):
       dispatch was scoped to; NULL for tenant-wide ops. Same discipline as
       ``audit_log.target_id`` (0004).
 
-    * ``params_hash`` -- SHA-256 hex hash of the canonicalised params
+    * ``params_hash`` -- keyed hash (HMAC-SHA256, 64 hex characters) of the
+      canonicalised params, every value included
       (from :func:`~meho_backplane.operations._validate.compute_params_hash`).
       The swap-defence value: a caller-supplied params dict on the REST
       ``/approve`` path is re-hashed against this to detect substitution
-      between request and approval.
+      between request and approval. A request parked before the keyed hash
+      holds the plain SHA-256;
+      :func:`~meho_backplane.operations._validate.params_hash_matches`
+      accepts both.
 
     * ``preview_hash`` -- Text nullable. The preview-result-hash binding
       for the ``destructive`` tier (#3197, decision requirement 2). SHA-256
@@ -6875,8 +6880,10 @@ class GatewayCommand(Base):
     Capability binding (#2500, migration ``0061``)
     ----------------------------------------------
 
-    * ``params_hash`` -- Text NOT NULL. ``compute_params_hash(params)`` at
-      mint. The delivery path re-hashes the stored ``params`` against it
+    * ``params_hash`` -- Text NOT NULL.
+      :func:`~meho_backplane.runner.work_item_signing.params_digest` of the
+      params at mint (a plain SHA-256: the runner checks it again and holds
+      no server key). The delivery path re-hashes the stored ``params`` against it
       and refuses delivery on mismatch (post-mint substitution defence,
       moulded on ``approve_request``). The migration sentinel default
       ``''`` only satisfies the NOT NULL ADD COLUMN on the empty

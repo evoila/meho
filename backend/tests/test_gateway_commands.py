@@ -18,6 +18,8 @@ against the real ``gateway_command`` / ``audit_log`` tables.
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -47,7 +49,7 @@ from meho_backplane.gateway.queue import (
     claim_next_command,
     enqueue_command,
 )
-from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations._validate import compute_audit_params_hash, compute_params_hash
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import create_pending_request
 from meho_backplane.operations.gateway_commands import (
@@ -60,6 +62,7 @@ from meho_backplane.operations.gateway_commands import (
 from meho_backplane.runner.work_item_signing import (
     TARGETLESS_SCOPE,
     load_verify_key,
+    params_digest,
     verify_remote_write_item,
 )
 from meho_backplane.settings import get_settings
@@ -100,8 +103,13 @@ async def _seed_committed_approval(
     params: dict[str, object] | None = None,
     target_id: uuid.UUID | None = None,
     op_id: str = _OP_ID,
+    params_hash: str | None = None,
 ) -> uuid.UUID:
-    """Insert an ``approved``, un-consumed ApprovalRequest and return its id."""
+    """Insert an ``approved``, un-consumed ApprovalRequest and return its id.
+
+    *params_hash* overrides the stored hash (default: the keyed
+    :func:`compute_params_hash` of the params).
+    """
     resolved = params if params is not None else dict(_PARAMS)
     now = datetime.now(UTC)
     approval = ApprovalRequest(
@@ -111,7 +119,7 @@ async def _seed_committed_approval(
         op_id=op_id,
         connector_id=_CONNECTOR_ID,
         target_id=target_id,
-        params_hash=compute_params_hash(resolved),
+        params_hash=params_hash if params_hash is not None else compute_params_hash(resolved),
         params=resolved,
         proposed_effect={"op_id": op_id},
         status=ApprovalRequestStatus.APPROVED.value,
@@ -434,13 +442,14 @@ async def test_mint_remote_write_binds_approval_and_signs(
     command = result.command
     assert command is not None and command.signature is not None
     # The signature verifies under the provisioned verify key over the canonical
-    # payload (op_id + params_hash + targetless scope + the bounded expires_at).
+    # payload (op_id + the runner's params digest + targetless scope + the
+    # bounded expires_at).
     assert (
         verify_remote_write_item(
             load_verify_key(_VERIFY_KEY_B64),
             command.signature,
             op_id=_OP_ID,
-            params_hash=compute_params_hash(_PARAMS),
+            params_hash=params_digest(_PARAMS),
             target_scope=TARGETLESS_SCOPE,
             expires_at=command.expires_at,
         )
@@ -529,6 +538,42 @@ async def test_mint_remote_write_refused_on_params_swap(
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
     assert await _count(GatewayCommand) == 0
     assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_mint_remote_write_refused_on_secret_value_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval binding covers secret-named values too.
+
+    Audit rows leave secret-named values out of their hash, but the approval
+    hash does not: a mint that changes only the password binds no approval.
+    """
+    approved = {"host": "10.0.0.1", "password": "approved-test-value"}
+    approval_id = await _seed_committed_approval(params=approved)
+    await _seed_write_allowlist()
+
+    result = await _mint_caution(monkeypatch, params={**approved, "password": "other-test-value"})
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_mint_remote_write_binds_approval_stored_with_plain_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval stored with the older plain SHA-256 hash still binds its mint.
+
+    Requests that were approved before the keyed hash carry the plain one.
+    """
+    plain = hashlib.sha256(json.dumps(_PARAMS, sort_keys=True, separators=(",", ":")).encode())
+    approval_id = await _seed_committed_approval(params_hash=plain.hexdigest())
+    await _seed_write_allowlist()
+
+    result = await _mint_caution(monkeypatch)
+
+    assert result.minted
+    assert await _approval_resumed_at(approval_id) is not None
 
 
 async def test_mint_remote_write_approval_is_single_use(
@@ -788,12 +833,12 @@ async def test_mint_writes_synchronous_audit_row(monkeypatch: pytest.MonkeyPatch
 
     assert result.minted
     assert mint_audit_id is not None
-    expected_hash = compute_params_hash(_PARAMS)
 
     async with sessionmaker() as session:
         command = await session.get(GatewayCommand, command_id)
         assert command is not None
-        assert command.params_hash == expected_hash
+        # The command row binds the digest the runner checks again.
+        assert command.params_hash == params_digest(_PARAMS)
         assert command.mint_audit_id == mint_audit_id
         assert command.expires_at is not None
         assert command.status == GatewayCommandStatus.PENDING.value
@@ -803,7 +848,9 @@ async def test_mint_writes_synchronous_audit_row(monkeypatch: pytest.MonkeyPatch
         assert audit.method == "GATEWAY"
         assert audit.path == "gateway.command.mint"
         assert audit.status_code == 202
-        assert audit.payload["params_hash"] == expected_hash
+        # The mint audit row carries the keyed audit hash, like every audit row.
+        assert audit.payload["params_hash"] == compute_audit_params_hash(_PARAMS)
+        assert audit.payload["params_hash"] != params_digest(_PARAMS)
         assert audit.payload["command_id"] == str(command_id)
 
     assert await _count(GatewayCommand) == 1

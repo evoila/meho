@@ -116,8 +116,8 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     the identical hash, and the dispatcher can recompute it to detect a
     param-swap between preview and the governed call.
 
-    Canonicalisation matches
-    :func:`~meho_backplane.operations._validate.compute_params_hash`
+    Canonicalisation matches the params hashes in
+    :mod:`meho_backplane.operations._validate`
     (``json.dumps(..., sort_keys=True, default=str, separators=(",", ":"))``)
     so the hashing discipline is uniform across the two binding hashes.
     """

@@ -231,13 +231,18 @@ type DeviceFlowOptions struct {
 // cancelled.
 //
 // The oauth2 package's DeviceAuth helper starts the flow. The
-// polling is our own (pollDeviceToken): the package's
-// DeviceAccessToken runs with "auto-detect" client authentication,
-// which sends every pending check twice — once with the client id in
-// an Authorization header, then again in the form body — and the
-// second request lands inside the server's interval and draws a
-// slow_down answer on every check. The wait then grows until the
-// code's last minute is never checked at all.
+// polling is our own (pollDeviceToken), for two reasons:
+//
+//  1. Our config used to leave Endpoint.AuthStyle at zero
+//     ("auto-detect"). The package then sent every pending check
+//     twice — once with the client id in an Authorization header,
+//     then again in the form body — and the second request drew a
+//     slow_down answer on every check. Pinning AuthStyleInParams
+//     alone fixes that part (refresh.go does exactly that).
+//  2. The package's DeviceAccessToken loop cannot make a last check
+//     just before the code's end, and it has no upper limit for the
+//     wait after slow_down answers. Both are needed so an approval
+//     late in the code's life is still seen.
 func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string, opts DeviceFlowOptions) (*LoginResult, error) {
 	if opts.Prompter == nil {
 		return nil, errors.New("meho: RunDeviceFlow requires a Prompter")

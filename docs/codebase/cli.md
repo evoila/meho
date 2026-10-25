@@ -541,16 +541,23 @@ Authorization Grant (RFC 8628). End-to-end shape:
      the code is valid and until when (local time), when the IdP sent
      `expires_in`.
 
-   Why our own loop (#4892): the oauth2 package's `DeviceAccessToken`
-   leaves the client-auth style at "auto-detect", which sends every
-   token request twice — first with the client id in an `Authorization`
-   header, then in the form body — and only remembers the working
-   style after a success. Before the approval every answer is an
-   error, so each check was two requests, the second one landed inside
-   the IdP's `interval` and drew `slow_down`, the wait grew by 5
-   seconds at every check, and the code's last ~75 seconds were never
-   checked. The refresh path (`api/refresh.go`) had the same cause and
-   now pins `oauth2.AuthStyleInParams`.
+   Why our own loop (#4892), in two parts:
+
+   1. Our `oauth2.Config` left `Endpoint.AuthStyle` at zero
+      ("auto-detect"). The package then sent every token request twice —
+      first with the client id in an `Authorization` header, then in the
+      form body — and only remembered the working style after a success.
+      Before the approval every answer is an error, so each check was two
+      requests, the second one landed inside the IdP's `interval` and
+      drew `slow_down`, the wait grew by 5 seconds at every check, and
+      the code's last ~75 seconds were never checked. Pinning
+      `oauth2.AuthStyleInParams` alone fixes this part; the refresh path
+      (`api/refresh.go`) had the same cause and does exactly that.
+   2. The package's `DeviceAccessToken` loop cannot make a last check
+      just before the code's end, and it has no upper limit for the wait.
+      Those two need our own loop. Do not go back to `DeviceAccessToken`
+      with a pinned auth style: the double request would be gone, but
+      the last check would be lost again.
 
    **Detached from ambient deadlines.** The interactive approval
    wait runs on a context built by `auth.NewDeviceFlowContext`,

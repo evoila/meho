@@ -224,14 +224,6 @@ func TestLoginCommandHelpListsFlags(t *testing.T) {
 	}
 }
 
-// TestLoginPrintTokenEmitsExactlyTheToken pins the --print-token stdout
-// contract (#2782 AC #1 / #3): on the print path stdout must carry the
-// access token and nothing else, so `TOKEN=$(meho login --print-token
-// <url>)` captures the bare credential and `... | wc -l` is exactly 1.
-// printAccessToken is the sole writer to stdout on that path, so pinning
-// its output pins the contract — mirroring status_test.go's redaction
-// test, which pins the isolated redaction helper rather than driving the
-// whole command.
 // TestStdoutPrompterShowsCodeLifetime: the waiting line tells the
 // operator how long the code is valid and until when (local time).
 // Without expires_in from the IdP the line stays as it was.
@@ -270,6 +262,14 @@ func TestStdoutPrompterShowsCodeLifetime(t *testing.T) {
 	}
 }
 
+// TestLoginPrintTokenEmitsExactlyTheToken pins the --print-token stdout
+// contract (#2782 AC #1 / #3): on the print path stdout must carry the
+// access token and nothing else, so `TOKEN=$(meho login --print-token
+// <url>)` captures the bare credential and `... | wc -l` is exactly 1.
+// printAccessToken is the sole writer to stdout on that path, so pinning
+// its output pins the contract — mirroring status_test.go's redaction
+// test, which pins the isolated redaction helper rather than driving the
+// whole command.
 func TestLoginPrintTokenEmitsExactlyTheToken(t *testing.T) {
 	const token = "eyJ.PRINT-TOKEN-TEST.SIGNATURE"
 	var stdout bytes.Buffer

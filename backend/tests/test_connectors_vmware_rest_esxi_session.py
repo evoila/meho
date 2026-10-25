@@ -84,6 +84,8 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import
     build_host_storage_devices_retrieve_params,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import object_collect_impl
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 from meho_backplane.operations._errors import result_connector_auth_failed, result_connector_error
 from meho_backplane.settings import get_settings
 
@@ -1556,3 +1558,43 @@ async def test_esxi_service_content_fault_reaches_envelope_upstream_fault() -> N
         "faultstring": _LONG_FAULTSTRING,
     }
     assert "Unable to complete Sysinfo operation." not in result.extras["exception_message"]
+
+
+# ---------------------------------------------------------------------------
+# A split answer on a standalone ESXi host fails, it never gives a short list (#4862)
+# ---------------------------------------------------------------------------
+
+_PAGED_DATASTORE_RETRIEVE_XML = _envelope(
+    '<RetrievePropertiesExResponse xmlns="urn:vim25"><returnval>'
+    '<objects><obj type="Datastore">ds-page-1</obj>'
+    '<propSet><name>info</name><val xsi:type="NasDatastoreInfo"><name>nfs-a</name></val></propSet>'
+    "</objects><token>page-2</token></returnval></RetrievePropertiesExResponse>"
+)
+
+
+@pytest.mark.asyncio
+async def test_esxi_split_answer_fails_the_read_instead_of_a_short_list() -> None:
+    """ESXi SOAP has no ``ContinueRetrievePropertiesEx``: a token fails the read, loud.
+
+    The host answers the first page with a token for the rest. The shared
+    paged read tries to continue, the SOAP transport has no builder for
+    that method, and the read raises. The objects of the first page are not
+    returned, and no second request reaches the host.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_xml=_PAGED_DATASTORE_RETRIEVE_XML)
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        with pytest.raises(RuntimeError, match=r"ContinueRetrievePropertiesEx.*no SOAP builder"):
+            await retrieve_all_pages(
+                connector,
+                target,
+                _make_operator(),
+                retrieve_properties_body("Datastore", ["ds-page-1", "ds-page-2"], ["info"]),
+            )
+
+    assert router.methods.count("RetrievePropertiesEx") == 1
+    assert router.methods[-1] == "RetrievePropertiesEx"

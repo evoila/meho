@@ -52,6 +52,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `vr-rest-9.1` | `vr` | >=8.8,<10.0 | — |
 | `vrli-rest-9.0` | `vrli` | >=9.0,<10.0 | — |
 | `vrli-vrli8-8.0` | `vrli` | >=8.0,<9.0 | — |
+| `vro-rest-9.0` | `vro` | >=8.0,<10.0 | — |
 | `vrops-rest-9.0` | `vrops` | >=9.0,<10.0 | — |
 | `vrops-vrops8-8.0` | `vrops` | >=8.0,<9.0 | — |
 | `windns-ssh-2016.x` | `windns` | — | — |

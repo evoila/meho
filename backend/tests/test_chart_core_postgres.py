@@ -367,4 +367,53 @@ def test_ci_database_tests_run_on_the_chart_postgres_image() -> None:
     ]
     assert pins
     for pin in pins:
-        assert pin.endswith(f"/{expected}"), pin
+        assert _ci_postgres_pin_matches(pin, expected), pin
+
+
+def _ci_postgres_pin_matches(pin: str, expected: str) -> bool:
+    mirror = f"harbor.evba.lab/dockerhub-proxy/{expected}"
+    routed = (
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.head.repo.full_name != github.repository && "
+        f"'{expected}' || '{mirror}' }}}}"
+    )
+    return pin in {mirror, routed}
+
+
+@pytest.mark.parametrize(
+    ("replacement", "valid"),
+    [
+        (None, True),
+        (("pull_request", "pull_request_target"), False),
+        (("!= github.repository", "== github.repository"), False),
+        ((" && ", " || "), False),
+        (("pgvector/pgvector@sha256:", "other/postgres@sha256:"), False),
+        (("@sha256:abc", "@sha256:def"), False),
+        (("harbor.evba.lab/dockerhub-proxy/", "untrusted.invalid/"), False),
+        (("proxy/pgvector/pgvector@sha256:abc", "proxy/pgvector/pgvector@sha256:def"), False),
+        (("'pgvector/pgvector@sha256:abc'", "'pgvector/pgvector@sha256:def'"), False),
+    ],
+)
+def test_ci_postgres_routing_requires_exact_fork_guard_and_both_images(
+    replacement: tuple[str, str] | None,
+    valid: bool,
+) -> None:
+    expected = "pgvector/pgvector@sha256:abc"
+    pin = (
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.head.repo.full_name != github.repository && "
+        f"'{expected}' || 'harbor.evba.lab/dockerhub-proxy/{expected}' }}}}"
+    )
+    if replacement is not None:
+        pin = pin.replace(*replacement)
+    assert _ci_postgres_pin_matches(pin, expected) is valid
+
+
+def test_ci_postgres_literal_requires_the_chart_digest_and_trusted_mirror() -> None:
+    expected = "pgvector/pgvector@sha256:abc"
+    assert _ci_postgres_pin_matches(f"harbor.evba.lab/dockerhub-proxy/{expected}", expected)
+    assert not _ci_postgres_pin_matches(expected, expected)
+    assert not _ci_postgres_pin_matches(f"untrusted.invalid/{expected}", expected)
+    assert not _ci_postgres_pin_matches(
+        "harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:def", expected
+    )

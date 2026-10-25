@@ -271,7 +271,10 @@ keep their separate role gates.
   401, `--json` and `--backplane` on every verb). Each server error code
   (`addon_contract_below_backplane_minimum`, `backplane_contract_below_addon_minimum`,
   `addon_already_paired`, `addon_not_paired`, 403, 503, 502) is printed with
-  one line that says what to do. Pairing health is in `meho status --json`
+  one line that says what to do. `pair` checks the name locally (same
+  alphabet and length as the server) and prints a `usage_error` before any
+  request, because the server's 422 carries a plain-string `detail` that
+  the generated client cannot decode. Pairing health is in `meho status --json`
   (the `pairings` list from `/api/v1/health`) and in the `meho_status` MCP
   tool; the text output of `meho status` does not show it.
 - **Heartbeat / capability-declare object-level binding is wired.** Both

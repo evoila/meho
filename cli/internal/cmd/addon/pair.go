@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 
 	"github.com/spf13/cobra"
 
@@ -103,10 +104,32 @@ type pairOptions struct {
 	BackplaneOverride   string
 }
 
+// The server accepts the same name alphabet and length. The check is
+// repeated here because the server's 422 answer carries a plain-string
+// detail that the generated client cannot decode, so the explanation
+// would otherwise be lost behind a network_unreachable error.
+var addonNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+const addonNameMaxLength = 128
+
+// checkAddonName returns the usage message for a name the server would
+// reject, or "" when the name is fine.
+func checkAddonName(name string) string {
+	switch {
+	case name == "":
+		return "<name> must not be empty"
+	case len(name) > addonNameMaxLength:
+		return fmt.Sprintf("<name> must be at most %d characters", addonNameMaxLength)
+	case !addonNamePattern.MatchString(name):
+		return fmt.Sprintf("<name> %q contains characters outside the safe set "+
+			"(allowed: letters, digits, hyphen, underscore, dot)", name)
+	}
+	return ""
+}
+
 func runPair(cmd *cobra.Command, opts pairOptions) error {
-	if opts.Name == "" {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected("pair requires a non-empty <name> argument"), opts.JSONOut)
+	if msg := checkAddonName(opts.Name); msg != "" {
+		return output.RenderError(cmd.ErrOrStderr(), output.Usage(msg), opts.JSONOut)
 	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {

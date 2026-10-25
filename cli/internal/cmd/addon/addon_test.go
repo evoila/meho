@@ -448,15 +448,56 @@ func TestPairRequiresVersionFlagsTextOutput(t *testing.T) {
 	}
 }
 
-func TestPairRejectsEmptyName(t *testing.T) {
-	srv := mockBackplane(t, map[string]mockHandler{})
-	defer srv.Close()
-	opts := pairOpts(srv, true)
-	opts.Name = ""
-	_, stderr, err := runVerbWithMock(t, srv, func(cmd *cobra.Command) error {
-		return runPair(cmd, opts)
-	})
-	assertRenderedErrorCode(t, stderr, err, output.ErrCodeUnexpected, "non-empty <name>")
+// TestPairRejectsBadNameBeforeAnyRequest drives the cobra command with
+// names the server would answer 422 to. The check runs before the
+// backplane URL is resolved, so no login and no request are needed, and
+// the error is a plain usage_error that names the allowed characters.
+func TestPairRejectsBadNameBeforeAnyRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"my addon", "allowed: letters, digits, hyphen, underscore, dot"},
+		{"addon/one", "allowed: letters, digits, hyphen, underscore, dot"},
+		{"", "<name> must not be empty"},
+		{strings.Repeat("a", 129), "at most 128 characters"},
+	}
+	for _, tc := range cases {
+		root := NewRootCmd()
+		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		root.SetOut(stdout)
+		root.SetErr(stderr)
+		root.SetArgs([]string{"pair", tc.name,
+			"--contract-version", "1", "--min-backplane-version", "1", "--json"})
+		err := root.Execute()
+		assertRenderedErrorCode(t, stderr, err, output.ErrCodeUsage, tc.want)
+		if strings.Contains(stderr.String(), "network_unreachable") {
+			t.Errorf("name %q: must fail as a usage error, not a network error; got %q", tc.name, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("name %q: stdout must be empty; got %q", tc.name, stdout.String())
+		}
+	}
+}
+
+func TestPairRejectsBadNameTextOutput(t *testing.T) {
+	root := NewRootCmd()
+	stderr := &bytes.Buffer{}
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(stderr)
+	root.SetArgs([]string{"pair", "my addon", "--contract-version", "1", "--min-backplane-version", "1"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(stderr.String(), "meho: usage_error: <name> \"my addon\" contains characters outside the safe set") {
+		t.Errorf("stderr: %q", stderr.String())
+	}
+}
+
+func TestPairAcceptsEveryAllowedNameCharacter(t *testing.T) {
+	if msg := checkAddonName("Auto-mation_v2.0"); msg != "" {
+		t.Errorf("expected no usage message; got %q", msg)
+	}
 }
 
 // ---------- error advice (step 6 of the task) ----------

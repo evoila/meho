@@ -17,19 +17,19 @@ import (
 )
 
 // transitionResult is the synthetic --json envelope the enable /
-// disable verbs render to operators. The underlying T6 route
-// returns HTTP 204 No Content (see api/v1/connectors_ingest.py), so
-// there is no canonical wire response to mirror. The envelope
+// disable / delete verbs render to operators. The underlying T6
+// routes return HTTP 204 No Content (see api/v1/connectors_ingest.py),
+// so there is no canonical wire response to mirror. The envelope
 // captures the connector_id the operator targeted plus the verb's
-// post-condition (action="enabled"|"disabled") so downstream tooling
-// piping to jq sees a structured artifact.
+// post-condition (action="enabled"|"disabled"|"deleted") so downstream
+// tooling piping to jq sees a structured artifact.
 type transitionResult struct {
 	ConnectorID string `json:"connector_id"`
 	Action      string `json:"action"`
 }
 
 // transitionVerb selects which typed-client endpoint a transition
-// command routes through. The two endpoints share signature shape
+// command routes through. The three endpoints share signature shape
 // (path-templated connector_id, empty params, 204 success) so the
 // shared transition machinery dispatches on the verb name without
 // duplicating the call site.
@@ -38,6 +38,7 @@ type transitionVerb string
 const (
 	verbEnable  transitionVerb = "enable"
 	verbDisable transitionVerb = "disable"
+	verbDelete  transitionVerb = "delete"
 )
 
 // newEnableCmd returns the `meho connector enable` command.
@@ -75,6 +76,10 @@ type transitionParams struct {
 	Short           string
 	Action          string
 	ConfirmQuestion string
+	// Long replaces the default enable / disable help text when set.
+	// The delete verb needs its own: it calls a DELETE route and a
+	// repeat call answers 404 instead of the current state.
+	Long string
 }
 
 func newTransitionCmd(p transitionParams) *cobra.Command {
@@ -83,17 +88,21 @@ func newTransitionCmd(p transitionParams) *cobra.Command {
 		jsonOut           bool
 		backplaneOverride string
 	)
-	cmd := &cobra.Command{
-		Use:   string(p.Verb) + " <connector_id>",
-		Short: p.Short,
-		Long: fmt.Sprintf("%s calls POST /api/v1/connectors/<connector_id>/%s.\n\n"+
+	long := p.Long
+	if long == "" {
+		long = fmt.Sprintf("%s calls POST /api/v1/connectors/<connector_id>/%s.\n\n"+
 			"The route is idempotent: calling it against an already-%s connector\n"+
 			"returns the current state without re-running the transition.\n\n"+
 			"Without --confirm, the verb prompts on stdin for confirmation;\n"+
 			"--confirm skips the prompt for scripted use (CI pipelines, etc.).\n\n"+
 			"Role: tenant_admin.",
 			p.Verb, p.Verb, p.Action,
-		),
+		)
+	}
+	cmd := &cobra.Command{
+		Use:           string(p.Verb) + " <connector_id>",
+		Short:         p.Short,
+		Long:          long,
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -152,13 +161,13 @@ func runTransition(cmd *cobra.Command, p transitionParams, opts transitionOption
 	return nil
 }
 
-// postTransition drives the typed-client enable / disable endpoint
-// with a one-shot 401-retry. Both routes return HTTP 204 No Content
-// on success; non-2xx surfaces as *httpResponseError for the caller
-// to route through renderHTTPStatus. The verb selector picks which
-// generated `*WithResponse` method to invoke — the two routes share
-// signature shape, so dispatching here keeps the call sites in one
-// place.
+// postTransition drives the typed-client enable / disable / delete
+// endpoint with a one-shot 401-retry. All three routes return HTTP
+// 204 No Content on success; non-2xx surfaces as *httpResponseError
+// for the caller to route through renderHTTPStatus. The verb selector
+// picks which generated `*WithResponse` method to invoke — the routes
+// share signature shape, so dispatching here keeps the call sites in
+// one place.
 func postTransition(
 	ctx context.Context,
 	backplaneURL string,
@@ -210,11 +219,31 @@ func postTransition(
 			return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 		}
 		return nil
+	case verbDelete:
+		resp, rerr := retryOn401(ctx, authed,
+			func(ctx context.Context) (*api.DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
+				return authed.DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(
+					ctx,
+					connectorID,
+					&api.DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams{},
+				)
+			},
+			func(r *api.DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse) int {
+				return r.StatusCode()
+			},
+		)
+		if rerr != nil {
+			return rerr
+		}
+		if resp.StatusCode() != http.StatusNoContent {
+			return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+		}
+		return nil
 	default:
 		// Defensive: the only constructors that build a
-		// transitionParams hard-code verbEnable / verbDisable, so
-		// reaching here means a future maintainer added a third verb
-		// to the dispatch and forgot to update this switch.
+		// transitionParams hard-code verbEnable / verbDisable /
+		// verbDelete, so reaching here means a future maintainer added
+		// a verb to the dispatch and forgot to update this switch.
 		return fmt.Errorf("unknown transition verb %q", verb)
 	}
 }

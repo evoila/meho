@@ -116,12 +116,14 @@ from meho_backplane.mcp.tools._connector_shared import (
     raise_invalid_params_for_builtin_write_forbidden,
     raise_invalid_params_for_connector_not_found,
     raise_invalid_params_for_edit_value_error,
+    raise_invalid_params_for_legacy_tenant_copy,
 )
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ConnectorStatusFilter,
+    LegacyTenantConnectorCopyError,
     ReviewService,
     list_ingested_connectors,
 )
@@ -178,6 +180,10 @@ async def _review_handler(
         # the dispatcher's bare -32603. See
         # raise_invalid_params_for_ambiguous_scope.
         raise_invalid_params_for_ambiguous_scope(exc)
+    except LegacyTenantConnectorCopyError as exc:
+        # #4889: an old tenant copy under a former product name maps to a
+        # structured -32602 (REST: 409) that names the copy and the way out.
+        raise_invalid_params_for_legacy_tenant_copy(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -221,6 +227,10 @@ async def _edit_group_handler(
         # builtin_connector_write_forbidden (#3616 parity), not the
         # dispatcher's bare -32603 class-name leak.
         raise_invalid_params_for_builtin_write_forbidden(exc)
+    except LegacyTenantConnectorCopyError as exc:
+        # #4889: an old tenant copy under a former product name maps to a
+        # structured -32602 (REST: 409) that names the copy and the way out.
+        raise_invalid_params_for_legacy_tenant_copy(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -284,6 +294,10 @@ async def _edit_op_handler(
         # builtin_connector_write_forbidden (#3616 parity), not the
         # dispatcher's bare -32603 class-name leak.
         raise_invalid_params_for_builtin_write_forbidden(exc)
+    except LegacyTenantConnectorCopyError as exc:
+        # #4889: an old tenant copy under a former product name maps to a
+        # structured -32602 (REST: 409) that names the copy and the way out.
+        raise_invalid_params_for_legacy_tenant_copy(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -315,6 +329,10 @@ async def _enable_handler(
         # builtin_connector_write_forbidden (#3616 parity), not the
         # dispatcher's bare -32603 class-name leak.
         raise_invalid_params_for_builtin_write_forbidden(exc)
+    except LegacyTenantConnectorCopyError as exc:
+        # #4889: an old tenant copy under a former product name maps to a
+        # structured -32602 (REST: 409) that names the copy and the way out.
+        raise_invalid_params_for_legacy_tenant_copy(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -360,6 +378,10 @@ async def _enable_reads_handler(
         # (#1801 / this is #1910). enable_reads shares the resolver with
         # the review read path, so it can raise the same error.
         raise_invalid_params_for_ambiguous_scope(exc)
+    except LegacyTenantConnectorCopyError as exc:
+        # #4889: an old tenant copy under a former product name maps to a
+        # structured -32602 (REST: 409) that names the copy and the way out.
+        raise_invalid_params_for_legacy_tenant_copy(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -386,6 +408,10 @@ async def _disable_handler(
         # builtin_connector_write_forbidden (#3616 parity), not the
         # dispatcher's bare -32603 class-name leak.
         raise_invalid_params_for_builtin_write_forbidden(exc)
+    except LegacyTenantConnectorCopyError as exc:
+        # #4889: an old tenant copy under a former product name maps to a
+        # structured -32602 (REST: 409) that names the copy and the way out.
+        raise_invalid_params_for_legacy_tenant_copy(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -512,7 +538,9 @@ register_mcp_tool(
             "maps to BOTH a tenant-curated row and a built-in row the "
             "call fails with a structured ambiguous-scope error listing "
             "the candidates; pass prefer='tenant' or prefer='builtin' to "
-            "target one directly."
+            "target one directly. prefer='legacy' shows the tenant's old "
+            "copy stored under a former product name, the copy "
+            "meho_connector_delete removes first."
         ),
         inputSchema={
             "type": "object",

@@ -64,6 +64,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._robot_canary_fixtures import (
     ROBOT_CANARY_SERVERS,
+    ROBOT_CORE_READ_OPS,
     ROBOT_FORCE_HANDLE_LIST_OP_ID,
     ROBOT_FORCE_HANDLE_PARAMS,
     IngestedRobotCanary,
@@ -122,8 +123,8 @@ def test_mcp_llm_instructions_contain_401_block_warning(op_id: str) -> None:
 # Smoke-test parameters — op ids and per-op path-parameter substitutions.
 # ---------------------------------------------------------------------------
 
-#: All 10 curated Hetzner Robot op ids, sourced from the canonical constant.
-SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in ROBOT_CORE_OPS)
+#: All 10 curated Hetzner Robot read op ids, sourced from the canonical constant.
+SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in ROBOT_CORE_READ_OPS)
 
 #: Path-parameter substitutions for ops with ``{var}`` templates.
 #: The respx router is registered for specific values; these must match.

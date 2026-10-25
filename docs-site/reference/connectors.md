@@ -38,6 +38,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `proxmox-api-8.x` | `proxmox` | >=7.0,<9.0 | — |
 | `rabbitmq-management-3.x` | `rabbitmq` | >=3.8,<5.0 | — |
 | `rke2-ssh-1.x` | `rke2` | — | — |
+| `salt-raas-8.18` | `salt` | >=8.0,<10.0 | — |
 | `sddc-rest-9.0` | `sddc` | >=9.0,<10.0 | generic |
 | `sddc-vcf5-5.0` | `sddc` | >=5.0,<9.0 | — |
 | `srm-rest-9.1` | `srm` | >=8.8,<10.0 | — |

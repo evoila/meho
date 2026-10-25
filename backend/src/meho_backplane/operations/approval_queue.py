@@ -106,7 +106,10 @@ from meho_backplane.operations._audit import (
     work_ref_var,
 )
 from meho_backplane.operations._errors import result_already_resumed, result_denied
-from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations._validate import (
+    params_hash_candidates,
+    params_hash_matches,
+)
 from meho_backplane.operations.approval_handoff import (
     ApprovalHandoffError,
 )
@@ -702,19 +705,21 @@ def _reuse_idempotent_request(
     op_id: str,
     connector_id: str,
     target_id: uuid.UUID | None,
-    params_hash: str,
+    params: dict[str, Any],
     preview_hash: str | None,
 ) -> ApprovalRequest:
     """Return *existing* for a retry, or refuse when the call differs (#3486).
 
-    The retry must be the identical call. ``work_ref`` is compared too, so
-    two runs under different change tickets never share one request.
+    The retry must be the identical call: its *params* must match the
+    stored ``params_hash`` (:func:`params_hash_matches`). ``work_ref`` is
+    compared too, so two runs under different change tickets never share
+    one request.
     """
     same_call = (
         existing.op_id == op_id
         and existing.connector_id == connector_id
         and existing.target_id == target_id
-        and existing.params_hash == params_hash
+        and params_hash_matches(params, existing.params_hash)
         and existing.preview_hash == preview_hash
         and existing.work_ref == work_ref_var.get()
     )
@@ -1100,7 +1105,8 @@ async def create_pending_request(
             stored params, and also used to verify hash consistency.
         params_hash: Pre-computed
             :func:`~meho_backplane.operations._validate.compute_params_hash`
-            of *params*. Stored for resume-path verification.
+            of *params* (the full approval hash, not the audit hash).
+            Stored for resume-path verification.
         run_id: The ``agent_run.id`` this request belongs to; ``None``
             for non-agent-run dispatches.
         proposed_effect: Human-readable summary for the reviewer.
@@ -1164,7 +1170,7 @@ async def create_pending_request(
             op_id=op_id,
             connector_id=connector_id,
             target_id=target_id,
-            params_hash=params_hash,
+            params=params,
             preview_hash=preview_hash,
         )
 
@@ -1327,8 +1333,8 @@ async def approve_request(
        :class:`SelfApprovalForbiddenError` (G11.7-T1 #1401). Checked
        before the hash check so a self-approver learns *why* they are
        refused rather than being told their params mismatch.
-    5. If *params* is supplied, ``compute_params_hash(params)`` matches
-       the stored ``params_hash`` (else 422, :class:`ParamsMismatchError`).
+    5. If *params* is supplied, it matches the stored ``params_hash``
+       (:func:`params_hash_matches`; else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
        operator-decision path (G11.2-T5 MCP/CLI surface) approves by
        request id alone and does not have the original params. The
@@ -1593,19 +1599,20 @@ async def find_remote_write_approval(
     tenant_id: uuid.UUID,
     op_id: str,
     target_id: uuid.UUID | None,
-    params_hash: str,
+    params: dict[str, Any],
 ) -> ApprovalRequest | None:
     """Find the committed approval that authorises a remote-write mint (read-only).
 
     Mechanism 1 of the satellite write-path composed gate (#3189, design §3):
     the ``remote-write`` (caution) tier mints a capability **only** against a
     committed :class:`ApprovalRequest` for the *identical*
-    ``(tenant, op, target, params_hash)`` -- the human approval decision is the
+    ``(tenant, op, target, params)`` -- the human approval decision is the
     mint's authorization, exactly as :func:`resume_dispatch_after_approval`
     re-dispatches an approved op with the policy gate bypassed
-    (``dispatch(..., _approved=True)``). The ``params_hash`` predicate is the
-    swap defence (#1503 / #3197): a mint whose params differ from the approved
-    ones matches no row and is refused.
+    (``dispatch(..., _approved=True)``). The ``params_hash`` predicate (any of
+    :func:`params_hash_candidates` for *params*) is the swap defence
+    (#1503 / #3197): a mint whose params differ from the approved ones matches
+    no row and is refused.
 
     Read-only: it never mutates a row, so the mint can refuse fail-closed (no
     approval, or -- later -- the signing key is unavailable) **without**
@@ -1624,7 +1631,7 @@ async def find_remote_write_approval(
         .where(
             ApprovalRequest.tenant_id == tenant_id,
             ApprovalRequest.op_id == op_id,
-            ApprovalRequest.params_hash == params_hash,
+            ApprovalRequest.params_hash.in_(params_hash_candidates(params)),
             ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
             ApprovalRequest.resumed_at.is_(None),
             target_clause,
@@ -1782,7 +1789,7 @@ async def resume_dispatch_after_approval(
             )
             await handoff_session.commit()
         effective_params = cast(dict[str, Any], handoff["params"])
-        if compute_params_hash(effective_params) != request.params_hash:
+        if not params_hash_matches(effective_params, request.params_hash):
             raise ApprovalHandoffError(
                 "approval execution payload does not match the approved request"
             )
@@ -2461,10 +2468,8 @@ async def _load_pending_for_approval(
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
     _check_self_approval(operator, request)
-    if params is not None:
-        incoming_hash = compute_params_hash(params)
-        if incoming_hash != request.params_hash:
-            raise ParamsMismatchError(request_id)
+    if params is not None and not params_hash_matches(params, request.params_hash):
+        raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)
     return request
 

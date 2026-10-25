@@ -945,6 +945,20 @@ register_mcp_tool(
                         "destructive-tier delete."
                     ),
                 },
+                "safety_level": {
+                    "type": "string",
+                    "description": (
+                        "The op's safety level: safe, caution, dangerous, or "
+                        "destructive (ingested ops, status=ok)."
+                    ),
+                },
+                "requires_approval": {
+                    "type": "boolean",
+                    "description": (
+                        "True when the op needs a human approval before it "
+                        "runs (ingested ops, status=ok)."
+                    ),
+                },
                 "proposed_effect": {
                     "type": "object",
                     "description": (

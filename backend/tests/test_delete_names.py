@@ -102,7 +102,10 @@ def test_every_delete_sign_is_a_write_word() -> None:
 def test_delete_shaped_patterns_are_the_grant_check_defaults() -> None:
     from meho_backplane.settings import _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
 
-    assert _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS == DELETE_SHAPED_OP_ID_PATTERNS
+    # The grant check adds the Hetzner Robot vSwitch writes sent as POST
+    # (#3973) on top of the shared delete signs.
+    grant_defaults = _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
+    assert grant_defaults == (*DELETE_SHAPED_OP_ID_PATTERNS, "POST:/vswitch/*")
     assert DELETE_SHAPED_OP_ID_PATTERNS == (
         "DELETE:*",
         "*.delete",

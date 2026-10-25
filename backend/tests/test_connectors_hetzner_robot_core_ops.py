@@ -1,19 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the Hetzner Robot read-only v0.2 core-ops curation.
+"""Behavioural tests for the Hetzner Robot curated core-ops curation.
 
 Covers :mod:`meho_backplane.connectors.hetzner_robot.core_ops`:
 
 * :func:`classify_robot_op` — path classifier rules for Robot's flat
   path structure. Validates that the most-specific prefix wins and that
-  only GET verbs are classified as curated.
+  only GET verbs plus the two vSwitch membership writes (#3973) are
+  classified as curated.
 * :func:`apply_robot_core_curation` — the operator-review-time substrate
   call that flips ``review_status='enabled'`` on the 3 curated groups,
-  lands ``llm_instructions`` on the 10 curated ops, and explicitly
+  lands ``llm_instructions`` on the 12 curated ops, and explicitly
   disables non-core ops via the audit-log-driven operator-override
-  exclusion. The load-bearing assertion is "10 ops dispatchable, every
-  other op in curated groups stays ``is_enabled=False``".
+  exclusion. The load-bearing assertion is "12 ops dispatchable, every
+  other op in curated groups stays ``is_enabled=False``" — including the
+  vSwitch rename and cancel ops.
 * ``llm_instructions`` completeness — every op has the three canonical
   keys with non-empty string values.
 * ``when_to_use`` completeness — every group has a non-empty hint.
@@ -103,17 +105,23 @@ def _make_operator(*, tenant_id: uuid.UUID) -> Operator:
         ("GET:/reset", "none"),
         ("GET:/wol", "none"),
         ("GET:/order/server/product", "none"),
-        # Non-GET verbs → "none" (Robot write paths)
+        # The two curated vSwitch membership writes (#3973)
+        ("POST:/vswitch/{vswitch-id}/server", "robot-networking"),
+        ("DELETE:/vswitch/{vswitch-id}/server", "robot-networking"),
+        # Every other write → "none" (Robot write paths)
         ("POST:/key", "none"),
         ("DELETE:/key/{fingerprint}", "none"),
         ("POST:/server/{server-ip}/reset", "none"),
+        ("POST:/vswitch/{vswitch-id}", "none"),
+        ("DELETE:/vswitch/{vswitch-id}", "none"),
+        ("POST:/firewall/{server-ip}", "none"),
         # Malformed op_id → "none"
         ("bad-op-id-no-colon", "none"),
     ],
     ids=str,
 )
 def test_classify_robot_op_returns_correct_group(op_id: str, expected_group: str) -> None:
-    """classify_robot_op returns the curated group_key for all 10 core ops."""
+    """classify_robot_op returns the curated group_key for all 12 core ops."""
     assert classify_robot_op(op_id) == expected_group
 
 
@@ -151,13 +159,22 @@ def test_classify_robot_op_all_core_ops_are_classified() -> None:
         )
 
 
-def test_classify_robot_op_all_core_ops_are_get() -> None:
-    """Every op in ROBOT_CORE_OPS is a GET — v0.2 core is read-only."""
-    for op in ROBOT_CORE_OPS:
-        method, _ = op.op_id.split(":", 1)
-        assert method == "GET", (
-            f"ROBOT_CORE_OPS entry {op.op_id!r} is not GET — v0.2 core must be read-only"
-        )
+#: The only writes the curated core may hold: vSwitch membership add and
+#: remove (#3973). The rename / VLAN change and the cancel stay out.
+_ALLOWED_CORE_WRITES = frozenset(
+    {
+        "POST:/vswitch/{vswitch-id}/server",
+        "DELETE:/vswitch/{vswitch-id}/server",
+    }
+)
+
+
+def test_classify_robot_op_core_writes_are_only_vswitch_membership() -> None:
+    """Every ROBOT_CORE_OPS entry is a GET, except the two membership writes."""
+    writes = {op.op_id for op in ROBOT_CORE_OPS if not op.op_id.startswith("GET:")}
+    assert writes == _ALLOWED_CORE_WRITES, (
+        f"the curated core may hold only the vSwitch membership writes; got {sorted(writes)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -188,16 +205,40 @@ def test_robot_core_groups_when_to_use_all_populated() -> None:
         assert group.name and group.name.strip(), f"group {group.group_key!r} has empty name"
 
 
-def test_robot_core_ops_count_is_10() -> None:
-    """ROBOT_CORE_OPS contains exactly 10 ops.
+def test_robot_core_ops_count_is_12() -> None:
+    """ROBOT_CORE_OPS contains exactly 12 ops.
 
-    The 9 G3.7 read ops + the #2848 firewall read; ``GET:/query``
-    (hetzner-robot.about) was removed by #2985 after the spec-reconcile
-    lane proved the Robot Webservice serves no such endpoint.
+    The 9 G3.7 read ops + the #2848 firewall read + the 2 #3973 vSwitch
+    membership writes; ``GET:/query`` (hetzner-robot.about) was removed by
+    #2985 after the spec-reconcile lane proved the Robot Webservice serves
+    no such endpoint.
     """
-    assert len(ROBOT_CORE_OPS) == 10, (
-        f"expected 10 ops in ROBOT_CORE_OPS; got {len(ROBOT_CORE_OPS)}"
+    assert len(ROBOT_CORE_OPS) == 12, (
+        f"expected 12 ops in ROBOT_CORE_OPS; got {len(ROBOT_CORE_OPS)}"
     )
+
+
+@pytest.mark.parametrize("op_id", sorted(_ALLOWED_CORE_WRITES))
+def test_membership_write_instructions_carry_the_approval_and_polling_guidance(
+    op_id: str,
+) -> None:
+    """The agent-facing guidance names the approval wait, polling, 409 and limits.
+
+    It also tells an agent what it gets back: ``awaiting_approval`` for a human
+    or service login (or an agent with permission), and ``denied`` for an
+    agent without an explicit permission (the default).
+    """
+    (op,) = [op for op in ROBOT_CORE_OPS if op.op_id == op_id]
+    text = " ".join(str(value) for value in op.llm_instructions.values())
+    assert "WAITS FOR A HUMAN APPROVAL" in text
+    assert "cannot approve" in text
+    assert "awaiting_approval" in text
+    assert "explicit permission" in text
+    assert "status denied" in text
+    assert "GET:/vswitch/{vswitch-id}" in text
+    assert "VSWITCH_IN_PROCESS" in text
+    assert "100 calls per hour" in text
+    assert "MTU 1400" in text
 
 
 def test_robot_core_groups_count_is_3() -> None:
@@ -331,7 +372,7 @@ async def _seed_curated_groups_and_ops(
 
 
 async def test_apply_robot_core_curation_enables_exactly_the_core_ops() -> None:
-    """apply_robot_core_curation enables exactly the 10 core ops."""
+    """apply_robot_core_curation enables exactly the 12 core ops."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)
@@ -392,7 +433,7 @@ async def test_apply_robot_core_curation_disables_non_core_ops_in_curated_groups
 
 
 async def test_apply_robot_core_curation_sets_llm_instructions_on_all_core_ops() -> None:
-    """llm_instructions is populated on all 10 core ops after curation."""
+    """llm_instructions is populated on all 12 core ops after curation."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)

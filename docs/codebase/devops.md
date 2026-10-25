@@ -1646,7 +1646,7 @@ workflow files, this doc, and the changelog.
 The four `python-unit-shard` legs run on `meho-runners-ci-heavy`
 (dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
 rdc-gitops#55; four shards fit the 5-pod ceiling). `python-integration`,
-`python-migration-tests` and the push-only `python-coverage-combine` run
+`python-migration-tests` and the nightly `python-coverage-combine` run
 on the dense `meho-runners-ci` pool (4-core): they pull their test images
 from the internal image mirror or read the private vendor spec shelf.
 
@@ -1783,8 +1783,8 @@ Because the required context string is unchanged and stays on a job, the
 edit** — the required name simply moved from the monolithic job onto the
 fan-in (the `python-coverage-combine` technique that kept quality-gate.yml
 byte-identical). No escape-hatch label (the coverage lane's
-`ci-coverage-validate`) is needed: the coverage lane is push-only and must
-be *forced* onto a PR, whereas the unit lane runs on every PR by default,
+`ci-coverage-validate`) is needed: the coverage lane runs once a night and
+must be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
 
 ### Docs-only fast path (#3252)
@@ -1960,27 +1960,39 @@ fails only on a finding from an error-level rule.
 
 ### Coverage handoff to SonarCloud
 
-On pushes to `main`, the Python job runs
-`COVERAGE_CORE=sysmon uv run pytest ... --cov=meho_backplane --cov-report=xml tests/`
-and uploads `backend/coverage.xml` as the `python-coverage` artefact.
+Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
+has a `schedule` trigger (`cron: '17 6 * * *'`, UTC). That run is a full
+CI run on `main`. The 8 `python-coverage` shards and the
+`python-coverage-combine` job run only in that run, or on a PR that
+carries the `ci-coverage-validate` label; their `if:` conditions allow
+`schedule` and the label, never `push` or `merge_group`. The combine job
+uploads `backend/coverage.xml` as the `python-coverage` artefact.
 [`quality-gate.yml`](../../.github/workflows/quality-gate.yml) listens
-on `workflow_run: workflows: ["CI"]`, downloads that exact artefact
-name via `actions/download-artifact@v4`, and feeds the XML into the
-SonarCloud scan. The workflow name (`CI`) and the artefact name
-(`python-coverage`) are the load-bearing contract between the two
-workflows — changing either side without the other would silently lose
-coverage reporting in SonarCloud.
+on `workflow_run: workflows: ["CI"]`, runs only when the CI run's event
+is `schedule` and its conclusion is `success`, downloads that exact
+artefact name, and feeds the XML into the SonarCloud scan. The workflow
+name (`CI`), the artefact name (`python-coverage`) and the event filter
+are the load-bearing contract between the two workflows — changing one
+side without the other would silently lose coverage reporting in
+SonarCloud, or make SonarCloud import 0% backend coverage from a run
+that never produced the file.
 
-`--cov` runs on **both push and PR** as of the post-#799 state. #726
-originally gated `--cov` to push-only on the belief that pytest-cov
+Why nightly: a push run on `main` used to start 8 coverage shards next
+to the 4 unit shards, so every merge filled the 12-runner heavy pool.
+Coverage took about 3,000 heavy-runner minutes a day, and the next merge
+cancelled most of it. Meanwhile the merge queue's unit shards waited for
+a runner or ran over their time budget. Coverage is not a required
+check, so one analysis a day is enough. The nightly run has its own
+concurrency group, so a merge does not cancel it.
+
+History: #726 gated `--cov` to push-only on the belief that pytest-cov
 was the unit job's dominant cost; the #771 diagnostic (#793) disproved
 that — the real cost was per-test descriptor re-embedding (fixed in
-#799), not coverage instrumentation. With the embedding re-fetch
-eliminated and sysmon's overhead, `--cov` adds only ~1 min (pytest
-~8m33s with cov vs ~7m35s without; run 26245676016), so the unit job
-stays ~9.3 min — under the Goal #11 10-min budget — while PRs gain
-SonarCloud Clean-as-You-Code new-code-coverage decoration on every PR
-instead of updating one merge late. The `quality-gate.yml` whole-job
+#799) — and `--cov` ran on every PR for a while. #1982 then took
+coverage out of the required unit lane for good (the OOM story in
+[`sonarcloud.md`](sonarcloud.md)), #1987 gave it its own non-required,
+push-only job, #3172 sharded that job, and #4910 moved it to the nightly
+run. The `quality-gate.yml` whole-job
 `continue-on-error` means a missing or late artefact never blocks a
 merge. `COVERAGE_CORE=sysmon` (#739) swaps coverage.py's default C
 tracer for the PEP 669 `sys.monitoring` backend (Python 3.12+,

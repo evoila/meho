@@ -566,6 +566,41 @@ def test_html_pre_block_with_json_is_checked() -> None:
     assert count == 1
 
 
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (
+            f'<pre>{{<span class="k">"password"</span>: <span class="s">"{_SECRET}"</span>}}</pre>',
+            f'<pre>{{"password":"{REDACTED}"}}</pre>',
+        ),
+        (
+            f'<pre><code class="json">{{\n  <span>"user"</span>: <span>"admin"</span>,\n'
+            f'  <span>"secret"</span>: <span>"{_SECRET}"</span>\n}}</code></pre>',
+            f'<pre>{{"user":"admin","secret":"{REDACTED}"}}</pre>',
+        ),
+        (
+            f'<p>Body:</p><code>[<span>{{"token": "{_SECRET}"}}</span>]</code>',
+            f'<p>Body:</p><code>[{{"token":"{REDACTED}"}}]</code>',
+        ),
+    ],
+    ids=["pre-with-spans", "pre-code-with-spans", "code-list-with-a-span"],
+)
+def test_html_highlighted_json_block_is_checked_as_one_document(
+    document: str, expected: str
+) -> None:
+    """Highlighting splits the JSON over child elements; the joined text is the document."""
+    text, count = _check(document, _HTML)
+    assert text == expected
+    assert count == 1
+
+
+def test_html_highlighted_block_that_is_not_json_keeps_its_markup() -> None:
+    document = '<pre><span class="kw">def</span> login(user):\n    return user</pre>'
+    text, count = _check(document, _HTML)
+    assert text == document
+    assert count == 0
+
+
 def test_html_comment_does_not_come_back() -> None:
     text, count = _check(f"<p>a<!-- password: {_SECRET} --></p>", _HTML)
     assert text == "<p>a</p>"

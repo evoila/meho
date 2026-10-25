@@ -14,7 +14,11 @@ rule for names whose case is lost. In both, a secret-named element loses
 its content, a secret-named attribute loses its value, and an element
 that a ``name``, ``id``, ``key`` or ``type`` attribute marks as secret
 loses its content and every attribute value except the label that marks
-it. A ``<script>`` block comes back only when its content is JSON.
+it. A ``<script>`` block comes back only when its content is JSON. A
+``<pre>`` or ``<code>`` block whose text is split over child elements
+(syntax highlighting with ``<span>``) is read as one text: when that text
+is a JSON document, it is checked like a JSON file and comes back as
+plain JSON, without the child elements.
 """
 
 from __future__ import annotations
@@ -358,6 +362,10 @@ def _html_children(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
             _html_element(child, out, scrubber)
 
 
+#: Blocks whose text a page may split over child elements to colour it.
+_HTML_TEXT_BLOCKS: Final[frozenset[str]] = frozenset({"pre", "code"})
+
+
 def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
     secret = _element_is_secret(
         node.tag.rpartition(":")[2], node.attrs, _html_name, is_secret_param_name_lowercased
@@ -382,11 +390,43 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
         out.append(REDACTED)
     elif node.tag == "script":
         out.append(_html_script(node, scrubber))
+    elif node.tag in _HTML_TEXT_BLOCKS and (document := _html_json_block(node)) is not None:
+        out.append(html.escape(scrubber.text(document), quote=False))
     elif node.tag == "style":
         out.extend(scrubber.text(c) for c in node.children if isinstance(c, str))
     else:
         _html_children(node, out, scrubber)
     out.append(f"</{node.tag}>")
+
+
+def _html_json_block(node: _HtmlNode) -> str | None:
+    """The text of a block split over child elements, when that text is a JSON document.
+
+    A block with only text needs nothing here: :meth:`Scrubber.text`
+    already reads JSON in one text value. A highlighted block splits the
+    same JSON over ``<span>`` elements, so no single text value is JSON.
+    Joined, the text is the document; ``None`` when it is not one.
+    """
+    if all(isinstance(child, str) for child in node.children):
+        return None
+    text = "".join(_html_text(node))
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        return None
+    return text if isinstance(parsed, (dict, list)) else None
+
+
+def _html_text(node: _HtmlNode) -> Iterable[str]:
+    """Every text value under *node*, in order."""
+    for child in node.children:
+        if isinstance(child, str):
+            yield child
+        elif child.tag != "!":
+            yield from _html_text(child)
 
 
 def _html_name(key: str) -> tuple[str, str]:

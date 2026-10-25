@@ -92,6 +92,7 @@ from meho_backplane.connectors._shared.api_file_read import (
 )
 from meho_backplane.connectors._shared.api_file_secrets import (
     ApiFileFormatError,
+    TextRule,
     check_api_file,
     scrub_query_string,
 )
@@ -252,6 +253,7 @@ async def _fetch_file(
     headers: dict[str, str],
     span: flight_recorder_capture.SpanStart | None,
     max_bytes: int,
+    text_rule: TextRule,
 ) -> httpx.Response:
     """Send the one ``GET`` with the target's login and return the answer with its body.
 
@@ -279,7 +281,7 @@ async def _fetch_file(
     except (ApiFileTooLargeError, ApiFileNotTextError) as exc:
         raise VropsApiFileError(f"{path!r}: {exc}. The file was not read.") from exc
     if response.status_code == httpx.codes.UNAUTHORIZED:
-        expired = _with_checked_body(response, path)
+        expired = _with_checked_body(response, path, text_rule)
         _record(span, headers, expired, expired.content)
         expired.raise_for_status()
     return response
@@ -297,25 +299,29 @@ def _record(
     )
 
 
-def _checked_body(response: httpx.Response, path: str) -> bytes:
+def _checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> bytes:
     """The body as the file check writes it back, or no body when it cannot be checked.
 
     For an answer the read does not return as a file: a ``401`` or another
-    error status. A secret-named value comes back as the placeholder; a
-    body that is not text, or does not parse, is left out.
+    error status. The check is the same as for a file, with the same text
+    rule: a secret-named value, and text MEHO's general redaction rules
+    match (an ``Authorization: Basic ...`` line in an error message), come
+    back as placeholders. A body that is not text, or does not parse, is
+    left out.
     """
     try:
         checked = check_api_file(
             decode_text(response, path),
             content_type=response.headers.get("content-type"),
             path=path,
+            text_rule=text_rule,
         )
     except (ApiFileNotTextError, ApiFileFormatError):
         return b""
     return checked.text.encode("utf-8")
 
 
-def _with_checked_body(response: httpx.Response, path: str) -> httpx.Response:
+def _with_checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> httpx.Response:
     """The same answer with a checked body (:func:`_checked_body`).
 
     The status and the headers stay, so the dispatcher still sees the
@@ -327,7 +333,7 @@ def _with_checked_body(response: httpx.Response, path: str) -> httpx.Response:
         headers=[
             (k, v) for k, v in response.headers.multi_items() if k.lower() != "content-length"
         ],
-        content=_checked_body(response, path),
+        content=_checked_body(response, path, text_rule),
         request=response.request,
         extensions=response.extensions,
     )
@@ -368,7 +374,7 @@ async def _read_version(
 
 
 def _file_fields(
-    path: str, content_type: str | None, body: bytes, operator: Operator, connector_id: str
+    path: str, content_type: str | None, body: bytes, text_rule: TextRule
 ) -> tuple[dict[str, Any], bytes]:
     """Decode a ``2xx`` body, check the whole file and build the file fields of the answer.
 
@@ -395,7 +401,7 @@ def _file_fields(
             text,
             content_type=content_type,
             path=path,
-            text_rule=text_redactor(operator, connector_id=connector_id, op_id=OP_ID),
+            text_rule=text_rule,
         )
     except ApiFileFormatError as exc:
         raise VropsApiFileError(str(exc)) from None
@@ -457,10 +463,13 @@ async def api_file_get_impl(
     settings = get_settings()
     max_record_bytes = settings.result_handle_max_record_bytes
     connector_id = f"{connector.impl_id}-{connector.version}"
+    text_rule = text_redactor(operator, connector_id=connector_id, op_id=OP_ID)
 
     headers = await connector.auth_headers(target, operator)
     span = flight_recorder_capture.span_start()
-    response = await _fetch_file(connector, target, path, headers, span, max_record_bytes)
+    response = await _fetch_file(
+        connector, target, path, headers, span, max_record_bytes, text_rule
+    )
     content_type = response.headers.get("content-type")
     redirect = (
         redirect_target(response.headers.get("location"), response.request.url)
@@ -481,16 +490,14 @@ async def api_file_get_impl(
     }
     if response.is_success:
         try:
-            fields, copy = _file_fields(
-                path, content_type, response.content, operator, connector_id
-            )
+            fields, copy = _file_fields(path, content_type, response.content, text_rule)
         except VropsApiFileError:
             _record(span, headers, response, b"")
             raise
         _record(span, headers, response, copy)
         answer.update(fields)
     else:
-        _record(span, headers, response, _checked_body(response, path))
+        _record(span, headers, response, _checked_body(response, path, text_rule))
     answer["secrets_replaced"] += redirect_replaced
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:

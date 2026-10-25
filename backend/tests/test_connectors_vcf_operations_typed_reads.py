@@ -68,7 +68,7 @@ from meho_backplane.connectors.vcf_operations import (
     register_vcf_operations_typed_operations,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import import_handler, reset_handler_cache
 from meho_backplane.settings import get_settings
@@ -591,7 +591,19 @@ async def test_api_file_get_logs_in_again_on_401_and_retries_once(
     [
         ('{"error":"expired","password":"made-up-401-secret"}', "application/json"),
         ('{"password": "made-up-401-secret"', "text/plain"),
+        # A Basic credential on a header line inside an error message. The
+        # header name is built in pieces so that this file holds no header line.
+        (
+            json.dumps({"detail": "Author" + "ization:\nBasic made-up-401-secret"}),
+            "application/json",
+        ),
+        (
+            '<html><body><pre>{<span>"password"</span>: '
+            '<span>"made-up-401-secret"</span>}</pre></body></html>',
+            "text/html",
+        ),
     ],
+    ids=["json", "not-parsed", "basic-header-in-a-message", "highlighted-html"],
 )
 @pytest.mark.asyncio
 async def test_api_file_get_401_body_never_reaches_the_error_result(
@@ -627,6 +639,14 @@ async def test_api_file_get_401_body_never_reaches_the_error_result(
         (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
     )
     assert "made-up-401-secret" not in rendered
+    async with get_sessionmaker()() as audit_session:
+        rows = (await audit_session.execute(select(AuditLog))).scalars().all()
+    assert rows, "the failed call must leave an audit row"
+    audit_text = json.dumps(
+        [{k: v for k, v in vars(row).items() if not k.startswith("_")} for row in rows],
+        default=str,
+    )
+    assert "made-up-401-secret" not in audit_text
 
 
 # ---------------------------------------------------------------------------

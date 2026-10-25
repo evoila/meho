@@ -302,9 +302,12 @@ registrar is queued via `register_typed_op_registrar` in the package
     raised instead, so the dispatcher drops the cached token, logs in
     again and retries once, like every other read of this connector. When
     the retry fails too, the dispatcher copies the body of the `401` into
-    the error result, so the read raises it with a checked body: a
-    secret-named value is replaced, and a body that is not text or does
-    not parse is left out. A login failure (no credentials, a rejected
+    the error result, so the read raises it with a checked body: the
+    same check as for a file, with the same general redaction rules, so
+    a secret-named value and text such as an `Authorization: Basic ...`
+    line in an error message are replaced. A body that is not text or
+    does not parse is left out. Other error statuses reach the flight
+    recorder with the same checked body. A login failure (no credentials, a rejected
     login) stops the read before the request. The call is kept in the
     flight recorder, but the recorder gets only the checked copy of the
     body, and no body when the file is refused.

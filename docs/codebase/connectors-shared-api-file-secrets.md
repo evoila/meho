@@ -113,6 +113,12 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      the same way, and always written back from the parsed copy, also
      when nothing was replaced: the original text can hold a repeated
      key the parser dropped, and its value with it.
+   - HTML `<pre>` and `<code>` blocks whose text is split over child
+     elements (a page that colours a JSON example with `<span>`): the
+     text of the whole block is joined. When it is a JSON object or list,
+     it is checked like a JSON file and comes back as plain JSON, without
+     the child elements. Any other block keeps its child elements and is
+     checked as before.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is

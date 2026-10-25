@@ -329,14 +329,30 @@ async def test_error_status_comes_back_in_the_answer(status: int) -> None:
 
 _SECRET_FILE = '{"openapi":"3.0.1","x-example":{"password":"made-up-recorder-secret"}}'
 
+#: A made-up Basic credential (``made-up-recorder:secret``), and an error
+#: message that shows it on a header line, as a vendor error may. The
+#: header name is built in pieces so that this test file holds no header line.
+_BASIC_CREDENTIAL = "bWFkZS11cC1yZWNvcmRlcjpzZWNyZXQ="
+_BASIC_ERROR = json.dumps({"detail": "Author" + f"ization:\nBasic {_BASIC_CREDENTIAL}"})
+
+#: An HTML error page that shows a JSON example coloured with ``<span>``.
+_HIGHLIGHTED_PAGE = (
+    "<html><body><p>Log in with:</p><pre>{"
+    '<span class="k">"password"</span>: <span class="s">"made-up-recorder-secret"</span>'
+    "}</pre></body></html>"
+)
+
 
 @pytest.mark.parametrize(
     ("body", "content_type", "expected"),
     [
         (_SECRET_FILE, "application/json", REDACTED.encode()),
+        (_BASIC_ERROR, "application/json", b"[REDACTED:"),
+        (_HIGHLIGHTED_PAGE, "text/html", REDACTED.encode()),
         ('{"password": "made-up-recorder-secret"', "text/plain", b""),
         ("\xff\xfe", "application/octet-stream", b""),
     ],
+    ids=["json", "basic-header-in-a-message", "highlighted-html", "not-parsed", "not-text"],
 )
 async def test_401_is_raised_with_a_checked_body(
     monkeypatch: pytest.MonkeyPatch, body: str, content_type: str, expected: bytes
@@ -358,6 +374,7 @@ async def test_401_is_raised_with_a_checked_body(
     else:
         assert raised.content == b""
     assert b"made-up-recorder-secret" not in raised.content
+    assert _BASIC_CREDENTIAL.encode() not in raised.content
     (call,) = [call for call in recorded if call["response"].url.path == _FILE_PATH]
     assert call["response_body"] == raised.content
 
@@ -400,6 +417,24 @@ async def test_flight_recorder_gets_only_the_checked_body(
         assert call["response_body"] == b""
     assert b"made-up-recorder-secret" not in call["response_body"]
     assert b"not parsed" not in call["response_body"]
+
+
+async def test_swagger_page_with_highlighted_json_comes_back_replaced() -> None:
+    """A page that colours a JSON example with ``<span>`` still has its secret replaced."""
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_PAGE_PATH).respond(
+            200, text=_HIGHLIGHTED_PAGE, headers={"Content-Type": "text/html"}
+        )
+        answer = await _call(connector, _PAGE_PATH)
+    await connector.aclose()
+
+    text = _joined(answer).decode()
+    assert answer["status"] == 200
+    assert f'<pre>{{"password":"{REDACTED}"}}</pre>' in text
+    assert answer["secrets_replaced"] == 1
+    assert "made-up-recorder-secret" not in msgspec.json.encode(answer).decode()
 
 
 async def test_flight_recorder_gets_no_body_when_the_file_is_refused(

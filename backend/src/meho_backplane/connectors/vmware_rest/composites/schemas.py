@@ -1777,6 +1777,16 @@ VM_POWER_PARAMETER_SCHEMA: dict[str, Any] = {
 #: Lists VMs on host, recursively dispatches ``vmware.composite.vm.migrate``
 #: per VM, then enters maintenance. ``tolerate_partial_failure=True``
 #: allows maintenance-enter with VMs left on host.
+#: ``HostMaintenanceSpec.vsanMode.objectAction`` values
+#: (``VsanHostDecommissionModeObjectAction_enum`` in the pinned
+#: ``vi-json.yaml``). Shared by every maintenance-mode operation that takes
+#: the vSAN data option.
+VSAN_MAINTENANCE_MODES: Final[list[str]] = [
+    "ensureObjectAccessibility",
+    "evacuateAllData",
+    "noAction",
+]
+
 HOST_EVACUATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1789,15 +1799,30 @@ HOST_EVACUATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": (
-                "When true, enter maintenance even if some VMs failed "
-                "to migrate (those VMs stay on the host). Default "
-                "false aborts before maintenance-enter on any failure."
+                "When true, the host enters maintenance mode even if some "
+                "running VMs could not be moved (those VMs stay on the host). "
+                "Default false stops before maintenance mode on the first VM "
+                "that cannot be moved. Has no effect when DRS is fully "
+                "automated: vCenter then moves the VMs itself."
+            ),
+        },
+        "vsan_mode": {
+            "type": "string",
+            "enum": VSAN_MAINTENANCE_MODES,
+            "default": "ensureObjectAccessibility",
+            "description": (
+                "What vSAN does with the host's data when the host enters "
+                "maintenance mode. ensureObjectAccessibility (the default, "
+                "also vCenter's own default): keep every object reachable and "
+                "move only the data that needs it. evacuateAllData: move all "
+                "data off the host. noAction: leave the data where it is. "
+                "Ignored on a host without vSAN."
             ),
         },
     },
     "required": ["host"],
     "additionalProperties": False,
-    "examples": [{"host": "host-21"}],
+    "examples": [{"host": "host-21", "vsan_mode": "ensureObjectAccessibility"}],
 }
 
 
@@ -3059,13 +3084,17 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
-            "enum": ["evacuated", "partial", "aborted"],
+            "enum": ["evacuated", "partial", "aborted", "timeout", "not_in_cluster"],
             "description": (
-                "``'evacuated'`` -- every VM migrated + host in "
-                "maintenance; ``'partial'`` -- some VMs left behind "
-                "(``tolerate_partial_failure=True``); ``'aborted'`` "
-                "-- migration failure stopped the loop before "
-                "maintenance-enter."
+                "``evacuated``: the host is in maintenance mode and no "
+                "running VM stayed on it (powered-off VMs may stay). "
+                "``partial``: the host is in maintenance mode but some "
+                "running VMs stayed (``tolerate_partial_failure``). "
+                "``aborted``: a VM could not be moved, so the host did not "
+                "enter maintenance mode. ``timeout``: MEHO stopped waiting "
+                "while the maintenance-mode task still runs; the call did "
+                "not fail. ``not_in_cluster``: the host is not in a cluster; "
+                "nothing was changed."
             ),
         },
         "host": {
@@ -3075,7 +3104,10 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "migrated_vms": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "VM moids that migrated successfully.",
+            "description": (
+                "Moids of the VMs that left the host, moved by MEHO or by "
+                "vCenter's DRS (see ``moved_by``)."
+            ),
         },
         "failed_vms": {
             "type": "array",
@@ -3087,14 +3119,64 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 },
                 "required": ["vm", "error"],
             },
-            "description": "VM moids whose migration failed, with reason.",
+            "description": (
+                "VMs MEHO tried to move and could not, with the reason "
+                "(for example ``no_recommendation``). A VM that left the "
+                "host anyway is not listed here."
+            ),
+        },
+        "remaining_vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                    "power_state": {"type": ["string", "null"]},
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Why the VM stayed: ``powered_off`` / ``suspended`` "
+                            "(only running VMs are moved), the move error, "
+                            "``still_listed_after_move`` (vm.migrate reported the "
+                            "move as done, but the host still lists the VM), "
+                            "``not_moved`` (vCenter left it on the host) or "
+                            "``not_attempted`` (the operation stopped before "
+                            "reaching it)."
+                        ),
+                    },
+                },
+                "required": ["vm", "reason"],
+            },
+            "description": "VMs still on the host after the operation, each with its reason.",
         },
         "maintenance_entered": {
             "type": "boolean",
             "description": (
-                "Whether the host entered maintenance mode -- true on "
-                "``evacuated``/``partial``, false on ``aborted``."
+                "Whether the host is in maintenance mode: true on "
+                "``evacuated`` / ``partial``, false otherwise."
             ),
+        },
+        "maintenance_task": {
+            "type": ["string", "null"],
+            "description": (
+                "The vCenter task id of the maintenance-mode request; on "
+                "``timeout`` the task still runs under this id."
+            ),
+        },
+        "moved_by": {
+            "type": "string",
+            "enum": ["drs", "meho", "none"],
+            "description": (
+                "``drs``: DRS is fully automated, so vCenter moved the VMs as "
+                "part of the maintenance-mode task. ``meho``: MEHO moved each "
+                "running VM where DRS recommended (vm.migrate). ``none``: no "
+                "VM was moved (``not_in_cluster``)."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "What to do next, on ``timeout`` and ``not_in_cluster``.",
         },
     },
     "required": [
@@ -3102,7 +3184,9 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "host",
         "migrated_vms",
         "failed_vms",
+        "remaining_vms",
         "maintenance_entered",
+        "moved_by",
     ],
 }
 

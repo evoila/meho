@@ -188,7 +188,9 @@ class _DepthRecordingConnector:
         self.depths.append(composite_depth_var.get())
         spec = self._spec(path)
         self.calls.append(("GET", spec))
-        return self.responses.get(spec, {"value": {}})
+        response = self.responses.get(spec, {"value": {}})
+        # An iterator answers one GET after the other (a listing that changes).
+        return next(response) if isinstance(response, Iterator) else response
 
     async def _post_json(
         self,
@@ -261,18 +263,46 @@ async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
     recorder = _DepthRecordingConnector()
     recorder.responses.update(
         {
-            "/vcenter/vm": {
-                "value": [
-                    {"vm": "vm-aa", "cluster": "cluster-1"},
-                    {"vm": "vm-bb", "cluster": "cluster-1"},
+            # Real ``Vcenter.VM.Summary`` rows: no cluster field (#4895). The
+            # listing after the maintenance task shows the host empty.
+            "/vcenter/vm": iter(
+                [
+                    {
+                        "value": [
+                            {"vm": "vm-aa", "name": "aa", "power_state": "POWERED_ON"},
+                            {"vm": "vm-bb", "name": "bb", "power_state": "POWERED_ON"},
+                        ]
+                    },
+                    {"value": []},
+                ]
+            ),
+            # vim ``HostSystem.parent`` read (#4895): the host's cluster.
+            "HostSystem": {
+                "objects": [
+                    {
+                        "obj": {"type": "HostSystem", "value": "host-source"},
+                        "propSet": [
+                            {
+                                "name": "parent",
+                                "val": {"type": "ClusterComputeResource", "value": "cluster-1"},
+                            }
+                        ],
+                    }
                 ]
             },
-            # vim drsRecommendation property read (#2970), keyed by object type.
+            # vim configurationEx (DRS manual, so MEHO moves the VMs) +
+            # drsRecommendation property reads (#2970), keyed by object type.
             "ClusterComputeResource": {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "cluster-1"},
                         "propSet": [
+                            {
+                                "name": "configurationEx",
+                                "val": {
+                                    "drsConfig": {"enabled": True, "defaultVmBehavior": "manual"}
+                                },
+                            },
                             {
                                 "name": "drsRecommendation",
                                 "val": [
@@ -301,7 +331,7 @@ async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
                                         ]
                                     }
                                 ],
-                            }
+                            },
                         ],
                     }
                 ]

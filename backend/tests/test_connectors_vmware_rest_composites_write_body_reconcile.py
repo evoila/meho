@@ -240,6 +240,9 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _write._VM_RELOCATE_SPEC_TYPE,
     _write._DVS_CONFIG_SPEC_TYPE,
     _write._DVS_HOST_MEMBER_CONFIG_SPEC_TYPE,
+    # host.evacuate's maintenance spec with the vSAN data option (#4895).
+    _write._HOST_MAINTENANCE_SPEC_TYPE,
+    _write._VSAN_HOST_DECOMMISSION_MODE_TYPE,
     _write._CLUSTER_CONFIG_SPEC_EX_TYPE,
     _write._CLUSTER_RULE_SPEC_TYPE,
     _write._CLUSTER_AFFINITY_RULE_TYPE,

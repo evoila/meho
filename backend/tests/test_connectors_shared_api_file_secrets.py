@@ -594,6 +594,49 @@ def test_html_highlighted_json_block_is_checked_as_one_document(
     assert count == 1
 
 
+@pytest.mark.parametrize(
+    ("document", "expected", "count"),
+    [
+        (
+            f'<pre>{{"value":"<span name="password">{_SECRET}</span>"}}</pre>',
+            f'<pre>{{"value":"{REDACTED}"}}</pre>',
+            1,
+        ),
+        (
+            f'<code>{{"value":"<span name="password">{_SECRET}</span>"}}</code>',
+            f'<code>{{"value":"{REDACTED}"}}</code>',
+            1,
+        ),
+        (
+            f'<pre>{{"value":"<span class="s"><span id="token">{_SECRET}</span></span>"}}</pre>',
+            f'<pre>{{"value":"{REDACTED}"}}</pre>',
+            1,
+        ),
+        (
+            f'<pre>{{"user":"<span name="password">{_SECRET}</span>",'
+            f'<span>"password"</span>: <span>"{_SECRET}"</span>}}</pre>',
+            f'<pre>{{"user":"{REDACTED}","password":"{REDACTED}"}}</pre>',
+            2,
+        ),
+    ],
+    ids=["pre-secret-child", "code-secret-child", "nested-secret-child", "child-and-key"],
+)
+def test_html_secret_child_in_a_highlighted_json_block_is_replaced(
+    document: str, expected: str, count: int
+) -> None:
+    """A child the block marks as secret is replaced before its text joins the JSON."""
+    text, replaced = _check(document, _HTML)
+    assert text == expected
+    assert replaced == count
+
+
+def test_html_secret_child_in_a_block_that_is_not_json_keeps_its_markup() -> None:
+    document = f'<pre>login: <span name="password">{_SECRET}</span></pre>'
+    text, count = _check(document, _HTML)
+    assert text == f'<pre>login: <span name="password">{REDACTED}</span></pre>'
+    assert count == 1
+
+
 def test_html_highlighted_block_that_is_not_json_keeps_its_markup() -> None:
     document = '<pre><span class="kw">def</span> login(user):\n    return user</pre>'
     text, count = _check(document, _HTML)

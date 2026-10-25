@@ -437,6 +437,34 @@ async def test_swagger_page_with_highlighted_json_comes_back_replaced() -> None:
     assert "made-up-recorder-secret" not in msgspec.json.encode(answer).decode()
 
 
+@pytest.mark.parametrize("block", ["pre", "code"])
+async def test_secret_child_in_a_highlighted_json_block_comes_back_replaced(
+    monkeypatch: pytest.MonkeyPatch, block: str
+) -> None:
+    """A JSON example whose value sits in a secret-marked child loses that value."""
+    recorded = _record_calls(monkeypatch)
+    page = (
+        f"<html><body><{block}>"
+        '{"value":"<span name="password">made-up-recorder-secret</span>"}'
+        f"</{block}></body></html>"
+    )
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_PAGE_PATH).respond(200, text=page, headers={"Content-Type": "text/html"})
+        answer = await _call(connector, _PAGE_PATH)
+    await connector.aclose()
+
+    text = _joined(answer).decode()
+    assert answer["status"] == 200
+    assert f'<{block}>{{"value":"{REDACTED}"}}</{block}>' in text
+    assert answer["secrets_replaced"] == 1
+    assert "made-up-recorder-secret" not in msgspec.json.encode(answer).decode()
+    (call,) = [call for call in recorded if call["response"].url.path == _PAGE_PATH]
+    assert call["response_body"] == text.encode()
+    assert b"made-up-recorder-secret" not in call["response_body"]
+
+
 async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

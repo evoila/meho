@@ -237,11 +237,16 @@ JOB_RESULT_OP = SaltTypedOp(
                         },
                         "return_bytes": {
                             "type": "integer",
-                            "description": "Size of the return as JSON, in bytes.",
+                            "description": (
+                                "Size of the return the server sent, as JSON, in bytes."
+                            ),
                         },
                         "return_truncated": {
                             "type": "boolean",
-                            "description": "True when the return was too big and left out.",
+                            "description": (
+                                "True when the return, or the state list shown for it, is "
+                                "bigger than 8 KiB and left out."
+                            ),
                         },
                         "return_withheld": {
                             "type": "boolean",
@@ -291,7 +296,8 @@ JOB_RESULT_OP = SaltTypedOp(
             "service, user, group and sysctl states. Every other return (a pillar read, a "
             "text such as file.read or cmd.run returns, a list, another dict) is null "
             "with return_withheld true, because it can hold a secret under no name. "
-            "return is also null when it is bigger than 8 KiB (return_truncated true); "
+            "return is also null when it, or the state list shown for it, is bigger than "
+            "8 KiB (return_truncated true); "
             "failed_states still names what failed. fun_args is shown only for a short "
             "list of functions whose arguments are only names and keys (state.apply, "
             "pkg.remove, service.restart, grains.get, pillar.get, test.ping and the "

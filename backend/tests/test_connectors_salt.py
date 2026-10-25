@@ -1113,6 +1113,57 @@ async def test_job_result_counts_failed_states_whose_id_names_a_password(
 
 
 @pytest.mark.asyncio
+async def test_job_result_size_limit_holds_for_the_shown_state_list(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """Many short states fit the limit as sent, but not as the shown state list.
+
+    Every shown state entry has eight fields, so the list can be bigger than
+    the return the server sent. The answer and the stored trace leave the
+    return out, flag it as truncated and still count and name the failures.
+    """
+    await _register(_stub_embedding)
+    await _enable_trace_capture(session)
+    state_return = {
+        f"test_|-s{index}_|-s{index}_|-succeed_without_changes": {
+            "result": index % 10 != 0,
+            "__run_num__": index,
+        }
+        for index in range(80)
+    }
+    answers = _one_return(
+        {
+            "minion_id": "<minion-1>",
+            "jid": "1",
+            "fun": "state.apply",
+            "fun_args": ["app"],
+            "return": state_return,
+        }
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["return_bytes"] < RETURN_BYTES_LIMIT
+    failed = [
+        {**_state_entry(state="test.succeed_without_changes", result=False), "run_num": index}
+        for index in range(0, 80, 10)
+    ]
+    assert result.audit_id is not None
+    spans = await _vendor_call_spans(result.audit_id)
+    assert len(spans) == 1
+    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    for shown in (row, recorded):
+        assert shown["return"] is None
+        assert shown["return_truncated"] is True
+        assert shown["return_withheld"] is False
+        assert shown["return_bytes"] == row["return_bytes"]
+        assert shown["states_total"] == 80
+        assert shown["states_failed"] == 8
+        assert shown["failed_states"] == failed
+        assert len(json.dumps(shown).encode("utf-8")) < RETURN_BYTES_LIMIT
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fun", ["pillar.get", "grains.get"])
 async def test_job_result_withholds_the_default_value_of_a_key_lookup(
     _stub_embedding: AsyncMock, session: AsyncSession, fun: str

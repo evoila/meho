@@ -22,7 +22,8 @@ from meho_backplane.connectors._shared.api_file_values import REDACTED, Scrubber
 __all__ = ["RETURN_BYTES_LIMIT", "result_row"]
 
 #: Largest job return per minion (JSON bytes) that ``salt.job.result``
-#: returns whole. A larger return comes back as ``null`` with its size.
+#: shows. Both the return the server sent and the return the row shows
+#: must fit; otherwise ``return`` is ``null`` with the size the server sent.
 RETURN_BYTES_LIMIT: Final[int] = 8192
 
 #: Largest function argument list (JSON bytes) a row keeps.
@@ -251,7 +252,10 @@ def result_row(row: dict[str, Any]) -> dict[str, Any]:
     states = None if pillar else _state_run(raw_return)
     shown, checked = _checked_return(scrubbed, states)
     withheld = pillar or not checked
-    truncated = size > RETURN_BYTES_LIMIT
+    # The shown list of a state run can be bigger than the return the
+    # server sent: every state entry has eight fields, however short the
+    # state was. So the limit holds for both.
+    truncated = max(size, _json_size(shown)) > RETURN_BYTES_LIMIT
     args_withheld = not _keeps_args(fun)
     raw_args = None
     if not args_withheld:

@@ -155,8 +155,11 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   `true`, `false` or `null` is shown as is. Every other return (a text, a
   list, a dict that is not a state run) is `null` with
   `return_withheld: true`, because `file.read` or `cmd.run` can return a
-  password under no name that a rule could match. A bigger return is
-  `null` with `return_bytes` and `return_truncated: true`. For a state
+  password under no name that a rule could match. A return is also
+  `null` with `return_truncated: true` when it, or the state list shown
+  for it, is bigger than 8 KiB. The state list can be the bigger one,
+  because every state entry has eight fields. `return_bytes` is the size
+  the server sent. For a state
   run, `states_total`, `states_failed` and up to 20 `failed_states` (the
   same entries) are always filled, so a failure is visible without the
   full return.

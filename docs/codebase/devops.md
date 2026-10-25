@@ -1932,9 +1932,11 @@ reason.
 
 `ci.yml` deliberately does **not** build the backplane container image.
 [`image.yml`](../../.github/workflows/image.yml) runs on PRs that touch
-`backend/**` or `.github/workflows/image.yml` (path-filtered, see
-`image.yml`'s `on.pull_request.paths`) with `push: false` — the
-Dockerfile + dep-resolution gate. PRs that don't touch the backend
+`backend/**`, `.github/workflows/image.yml` or `.trivyignore`
+(path-filtered, see `image.yml`'s `on.pull_request.paths`) with
+`push: false` — the Dockerfile + dep-resolution gate — plus a trivy scan
+of `backend/uv.lock` on a hosted runner (the `lock-scan` job; see
+`docs/codebase/backend.md`). PRs that don't touch the backend
 (chart-only, CLI-only, docs-only) skip the image build by design,
 because the gate's inputs haven't changed and rebuilding would add zero
 signal. Repeating the build in `ci.yml` would double the cost for
@@ -2099,7 +2101,7 @@ their isolation posture:
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
-| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
 | `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |

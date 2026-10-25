@@ -632,6 +632,52 @@ func TestRenderAwaitingApprovalJSON(t *testing.T) {
 	}
 }
 
+// TestRenderAwaitingApprovalRendersAuditReceipt — a multi-step operation
+// that stops for approval already has an audit row. The parked text
+// render shows its id after the parked hint and still exits 0 (#4833).
+func TestRenderAwaitingApprovalRendersAuditReceipt(t *testing.T) {
+	const auditID = "66666666-6666-6666-6666-666666666666"
+	id := auditID
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync", AuditID: &id,
+		Extras: json.RawMessage(`{"approval_request_id":"ar-render-2"}`),
+	}
+	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
+		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
+	}
+	if !strings.HasSuffix(out.String(), "audit receipt: "+auditID+"\n") {
+		t.Errorf("parked render must end with the audit receipt:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "meho approvals show ar-render-2") {
+		t.Errorf("parked hint must still be present:\n%s", out.String())
+	}
+}
+
+// TestRenderAwaitingApprovalNullReceiptPrintsNoLine — a parked call with
+// audit_id null prints no receipt line and still exits 0.
+func TestRenderAwaitingApprovalNullReceiptPrintsNoLine(t *testing.T) {
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync",
+		Extras: json.RawMessage(`{"approval_request_id":"ar-render-3"}`),
+	}
+	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
+		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
+	}
+	if strings.Contains(out.String(), "audit receipt:") {
+		t.Errorf("null audit_id must not render a receipt:\n%s", out.String())
+	}
+}
+
 func TestRenderInvalidStatusReturnsRenderError(t *testing.T) {
 	c := New("c")
 	cmd := &cobra.Command{}
@@ -725,7 +771,7 @@ func TestCallDecodesAuditID(t *testing.T) {
 		},
 	})
 	c := New("vault-1.x")
-	r, err := c.Call(context.Background(), "https://bp", "vault.kv.read", "rdc-vault", nil)
+	r, err := c.Call(context.Background(), "https://bp", "vault.kv.read", "test-target", nil)
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}

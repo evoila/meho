@@ -1431,7 +1431,10 @@ scenarios.
   backplane committed an audit row, the text output ends with
   `audit receipt: <id>` on every status, not only on `ok` (#4833) —
   a failed call's row is the one that says why it failed; read it
-  with `meho audit show <id>`. A null `audit_id` prints no line.
+  with `meho audit show <id>`. A null `audit_id` prints no line. A
+  parked call (`awaiting_approval`, exit 0) shows the receipt too, after
+  the parked hint: a multi-step operation that stops for approval
+  already has its own audit row.
   Surfaced via the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).

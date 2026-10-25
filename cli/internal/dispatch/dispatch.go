@@ -592,6 +592,9 @@ func (c Connector) Render(
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", c.ID, opID, r.Status, r.DurationMs)
 		WriteParkedHint(w, r.Extras)
+		// A multi-step operation that stops for approval already has
+		// its own audit row; show its id like every other status (#4833).
+		WriteAuditReceipt(w, r.AuditID)
 		return nil // parked, not failed — exit 0.
 	}
 	switch r.Status {

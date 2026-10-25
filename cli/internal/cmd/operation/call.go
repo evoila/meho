@@ -181,6 +181,9 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n",
 			opts.ConnectorID, opts.OpID, result.Status, result.DurationMs)
 		dispatch.WriteParkedHint(w, result.Extras)
+		// A multi-step operation that stops for approval already has
+		// its own audit row; show its id like every other status (#4833).
+		dispatch.WriteAuditReceipt(w, result.AuditID)
 		return nil // parked, not failed — exit 0.
 	}
 	// Classify status BEFORE rendering. The backend

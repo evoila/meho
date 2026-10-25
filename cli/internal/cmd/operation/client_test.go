@@ -989,6 +989,51 @@ func TestRunCallAwaitingApprovalJSON(t *testing.T) {
 	}
 }
 
+// TestRunCallAwaitingApprovalRendersAuditReceipt — a multi-step operation
+// that stops for approval already has an audit row. On the real runCall
+// path the parked text output shows its id and exits 0 (#4833). A null
+// audit_id prints no line.
+func TestRunCallAwaitingApprovalRendersAuditReceipt(t *testing.T) {
+	const auditID = "55555555-5555-5555-5555-555555555555"
+	id := auditID
+	for name, got := range map[string]*string{"present": &id, "null": nil} {
+		t.Run(name, func(t *testing.T) {
+			cr, _ := json.Marshal(CallResult{
+				Status: "awaiting_approval", OpID: "argocd.app.sync", DurationMs: 7,
+				Extras:  json.RawMessage(`{"approval_request_id":"ar-op-2"}`),
+				AuditID: got,
+			})
+			f := &fakeOperationsClient{
+				callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+					{HTTPResponse: makeHTTPResp(200), Body: cr},
+				},
+			}
+			withFakeClient(t, f)
+
+			cmd := newCallCmd()
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "test-target", "--backplane", "https://x"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
+			}
+			if !strings.Contains(out.String(), "meho approvals show ar-op-2") {
+				t.Errorf("parked hint must still be present:\n%s", out.String())
+			}
+			if got == nil {
+				if strings.Contains(out.String(), "audit receipt:") {
+					t.Errorf("null audit_id must not render a receipt:\n%s", out.String())
+				}
+				return
+			}
+			if !strings.HasSuffix(out.String(), "audit receipt: "+auditID+"\n") {
+				t.Errorf("parked render must end with the audit receipt:\n%s", out.String())
+			}
+		})
+	}
+}
+
 // ---- checks_alert_advisory (#2718) reach on the operator CLI ----
 //
 // The backend attaches extras["checks_alert_advisory"] to SUCCESSFUL

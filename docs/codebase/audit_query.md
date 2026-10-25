@@ -203,6 +203,7 @@ take `event_class` as a required argument.
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
 | `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
 | `event_class` | `AuditEventClass \| None` | `audit_log.event_class = :value` — exact match on the closed set (#3733). `None` applies no class filter, so a query without it returns every class, the same rows as before. Old rows match `legacy_request`. |
+| `has_trace` | `bool \| None` | `True` keeps only the rows the trace route returns a trace for: `event_class = operation_execution` AND `EXISTS` a `dispatch_trace` row with the same `audit_id` and the caller's `tenant_id` (#4855). `False` keeps the other rows. `None` applies no filter. The unique index `dispatch_trace_audit_id_idx` makes the check cheap. On the REST body (`AuditQueryRequest`) and used by `meho audit trace list`; not on the MCP input schema. |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 

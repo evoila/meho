@@ -48,6 +48,11 @@ names.
   tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
   `--max-depth`; a 413 `session_too_large` redirects to
   `query --session-id`) — plus a `--session-id` filter on `query`.
+  #4855 adds `trace list` (the operation runs that still have a stored
+  flight-recorder trace, via `query` with `has_trace=true`, audit id
+  first) and `trace show <audit-id>` (one trace over
+  `GET /api/v1/audit/{audit_id}/trace`; headers and bodies only in
+  `--json`).
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
@@ -197,10 +202,14 @@ cli/
     │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
     │   │   ├── my_recent.go      # `meho audit my-recent` (GET /api/v1/audit/my-recent).
     │   │   ├── replay.go         # `meho audit replay <session-id>` (GET /api/v1/audit/sessions/{id}/replay) — ASCII tree + 413 redirect.
+    │   │   ├── trace.go          # `meho audit trace` group + `trace list` (#4855; POST /api/v1/audit/query with has_trace=true, audit id first).
+    │   │   ├── trace_show.go     # `meho audit trace show <audit-id>` (GET /api/v1/audit/{id}/trace) — header + one line per span; no header/body values.
     │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
     │   │   ├── query_test.go     # body-marshal + render + 400-passthrough + --session-id tests.
     │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
     │   │   ├── replay_test.go    # tree render + --json + --max-depth fold + 413 redirect tests.
+    │   │   ├── trace_test.go     # has_trace body + audit-id-first table + --json + 403 tests.
+    │   │   ├── trace_show_test.go # span lines without header/body values + --json unchanged + no-trace exit 0 + 404 / 403 tests.
     │   │   ├── who_touched_test.go # query-param emit + table render tests.
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.

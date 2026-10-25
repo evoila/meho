@@ -20,7 +20,9 @@ it. A ``<script>`` block comes back only when its content is JSON. A
 is a JSON document, it is checked like a JSON file and comes back as
 plain JSON, without the child elements. A secret-marked child inside such
 a block is replaced before the text is joined, in a form that keeps the
-text JSON; when no form does, the whole block content is replaced.
+text JSON; when no form does, or when the child held a key, so that the
+replacement would hide the key from the check, the whole block content
+is replaced.
 """
 
 from __future__ import annotations
@@ -412,21 +414,40 @@ def _html_json_block(node: _HtmlNode, scrubber: Scrubber) -> str | None:
     when the child held a whole JSON value (``42``, ``"made-up"``), bare
     when it held part of one. When the document is no longer JSON after
     that, the child held more than a value and the block cannot be
-    checked, so its whole content becomes the placeholder.
+    checked, so its whole content becomes the placeholder. The same
+    happens when the child held a key, or part of one: the replaced key
+    would hide the value that follows it (``<span
+    name="token">"password"</span>:"made-up"``) from the check by key.
     """
     if all(isinstance(child, str) for child in node.children):
         return None
     pieces: list[_HtmlPiece] = []
     _html_text(node, pieces)
-    if _json_document("".join(piece.text for piece in pieces)) is None:
+    original = _json_document("".join(piece.text for piece in pieces))
+    if original is None:
         return None
     secrets = sum(1 for piece in pieces if piece.secret)
     document = "".join(piece.replaced() for piece in pieces)
-    if secrets and _json_document(document) is None:
-        scrubber.count += 1
-        return REDACTED
+    if secrets:
+        replaced = _json_document(document)
+        if replaced is None or _json_keys(replaced) != _json_keys(original):
+            scrubber.count += 1
+            return REDACTED
     scrubber.count += secrets
     return html.escape(scrubber.text(document), quote=False)
+
+
+def _json_keys(node: Any) -> list[str]:
+    """Every object key under *node*, in document order, nested keys after their parent."""
+    keys: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            keys.append(key)
+            keys.extend(_json_keys(value))
+    elif isinstance(node, list):
+        for item in node:
+            keys.extend(_json_keys(item))
+    return keys
 
 
 def _json_document(text: str) -> dict[str, Any] | list[Any] | None:

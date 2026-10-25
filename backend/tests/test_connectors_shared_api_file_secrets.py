@@ -684,8 +684,22 @@ def test_html_secret_child_in_a_highlighted_json_block_is_replaced(
         f'<span name="token">"other":42</span>}}</code>',
         f'<pre>{{"password":<span>"{_SECRET}"</span>,'
         f'"pin":"<span name="token">1234</span>"}}</pre>',
+        f'<pre>{{<span name="token">"password"</span>:<span>"{_SECRET}"</span>}}</pre>',
+        f'<code>{{<span name="token">"password"</span>:<span>"{_SECRET}"</span>}}</code>',
+        f'<pre>{{"pass<span name="token">word</span>":"{_SECRET}"}}</pre>',
+        f'<code>{{"user":"u","key":{{<span name="token">"password"</span>:"{_SECRET}"}}}}</code>',
+        f'<pre>[{{<span name="token">"password"</span>:<span>"{_SECRET}"</span>}}]</pre>',
     ],
-    ids=["pre-child-holds-key-and-value", "code-child-holds-key-and-value", "number-in-quotes"],
+    ids=[
+        "pre-child-holds-key-and-value",
+        "code-child-holds-key-and-value",
+        "number-in-quotes",
+        "pre-child-holds-the-key",
+        "code-child-holds-the-key",
+        "pre-child-holds-part-of-the-key",
+        "code-child-holds-a-nested-key",
+        "pre-child-holds-a-key-in-a-list",
+    ],
 )
 def test_html_highlighted_json_block_that_cannot_be_checked_is_refused(document: str) -> None:
     """When the replaced child leaves the joined text no longer JSON, the block is not checked.
@@ -694,10 +708,15 @@ def test_html_highlighted_json_block_that_cannot_be_checked_is_refused(document:
     than one value, so no placeholder keeps the document valid. Checking
     the children one by one would miss the secret key whose value sits in
     another child, so the whole block content becomes the placeholder.
+
+    The same happens when the secret child holds a key, or part of one:
+    the joined text stays JSON, but the replaced key would hide the
+    secret value that follows it from the check by key.
     """
     tag = document[1 : document.index(">")]
     text, count = _check(document, _HTML)
     assert text == f"<{tag}>{REDACTED}</{tag}>"
+    assert _SECRET not in text
     assert count == 1
 
 

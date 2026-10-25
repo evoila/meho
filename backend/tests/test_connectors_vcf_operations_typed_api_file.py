@@ -472,6 +472,25 @@ async def test_secret_child_holding_a_whole_value_keeps_the_block_checked(
     )
 
 
+@pytest.mark.parametrize("block", ["pre", "code"])
+async def test_secret_child_holding_the_key_replaces_the_whole_block(
+    monkeypatch: pytest.MonkeyPatch, block: str
+) -> None:
+    """A secret child that holds a JSON key cannot hide the value after it.
+
+    Replacing the key would leave the value unchecked, so the whole block
+    content becomes the placeholder, in the answer and in what the flight
+    recorder gets.
+    """
+    recorded = _record_calls(monkeypatch)
+    page = (
+        f"<html><body><{block}>"
+        '{<span name="token">"password"</span>:<span>"made-up-recorder-secret"</span>}'
+        f"</{block}></body></html>"
+    )
+    await _check_highlighted_block(page, block, REDACTED, recorded, replaced=1)
+
+
 async def _check_highlighted_block(
     page: str, block: str, expected: str, recorded: list[dict[str, Any]], *, replaced: int
 ) -> None:

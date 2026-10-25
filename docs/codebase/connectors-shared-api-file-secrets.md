@@ -123,8 +123,10 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      placeholder is written so the joined text stays JSON: as a JSON
      string when the child held a whole value (a number, a quoted
      string), bare when it held part of one. When no placeholder keeps
-     the text JSON (the child held a key and its value), the block
-     cannot be checked, and its whole content becomes the placeholder.
+     the text JSON (the child held a key and its value), or when the
+     child held a key or part of one (the replaced key would hide the
+     value after it from the check by key), the block cannot be
+     checked, and its whole content becomes the placeholder.
      Any other block keeps its child elements and is checked as before.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.

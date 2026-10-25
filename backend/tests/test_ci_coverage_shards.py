@@ -68,6 +68,42 @@ def test_coverage_shard_count_is_the_same_everywhere(ci_jobs: dict[str, Any]) ->
     assert downloaded == [f"python-coverage-data-shard-{i}" for i in range(1, total + 1)]
 
 
+def test_report_requires_all_successful_shards(ci_jobs: dict[str, Any], tmp_path: Path) -> None:
+    """A missing shard must never produce a report from the remaining data."""
+    import os
+    import subprocess
+
+    combine = _step(
+        ci_jobs["python-coverage-combine"], "Combine coverage + write XML (offline, all shards)"
+    )
+    script = combine["run"]
+    # Replace the expensive coverage command with a recorder. Exercise the real
+    # shell checks, including missing markers and missing worker data.
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\ntouch coverage-command-ran\n")
+    uv.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    for shard in range(1, 9):
+        directory = tmp_path / "coverage-shards" / str(shard)
+        directory.mkdir(parents=True)
+        (directory / ".coverage.worker").touch()
+        if shard != 8:
+            (directory / ".coverage-shard-complete").touch()
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True)
+    assert result.returncode != 0
+    assert not (tmp_path / "coverage-command-ran").exists()
+    (tmp_path / "coverage-shards/8/.coverage-shard-complete").touch()
+    (tmp_path / "coverage-shards/8/.coverage.worker").unlink()
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True)
+    assert result.returncode != 0
+    assert not (tmp_path / "coverage-command-ran").exists()
+    (tmp_path / "coverage-shards/8/.coverage.worker").touch()
+    (tmp_path / "coverage.xml").write_text("<coverage/>")
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "coverage-command-ran").exists()
+
+
 @pytest.mark.parametrize("job_id", ["python-coverage", "python-coverage-combine"])
 def test_coverage_job_cap_is_above_its_step_caps(ci_jobs: dict[str, Any], job_id: str) -> None:
     """A job-level timeout cancels the run; step timeouts only fail the step.

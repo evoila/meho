@@ -1,172 +1,139 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-# SonarCloud quality gate.
-#
-# Triggers via workflow_run after CI succeeds. Downloads the Python
-# coverage artifact CI produces, then runs the SonarCloud scan. The
-# "Clean as You Code" model is meant to gate new code only — existing
-# issues don't block PRs.
-#
-# NEW-CODE BASELINE: this workflow analyzes main pushes only (see the
-# `if:` on the job — the event filter stops PR completions from
-# overwriting the main-branch analysis). The new-code period is left at
-# SonarCloud's default `previous_version`, NOT a reference branch: pinning
-# New Code = "Reference branch: main" would make main's own new-code
-# window permanently ~empty (main is diffed against itself). Rationale +
-# how to read the dashboard live in docs/codebase/sonarcloud.md.
-# continue-on-error below keeps the gate advisory.
-#
-# Prerequisite: SONAR_TOKEN repo secret. Verified present pre-merge.
-#
-# IMPORTANT: Uses SonarSource/sonarqube-scan-action@v5 (NOT the
-# deprecated sonarcloud-github-action). All third-party actions are
-# pinned to commit SHAs.
-
 name: Quality Gate
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: [CI]
     types: [completed]
 
+# Do not cancel a queue check or leave an older SHA's status pending.
 concurrency:
-  group: quality-gate-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
+  group: quality-gate-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
 
-# Workflow-level floor: read-only. The sonarcloud job below declares its
-# own explicit token scope (job-level `permissions:`), so this floor caps
-# any future job that forgets to.
 permissions:
   contents: read
 
 jobs:
   sonarcloud:
     name: SonarCloud Analysis
-    # GitHub-hosted, ephemeral runner — deliberately NOT the self-hosted
-    # meho-runners-ci pool. This job checks out an untrusted
-    # workflow_run head_sha (see the checkout invariant below), so it must
-    # never land on persistent internal infrastructure (CodeQL
-    # actions/untrusted-checkout, alert #109). SonarCloud + apt mirrors are
-    # reachable from GitHub-hosted runners (the vendor-default topology);
-    # Harbor / internal network are not needed here.
     runs-on: ubuntu-latest
-    # Job-scoped least-privilege token. contents:read = checkout the
-    # analyzed commit; actions:read = cross-run actions/download-artifact
-    # pulling coverage from the triggering CI run (per download-artifact
-    # docs). pull-requests:write is retained CONSERVATIVELY: SonarCloud
-    # decorates PRs via its GitHub App + SONAR_TOKEN, not the workflow
-    # GITHUB_TOKEN, and this job is push-only (see `if:` below) so no
-    # GITHUB_TOKEN PR-decoration path actually runs here — but the drop is
-    # UNVERIFIED (no live PR-decoration test is possible pre-merge). Kept
-    # until decoration is empirically confirmed unaffected, then dropped as
-    # a follow-up (#2492).
+    timeout-minutes: 25
     permissions:
       contents: read
       actions: read
-      pull-requests: write
-    timeout-minutes: 20
-    continue-on-error: true
-    # Only analyze main pushes. CI runs on both `push` and `pull_request`,
-    # so without the event filter every PR-branch CI completion triggered a
-    # scan that overwrote the main-branch analysis (SonarCloud stores one
-    # analysis per project, keyed by branch — PR scans churned the activity
-    # history and the "new code" window never lined up with a real merge).
-    # See docs/codebase/sonarcloud.md.
-    if: >-
-      github.event.workflow_run.conclusion == 'success'
-      && github.event.workflow_run.event == 'push'
+      pull-requests: read
+      statuses: write
     steps:
-      # SECURITY INVARIANT — load-bearing: no step in this workflow may
-      # execute code from the checkout (no make/pytest/npm/scripts/
-      # build-wrapper); artifacts downloaded from the triggering run are
-      # untrusted input. This checkout is a workflow_run head_sha, which on
-      # a fork PR is attacker-controlled source. The Sonar scanner only
-      # reads source; every `run:` step invokes fixed sed/grep/apt-get/
-      # command -v. Adding any step that runs a file from the checkout turns
-      # this into arbitrary code execution with SONAR_TOKEN in scope.
+      - name: Bind analysis to the CI commit
+        id: metadata
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const repo = context.repo;
+            const supported = ['push', 'pull_request', 'merge_group'];
+            if (!supported.includes(run.event)) throw new Error(`Unsupported CI event: ${run.event}`);
+            if (run.event === 'push' && run.head_branch !== 'main') throw new Error('Only main pushes are supported');
+            let pr = null;
+            if (run.event === 'pull_request') {
+              const {data: pulls} = await github.rest.repos.listPullRequestsAssociatedWithCommit({...repo, commit_sha: run.head_sha});
+              pr = pulls.find(p => p.head.sha === run.head_sha && p.base.repo.full_name === `${repo.owner}/${repo.repo}` && p.base.ref === 'main');
+              if (!pr) throw new Error('No matching PR head and main base for this CI commit');
+            }
+            core.setOutput('sha', run.head_sha);
+            core.setOutput('pr', pr ? JSON.stringify({number: pr.number, head: pr.head.ref, base: pr.base.ref}) : '');
+            core.setOutput('event', run.event);
+            core.setOutput('branch', run.head_branch);
+            await github.rest.repos.createCommitStatus({...repo, sha: run.head_sha, context: 'SonarCloud Quality Gate', state: 'pending', description: 'Checking the CI result and SonarCloud quality gate', target_url: `${context.serverUrl}/${repo.owner}/${repo.repo}/actions/runs/${context.runId}`});
+            if (run.conclusion !== 'success') throw new Error(`CI finished with ${run.conclusion}; analysis cannot pass`);
+
+      # SECURITY: source and coverage are untrusted input. Never run repository
+      # scripts, builds, package installers, or local actions in this job.
+      # Use only fixed inline code and pinned scanner/action implementations.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 0  # full history for accurate blame + new-code detection
-          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          ref: ${{ steps.metadata.outputs.sha }}
+          persist-credentials: false
 
-      - name: Download Python coverage from CI workflow
+      - name: Download complete Python coverage
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage
-          # Extract into backend/ so the file lands at backend/coverage.xml,
-          # matching sonar.python.coverage.reportPaths in
-          # sonar-project.properties. The artifact stores the bare
-          # `coverage.xml` basename (uploaded from backend/coverage.xml).
           path: backend
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true  # missing artifact degrades to "no coverage", never blocks
 
-      - name: Assert python-coverage artifact present (fail-visible)
-        # Fail-visible contract (#2513). The job-level `if:` above already scopes
-        # this workflow to main-push analyses, so a missing backend/coverage.xml
-        # here means the push-only python-coverage job (ci.yml) did not upload
-        # coverage — historically an invisible OOM / runner-loss on
-        # meho-runners-ci-heavy that collapsed SonarCloud coverage from 65.8% to
-        # ~24% on 2026-06-20 and stayed hidden for 3+ weeks (the download above is
-        # continue-on-error, so the scan silently ran without coverage). This step
-        # makes that degradation LOUD: an error-level workflow annotation naming
-        # the missing artifact plus a clearly-named failed step. Its own
-        # continue-on-error keeps it non-blocking, so the SonarCloud scan below
-        # still runs (resilience preserved) — only the invisibility is removed.
-        # See docs/codebase/sonarcloud.md (coverage-collapse runbook).
-        if: hashFiles('backend/coverage.xml') == ''
-        continue-on-error: true
-        run: |
-          echo "::error title=python-coverage artifact missing::No backend/coverage.xml on this main-push analysis — the push-only python-coverage job (ci.yml) did not upload coverage (likely an OOM / runner-loss on meho-runners-ci-heavy). SonarCloud will import 0% backend coverage for commit ${{ github.event.workflow_run.head_sha }}. See docs/codebase/sonarcloud.md (coverage-collapse runbook)."
-          exit 1
-
-      - name: Point coverage report at the backend/ source root
-        # coverage.py (relative_files=true) writes an empty <source></source>
-        # and filenames like `src/meho_backplane/...` relative to backend/.
-        # SonarCloud resolves coverage paths from the repo root, so without
-        # the `backend/` prefix every file fails with "Cannot resolve the
-        # file path ... the file does not exist in all 'source'" and coverage
-        # imports as 0% (observed on the #920 merge run). Injecting the
-        # source root makes paths resolve to backend/src/meho_backplane/...
-        # Guarded on the file existing so a missing coverage artifact is a no-op.
-        if: hashFiles('backend/coverage.xml') != ''
-        run: |
-          set -euo pipefail
-          sed -i 's#<source></source>#<source>backend</source>#' backend/coverage.xml
-          grep -q '<source>backend</source>' backend/coverage.xml \
-            && echo "coverage source root set to backend/" \
-            || echo "::warning::coverage <source> not rewritten — sonar may report 0% coverage"
-
-      - name: Download Go coverage from CI workflow
+      - name: Download Go coverage
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: go-coverage
-          # Extract into cli/ so the file lands at cli/coverage.out, matching
-          # sonar.go.coverage.reportPaths. The Go profile uses module import
-          # paths (github.com/evoila/meho/cli/...), which SonarCloud's Go
-          # sensor resolves via cli/go.mod — no path rewrite needed (unlike
-          # the Python report).
           path: cli
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true  # missing artifact degrades to "no Go coverage", never blocks
 
-      - name: Ensure dirmngr is available (for sonar-scanner GPG verify)
+      - name: Prepare trusted scan settings
+        env:
+          TRUSTED_SHA: ${{ github.sha }}
+          ANALYZED_SHA: ${{ steps.metadata.outputs.sha }}
+          ANALYSIS_EVENT: ${{ steps.metadata.outputs.event }}
+          ANALYSIS_BRANCH: ${{ steps.metadata.outputs.branch }}
+          ANALYSIS_PR: ${{ steps.metadata.outputs.pr }}
         run: |
           set -euo pipefail
-          if ! command -v dirmngr >/dev/null 2>&1; then
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dirmngr
-          fi
+          # Read settings from the trusted default-branch workflow commit. A PR
+          # cannot redirect SONAR_TOKEN or suppress its own findings via config.
+          git show "${TRUSTED_SHA}:sonar-project.properties" > /tmp/sonar-trusted.properties
+          git describe --tags --match 'v[0-9]*' --abbrev=0 "${ANALYZED_SHA}" > /tmp/sonar-release-version
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
 
-      - name: SonarCloud Scan
+          report = Path('backend/coverage.xml')
+          tree = ET.parse(report)
+          sources = tree.findall('./sources/source')
+          if len(sources) != 1:
+              raise SystemExit('Expected one Python coverage source root')
+          sources[0].text = 'backend'
+          tree.write(report, encoding='utf-8', xml_declaration=True)
+          if not Path('cli/coverage.out').stat().st_size:
+              raise SystemExit('Go coverage report is empty')
+          settings = Path('/tmp/sonar-trusted.properties').read_text()
+          settings += '\nsonar.projectVersion=' + Path('/tmp/sonar-release-version').read_text().strip() + '\n'
+          settings += 'sonar.scm.revision=' + os.environ['ANALYZED_SHA'] + '\n'
+          settings += 'sonar.qualitygate.wait=true\nsonar.qualitygate.timeout=600\n'
+          if os.environ['ANALYSIS_EVENT'] == 'pull_request':
+              pr = json.loads(os.environ['ANALYSIS_PR'])
+              settings += f"sonar.pullrequest.key={pr['number']}\nsonar.pullrequest.branch={pr['head']}\nsonar.pullrequest.base={pr['base']}\n"
+          elif os.environ['ANALYSIS_EVENT'] == 'merge_group':
+              settings += 'sonar.branch.name=' + os.environ['ANALYSIS_BRANCH'] + '\n'
+              settings += 'sonar.newCode.referenceBranch=main\n'
+          else:
+              settings += 'sonar.branch.name=main\n'
+          output = Path('.sonar-ci.properties')
+          output.unlink(missing_ok=True)
+          output.write_text(settings)
+          PY
+
+      - name: SonarCloud scan and gate result
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9  # v8.3.0
         with:
-          # Stamp each analysis with the analysed commit so SonarCloud's
-          # history is navigable (the project version was "not provided").
-          args: >-
-            -Dsonar.projectVersion=${{ github.event.workflow_run.head_sha }}
+          args: -Dproject.settings=.sonar-ci.properties
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Publish terminal gate status on the analyzed commit
+        if: always()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          JOB_STATUS: ${{ job.status }}
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const passed = process.env.JOB_STATUS === 'success';
+            await github.rest.repos.createCommitStatus({...context.repo, sha: run.head_sha, context: 'SonarCloud Quality Gate', state: passed ? 'success' : 'failure', description: passed ? 'SonarCloud quality gate passed' : 'CI, coverage, scan, or quality gate failed; see workflow log', target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`});

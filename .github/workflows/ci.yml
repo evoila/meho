@@ -78,28 +78,12 @@
 #     (path-scoped to manifest changes).
 #   * Secret + supply-chain scans   -> secret-scan.yml + security-scan.yml.
 #
-# The workflow name is `CI` so it satisfies the `workflow_run:
-# workflows: ["CI"]` dependency in quality-gate.yml (SonarCloud's
-# Clean-as-You-Code gate). The dedicated `python-coverage` job (push to
-# main only) uploads `coverage.xml` as a `python-coverage` artifact so
-# the downstream SonarCloud scan can ingest it — quality-gate.yml's
-# `actions/download-artifact` step references that exact name. The
-# required unit lane (the `python-unit-shard` matrix behind the
-# `python-unit-lane` fan-in) is intentionally NO-cov: see those jobs and
-# #1982 — running the unit suite under coverage OOM-kills the
-# memory-limited heavy runner, so coverage was split into its own
-# push-only, non-required, continue-on-error job (#1987).
-#
-# Fail-loud posture (per Goal #11 + devops_best_practices "no
-# continue-on-error on linters or tests"): every step that asserts a
-# contract is allowed to fail the job. The continue-on-error in this
-# file is confined to coverage: the whole `python-coverage` job is
-# job-level continue-on-error (a coverage OOM degrades to "no
-# coverage for this push" and never fails the CI run conclusion —
-# which would otherwise also suppress quality-gate.yml's
-# workflow_run), and the artifact-upload step inside it is
-# step-level continue-on-error. SonarCloud already guards its own
-# download with continue-on-error.
+# The name CI is consumed by quality-gate.yml's workflow_run trigger.
+# Coverage is measured separately from required unit tests to limit memory.
+# It runs on main, PRs, and merge-queue commits. Coverage jobs remain
+# non-required individually; missing or incomplete reports fail the downstream
+# SonarCloud Quality Gate status. Artifact names are a cross-workflow contract.
+# Failed coverage jobs still upload diagnostic data where possible.
 #
 # All third-party actions pinned to immutable SHAs with the
 # human-readable tag in a trailing comment (devops_best_practices:
@@ -1181,108 +1165,23 @@ jobs:
 
   python-coverage:
     name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/8)
-    # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
-    # had to drop from the required unit lane to stop the OOM kill. This job
-    # is deliberately:
-    #   * PUSH-TO-MAIN ONLY by default (`github.event_name == 'push'`) — PRs
-    #     stay fast/no-cov; SonarCloud decoration updates "one merge late" (the
-    #     pre-#771 behaviour, the accepted trade in #1987). Not run on PRs
-    #     (no per-PR suite double-run) and not in the merge queue. The ONE
-    #     exception is an opt-in `ci-coverage-validate` PR label: a PR carrying
-    #     that label also runs this job, so a change to the coverage path
-    #     itself can be proven green + artifact-producing on the real
-    #     `meho-runners-ci-heavy` pod (where the OOM reproduces) BEFORE it
-    #     merges — without paying the double-suite cost on every other PR.
-    #     Remove the label once validated; routine PRs never carry it.
-    #   * NON-REQUIRED + whole-job continue-on-error (#1987 AC5) — it is NOT
-    #     in branch protection's required contexts, AND continue-on-error
-    #     means a coverage-job FAILURE (OOM, red tests, step timeout) is
-    #     absorbed: the job itself still reports conclusion `failure` (jobs
-    #     API, observed on run 30925197316), but it never fails the overall
-    #     CI run conclusion. That matters twice: a red coverage job must not
-    #     block merge (it can't — push runs after merge — but defence in
-    #     depth), and it must not flip the CI run's `conclusion` to
-    #     `failure`, which would suppress quality-gate.yml's `workflow_run`
-    #     (it only runs on `conclusion == 'success'`).
-    #     CAUTION (#2800): continue-on-error absorbs *failure* only —
-    #     cancellation leaks through. A JOB-level `timeout-minutes` expiry
-    #     CANCELS the job, and the `cancelled` conclusion propagated to the
-    #     whole run (observed three times on 2026-08-04, run 30902356757),
-    #     suppressing quality-gate.yml exactly like a `failure` would and
-    #     tripping docs/RELEASING.md's "cancelled ≠ green" pre-flight.
-    #     Hence the hang backstop lives on the pytest STEP (step timeout →
-    #     step failure → job failure → absorbed); the job-level cap is only
-    #     the outer backstop — see the timeout-minutes comment below.
+    # Coverage runs separately from required unit tests because measuring
+    # the whole package uses much more memory. Eight file-level shards keep
+    # each pytest process within the runner budget. Each xdist worker saves
+    # its parallel data before reporting completion (tests/conftest.py).
+    # The combine job runs only after pytest exits, so combining is cheap.
     #
-    # WHY OFFLINE COMBINE + LOW PARALLELISM (the memory story, measured for
-    # #1987; methodology = #1982's: systemd-run --user --scope, cgroup
-    # memory.peak, full unit suite, 8306 passed):
-    #   | config                   | peak       | wall   |
-    #   | no-cov -n 3 (#1982)      | 7.86 GiB   | 13:34  |
-    #   | offline-cov -n 3        | 14.03 GiB  | 15:19  |
-    #   | offline-cov -n 2        | 13.17 GiB  | 20:42  |
-    #   | offline-cov -n 1        | 12.48 GiB  | 35:32  |
-    # The coverage tax (~4.6 GiB even fully serial) is INTRINSIC — the
-    # in-memory line-coverage map over the whole meho_backplane package
-    # across 8306 tests — and barely shrinks with xdist worker count, so the
-    # session-end combine is NOT the peak (offline combine alone did not
-    # avoid the OOM at -n 3). The lever that actually fits the pod is dropping
-    # base suite memory via low parallelism: -n 1 peaks at 12.48 GiB.
-    # CORRECTION (#3172, 2026-08-27): the "<13.67 GiB pod limit" this job was
-    # originally sized against NEVER existed — 13.67 GiB was #1982's measured
-    # local peak, mistaken for the runner's cap. The live heavy-pool runner
-    # container limit (rdc-gitops apps/rke2-ci/meho-runners-heavy) was 8Gi,
-    # so the 12.48-GiB serial sweep never fit: every main-push run since
-    # ~2026-06-20 died as an OOM runner-loss (absorbed job failure, null step
-    # telemetry) or a memory-thrash wedge (pytest crawls to the 45-min step
-    # cap, combine hangs on the debris — the v0.31.0 tag-gate blocker).
-    # rdc-gitops#115 resizes the pool to 14Gi (request == limit,
-    # node-exclusive by memory), giving the sweep ~1.5 GiB of real headroom
-    # on this same runs-on label.
-    # The "offline" shape (per-worker parallel data + `coverage combine`/`xml`
-    # AFTER pytest exits, pytest invoked with `-p no:cov` so pytest-cov's
-    # in-process combine never runs) keeps the combine memory-cheap regardless.
-    # SHARDED (#3172, 2026-08-28): 13,311 collected tests put the -n 1
-    # serial wall at ~57 min — past the 45-min step cap, the 55-min job cap,
-    # and brushing the ~60-min external pod reap, so a monolithic sweep was
-    # structurally out of road (proven by run 33149016521: healthy 14Gi pod,
-    # steady progress, killed at 93%). The sweep now runs as 8 stride shards
-    # of the sorted test-file list (~125 files each; #3172 started with 3,
-    # #4748 went to 5, #4758 to 8), fanned into the python-coverage-combine
-    # job below which merges all shards' parallel data and uploads the
-    # single `python-coverage` artifact — the quality-gate.yml contract is
-    # unchanged. A shard's memory grows with the number of tests in its one
-    # pytest process, so more shards means less memory per shard. The
-    # "Print peak memory" step at the end of each shard shows the real
-    # numbers. 8 shards (#4758): 3 shards hit the 30-min step cap and lost
-    # all their data; on the 7 GiB heavy runner, 5 shards of ~4,000-4,700
-    # tests still ran 19-29 min of pytest and peaked at the memory limit.
-    # ~2,700 tests per shard keeps each one near 15-20 min and ~4 GiB.
-    # If a shard's wall approaches its 30-min step cap, or its memory nears
-    # the runner's limit, raise the shard count — bump the matrix, TOTAL in
-    # the pytest step AND the combine job's download steps, in lockstep
-    # (tests/test_ci_coverage_shards.py pins the lockstep). This job stays
-    # non-blocking; a shard OOM merely thins one shard's coverage.
-    # A SHARD'S WORKER DATA FILE (#4758): the worker writes its coverage
-    # data at interpreter exit, which the xdist controller can cut short
-    # (it kills a worker 10 s after the worker reports finished). The
-    # tests/conftest.py session-finish hook saves the worker's data before
-    # that report, so a slow worker clean-up no longer loses a whole
-    # shard's test coverage with every check green.
-    # Runs on push to main, OR on a PR explicitly opted in via the
-    # `ci-coverage-validate` label (the on-runner validation escape hatch
-    # described above). The fork-PR guard still applies on the PR path so
-    # fork code never executes on the self-hosted pool.
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
-    runs-on: meho-runners-ci-heavy
+    # All shards must finish. Partial data remains useful for debugging but
+    # must never be published as the report used by the Sonar gate. The jobs
+    # remain non-required individually; missing coverage fails that gate.
+    # Raise the matrix count, TOTAL, and downloads together if memory or
+    # runtime approaches the limits. test_ci_coverage_shards.py checks this.
+    # Fork code runs only on disposable GitHub-hosted infrastructure.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'meho-runners-ci-heavy' }}
     strategy:
       # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in
       # the header comment. fail-fast off: one shard's red tests must not
-      # cancel the other shards' coverage data (partial coverage beats none).
+      # cancel the other shards before they upload diagnostic data.
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
@@ -1294,8 +1193,7 @@ jobs:
     # 8Gi runner limit vs this job's 12.48-GiB serial sweep. Fixed IN PLACE by
     # rdc-gitops#115 (heavy pool resized to 14Gi request==limit); this
     # `runs-on:` label is correct and stays. An OOM would still only skip one
-    # coverage upload (job stays non-blocking); quality-gate.yml makes that
-    # skip fail-visible via an error annotation (#2513).
+    # coverage upload; the downstream gate then fails for a missing report.
     # THREE-LAYER hang defense (#2800 → #2806 → #2865). Ordered inner→outer;
     # each layer catches what the one inside it structurally cannot:
     #   1. IN-PROCESS, per test — pytest-timeout `--timeout=300` (signal) on
@@ -1328,8 +1226,8 @@ jobs:
     #      reap seen on the heavy pool, so GitHub's job timeout wins that
     #      race. (The combine + coverage.xml upload moved to the
     #      python-coverage-combine fan-in job below, with its own budget.)
-    # Neither runner cap is a perf budget: the job is push-only and non-blocking,
-    # so a long wall never gates a PR.
+    # These caps protect against hangs. Check normal wall time and queue
+    # capacity separately before requiring the downstream gate.
     timeout-minutes: 55
     continue-on-error: true
     env:
@@ -1527,6 +1425,9 @@ jobs:
             "${SHARD_FILES[@]}" 2>&1 | tee pytest-coverage.log
           exit "${PIPESTATUS[0]}"
 
+      - name: Record successful coverage shard
+        run: touch .coverage-shard-complete
+
       - name: Upload shard coverage data (parallel files)
         # Raw per-worker parallel data files (`.coverage.<host>.<pid>.<rand>`)
         # for THIS shard — the python-coverage-combine job below merges every
@@ -1544,7 +1445,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage-data-shard-${{ matrix.shard }}
-          path: backend/.coverage.*
+          path: |
+            backend/.coverage.*
+            backend/.coverage-shard-complete
           include-hidden-files: true
           retention-days: 1
           if-no-files-found: warn
@@ -1622,26 +1525,11 @@ jobs:
 
   python-coverage-combine:
     name: Python coverage combine (SonarCloud artifact)
-    # Fan-in for the sharded python-coverage matrix above (#3172): downloads
-    # every shard's raw parallel coverage data, merges it, and uploads the
-    # single `python-coverage` artifact (backend/coverage.xml) — the
-    # quality-gate.yml contract is byte-identical to the old monolithic
-    # producer; only the producer topology changed. Same trigger + absorption
-    # posture as the shard job: push-to-main (or the `ci-coverage-validate`
-    # PR label), non-required, whole-job continue-on-error. `always()` keeps
-    # the fan-in merging partial data when a shard failed its tests or died —
-    # per-download continue-on-error tolerates a shard that never produced an
-    # artifact, and the combine step's ls guard exits cleanly when none did.
-    # Runs on the main (non-heavy) pool: combine is seconds of CPU and a few
-    # hundred MB — it needs no 14Gi node.
+    # Publish coverage only when every shard completed and uploaded data.
+    # The scan fails clearly when this artifact is missing.
     needs: python-coverage
-    if: >-
-      always() &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
-    runs-on: meho-runners-ci
+    if: always()
+    runs-on: ubuntu-latest
     # 26 > the 22 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
@@ -1677,7 +1565,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-1
-          path: backend
+          path: backend/coverage-shards/1
 
       - name: Download shard 2 coverage data
         continue-on-error: true
@@ -1685,7 +1573,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-2
-          path: backend
+          path: backend/coverage-shards/2
 
       - name: Download shard 3 coverage data
         continue-on-error: true
@@ -1693,7 +1581,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-3
-          path: backend
+          path: backend/coverage-shards/3
 
       - name: Download shard 4 coverage data
         continue-on-error: true
@@ -1701,7 +1589,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-4
-          path: backend
+          path: backend/coverage-shards/4
 
       - name: Download shard 5 coverage data
         continue-on-error: true
@@ -1709,7 +1597,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-5
-          path: backend
+          path: backend/coverage-shards/5
 
       - name: Download shard 6 coverage data
         continue-on-error: true
@@ -1717,7 +1605,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-6
-          path: backend
+          path: backend/coverage-shards/6
 
       - name: Download shard 7 coverage data
         continue-on-error: true
@@ -1725,7 +1613,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-7
-          path: backend
+          path: backend/coverage-shards/7
 
       - name: Download shard 8 coverage data
         continue-on-error: true
@@ -1733,58 +1621,36 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-8
-          path: backend
+          path: backend/coverage-shards/8
 
       - name: Combine coverage + write XML (offline, all shards)
-        # Runs in this fan-in job with every shard's pytest long gone, so
-        # `coverage combine` merges the downloaded per-worker parallel data
-        # files standalone (cheap). Uses .coveragerc.ci (relative_files=true)
-        # so paths are repo-relative across the eight shard runners and for
-        # SonarCloud cross-job mapping (#1987 AC6).
-        #
-        # `if: always()` + the ls guard: combine whatever shards delivered —
-        # a missing shard artifact (OOM before any data file) thins coverage
-        # rather than zeroing it. Partial coverage beats none; this whole job
-        # is non-blocking, and SonarCloud merging slightly incomplete
-        # new-code coverage is far better than a "no data" gap. The guard
-        # keeps the step from erroring with "No data to combine" when NO
-        # shard produced data (→ the upload step's hashFiles guard then
-        # skips cleanly).
-        #
-        # timeout-minutes (#3172): combine takes seconds when healthy, but the
-        # v0.31.0 cut proved a hang that outlives the pytest step's SIGALRM
-        # guard leaves debris this step then hangs on — and an UNBOUNDED step
-        # rides into this job's cap, whose timeout is a CANCELLATION that
-        # whole-job continue-on-error does NOT absorb (it absorbs failures),
-        # flipping the run conclusion to `cancelled` and blocking the
-        # RELEASING.md tag gate. A step cap converts that hang into an
-        # absorbed step FAILURE — run stays `success`, coverage degrades to
-        # "none for this push", the documented lossy contract. This fan-in
-        # job's budget: downloads 8 x 2 + this step 4 + upload 2 = 22 min
-        # of bounded steps + checkout/uv/sync (~1-2 min honest) under the
-        # 26-min job cap, so step caps always fire first.
-        if: always()
+        # A report is trustworthy only when every shard completed its tests.
+        # Failed shards may upload partial data for diagnosis, but their missing
+        # completion marker prevents publication of an incomplete report.
         timeout-minutes: 4
         run: |
-          if ! ls .coverage.* >/dev/null 2>&1; then
-            echo "::warning::no per-worker coverage data files — pytest produced no coverage (crash before first test?); skipping combine"
-            exit 0
-          fi
-          uv run coverage combine --rcfile=.coveragerc.ci
+          set -euo pipefail
+          for shard in {1..8}; do
+            test -f "coverage-shards/${shard}/.coverage-shard-complete" || {
+              echo "::error::Coverage shard ${shard} did not finish; no report will be published"
+              exit 1
+            }
+            compgen -G "coverage-shards/${shard}/.coverage.*" >/dev/null || {
+              echo "::error::Coverage shard ${shard} has no worker data"
+              exit 1
+            }
+          done
+          uv run coverage combine --rcfile=.coveragerc.ci coverage-shards/{1..8}
           uv run coverage xml --rcfile=.coveragerc.ci -o coverage.xml
-          # Sanity: the file must exist and carry the empty <source></source>
-          # that quality-gate.yml's sed rewrites to <source>backend</source>.
-          test -f coverage.xml
-          grep -q '<source></source>' coverage.xml \
-            || echo "::warning::coverage.xml has no empty <source> — SonarCloud path mapping may not resolve"
+          test -s coverage.xml
 
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud) under this
         # exact name. Lossy: a missing upload degrades the SonarCloud signal to
-        # "no coverage for this push" but never invalidates anything.
+        # a missing report; the downstream gate then fails clearly.
         # continue-on-error here is belt-and-suspenders on top of the whole-job
         # continue-on-error.
-        if: always() && hashFiles('backend/coverage.xml') != ''
+        if: success() && hashFiles('backend/coverage.xml') != ''
         continue-on-error: true
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
@@ -2118,10 +1984,8 @@ jobs:
 
   go-lint-test:
     name: Go (golangci-lint + go test)
-    # Fork-PR guard mirrors the Python job — same rationale. Runs on a
-    # GitHub-hosted runner since #4626: it needs only the Go toolchain and
-    # public egress.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Public toolchain and hosted runner only. Fork PRs also need the Go
+    # report for the Sonar gate; they receive no repository secrets.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

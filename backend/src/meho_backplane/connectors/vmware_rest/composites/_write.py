@@ -3746,15 +3746,19 @@ async def _drain_deploy_cleanup(
     re-raises the task's exception, which is caught here and becomes a
     ``cleanup`` warning issue (a cancel seen before it is still re-raised).
     """
+    caller = asyncio.current_task()
+    entry_cancellations = caller.cancelling() if caller is not None else 0
     task = asyncio.ensure_future(cleanup)
     cancelled = False
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            # The caller was cancelled; the shielded task runs on. (A task
-            # cancelled from outside is done, which ends the loop.)
-            if not task.cancelled():
+            # Both tasks may be cancelled before this wait resumes. A cancel
+            # caught before entry still belongs to the outer caller.
+            if not task.cancelled() or (
+                caller is not None and caller.cancelling() > entry_cancellations
+            ):
                 cancelled = True
         except Exception:  # the task failed; its exception is read below
             break

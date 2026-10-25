@@ -50,7 +50,7 @@ fail() {
 SAVED=$(k get secret "$SECRET" -o json) || fail "no Secret $SECRET: set OpenBao up first"
 KEY_B64=$(jq -r '.data.key' <<<"$SAVED")
 KEY=$(jq -r '.data.key | @base64d' <<<"$SAVED")
-[ -n "$KEY" ] || fail "the Secret $SECRET has no key"
+[[ -n "$KEY" ]] || fail "the Secret $SECRET has no key"
 # The server container is named after the program (`bao` or `vault`).
 BIN=$(k get pod "$POD" -o jsonpath='{.spec.containers[0].name}')
 
@@ -77,25 +77,32 @@ wait_until() {
   done
 }
 uid() { k get pod "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
-ready() { [ "$(k get pod "$POD" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]; }
+ready() { [[ "$(k get pod "$POD" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]]; }
 # `status` exits 0 when unsealed, 2 when sealed, 1 when the server does not answer.
 seal_rc() {
   local rc=0
   k exec "$POD" -c unseal -- "$BIN" status >/dev/null 2>&1 || rc=$?
   echo "$rc"
 }
-answers() { [ "$(seal_rc)" != 1 ]; }
-new_pod() { local u; u=$(uid); [ -n "$u" ] && [ "$u" != "$OLD_UID" ]; }
+answers() { [[ "$(seal_rc)" != 1 ]]; }
+new_pod() { local u; u=$(uid); [[ -n "$u" ]] && [[ "$u" != "$OLD_UID" ]]; }
 new_and_ready() { new_pod && ready; }
 new_and_answers() { new_pod && answers; }
 server_restarts() { k get pod "$POD" -o jsonpath="{.status.containerStatuses[?(@.name==\"$BIN\")].restartCount}"; }
-restarted_and_answers() { [ "$(server_restarts)" -gt "$RESTARTS" ] && answers; }
+restarted_and_answers() {
+  local current
+  current=$(server_restarts)
+  # Counts come from kubectl. Check digits before Bash arithmetic, which
+  # otherwise evaluates variable contents as expressions. Keep decimal values.
+  [[ "$current" =~ ^[0-9]+$ && "$RESTARTS" =~ ^[0-9]+$ ]] || return 1
+  ((10#$current > 10#$RESTARTS)) && answers
+}
 key_file_gone() { ! k exec "$POD" -c unseal -- test -e /unseal/key 2>/dev/null; }
 # stays_sealed <seconds> <what>: sealed and not ready on every look, every 5 s.
 stays_sealed() {
   local end=$((SECONDS + $1))
   while ((SECONDS < end)); do
-    [ "$(seal_rc)" = 2 ] || fail "$2: the server is not sealed"
+    [[ "$(seal_rc)" = 2 ]] || fail "$2: the server is not sealed"
     ! ready || fail "$2: the pod is ready"
     sleep 5
   done
@@ -160,7 +167,7 @@ echo "5. put the Secret back, expect the helper to unseal the same pod"
 OLD_UID=$(uid)
 restore_secret
 wait_until 180 ready || fail "not ready within 3 minutes after the Secret came back"
-[ "$(uid)" = "$OLD_UID" ] || fail "the pod was replaced"
+[[ "$(uid)" = "$OLD_UID" ]] || fail "the pod was replaced"
 echo "ok: ready, same pod"
 
 no_key_anywhere "after"

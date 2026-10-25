@@ -11,6 +11,9 @@ state rather than a complete outcome.
 
 An operation may declare `result_objects` for a bounded top-level identity
 projection. `result_object_truncations` names an inline field whose value was
-bounded. The full value is retrievable through a JSONFlux handle only when the
-projected object aliases the collection that was spilled (as TLS `leaf` aliases
-`chain[0]`); arbitrary sibling objects are not implicitly persisted.
+bounded. Every object the hint names is also stored whole with the spilled
+rows (the same place as an omitted scalar), so a `result_query` read with
+`path="/<object key>"` returns the complete value. When a field was cut,
+`result_object_note` rides inline next to the truncations and names that read,
+or says the object could not be kept when the store dropped it. Objects the
+hint does not name are not persisted.

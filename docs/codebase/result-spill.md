@@ -31,7 +31,9 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
   Lists and objects are never copied by default (objects need the
-  bounded `result_objects` hint); and
+  bounded `result_objects` hint). An object that hint names is stored
+  whole next to the omitted scalars, so a `path` read returns what the
+  bounded inline projection left out; and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope. `schema_` comes from the result field catalog

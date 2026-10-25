@@ -190,6 +190,52 @@ def _vmomi_task_moref(value: str) -> dict[str, str]:
     return {"type": "Task", "value": value}
 
 
+def _vmomi_host_parent(host_moid: str, cluster_moid: str) -> dict[str, Any]:
+    """``HostSystem.parent`` read: the host is in *cluster_moid* (#4895)."""
+    return _vmomi_retrieve_result(
+        "HostSystem",
+        host_moid,
+        "parent",
+        {"type": "ClusterComputeResource", "value": cluster_moid},
+    )
+
+
+def _vmomi_cluster_drs(
+    cluster_moid: str, behavior: str, recommendations: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """``ClusterComputeResource`` read serving ``configurationEx`` (DRS on, *behavior*).
+
+    The recorders key ``RetrievePropertiesEx`` by object type, so the one
+    canned result also carries ``drsRecommendation`` for the vm.migrate
+    recursion's DRS read (#4895).
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": cluster_moid},
+                "propSet": [
+                    {
+                        "name": "configurationEx",
+                        "val": {"drsConfig": {"enabled": True, "defaultVmBehavior": behavior}},
+                    },
+                    {"name": "drsRecommendation", "val": recommendations or []},
+                ],
+            }
+        ]
+    }
+
+
+def _vm_listing_row(vm: str, power_state: str = "POWERED_ON") -> dict[str, Any]:
+    """One ``GET:/vcenter/vm`` row in the real ``Vcenter.VM.Summary`` shape (no cluster field)."""
+    return {
+        "vm": vm,
+        "name": f"name-{vm}",
+        "power_state": power_state,
+        "cpu_count": 1,
+        "memory_size_mib": 1024,
+    }
+
+
 def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", url)
     response = httpx.Response(status, request=request)
@@ -242,7 +288,9 @@ class _RecordingVmwareConnector:
     ) -> Any:
         spec = self._spec(path)
         self.calls.append(("GET", spec))
-        return self.responses.get(spec, {"value": {}})
+        response = self.responses.get(spec, {"value": {}})
+        # An iterator answers one GET after the other (a listing that changes).
+        return next(response) if isinstance(response, Iterator) else response
 
     async def _post_json(
         self,
@@ -512,7 +560,11 @@ def _benign_vmomi_for(composite_op_id: str) -> dict[str, Any]:
                 "ClusterComputeResource", "domain-c1", "drsRecommendation", []
             ),
         },
+        # host.evacuate (#4895): the host's cluster + its DRS config are vim
+        # reads; with DRS fully automated vCenter moves the VMs itself.
         "vmware.composite.host.evacuate": {
+            "HostSystem": _vmomi_host_parent("host-1", "domain-c1"),
+            "ClusterComputeResource": _vmomi_cluster_drs("domain-c1", "fullyAutomated"),
             "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-benign"),
         },
         # #3697: the deployed VM is renamed from its unique deploy name.
@@ -865,15 +917,18 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(
         {
-            "/vcenter/vm": {"value": [{"vm": "vm-a", "cluster": "domain-c1"}]},
+            # Before the maintenance task the host runs vm-a; after it, nothing.
+            "/vcenter/vm": iter([{"value": [_vm_listing_row("vm-a")]}, {"value": []}]),
         }
     )
     recorder.vmomi_responses.update(
         {
-            "ClusterComputeResource": _vmomi_retrieve_result(
-                "ClusterComputeResource",
+            # The cluster comes from the host's ``parent`` (#4895); DRS is on
+            # but manual, so MEHO moves the VM where DRS recommends.
+            "HostSystem": _vmomi_host_parent("host-1", "domain-c1"),
+            "ClusterComputeResource": _vmomi_cluster_drs(
                 "domain-c1",
-                "drsRecommendation",
+                "manual",
                 [
                     {
                         "migrationList": [
@@ -905,11 +960,14 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     assert result.result["status"] == "evacuated"
     assert result.result["maintenance_entered"] is True
     assert result.result["migrated_vms"] == ["vm-a"]
-    # The DRS read + maintenance-enter are vim (#2970); the REST calls are
-    # the listing + the recursion's relocate.
+    assert result.result["moved_by"] == "meho"
+    # The host / cluster / DRS reads + maintenance-enter are vim (#2970,
+    # #4895); the REST calls are the listing, the recursion's relocate and
+    # the listing after the maintenance task.
     assert recorder.calls == [
         ("GET", "/vcenter/vm"),
         ("POST", "/vcenter/vm/vm-a?action=relocate"),
+        ("GET", "/vcenter/vm"),
     ]
     assert [p for p, _ in recorder.vmomi_calls if p.endswith("/EnterMaintenanceMode_Task")] == [
         "/HostSystem/host-1/EnterMaintenanceMode_Task"

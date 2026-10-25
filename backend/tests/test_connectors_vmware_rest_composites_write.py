@@ -5303,96 +5303,417 @@ def _no_rec() -> OperationResult:
     )
 
 
-@pytest.mark.asyncio
-async def test_host_evacuate_recurses_then_enters_maintenance(gate: _GateRecorder) -> None:
-    """VM listing GET -> per-VM vm.migrate via dispatch_child -> vim maintenance-enter."""
-    conn = _RecordingConnector(
+def _host_parent_cluster(host_moid: str, cluster_moid: str) -> dict[str, Any]:
+    """``HostSystem.parent`` read: the host sits in *cluster_moid*."""
+    return _retrieve_result(
+        "HostSystem",
+        host_moid,
+        "parent",
         {
-            "/api/vcenter/vm": [
-                {"vm": "vm-a", "cluster": "c-1"},
-                {"vm": "vm-b", "cluster": "c-2"},
-            ],
-        },
-        vmomi={
-            "/HostSystem/host-1/EnterMaintenanceMode_Task": _task_moref("task-mm-1"),
+            "_typeName": "ManagedObjectReference",
+            "type": "ClusterComputeResource",
+            "value": cluster_moid,
         },
     )
-    dispatch = _RecordingDispatchChild([_migrated(), _migrated()])
+
+
+def _host_parent_standalone(host_moid: str) -> dict[str, Any]:
+    """``HostSystem.parent`` read of a host outside any cluster (a plain ComputeResource)."""
+    return _retrieve_result(
+        "HostSystem",
+        host_moid,
+        "parent",
+        {"_typeName": "ManagedObjectReference", "type": "ComputeResource", "value": "domain-s5"},
+    )
+
+
+def _cluster_drs(cluster_moid: str, *, enabled: bool, behavior: str) -> dict[str, Any]:
+    """``ClusterComputeResource.configurationEx`` read carrying the DRS config."""
+    return _retrieve_result(
+        "ClusterComputeResource",
+        cluster_moid,
+        "configurationEx",
+        {
+            "_typeName": "ClusterConfigInfoEx",
+            "drsConfig": {
+                "_typeName": "ClusterDrsConfigInfo",
+                "enabled": enabled,
+                "defaultVmBehavior": behavior,
+            },
+        },
+    )
+
+
+def _vm_listing_row(vm: str, name: str, power_state: str) -> dict[str, Any]:
+    """One ``GET:/vcenter/vm`` row in the real ``Vcenter.VM.Summary`` shape (no cluster field)."""
+    return {
+        "vm": vm,
+        "name": name,
+        "power_state": power_state,
+        "cpu_count": 2,
+        "memory_size_mib": 4096,
+    }
+
+
+_VSAN_MODES = ("ensureObjectAccessibility", "evacuateAllData", "noAction")
+_ENTER_MAINTENANCE_OP = "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"
+
+
+def _evacuate_connector(
+    *,
+    host: str,
+    listings: list[Any],
+    drs_behavior: str = "fullyAutomated",
+    drs_enabled: bool = True,
+    in_cluster: bool = True,
+) -> _RecordingConnector:
+    """Recorder for host.evacuate: sequential VM listings + the host / cluster vim reads."""
+    parent = (
+        _host_parent_cluster(host, "domain-c1") if in_cluster else _host_parent_standalone(host)
+    )
+    return _RecordingConnector(
+        listings,
+        vmomi={
+            "HostSystem": parent,
+            "ClusterComputeResource": _cluster_drs(
+                "domain-c1", enabled=drs_enabled, behavior=drs_behavior
+            ),
+            f"/HostSystem/{host}/EnterMaintenanceMode_Task": _task_moref("task-mm-1"),
+        },
+    )
+
+
+def _enter_maintenance_bodies(conn: _RecordingConnector) -> list[Any]:
+    return [b for p, b in conn.vmomi_calls if p.endswith("/EnterMaintenanceMode_Task")]
+
+
+async def _run_evacuate(
+    conn: _RecordingConnector, dispatch: _RecordingDispatchChild, params: dict[str, Any]
+) -> dict[str, Any]:
     out = await host_evacuate_composite(
         operator=_make_operator(),
         target=object(),
-        params={"host": "host-1"},
+        params=params,
         connector=conn,  # type: ignore[arg-type]
         dispatch_child=dispatch,
     )
+    assert isinstance(out, dict)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_drs_fully_automated_lets_vcenter_move_the_vms(
+    gate: _GateRecorder,
+) -> None:
+    """DRS on + fully automated: no per-VM move, one maintenance request, both VMs left."""
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    conn = _evacuate_connector(host="host-1", listings=[before, []])
+    dispatch = _RecordingDispatchChild([])
+    out = await _run_evacuate(conn, dispatch, {"host": "host-1"})
+    assert dispatch.calls == []
+    # Host parent -> cluster DRS config -> listing -> maintenance -> listing.
+    assert [c["path"] for c in conn.calls] == ["/api/vcenter/vm", "/api/vcenter/vm"]
+    read_types = [
+        b["specSet"][0]["propSet"][0]["type"]
+        for p, b in conn.vmomi_calls
+        if p.endswith("/RetrievePropertiesEx")
+    ]
+    assert read_types[:2] == ["HostSystem", "ClusterComputeResource"]
+    assert gate.gated_op_ids == [_ENTER_MAINTENANCE_OP]
+    assert out["status"] == "evacuated"
+    assert out["maintenance_entered"] is True
+    assert out["migrated_vms"] == ["vm-a", "vm-b"]
+    assert out["failed_vms"] == []
+    assert out["remaining_vms"] == []
+    assert out["moved_by"] == "drs"
+    assert out["maintenance_task"] == "task-mm-1"
+    assert "issues" not in out
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_drs_not_automated_moves_vms_with_the_hosts_cluster(
+    gate: _GateRecorder,
+) -> None:
+    """DRS on but not fully automated: per-VM vm.migrate with the cluster read from the host."""
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    conn = _evacuate_connector(host="host-1", listings=[before, []], drs_behavior="manual")
+    dispatch = _RecordingDispatchChild([_migrated(), _migrated()])
+    out = await _run_evacuate(conn, dispatch, {"host": "host-1"})
     # Recursion routes through dispatch_child (composite->composite), NOT the
     # direct session -- proving the #2248 carve-out.
     assert [c["op_id"] for c in dispatch.calls] == [
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.migrate",
     ]
-    assert dispatch.calls[0]["params"] == {"vm": "vm-a", "cluster": "c-1"}
-    assert dispatch.calls[1]["params"] == {"vm": "vm-b", "cluster": "c-2"}
+    assert dispatch.calls[0]["params"] == {"vm": "vm-a", "cluster": "domain-c1"}
+    assert dispatch.calls[1]["params"] == {"vm": "vm-b", "cluster": "domain-c1"}
     assert all(c["connector_id"] == "vmware-rest-9.0" for c in dispatch.calls)
-    # The listing read is the only REST call; maintenance-enter is vim
-    # (#2970) -- the write POST plus its Task.info poll.
-    assert [(c["method"], c["path"]) for c in conn.calls] == [("GET", "/api/vcenter/vm")]
-    enter_calls = [(p, b) for p, b in conn.vmomi_calls if p.endswith("/EnterMaintenanceMode_Task")]
-    # ``EnterMaintenanceModeRequestType.timeout`` is required (int).
-    assert enter_calls == [("/HostSystem/host-1/EnterMaintenanceMode_Task", {"timeout": 0})]
-    # Only the maintenance-enter write was gated (the recursion self-gates).
-    assert gate.gated_op_ids == ["POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"]
+    assert gate.gated_op_ids == [_ENTER_MAINTENANCE_OP]
     assert out["status"] == "evacuated"
-    assert out["maintenance_entered"] is True
     assert out["migrated_vms"] == ["vm-a", "vm-b"]
+    assert out["moved_by"] == "meho"
 
 
 @pytest.mark.asyncio
-async def test_host_evacuate_default_aborts_on_migrate_failure(gate: _GateRecorder) -> None:
-    """tolerate_partial_failure=False -> a vm.migrate failure aborts before maintenance."""
-    conn = _RecordingConnector({"/api/vcenter/vm": [{"vm": "vm-x", "cluster": "c-1"}]})
+async def test_host_evacuate_no_recommendation_aborts_before_maintenance(
+    gate: _GateRecorder,
+) -> None:
+    """DRS has no suggestion for a VM -> no_recommendation; default aborts before maintenance."""
+    before = [
+        _vm_listing_row("vm-x", "app-x", "POWERED_ON"),
+        _vm_listing_row("vm-y", "app-y", "POWERED_ON"),
+    ]
+    conn = _evacuate_connector(host="host-3", listings=[before], drs_behavior="partiallyAutomated")
     dispatch = _RecordingDispatchChild([_no_rec()])
-    out = await host_evacuate_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"host": "host-3"},
-        connector=conn,  # type: ignore[arg-type]
-        dispatch_child=dispatch,
-    )
+    out = await _run_evacuate(conn, dispatch, {"host": "host-3"})
     assert out["status"] == "aborted"
     assert out["maintenance_entered"] is False
-    assert len(out["failed_vms"]) == 1
-    # Maintenance-enter never fired -> the only direct call was the listing GET.
+    assert out["failed_vms"] == [{"vm": "vm-x", "error": "no_recommendation"}]
+    assert out["remaining_vms"] == [
+        {"vm": "vm-x", "name": "app-x", "power_state": "POWERED_ON", "reason": "no_recommendation"},
+        {"vm": "vm-y", "name": "app-y", "power_state": "POWERED_ON", "reason": "not_attempted"},
+    ]
+    assert any(i["severity"] == "error" for i in out["issues"])
+    # Maintenance-enter never fired: one listing GET, no gated write.
     assert [c["method"] for c in conn.calls] == ["GET"]
+    assert _enter_maintenance_bodies(conn) == []
     assert gate.calls == []
 
 
 @pytest.mark.asyncio
-async def test_host_evacuate_tolerate_partial_still_enters_maintenance(gate: _GateRecorder) -> None:
-    """tolerate_partial_failure=True -> maintenance enters even with VM failures."""
-    conn = _RecordingConnector(
-        {
-            "/api/vcenter/vm": [
-                {"vm": "vm-a", "cluster": "c-1"},
-                {"vm": "vm-b", "cluster": "c-1"},
-            ],
-        },
-        vmomi={
-            "/HostSystem/host-2/EnterMaintenanceMode_Task": _task_moref("task-mm-2"),
-        },
-    )
+async def test_host_evacuate_tolerate_partial_reports_the_vm_that_stayed(
+    gate: _GateRecorder,
+) -> None:
+    """tolerate_partial_failure=True: maintenance enters; the VM that stayed is listed with why."""
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    after = [_vm_listing_row("vm-b", "app-b", "POWERED_ON")]
+    conn = _evacuate_connector(host="host-2", listings=[before, after], drs_behavior="manual")
     dispatch = _RecordingDispatchChild([_migrated(), _no_rec()])
-    out = await host_evacuate_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"host": "host-2", "tolerate_partial_failure": True},
-        connector=conn,  # type: ignore[arg-type]
-        dispatch_child=dispatch,
-    )
+    out = await _run_evacuate(conn, dispatch, {"host": "host-2", "tolerate_partial_failure": True})
     assert out["status"] == "partial"
     assert out["maintenance_entered"] is True
     assert out["migrated_vms"] == ["vm-a"]
-    assert len(out["failed_vms"]) == 1
+    assert out["failed_vms"] == [{"vm": "vm-b", "error": "no_recommendation"}]
+    assert out["remaining_vms"] == [
+        {"vm": "vm-b", "name": "app-b", "power_state": "POWERED_ON", "reason": "no_recommendation"}
+    ]
+    assert any(i["severity"] == "error" for i in out["issues"])
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_never_calls_a_vm_failed_when_vcenter_moved_it(
+    gate: _GateRecorder,
+) -> None:
+    """A VM MEHO could not move but vCenter moved during maintenance is 'left', not 'failed'."""
+    before = [_vm_listing_row("vm-a", "app-a", "POWERED_ON")]
+    conn = _evacuate_connector(host="host-2", listings=[before, []], drs_behavior="manual")
+    dispatch = _RecordingDispatchChild([_no_rec()])
+    out = await _run_evacuate(conn, dispatch, {"host": "host-2", "tolerate_partial_failure": True})
+    assert out["status"] == "evacuated"
+    assert out["migrated_vms"] == ["vm-a"]
+    assert out["failed_vms"] == []
+    assert out["remaining_vms"] == []
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_powered_off_vm_stays_and_is_not_failed(gate: _GateRecorder) -> None:
+    """Only running VMs are moved; a powered-off VM that stays is listed as staying."""
+    off = _vm_listing_row("vm-off", "cold-storage", "POWERED_OFF")
+    before = [_vm_listing_row("vm-a", "app-a", "POWERED_ON"), off]
+    conn = _evacuate_connector(host="host-1", listings=[before, [off]], drs_behavior="manual")
+    dispatch = _RecordingDispatchChild([_migrated()])
+    out = await _run_evacuate(conn, dispatch, {"host": "host-1"})
+    # The powered-off VM was never handed to vm.migrate.
+    assert [c["params"]["vm"] for c in dispatch.calls] == ["vm-a"]
+    assert out["status"] == "evacuated"
+    assert out["maintenance_entered"] is True
+    assert out["migrated_vms"] == ["vm-a"]
+    assert out["failed_vms"] == []
+    assert out["remaining_vms"] == [
+        {
+            "vm": "vm-off",
+            "name": "cold-storage",
+            "power_state": "POWERED_OFF",
+            "reason": "powered_off",
+        }
+    ]
+    assert "issues" not in out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vsan_mode", _VSAN_MODES)
+async def test_host_evacuate_sends_the_vsan_mode_in_the_maintenance_spec(
+    gate: _GateRecorder, vsan_mode: str
+) -> None:
+    """Each vSAN value reaches the request body as ``maintenanceSpec.vsanMode.objectAction``."""
+    conn = _evacuate_connector(host="host-1", listings=[[], []])
+    out = await _run_evacuate(
+        conn, _RecordingDispatchChild([]), {"host": "host-1", "vsan_mode": vsan_mode}
+    )
+    assert out["status"] == "evacuated"
+    assert _enter_maintenance_bodies(conn) == [
+        {
+            "timeout": 0,
+            "maintenanceSpec": {
+                "_typeName": "HostMaintenanceSpec",
+                "vsanMode": {
+                    "_typeName": "VsanHostDecommissionMode",
+                    "objectAction": vsan_mode,
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_default_vsan_mode_is_ensure_object_accessibility(
+    gate: _GateRecorder,
+) -> None:
+    """Leaving ``vsan_mode`` out sends vCenter's own default, so nothing changes for callers."""
+    conn = _evacuate_connector(host="host-1", listings=[[], []])
+    await _run_evacuate(conn, _RecordingDispatchChild([]), {"host": "host-1"})
+    [body] = _enter_maintenance_bodies(conn)
+    assert body["maintenanceSpec"]["vsanMode"]["objectAction"] == "ensureObjectAccessibility"
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_host_not_in_cluster_stops_before_any_change(
+    gate: _GateRecorder,
+) -> None:
+    """A host outside a cluster is refused before the listing, the moves and the maintenance."""
+    conn = _evacuate_connector(host="host-9", listings=[], in_cluster=False)
+    dispatch = _RecordingDispatchChild([])
+    out = await _run_evacuate(conn, dispatch, {"host": "host-9"})
+    assert out["status"] == "not_in_cluster"
+    assert out["maintenance_entered"] is False
+    assert out["migrated_vms"] == [] and out["remaining_vms"] == []
+    assert "not in a cluster" in out["guidance"]
+    assert dispatch.calls == []
+    assert conn.calls == []
+    assert [p for p, _ in conn.vmomi_calls] == [
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    ]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_poll_timeout_reports_the_running_task(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When MEHO stops waiting while the task runs, the answer says so with the task id."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    after = [_vm_listing_row("vm-b", "app-b", "POWERED_ON")]
+    conn = _evacuate_connector(host="host-1", listings=[before, after])
+    conn._vmomi["Task"] = _task_info_result("task-mm-1", "running")
+    out = await _run_evacuate(conn, _RecordingDispatchChild([]), {"host": "host-1"})
+    assert out["status"] == "timeout"
+    assert out["maintenance_entered"] is False
+    assert out["maintenance_task"] == "task-mm-1"
+    assert "task-mm-1" in out["guidance"]
+    assert out["migrated_vms"] == ["vm-a"]
+    assert out["remaining_vms"] == [
+        {"vm": "vm-b", "name": "app-b", "power_state": "POWERED_ON", "reason": "not_moved"}
+    ]
+    # The call did not fail: no error-severity issue.
+    assert [i["severity"] for i in out["issues"]] == ["warning"]
+
+
+_STILL_LISTED = {
+    "vm": "vm-a",
+    "name": "app-a",
+    "power_state": "POWERED_ON",
+    "reason": "still_listed_after_move",
+}
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_vm_still_listed_after_a_reported_move_is_remaining(
+    gate: _GateRecorder,
+) -> None:
+    """vm.migrate said moved, but the listing after the task still shows the VM: it stayed."""
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    after = [_vm_listing_row("vm-a", "app-a", "POWERED_ON")]
+    conn = _evacuate_connector(host="host-1", listings=[before, after], drs_behavior="manual")
+    out = await _run_evacuate(
+        conn, _RecordingDispatchChild([_migrated(), _migrated()]), {"host": "host-1"}
+    )
+    assert out["status"] == "partial"
+    assert out["maintenance_entered"] is True
+    assert out["migrated_vms"] == ["vm-b"]
+    assert out["failed_vms"] == []
+    assert out["remaining_vms"] == [_STILL_LISTED]
+    assert any(i["severity"] == "error" for i in out["issues"])
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_poll_timeout_keeps_a_still_listed_vm_as_remaining(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On timeout too, the listing after the task wins over an earlier vm.migrate success."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    after = [_vm_listing_row("vm-a", "app-a", "POWERED_ON")]
+    conn = _evacuate_connector(host="host-1", listings=[before, after], drs_behavior="manual")
+    conn._vmomi["Task"] = _task_info_result("task-mm-1", "running")
+    out = await _run_evacuate(
+        conn, _RecordingDispatchChild([_migrated(), _migrated()]), {"host": "host-1"}
+    )
+    assert out["status"] == "timeout"
+    assert out["migrated_vms"] == ["vm-b"]
+    assert out["remaining_vms"] == [_STILL_LISTED]
+    assert [i["severity"] for i in out["issues"]] == ["warning"]
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_faulted_maintenance_task_raises(gate: _GateRecorder) -> None:
+    """A faulted EnterMaintenanceMode_Task is a failed call (connector_error), unchanged."""
+    conn = _evacuate_connector(host="host-1", listings=[[], []])
+    conn._vmomi["Task"] = _task_info_result("task-mm-1", "error", "host has no spare capacity")
+    with pytest.raises(RuntimeError, match=r"host\.evacuate: EnterMaintenanceMode_Task"):
+        await _run_evacuate(conn, _RecordingDispatchChild([]), {"host": "host-1"})
+    # The listing after the task never ran.
+    assert [c["method"] for c in conn.calls] == ["GET"]
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_gated_maintenance_write_returns_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked maintenance write returns the seam's result; no listing-after read."""
+    parked = OperationResult(
+        status="awaiting_approval", op_id=_ENTER_MAINTENANCE_OP, result=None, duration_ms=0.0
+    )
+    recorder = _GateRecorder({_ENTER_MAINTENANCE_OP: parked})
+    monkeypatch.setattr(_write, "enforce_subop_policy", recorder)
+    conn = _evacuate_connector(host="host-1", listings=[[]])
+    out = await host_evacuate_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"host": "host-1"},
+        connector=conn,  # type: ignore[arg-type]
+        dispatch_child=_RecordingDispatchChild([]),
+    )
+    assert out is parked
+    assert _enter_maintenance_bodies(conn) == []
 
 
 # ===========================================================================

@@ -1538,12 +1538,42 @@ calls another composite via `dispatch_child`. Two-level nesting:
 
 ```text
 host.evacuate                                            # depth 0 (top-level dispatch)
-  ├─ GET:/vcenter/vm                                     # depth 0 (direct session read)
-  └─ vmware.composite.vm.migrate (× N)                  # depth 1 (dispatch_child of a composite)
-       ├─ vim RetrievePropertiesEx (drsRecommendation)  # depth 1 (direct vmomi read, #2970)
-       └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 1 (direct session write, gated)
-  └─ vim POST:/HostSystem/{moId}/EnterMaintenanceMode_Task # depth 0 (gated vmomi write + Task poll, #2970)
+  ├─ vim RetrievePropertiesEx (HostSystem.parent)        # depth 0: the host's cluster (#4895)
+  ├─ vim RetrievePropertiesEx (configurationEx)          # depth 0: the cluster's DRS config
+  ├─ GET:/vcenter/vm?hosts=<host>                        # depth 0 (direct session read)
+  ├─ vmware.composite.vm.migrate (× running VMs)        # depth 1 (dispatch_child of a composite;
+  │    ├─ vim RetrievePropertiesEx (drsRecommendation)  #   skipped when DRS is fully automated)
+  │    └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 1 (direct session write, gated)
+  ├─ vim POST:/HostSystem/{moId}/EnterMaintenanceMode_Task # depth 0 (gated vmomi write + Task poll, #2970)
+  └─ GET:/vcenter/vm?hosts=<host>                        # depth 0: which VMs left, which stayed
 ```
+
+**What `host.evacuate` does (#4895).** The vCenter VM listing rows
+(`Vcenter.VM.Summary`: `vm`, `name`, `power_state`, `cpu_count`,
+`memory_size_mib`) carry no cluster field, so the handler reads the
+cluster once from the host's `parent` property. A host outside a cluster
+is refused before any change (`not_in_cluster`). It then reads the
+cluster's `configurationEx` and picks `drsConfig` in code (vCenter 8.0
+refuses the nested path, #3617). When DRS is on and fully automated, it
+sends no per-VM move: vCenter moves the running VMs itself as part of the
+maintenance-mode task. Otherwise it moves every running VM (`power_state`
+`POWERED_ON`) through the recursive `vm.migrate` with that cluster; a VM
+DRS has no suggestion for is `no_recommendation` and stops the call before
+maintenance mode unless `tolerate_partial_failure` is set. Powered-off VMs
+are never moved (MEHO does not send `evacuatePoweredOffVms`) and may stay
+on the host. The maintenance body is `{"timeout": 0, "maintenanceSpec":
+{"vsanMode": {"objectAction": <vsan_mode>}}}` — `vsan_mode` is
+`ensureObjectAccessibility` (vCenter's own default), `evacuateAllData` or
+`noAction`; `cluster.patch` keeps the plain `{"timeout": 0}` body. After
+the task the handler lists the host's VMs again, and that listing alone
+decides: `migrated_vms` are the VMs that are gone (moved by MEHO or by
+vCenter, see `moved_by`), `remaining_vms` the VMs still listed with the
+reason (`powered_off`, `no_recommendation`, `still_listed_after_move` when
+`vm.migrate` reported a move the host does not show, `not_moved`,
+`not_attempted`), `failed_vms` only the VMs MEHO tried to move and that are
+still there. When the 600 s poll ends
+while the task still runs, the answer is `status: timeout` with
+`maintenance_task` and a `warning` issue — the call did not fail.
 
 `composite_depth_var` (default cap 8) handles the one nesting level
 naturally. Post-`#2256` the **audit** tree is two-level, not three:
@@ -1680,7 +1710,7 @@ enum) are:
 | `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
 | `vm.disk.attach` | `attached`, `invalid_vmdk_path`, `invalid_unit`, `controller_not_found`, `unit_in_use`, `timeout` (#3256; the first four are pre-write fail-closed refusals; `timeout` when the `ReconfigVM_Task` add poll gives up; a task *fault* raises `connector_error`) |
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
-| `host.evacuate` | `evacuated`, `partial`, `aborted` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; fault/timeout raises `connector_error`, #2970) |
+| `host.evacuate` | `evacuated`, `partial`, `aborted`, `timeout`, `not_in_cluster` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; a task *fault* raises `connector_error`, #2970; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, #4895; `not_in_cluster` is a pre-change refusal) |
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
@@ -3544,7 +3574,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | Composite | Preview | Depth |
 | --- | --- | --- |
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
-| `host.evacuate` | `{host, tolerate_partial_failure, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
+| `host.evacuate` | `{host, tolerate_partial_failure, vsan_mode, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |

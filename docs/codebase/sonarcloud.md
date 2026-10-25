@@ -20,8 +20,8 @@ publishes `go-coverage`. Integration-test coverage is not included.
 
 The `Quality Gate` workflow starts after CI completes. It runs on disposable
 GitHub-hosted infrastructure. Fork source is never executed by this workflow.
-It downloads the reports from that exact CI run and reads the source. It does
-not run repository scripts, local actions, builds, or package installers.
+It downloads the reports from that exact CI run and reads the source. Its inline Python uses isolated mode, so PR-added modules cannot replace
+standard-library imports. It does not run repository scripts, local actions, builds, or package installers.
 
 The workflow binds a PR to its current head commit and main base through the
 GitHub API. It passes the PR number, source branch, and target branch explicitly
@@ -30,7 +30,12 @@ pushes update main. Queue commits are not Sonar-scanned: the Free plan does
 not support feature-branch analysis. Instead, the queue gate reads the full
 current GitHub queue and finds the entry for the exact queue SHA. It requires
 a continuous chain from current main to that entry and a successful Sonar gate
-on every member PR's exact current head. Missing, stale, or unclear membership,
+on every member PR's exact current head. A passing status must link to this
+repository's successful default-branch Quality Gate workflow_run execution,
+with a nonexpired successful-scan artifact named for that exact head. A status
+from an ordinary PR workflow is not trusted, even if GitHub Actions published
+it. Scan proof artifacts last seven days; rerun a scan if its proof expires.
+Missing, stale, or unclear membership,
 or any missing, pending, or failed PR status, fails the queue gate. Existing
 merge-group CI still tests the combined code. The status description says that
 the queue commit itself was not Sonar-scanned. A failed or cancelled upstream CI run produces a failed gate
@@ -76,6 +81,15 @@ branch protection does not require SonarCloud. A maintainer must first check:
    monitor queue time and memory before making this required. A successful
    October 25 run used about 150 runner-minutes across eight shards plus the
    combine job. Each PR update adds a sweep. Queue runs do not repeat it.
+
+The commit status still shares the GitHub Actions publisher identity with other
+repository workflows. Contributors who can run same-repository workflows with
+`statuses:write` remain trusted: they could publish the same status directly on
+a queue SHA. The member-PR proof checks prevent status forgery from fooling this
+workflow, but cannot stop another workflow from publishing the final check
+itself. If that contributor threat is in scope, use a dedicated publisher App
+or enforce a trusted required workflow at repository/organisation level before
+claiming that the gate prevents such forgery.
 
 Then a repository maintainer can require `SonarCloud Quality Gate` for main,
 including merge-queue commits. Keep the check name stable. Do not add path filters

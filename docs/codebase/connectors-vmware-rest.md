@@ -3019,30 +3019,29 @@ envelope (a request saved before #4217) is refused before anything runs
 — never the 9.0-only `sslCertificate` — so it works on the VCF 5.x
 migration-source fleet (#3056) as well as 9.0+.
 
-**Device-host thumbprint pinning (#3284).** Each disk PUT streams to an
-*absolute* per-device ESXi upload URL, not to `target.host`, so the pooled
-client's per-target SSRF host re-screen (keyed to `target.host`) does not run
-for the device host — a deliberate bypass, since screening would wrongly
-block a legitimate private ESXi host. The replacement control is certificate
-thumbprint pinning: `plan_transfers` captures each device URL's
-`HttpNfcLeaseDeviceUrl.sslThumbprint` (a SHA-1 hash of the DER certificate in
-colon-separated hex — the vim thumbprint convention `HostConnectSpec.sslThumbprint`
-documents), and `ovf_transfer.verify_device_thumbprint` opens a pre-flight
-`VERIFY_NONE` handshake to the device host and **refuses to stream a byte**
-unless the presented certificate hashes to that attestation. A mismatch — or
-a handshake that cannot obtain a certificate — raises `DeviceThumbprintError`,
-which `_run_transfer` catches before `httpx.HTTPError`, aborts the lease, and
-maps to a distinct `import_error` with a `security`-category issue (no disk
-bytes flowed). **Missing-thumbprint policy: fail-open.** An empty / absent
-`sslThumbprint` skips pinning and falls back to the pooled client's existing
-TLS trust, because the vim spec sanctions an empty value ("Empty if no SSL
-thumbprint is available or needed") — a conformant lease that omits the field
-must still import, and pinning is a strict improvement layered on top of the
-pre-existing "device URLs are trusted vendor data" posture, never a new gate
-that fails closed on legitimate traffic. The SSRF host screen stays off for
-device-URL PUTs; pinning is the replacement, comparison is
-colon/case-insensitive, and the 64-hex-char case is accepted as SHA-256 for
-forward-compatibility.
+**Device-host certificate checks.** Each disk PUT goes to the ESXi URL
+returned by vCenter's lease. `plan_transfers` keeps its `sslThumbprint`,
+which is a SHA-1 certificate hash (SHA-256 is also accepted). A fresh client
+checks this hash on the actual upload TLS connection, before sending HTTP
+headers, the lease token, or disk bytes. Every new connection checks again.
+There is no separate preflight connection. This supports self-signed ESXi
+certificates, even when normal TLS checks are disabled for the target.
+A missing certificate, bad hash, or mismatch raises `DeviceThumbprintError`;
+the engine aborts the lease and returns a security issue.
+
+When the lease has no hash, the upload requires normal CA and hostname
+checks, using the target's CA pin or the default trust store. A target with
+TLS checks disabled and no CA pin cannot upload without a lease hash.
+All device URLs must use HTTPS. The per-disk client carries no vCenter login
+cookies and follows no redirects. Private ESXi addresses remain supported:
+the authenticated lease and the upload certificate establish trust rather
+than a public-address-only rule.
+
+The transport wraps HTTPcore's network stream. It checks the peer after
+`start_tls` and blocks every write until that check passes. This follows the
+[HTTPcore network backend API](https://www.encode.io/httpcore/network-backends/).
+Real TLS tests cover self-signed matches, changed certificates, reconnects,
+missing hashes, CA pins, hostname checks, and redirects.
 
 **Envelope.** Item resolution (id passthrough or name find, ambiguity-refusing)
 reuses `_resolve_deploy_library_item`, and the outcome maps onto the **same**

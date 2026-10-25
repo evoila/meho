@@ -21,7 +21,6 @@ Block-topology and capacity reporting (``df`` / ``lsblk``) is out of scope
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
@@ -59,10 +58,31 @@ MOUNT_LIST_COMMAND: str = (
     "exportfs -s 2>/dev/null || showmount -e localhost 2>/dev/null || true"
 )
 
-#: ``mount(8)`` line shape: ``SOURCE on TARGET type FSTYPE (OPTIONS)``.
-_MOUNT8_RE: re.Pattern[str] = re.compile(
-    r"^(?P<source>.+?) on (?P<target>.+?) type (?P<fstype>\S+) \((?P<options>.*)\)\s*$"
-)
+
+def _mount8_fields(line: str) -> dict[str, str] | None:
+    """Read mount's separators from left to right, including ambiguous names."""
+    text = line.rstrip()
+    if not text.endswith(")") or "\n" in text:
+        return None
+    source_end = text.find(" on ", 1)
+    if source_end < 0:
+        return None
+    target_start = source_end + 4
+    type_at = text.find(" type ", target_start + 1)
+    while type_at >= 0:
+        type_start = type_at + 6
+        type_end = type_start
+        while type_end < len(text) and not text[type_end].isspace():
+            type_end += 1
+        if type_end > type_start and text[type_end : type_end + 2] == " (":
+            return {
+                "source": text[:source_end].strip(),
+                "target": text[target_start:type_at].strip(),
+                "fstype": text[type_start:type_end],
+                "options": text[type_end + 2 : -1].strip(),
+            }
+        type_at = text.find(" type ", type_at + 1)
+    return None
 
 
 def parse_mount_line(line: str) -> dict[str, Any] | None:
@@ -78,15 +98,9 @@ def parse_mount_line(line: str) -> dict[str, Any] | None:
     if not stripped:
         return None
 
-    match = _MOUNT8_RE.match(line)
-    if match is not None:
-        return {
-            "kind": "mount",
-            "source": match.group("source").strip(),
-            "target": match.group("target").strip(),
-            "fstype": match.group("fstype").strip(),
-            "options": match.group("options").strip(),
-        }
+    fields = _mount8_fields(line)
+    if fields is not None:
+        return {"kind": "mount", **fields}
 
     # findmnt raw: SOURCE TARGET FSTYPE OPTIONS (options never contain a
     # bare space; findmnt escapes them), so split on whitespace, 4 fields.

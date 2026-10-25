@@ -73,7 +73,7 @@ _HEADER_JOIN: Final[str] = " > "
 #: so one long heading line cannot fill every search hit's locator.
 MAX_HEADING_TITLE_CHARS: Final[int] = 200
 
-_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
+_HEADING_PREFIX = re.compile(r"^ {0,3}(#{1,6})[ \t]+")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
 _LINE_BREAK = re.compile(r"\n")
@@ -139,6 +139,20 @@ def chunk_markdown(body: str, count: Counter, window: int) -> list[KbPassage]:
     return passages
 
 
+def _heading(line: str) -> tuple[int, str] | None:
+    prefix = _HEADING_PREFIX.match(line)
+    if prefix is None:
+        return None
+    title = line[prefix.end() :].rstrip(" \t")
+    if "\n" in title:
+        return None
+    # A closing hash run is markup only when whitespace separates it from text.
+    end = len(title.rstrip("#"))
+    if end and end < len(title) and title[end - 1] in " \t":
+        title = title[:end].rstrip(" \t")
+    return len(prefix.group(1)), title
+
+
 def _sections(body: str) -> list[_Section]:
     """Cut *body* at every ATX heading outside a fenced code block."""
     sections: list[_Section] = []
@@ -156,13 +170,13 @@ def _sections(body: str) -> list[_Section]:
                 fence = marker
             elif marker[0] == fence[0] and len(marker) >= len(fence):
                 fence = None
-        elif fence is None and (heading := _HEADING.match(stripped)) is not None:
+        elif fence is None and (heading := _heading(stripped)) is not None:
             if offset > start:
                 sections.append(_Section(path, start, offset))
-            level = len(heading.group(1))
+            level, title = heading
             while stack and stack[-1][0] >= level:
                 stack.pop()
-            stack.append((level, heading.group(2).strip()[:MAX_HEADING_TITLE_CHARS]))
+            stack.append((level, title.strip()[:MAX_HEADING_TITLE_CHARS]))
             path = tuple(title for _level, title in stack)
             start = offset
         offset += len(line)

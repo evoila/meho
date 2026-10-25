@@ -376,10 +376,16 @@ def _audit_payload(
     *,
     deleted_group_keys: list[str],
 ) -> dict[str, Any]:
-    """Build the JSON-safe ``meho_connector_delete`` audit payload."""
+    """Build the JSON-safe ``meho_connector_delete`` audit payload.
+
+    ``product`` is the product the deleted rows were stored under. It
+    equals the id's product except for an old tenant copy under a
+    former product name (#4889), where it records which copy went.
+    """
     return {
         "connector_id": result.connector_id,
         "tenant_scope": str(scope.tenant_id) if scope.tenant_id is not None else None,
+        "product": scope.product,
         "deleted_group_keys": sorted(deleted_group_keys),
         "groups_deleted": result.groups_deleted,
         "operations_deleted": result.operations_deleted,
@@ -414,21 +420,28 @@ async def stage_connector_delete(
 
     The caller writes the audit row from ``audit_payload``, commits,
     and then applies :func:`deregister_staged_auto_shims`.
+
+    The residual probe and the shim walk use the triple parsed from
+    *connector_id*, not ``scope.product``. They agree except when
+    *scope* is an old tenant copy under a former product name (#4889):
+    dispatch and the registry key on the parsed product, so rows under
+    the former name neither need the shim nor count as residual.
     """
+    product, version, impl_id = parse_connector_id(connector_id)
     groups = await _scoped_groups(session, scope)
     op_total, op_enabled = await _scoped_descriptor_counts(session, scope)
 
     if not groups and op_total == 0:
-        if await _rows_exist_any_scope(session, scope.product, scope.version, scope.impl_id):
+        if await _rows_exist_any_scope(session, product, version, impl_id):
             raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=scope.tenant_id)
         return _registry_only_stage(scope, connector_id)
 
     group_keys = [group.group_key for group in groups]
     ops_deleted, groups_deleted = await _delete_scoped_rows(session, scope)
-    residual = await _rows_exist_any_scope(session, scope.product, scope.version, scope.impl_id)
+    residual = await _rows_exist_any_scope(session, product, version, impl_id)
     shim_keys: tuple[tuple[str, str, str], ...] = ()
     if not residual:
-        shim_keys = _auto_shim_keys_for_triple(scope.product, scope.version, scope.impl_id)
+        shim_keys = _auto_shim_keys_for_triple(product, version, impl_id)
 
     result = DeleteConnectorResult(
         connector_id=connector_id,

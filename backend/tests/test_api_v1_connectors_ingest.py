@@ -1940,7 +1940,7 @@ async def test_get_review_prefer_rejects_out_of_vocabulary_value(
 ) -> None:
     """#2029: an unknown ``prefer`` value is a 422 (the closed-set contract).
 
-    The selector is a closed ``Literal["tenant", "builtin"]``; FastAPI
+    The selector is a closed ``Literal["tenant", "builtin", "legacy"]``; FastAPI
     rejects any other value at validation time, so the closed-set
     guarantee holds at the wire.
     """

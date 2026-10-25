@@ -39,7 +39,9 @@ func newReviewCmd() *cobra.Command {
 			"piping to jq / saving for a review checkpoint).\n\n" +
 			"If the id matches both a built-in connector and a connector in\n" +
 			"your tenant, the command stops with an error. Pass\n" +
-			"--prefer tenant or --prefer builtin to pick one.",
+			"--prefer tenant or --prefer builtin to pick one. Pass\n" +
+			"--prefer legacy to see your tenant's old copy stored under a\n" +
+			"former product name (the copy `meho connector delete` removes first).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -94,7 +96,7 @@ func runReview(cmd *cobra.Command, opts reviewOptions) error {
 // 401-retry. The route declares `response_model=ConnectorReviewPayload`
 // so JSON200 carries the typed envelope; non-2xx surfaces as
 // *httpResponseError for the caller to route through renderHTTPStatus.
-// A non-empty prefer ("tenant" or "builtin") is sent as ?prefer=.
+// A non-empty prefer ("tenant", "builtin" or "legacy") is sent as ?prefer=.
 func getReview(ctx context.Context, backplaneURL, connectorID, prefer string) (*api.ConnectorReviewPayload, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -475,10 +476,15 @@ func stdoutPrompter(w io.Writer) auth.DeviceFlowPrompter {
 	return func(_ context.Context, resp *oauth2.DeviceAuthResponse) error {
 		fmt.Fprintf(w, "\nTo authenticate, open the following URL:\n  %s\n\nAnd enter the code:\n  %s\n\n",
 			resp.VerificationURI, resp.UserCode)
-		// Print without a trailing newline so the spinner-less wait
-		// for the IdP doesn't leave the cursor mid-line if the
-		// operator inspects the terminal during polling.
-		fmt.Fprintf(w, "Waiting for authorisation…\n")
+		fmt.Fprint(w, "Waiting for authorisation…")
+		// Tell the operator how long the code lives. Keycloak's
+		// default is ten minutes; a person who knows the deadline can
+		// decide whether to hurry or to rerun the login.
+		if !resp.Expiry.IsZero() {
+			fmt.Fprintf(w, " The code is valid for %s, until %s.",
+				time.Until(resp.Expiry).Round(time.Second), resp.Expiry.Local().Format("15:04"))
+		}
+		fmt.Fprintln(w)
 		return nil
 	}
 }

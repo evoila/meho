@@ -530,7 +530,10 @@ async def register_installer_composite_operations(
         response_schema=BRINGUP_COMPOSITE_RESPONSE,
         group_key=_GROUP_BRINGUP,
         when_to_use=INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP[_GROUP_BRINGUP],
-        tags=["vcf", "installer", "bringup", "deploy", "dangerous"],
+        # "credential" keeps the SddcSpec out of trace bodies. The check and the
+        # deploy call both run under this op, so both bodies are left out (the
+        # same tag as installer.sddc.spec.validate).
+        tags=["vcf", "installer", "bringup", "deploy", "dangerous", "credential"],
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=_BRINGUP_LLM_INSTRUCTIONS,

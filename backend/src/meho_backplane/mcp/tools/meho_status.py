@@ -69,11 +69,17 @@ register_mcp_tool(
             "Returns the operator's identity (sub, name, email, tenant_id, "
             "tenant_role) plus the "
             "MEHO backplane's dependency status: Vault federation chain "
-            "(reachable + KV read OK?) and DB migration state, the OAuth "
+            "(reachable + KV read OK?), DB migration state with the "
+            "database's revision and the revision this build expects, the "
+            "readiness checks /ready reports (name, ok, detail), the "
+            "approval settings in force (approval key state, whether a "
+            "second person must approve), the gated features and the "
+            "setting names they still need, the OAuth "
             "scopes this session holds, and which working-surface tools it "
             "should see versus the ones it lists. Call at "
             "MCP session start to verify the operator can reach all "
-            "subsystems before issuing product calls. No arguments."
+            "subsystems before issuing product calls, or after an upgrade "
+            "to confirm the database reached the new revision. No arguments."
         ),
         inputSchema={
             "type": "object",

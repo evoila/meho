@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -65,6 +66,7 @@ class _FakeConnector:
         self._mount_prefix = mount_prefix
         self.mount_calls: list[str] = []
         self.post_calls: list[tuple[str, dict[str, Any]]] = []
+        self.continue_sessions: list[str] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         del target, operator
@@ -78,14 +80,25 @@ class _FakeConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         # Both RetrievePropertiesEx reads route through the vmomi seam with
         # the spec-relative path (the /sdk/vim25 mount is the connector's
-        # job, #2466).
-        del target, operator
+        # job, #2466). A ContinueRetrievePropertiesEx page comes from the
+        # same sequence; the call records the session token it was pinned to.
+        del target, operator, promote_managed_object_not_found
         assert json is not None
+        if session_used is not None:
+            session_used.token = "<session-1>"
         self.post_calls.append((path, json))
-        return self._responses.pop(0)
+        if session_token is not None:
+            self.continue_sessions.append(session_token)
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _recent_task_result(moids: list[str]) -> dict[str, Any]:
@@ -310,3 +323,53 @@ def test_tasks_recent_group_has_non_empty_when_to_use() -> None:
     blurb = VMWARE_TYPED_WHEN_TO_USE_BY_GROUP.get(group_key)
     assert isinstance(blurb, str)
     assert blurb.strip()
+
+
+# ---------------------------------------------------------------------------
+# Paged info read (#4862)
+# ---------------------------------------------------------------------------
+
+_CONTINUE_PATH = "/PropertyCollector/propertyCollector/ContinueRetrievePropertiesEx"
+
+
+@pytest.mark.asyncio
+async def test_tasks_recent_reads_every_page_of_the_info_read() -> None:
+    """A split ``Task.info`` answer still gives every row its operation, state and times."""
+    conn = _FakeConnector(
+        responses=[
+            _recent_task_result(["task-1", "task-2"]),
+            {**_info_result({"task-1": _TASK_INFO_SUCCESS}), "token": "<token-1>"},
+            _info_result({"task-2": _TASK_INFO_ERROR}),
+        ]
+    )
+
+    out = await tasks_recent_impl(conn, _make_operator(), _Target(), {})
+
+    tasks = out["tasks"]
+    assert [t["task"] for t in tasks] == ["task-1", "task-2"]
+    assert [t["operation"] for t in tasks] == [
+        _TASK_INFO_SUCCESS["descriptionId"],
+        _TASK_INFO_ERROR["descriptionId"],
+    ]
+    assert [t["state"] for t in tasks] == ["success", "error"]
+    assert tasks[0]["queue_time"] == _TASK_INFO_SUCCESS["queueTime"]
+    assert tasks[1]["error_message"] == "The operation is not allowed in the current state."
+    # The token of the first page went once to ContinueRetrievePropertiesEx,
+    # on the session the first call used.
+    assert conn.post_calls[2] == (_CONTINUE_PATH, {"token": "<token-1>"})
+    assert conn.continue_sessions == ["<session-1>"]
+
+
+@pytest.mark.asyncio
+async def test_tasks_recent_failed_page_fails_the_operation() -> None:
+    """A lost page fails the read; no row comes back with only its id."""
+    conn = _FakeConnector(
+        responses=[
+            _recent_task_result(["task-1", "task-2"]),
+            {**_info_result({"task-1": _TASK_INFO_SUCCESS}), "token": "<token-1>"},
+            httpx.ConnectError("page lost"),
+        ]
+    )
+
+    with pytest.raises(httpx.ConnectError):
+        await tasks_recent_impl(conn, _make_operator(), _Target(), {})

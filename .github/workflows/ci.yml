@@ -566,7 +566,8 @@ jobs:
           # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB each
           # vcf-automation-9.0-reference / -9.1 / -9.1.1 + ~0.4 MB
           # vcf-installer-9.0 + ~0.4 MB vcf-installer-9.1 + ~5 MB
-          # vcf-operations-9.0 + ~1.3 MB vcf-protection-and-recovery-9.1
+          # vcf-operations-9.0 + ~0.1 MB vcf-operations-orchestrator-9.0
+          # / -9.1 + ~1.3 MB vcf-protection-and-recovery-9.1
           # + ~0.4 MB vks-9.0), not the
           # whole consumer repo. No
           # `ref:` pin — the shelf's default branch IS the
@@ -596,6 +597,8 @@ jobs:
             docs/vcf-installer-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vcf-operations-orchestrator-9.0
+            docs/vcf-operations-orchestrator-9.1
             docs/vcf-protection-and-recovery-9.1
             docs/vks-9.0
           filter: blob:none
@@ -646,14 +649,17 @@ jobs:
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
+            spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
             spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; recovery-srm-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -948,14 +954,17 @@ jobs:
           # measured file times are stale — refresh tests/_unit_shard_durations.json
           # (see tests/_unit_shard_split.py) rather than bumping only this budget.
           # Add a shard (matrix + TOTAL) only when all shards are near the budget.
-          budget_s=660
+          # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
+          # node), shards that pass every test can take 674-710 s, and 660 s
+          # dropped good pull requests from the merge queue.
+          budget_s=900
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
           # in each xdist worker, so a test that stops making progress fails
           # on its own after 180 s with its name and a stack dump of every
           # thread, instead of sitting silent (one dot per test, no names)
           # until the 20-min job cap. The shard then still lands inside the
-          # 660 s budget below. Mirrors the python-coverage job's guard;
+          # 900 s budget below. Mirrors the python-coverage job's guard;
           # --timeout-method=signal (NOT thread) is load-bearing under xdist:
           # thread calls os._exit(), which xdist reads as a worker crash and
           # whose stack dump it swallows. 180 s is ~3x the slowest honest
@@ -1911,6 +1920,8 @@ jobs:
             docs/vcf-installer-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vcf-operations-orchestrator-9.0
+            docs/vcf-operations-orchestrator-9.1
             docs/vcf-protection-and-recovery-9.1
             docs/vks-9.0
           filter: blob:none
@@ -1954,14 +1965,17 @@ jobs:
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
+            spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
             spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; recovery-srm-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the
@@ -2025,7 +2039,10 @@ jobs:
         # self-checks also run (again) here — seconds, harmless. Lane
         # placement rule + amortisation pattern:
         # docs/decisions/spec-reconcile-guards-standard.md.
-        run: uv run pytest -x tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
+        # -rs prints the reason of every skipped test. The k3s tests skip
+        # when the cluster cannot pull an image; without the reason a green
+        # lane hides that nothing ran on the cluster.
+        run: uv run pytest -x -rs tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
 
   python-migration-tests:
     name: Python (database migrations)

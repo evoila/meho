@@ -209,8 +209,10 @@ def test_flattened_2973_bodies_are_served_flat_by_the_pinned_spec() -> None:
 
 from meho_backplane.connectors.vmware_rest import ovf_import_control  # noqa: E402
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
+    _alarm,
     _datastore_browse,
     _read,
+    _snapshot,
     _teardown_network,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
@@ -268,10 +270,14 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _teardown_network._DVS_PORT_CRITERIA_TYPE,
     _datastore_browse._SEARCH_SPEC_TYPE,
     _datastore_browse._FILE_QUERY_FLAGS_TYPE,
+    # The VM snapshot create's quiesce request.
+    _snapshot._GUEST_QUIESCE_SPEC_TYPE,
     # #3706 event.tail QueryEvents filter.
     _read._EVENT_FILTER_SPEC_TYPE,
     _read._EVENT_FILTER_SPEC_BY_TIME_TYPE,
     _read._EVENT_FILTER_SPEC_BY_ENTITY_TYPE,
+    # #4383 alarm.reset ClearTriggeredAlarms filter.
+    _alarm._ALARM_FILTER_SPEC_TYPE,
 }
 
 

@@ -119,6 +119,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -169,23 +170,6 @@ _RESOURCE_KIND_PROPERTIES_PATH = (
 )
 _LICENSING_EDITION_PATH = "/suite-api/api/product/licensing/edition"
 _LICENSING_INFO_PATH = "/suite-api/api/product/licensing/info"
-
-#: How many characters of a licence key stay visible after masking.
-_LICENSE_KEY_VISIBLE_CHARS = 5
-
-
-def _mask_license_key(value: Any) -> Any:
-    """Hide a licence key except its last few characters.
-
-    A short value is hidden in full, so a masked key never shows more than
-    a small tail. A value that is not a non-empty string is returned as is.
-    """
-    if not isinstance(value, str) or not value:
-        return value
-    if len(value) <= 2 * _LICENSE_KEY_VISIBLE_CHARS:
-        return "*" * len(value)
-    tail = value[-_LICENSE_KEY_VISIBLE_CHARS:]
-    return "*" * (len(value) - _LICENSE_KEY_VISIBLE_CHARS) + tail
 
 
 def _vrops_acquire_payload_builder(
@@ -705,7 +689,7 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         info = await self._get_json(target, _LICENSING_INFO_PATH, operator=operator)
         result = {**info, **edition}
         if "licenseKey" in result:
-            result["licenseKey"] = _mask_license_key(result["licenseKey"])
+            result["licenseKey"] = mask_license_key(result["licenseKey"])
         return result
 
     async def invalidate_credentials(self, target: VcfOperationsTargetLike) -> None:

@@ -334,9 +334,15 @@ var errDeviceCodeExpired = errors.New("meho: device code expired before authoris
 // reach the server closer together than the wait. The wait follows
 // §3.5: the server's interval first, plus slowDownStep after every
 // slow_down, capped at maxPollInterval (or the server's interval, if
-// longer). When the next regular check would fall inside the last
-// lastCheckMargin of the code's life, that check moves to the margin
-// and is the final one.
+// longer). The last check before the code's end is planned ahead
+// (see nextCheck) so that it, too, keeps the full wait to the check
+// before it; the IdP answers slow_down to a check that comes sooner,
+// which would hide an approval.
+//
+// The code's end is also a deadline for the sleeps and the requests,
+// as it was in the oauth2 package's own loop. An answer that stalls
+// past the end stops the login with the "device code expired"
+// message, not with the outer PollTimeout message.
 func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, clientID string, da *oauth2.DeviceAuthResponse) (*oauth2.Token, error) {
 	wait := defaultPollInterval
 	if da.Interval > 0 {
@@ -344,21 +350,42 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 	}
 	maxWait := max(maxPollInterval, wait)
 
+	pollCtx := ctx
+	if !da.Expiry.IsZero() {
+		var cancel context.CancelFunc
+		pollCtx, cancel = context.WithDeadline(ctx, da.Expiry)
+		defer cancel()
+	}
+	// codeEnded reports whether the code's own deadline, and not the
+	// caller's context, ended the wait or the request.
+	codeEnded := func() bool { return pollCtx.Err() != nil && ctx.Err() == nil }
+
 	form := url.Values{
 		"grant_type":  {deviceCodeGrantType},
 		"device_code": {da.DeviceCode},
 		"client_id":   {clientID},
 	}
 
+	first := true
 	for {
-		delay, last := nextCheckDelay(time.Now(), wait, da.Expiry)
-		if err := sleepCtx(ctx, delay); err != nil {
+		delay, last, ok := nextCheck(time.Now(), wait, first, da.Expiry)
+		if !ok {
+			return nil, errDeviceCodeExpired
+		}
+		if err := sleepCtx(pollCtx, delay); err != nil {
+			if codeEnded() {
+				return nil, errDeviceCodeExpired
+			}
 			return nil, err
 		}
+		first = false
 
-		tok, err := requestDeviceToken(ctx, httpClient, tokenURL, form)
+		tok, err := requestDeviceToken(pollCtx, httpClient, tokenURL, form)
 		if err == nil {
 			return tok, nil
+		}
+		if codeEnded() {
+			return nil, errDeviceCodeExpired
 		}
 		var retr *oauth2.RetrieveError
 		if !errors.As(err, &retr) {
@@ -379,19 +406,41 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 	}
 }
 
-// nextCheckDelay returns how long to wait before the next check and
-// whether that check is the last one before the code's end. A zero
-// expiry means the server sent no expires_in; then the regular
-// cadence continues until the caller's context ends.
-func nextCheckDelay(now time.Time, wait time.Duration, expiry time.Time) (time.Duration, bool) {
+// nextCheck plans the next check. It returns how long to wait before
+// it, whether it is the last one before the code's end, and false as
+// the third value when no check fits before the end any more.
+//
+// A zero expiry means the server sent no expires_in; then the regular
+// cadence continues until the caller's context ends. Otherwise the
+// last check is meant to run lastCheckMargin before the end. The
+// regular cadence goes on only while another full wait still fits
+// between the next check and that moment; else the next check is the
+// last one. The last check keeps the full wait to the check before
+// it, even when that puts it inside the margin, because a check that
+// comes sooner draws slow_down and hides the approval. first is true
+// before the first check: the server has seen no request yet, so no
+// minimum gap applies and the check may run at once.
+func nextCheck(now time.Time, wait time.Duration, first bool, expiry time.Time) (time.Duration, bool, bool) {
 	if expiry.IsZero() {
-		return wait, false
+		return wait, false, true
 	}
 	lastCheckAt := expiry.Add(-lastCheckMargin)
-	if now.Add(wait).Before(lastCheckAt) {
-		return wait, false
+	regular := now.Add(wait)
+	if !regular.Add(wait).After(lastCheckAt) {
+		return wait, false, true
 	}
-	return max(lastCheckAt.Sub(now), 0), true
+	earliest := regular
+	if first {
+		earliest = now
+	}
+	checkAt := lastCheckAt
+	if earliest.After(checkAt) {
+		checkAt = earliest
+	}
+	if !checkAt.Before(expiry) {
+		return 0, true, false
+	}
+	return checkAt.Sub(now), true, true
 }
 
 // sleepCtx waits for d or until ctx is done, whichever comes first.

@@ -291,12 +291,26 @@ func TestRunDeviceFlowHappyPath(t *testing.T) {
 // pollingFakeIdP is a fake IdP for the polling tests. Every token
 // request records its arrival time; answers come from the supplied
 // script in order (an empty entry means "issue the token").
+//
+// Like Keycloak, the fake answers slow_down to a token request that
+// arrives less than interval after the last accepted one, and counts
+// it in tooSoon. Such a request does not use up a script entry.
 type pollingFakeIdP struct {
 	srv       *httptest.Server
 	mu        sync.Mutex
+	started   time.Time
 	arrivals  []time.Time
 	authHdrs  []string
 	clientIDs []string
+	accepted  time.Time
+	tooSoon   int
+	// approveAfter, when set, replaces the script: token requests that
+	// arrive earlier than this after the device-auth answer are
+	// pending, later ones get the token.
+	approveAfter time.Duration
+	// stall makes the token endpoint hold every request open until
+	// the client gives up on it.
+	stall bool
 }
 
 // newPollingFakeIdP starts a fake IdP whose device-auth answer carries
@@ -306,9 +320,13 @@ type pollingFakeIdP struct {
 func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *pollingFakeIdP {
 	t.Helper()
 	f := &pollingFakeIdP{}
+	minGap := time.Duration(interval) * time.Second
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/auth/device":
+			f.mu.Lock()
+			f.started = time.Now()
+			f.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"device_code":      "dc",
@@ -319,16 +337,38 @@ func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *
 			})
 		case "/token":
 			_ = r.ParseForm()
+			now := time.Now()
 			f.mu.Lock()
-			n := len(f.arrivals)
-			f.arrivals = append(f.arrivals, time.Now())
+			f.arrivals = append(f.arrivals, now)
 			f.authHdrs = append(f.authHdrs, r.Header.Get("Authorization"))
 			f.clientIDs = append(f.clientIDs, r.PostForm.Get("client_id"))
+			if f.stall {
+				f.mu.Unlock()
+				<-r.Context().Done()
+				return
+			}
+			answer := ""
+			switch {
+			case !f.accepted.IsZero() && now.Sub(f.accepted) < minGap:
+				f.tooSoon++
+				answer = "slow_down"
+			case f.approveAfter > 0:
+				f.accepted = now
+				if now.Sub(f.started) < f.approveAfter {
+					answer = "authorization_pending"
+				}
+			default:
+				n := len(f.arrivals) - 1 - f.tooSoon
+				f.accepted = now
+				if n < len(script) {
+					answer = script[n]
+				}
+			}
 			f.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			if n < len(script) && script[n] != "" {
+			if answer != "" {
 				w.WriteHeader(http.StatusBadRequest)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": script[n]})
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": answer})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -342,6 +382,21 @@ func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// setApproveAfter makes the fake approve the code d after the
+// device-auth answer, like a person who approves late.
+func (f *pollingFakeIdP) setApproveAfter(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approveAfter = d
+}
+
+// setStall makes the token endpoint hold every request open.
+func (f *pollingFakeIdP) setStall() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stall = true
 }
 
 func (f *pollingFakeIdP) doc() *DiscoveryDocument {
@@ -369,6 +424,14 @@ func (f *pollingFakeIdP) requests() int {
 	return len(f.arrivals)
 }
 
+// rejectedTooSoon is how many token requests arrived less than
+// interval after the last accepted one.
+func (f *pollingFakeIdP) rejectedTooSoon() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tooSoon
+}
+
 // setPollKnobs shortens the polling knobs for one test and restores
 // them afterwards.
 func setPollKnobs(t *testing.T, step, maxWait, margin time.Duration) {
@@ -390,14 +453,20 @@ func assertGapAbout(t *testing.T, name string, got, want time.Duration) {
 	}
 }
 
+// runFlow runs the device flow against the fake and fails the test
+// when any check reached the fake sooner than its interval allows.
 func runFlow(t *testing.T, f *pollingFakeIdP) (*LoginResult, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return RunDeviceFlow(ctx, f.doc(), "meho-cli", DeviceFlowOptions{
+	result, err := RunDeviceFlow(ctx, f.doc(), "meho-cli", DeviceFlowOptions{
 		HTTPClient: f.srv.Client(),
 		Prompter:   func(context.Context, *oauth2.DeviceAuthResponse) error { return nil },
 	})
+	if n := f.rejectedTooSoon(); n != 0 {
+		t.Errorf("%d token request(s) came sooner than the interval allows", n)
+	}
+	return result, err
 }
 
 // TestRunDeviceFlowOneRequestPerCheck pins the core of #4892: every
@@ -512,37 +581,98 @@ func TestRunDeviceFlowExpiresWithoutApproval(t *testing.T) {
 	if strings.Contains(err.Error(), "timed out") {
 		t.Errorf("error must not blame the 10-minute cap: %q", err.Error())
 	}
-	// Checks at ~1s and ~2s, then the last one at ~2.5s; the loop
-	// stops before the 3s end instead of running into the cap.
-	if got := f.requests(); got != 3 {
-		t.Errorf("token requests: %d, want 3", got)
+	// A check at ~1s, then the last one at ~2.5s (a regular check at
+	// ~2s would leave only 0.5s to the last one); the loop stops
+	// before the 3s end instead of running into the cap.
+	if got := f.requests(); got != 2 {
+		t.Errorf("token requests: %d, want 2", got)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second+gapTolerance {
 		t.Errorf("loop ran %v, should stop at the code's end (3s)", elapsed)
 	}
 }
 
-// TestNextCheckDelay pins the arithmetic of the last check.
-func TestNextCheckDelay(t *testing.T) {
+// TestRunDeviceFlowLastCheckKeepsTheGap: the last check is planned
+// so that it keeps the full wait to the check before it. Here the code
+// lives 5s, the interval is 1s and the last check is meant for 1.5s
+// before the end: checks at ~1s and ~2s, then the last one at ~3.5s.
+// Moving only the final check (~3s regular, ~3.5s last) would put two
+// checks 0.5s apart; the fake, like Keycloak, answers slow_down to
+// that, and the approval at 3.2s would be reported as "expired".
+func TestRunDeviceFlowLastCheckKeepsTheGap(t *testing.T) {
+	setPollKnobs(t, time.Second, 30*time.Second, 1500*time.Millisecond)
+	f := newPollingFakeIdP(t, 5, 1, nil)
+	f.setApproveAfter(3200 * time.Millisecond)
+	result, err := runFlow(t, f)
+	if err != nil {
+		t.Fatalf("RunDeviceFlow: %v", err)
+	}
+	if result.Token.AccessToken != "at" {
+		t.Errorf("access token: %q", result.Token.AccessToken)
+	}
+	if got := f.requests(); got != 3 {
+		t.Fatalf("token requests: %d, want 3", got)
+	}
+	gaps := f.gaps()
+	assertGapAbout(t, "regular gap", gaps[0], time.Second)
+	assertGapAbout(t, "gap before the last check", gaps[1], 1500*time.Millisecond)
+}
+
+// TestRunDeviceFlowStalledAnswerEndsWithTheCode: an answer that never
+// arrives cannot keep the login waiting past the code's end. The code
+// lives 2s; the one check (at ~1.5s) stalls, and the loop stops at
+// ~2s with the "device code expired" message, not the 10-minute one.
+func TestRunDeviceFlowStalledAnswerEndsWithTheCode(t *testing.T) {
+	setPollKnobs(t, 5*time.Second, 30*time.Second, 500*time.Millisecond)
+	f := newPollingFakeIdP(t, 2, 1, nil)
+	f.setStall()
+	start := time.Now()
+	_, err := runFlow(t, f)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	if !strings.Contains(err.Error(), "device code expired") {
+		t.Errorf("error should say the code expired, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error must not blame the 10-minute cap: %q", err.Error())
+	}
+	if got := f.requests(); got != 1 {
+		t.Errorf("token requests: %d, want 1", got)
+	}
+	if elapsed < 2*time.Second-20*time.Millisecond || elapsed > 2*time.Second+gapTolerance {
+		t.Errorf("loop ran %v, should stop at the code's end (2s)", elapsed)
+	}
+}
+
+// TestNextCheck pins the arithmetic of the last check.
+func TestNextCheck(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name     string
 		wait     time.Duration
+		first    bool
 		expiry   time.Time
 		want     time.Duration
 		wantLast bool
+		wantOK   bool
 	}{
-		{"no expiry keeps cadence", 5 * time.Second, time.Time{}, 5 * time.Second, false},
-		{"far from the end", 5 * time.Second, now.Add(time.Minute), 5 * time.Second, false},
-		{"next check inside the margin", 5 * time.Second, now.Add(6 * time.Second), 4 * time.Second, true},
-		{"next check after the end", 10 * time.Second, now.Add(3 * time.Second), time.Second, true},
-		{"already inside the margin", 5 * time.Second, now.Add(time.Second), 0, true},
+		{"no expiry keeps cadence", 5 * time.Second, false, time.Time{}, 5 * time.Second, false, true},
+		{"far from the end", 5 * time.Second, false, now.Add(time.Minute), 5 * time.Second, false, true},
+		{"another wait still fits", 5 * time.Second, false, now.Add(12 * time.Second), 5 * time.Second, false, true},
+		{"another wait would not fit", 5 * time.Second, false, now.Add(11 * time.Second), 9 * time.Second, true, true},
+		{"last check keeps the gap", 5 * time.Second, false, now.Add(6 * time.Second), 5 * time.Second, true, true},
+		{"first check may run at the margin", 10 * time.Second, true, now.Add(3 * time.Second), time.Second, true, true},
+		{"first check already inside the margin", 5 * time.Second, true, now.Add(time.Second), 0, true, true},
+		{"no check fits before the end", 10 * time.Second, false, now.Add(3 * time.Second), 0, true, false},
+		{"gap-keeping check would be at the end", 5 * time.Second, false, now.Add(5 * time.Second), 0, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, last := nextCheckDelay(now, tc.wait, tc.expiry)
-			if got != tc.want || last != tc.wantLast {
-				t.Errorf("got (%v, %v), want (%v, %v)", got, last, tc.want, tc.wantLast)
+			got, last, ok := nextCheck(now, tc.wait, tc.first, tc.expiry)
+			if got != tc.want || last != tc.wantLast || ok != tc.wantOK {
+				t.Errorf("got (%v, %v, %v), want (%v, %v, %v)", got, last, ok, tc.want, tc.wantLast, tc.wantOK)
 			}
 		})
 	}

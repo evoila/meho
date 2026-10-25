@@ -531,12 +531,25 @@ Authorization Grant (RFC 8628). End-to-end shape:
      later ones. It never grows past 30 seconds (or past the IdP's own
      `interval`, if that is longer). The cap only stops an IdP that
      keeps answering `slow_down` from stretching the wait without end.
-   * **Last check before the end.** When the next regular check would
-     fall inside the last 2 seconds of the code's life (`expires_in`),
-     it moves to that moment and is the final one. If it is still
-     pending, the login stops with "device code expired before
-     authorisation", not with the 10-minute timeout message. Without
-     `expires_in` the regular cadence continues until `PollTimeout`.
+   * **Last check before the end.** The final check is meant to run
+     2 seconds before the code's life (`expires_in`) ends. The regular
+     cadence goes on only while another full wait still fits between
+     the next check and that moment; otherwise the next check is the
+     final one. The final check keeps the full wait to the check before
+     it, even if that puts it inside the last 2 seconds: Keycloak
+     answers `slow_down` to a check that comes sooner than `interval`
+     after the previous one, and that answer would hide an approval.
+     (The very first check has no such limit; the IdP has seen no
+     request yet.) If the final check is still pending, or no check
+     fits before the end any more, the login stops with "device code
+     expired before authorisation", not with the 10-minute timeout
+     message. Without `expires_in` the regular cadence continues until
+     `PollTimeout`.
+   * **The code's end is a deadline.** The sleeps and the token
+     requests run on a context that ends with the code (as in the
+     oauth2 package's own loop). An answer that stalls past the end
+     stops the login with the "device code expired" message, not with
+     the 10-minute one.
    * The "Waiting for authorisation…" line in step 4 also says how long
      the code is valid and until when (local time), when the IdP sent
      `expires_in`.

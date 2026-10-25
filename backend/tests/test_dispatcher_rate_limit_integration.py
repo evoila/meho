@@ -22,6 +22,7 @@ param validation, the limit primitives, the audit writer, the policy gate):
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -31,6 +32,7 @@ import meho_backplane.operations.dispatcher as dispatcher
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.operations import dispatch
+from meho_backplane.settings import get_settings
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000f1")
 _RECEIPT = uuid.UUID("00000000-0000-0000-0000-00000000a669")
@@ -43,6 +45,17 @@ def _operator() -> Operator:
         tenant_id=_TENANT,
         tenant_role=TenantRole.OPERATOR,
     )
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the settings the params hash reads its server key from."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture

@@ -686,6 +686,38 @@ hour by default. The container status keeps the reason for as long as
 the pod exists. The change is additive: `state` and `last_state` keep
 their one-word shape.
 
+### Environment variable sources in `k8s.pod.info` and `k8s.deployment.info` (#4890)
+
+A variable that takes its value from a Secret or a ConfigMap has no
+literal value in the pod definition. Before #4890 both ops showed it
+as `{"name": ..., "value": null}`, the same as an empty variable. Now
+each `containers[].env` and `init_containers[].env` entry built by
+`_env_var_row()` in `ops_workload.py` keeps `name` and `value`, and
+adds `value_from` when the entry has a source:
+
+| `value_from` key | source in the pod spec | fields shown |
+| --- | --- | --- |
+| `secret_key_ref` | `valueFrom.secretKeyRef` | `name` (the Secret), `key`, `optional` |
+| `config_map_key_ref` | `valueFrom.configMapKeyRef` | `name` (the ConfigMap), `key`, `optional` |
+| `field_ref` | `valueFrom.fieldRef` | `field_path` (for example `status.podIP`) |
+| `resource_field_ref` | `valueFrom.resourceFieldRef` | `container_name`, `resource` (for example `limits.memory`) |
+| `file_key_ref` | `valueFrom.fileKeyRef` | `volume_name`, `path`, `key`, `optional` |
+
+A literal entry has no `value_from` key, so its shape is unchanged.
+
+Each container also gets `env_from` (`_env_from_row()`): one row per
+`envFrom` source with `kind` (`secret_ref` or `config_map_ref`), the
+object `name`, `optional` and `prefix`. `envFrom` loads every key of
+the object as a variable, so the row names the object only.
+
+MEHO does not read the Secret or the ConfigMap for this. The ops still
+make one `list_namespaced_pod` / `list_namespaced_deployment` call and
+copy the names, keys and field paths already written in the pod
+definition. No secret value can appear in the result. The main use is
+a container waiting with `CreateContainerConfigError`: the status row
+says the container cannot start, and `value_from` / `env_from` say
+which Secret and key it asks for.
+
 ### Job reads (`ops_job.py`)
 
 `k8s.job.list` and `k8s.job.info` answer "did the Job finish, and did it

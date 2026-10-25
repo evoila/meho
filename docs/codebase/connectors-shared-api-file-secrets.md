@@ -124,7 +124,11 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      holds one) is checked like a JSON file: a request line followed by
      its JSON body is the usual shape. The block comes back as plain text, without the
      child elements; the text around the JSON goes through the general
-     rules. A block that holds no JSON keeps its child elements. A block
+     rules. A child element keeps the check it gets on its own: a secret
+     child (`<span id="password">`) is joined as the placeholder, and a
+     nested `<script>` as what it would come back as (its JSON checked,
+     anything else the placeholder). A block that holds no JSON keeps its
+     child elements. A block
      the parser cannot finish within a bounded amount of work (brackets
      that open over and over and never close) comes back as the
      placeholder.

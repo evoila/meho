@@ -20,7 +20,8 @@ joined over child elements (syntax highlighting with ``<span>``), is read
 as one document, and every JSON object in it (the body after a request
 line, for example; also a list that holds an object) is checked like a
 JSON file. Such a block comes back as plain text, without the child
-elements.
+elements; a secret child element and a non-JSON script in it are joined
+as the placeholder, as they would come back on their own.
 """
 
 from __future__ import annotations
@@ -379,9 +380,7 @@ def _html_children(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
 
 
 def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
-    secret = _element_is_secret(
-        node.tag.rpartition(":")[2], node.attrs, _html_name, is_secret_name_lowercased
-    )
+    secret = _html_element_is_secret(node)
     head = [f"<{node.tag}"]
     for key, value in node.attrs:
         if value is None:
@@ -426,13 +425,15 @@ def _html_example(node: _HtmlNode, scrubber: Scrubber) -> str | None:
     and is checked as any other element. A block the parser cannot finish
     within its work budget comes back as the placeholder.
     """
-    text = "".join(_html_text(node))
+    joined = Scrubber()
+    text = "".join(_html_text(node, joined))
     documents = _json_documents(text)
     if documents is None:
         scrubber.count += 1
         return REDACTED
     if not documents:
         return None
+    scrubber.count += joined.count
     out: list[str] = []
     position = 0
     for start, end, parsed in documents:
@@ -491,13 +492,34 @@ def _holds_object(value: Any) -> bool:
     return isinstance(value, list) and any(_holds_object(item) for item in value)
 
 
-def _html_text(node: _HtmlNode) -> Iterable[str]:
-    """Every text value under *node*, in order, without the markup."""
+def _html_text(node: _HtmlNode, scrubber: Scrubber) -> Iterable[str]:
+    """Every text value under *node*, in order, without the markup.
+
+    A child element keeps the check it gets on its own: a secret element
+    (``<span id="password">``) with content gives the placeholder in
+    place of its content, and a script gives what :func:`_html_script`
+    gives. *scrubber* counts these; the caller adds the count when it
+    uses the joined text.
+    """
     for child in node.children:
         if isinstance(child, str):
             yield child
-        elif child.tag != "!":
-            yield from _html_text(child)
+        elif child.tag == "!":
+            continue
+        elif _html_element_is_secret(child):
+            if child.children:
+                scrubber.count += 1
+                yield REDACTED
+        elif child.tag == "script":
+            yield _html_script(child, scrubber)
+        else:
+            yield from _html_text(child, scrubber)
+
+
+def _html_element_is_secret(node: _HtmlNode) -> bool:
+    return _element_is_secret(
+        node.tag.rpartition(":")[2], node.attrs, _html_name, is_secret_name_lowercased
+    )
 
 
 def _html_name(key: str) -> tuple[str, str]:

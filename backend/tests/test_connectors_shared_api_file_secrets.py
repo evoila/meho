@@ -637,6 +637,56 @@ def test_html_example_with_brackets_that_open_no_json_is_unchanged() -> None:
     assert count == 0
 
 
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (
+            f'<pre><span id="password">{_SECRET}</span>{{"ok": true}}</pre>',
+            f'<pre>{REDACTED}{{"ok":true}}</pre>',
+        ),
+        (
+            f'<pre>Token:\n<code name="token">{_SECRET}</code>\n{{"ok": true}}</pre>',
+            f'<pre>Token:\n{REDACTED}\n{{"ok":true}}</pre>',
+        ),
+        (
+            f'<pre><b><password>{_SECRET}</password></b>\n[{{"ok": true}}]</pre>',
+            f'<pre>{REDACTED}\n[{{"ok":true}}]</pre>',
+        ),
+    ],
+    ids=["span-named-password", "code-named-token", "secret-named-element-nested"],
+)
+def test_html_example_keeps_the_check_of_a_secret_child_element(
+    document: str, expected: str
+) -> None:
+    """Joining the block's text must not drop the check a secret child gets on its own."""
+    text, count = _check(document, _HTML)
+    assert text == expected
+    assert count == 1
+
+
+def test_html_example_with_a_secret_child_but_no_json_keeps_its_markup() -> None:
+    text, count = _check(f'<pre><span id="password">{_SECRET}</span> is the password</pre>', _HTML)
+    assert text == f'<pre><span id="password">{REDACTED}</span> is the password</pre>'
+    assert count == 1
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        (f'<script>var password = "{_SECRET}";</script>', REDACTED),
+        (
+            f'<script type="application/json">{{"password": "{_SECRET}"}}</script>',
+            f'{{"password":"{REDACTED}"}}',
+        ),
+    ],
+    ids=["not-json", "json"],
+)
+def test_html_example_keeps_the_check_of_a_nested_script(script: str, expected: str) -> None:
+    text, count = _check(f'<pre>{script}\n{{"ok": true}}</pre>', _HTML)
+    assert text == f'<pre>{expected}\n{{"ok":true}}</pre>'
+    assert count == 1
+
+
 def test_html_example_the_parser_cannot_finish_is_withheld() -> None:
     """Brackets that open over and over and never close would cost a read per bracket."""
     text, count = _check("<pre>" + "[1,1,1,1," * 2000 + "</pre>", _HTML)

@@ -1044,6 +1044,13 @@ _SECRET_PAGES: list[Any] = [
         id="json-example-coloured-with-span",
     ),
     pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre><span id="password">example-secret-value-0123456789</span>{"ok": true}</pre>',
+        "example-secret-value-0123456789",
+        id="secret-child-element-before-json-in-one-block",
+    ),
+    pytest.param(
         "application/json",
         _API_DOCS,
         '{"username": "admin", "password": "it\'s-a-secret-0123456789"}',

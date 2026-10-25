@@ -696,22 +696,15 @@ async def test_job_result_names_failed_states_and_replaces_secrets(
     assert failed["states_total"] == 2
     assert failed["states_failed"] == 1
     assert failed["failed_states"] == [
-        {
-            "state": "file_|-cfg_|-/etc/made-up.conf_|-managed",
-            "name": "/etc/made-up.conf",
-            "comment": "Source file not found",
-        }
+        _state_entry(state="file.managed", name="/etc/made-up.conf", result=False)
     ]
     assert failed["return_truncated"] is False
     assert failed["return_withheld"] is False
-    assert failed["return"] == {
-        "file_|-cfg_|-/etc/made-up.conf_|-managed": _state_entry(
-            result=False, name="/etc/made-up.conf", comment="Source file not found"
-        ),
-        "pkg_|-tool_|-tool_|-installed": _state_entry(
-            result=True, name="tool", comment="ok", changed=True
-        ),
-    }
+    assert failed["return"] == [
+        _state_entry(state="file.managed", name="/etc/made-up.conf", result=False),
+        _state_entry(state="pkg.installed", name="tool", result=True, changed=True),
+    ]
+    assert "Source file not found" not in json.dumps(body)
     assert failed["fun_args"] == ["made-up-state"]
     assert failed["fun_args_withheld"] is False
     assert good["return"] is None
@@ -727,19 +720,18 @@ def _one_return(row: dict[str, Any]) -> _Answers:
 
 
 def _state_entry(
-    *, result: bool, name: str, comment: str | None, changed: bool = False
+    *, state: str | None, result: bool | None, name: str | None = None, changed: bool = False
 ) -> dict[str, Any]:
     """The reduced form of one state in a shown state run return."""
     return {
-        "result": result,
+        "state": state,
         "name": name,
-        "comment": comment,
-        "__sls__": None,
-        "__id__": None,
-        "__run_num__": None,
+        "sls": None,
+        "result": result,
+        "changed": changed,
+        "run_num": None,
         "start_time": None,
         "duration": None,
-        "changed": changed,
     }
 
 
@@ -941,17 +933,140 @@ async def test_job_result_hides_a_pillar_argument_of_a_state_run(
         {"pillar": "[REDACTED:param_name]", "__kwarg__": True},
         "pillar=[REDACTED:param_name]",
     ]
-    assert row["return"] == {
-        "cmd_|-hello_|-echo hi_|-run": _state_entry(
-            result=True, name="echo hi", comment=None, changed=True
-        )
-    }
+    assert row["return"] == [_state_entry(state="cmd.run", result=True, changed=True)]
     assert row["return_withheld"] is False
     assert row["states_total"] == 1
     text = json.dumps(result.result)
     assert "plain-pillar-value-4" not in text
     assert "plain-pillar-value-5" not in text
     assert "plain-secret-value-12" not in text
+    assert "echo hi" not in text
+
+
+@pytest.mark.asyncio
+async def test_job_result_withholds_state_names_ids_and_comments(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """The command of a ``cmd`` state is in the state key, its name and its comment.
+
+    The answer and the stored trace keep only the checked fields of a
+    state: kind, outcome, timing, and the name of a path or object state.
+    The hidden values carry no secret-shaped word, so this test shows the
+    reduction itself and not the shared scrubber.
+    """
+    await _register(_stub_embedding)
+    await _enable_trace_capture(session)
+    command = "mysql -u root -pplain-hidden-value-20 -e 'select 1'"
+    state_return = {
+        f"cmd_|-plain-hidden-value-21_|-{command}_|-run": {
+            "__id__": "plain-hidden-value-21",
+            "__sls__": "db.check",
+            "__run_num__": 0,
+            "name": command,
+            "result": False,
+            "comment": f'Command "{command}" run',
+            "changes": {"stdout": "", "stderr": "plain-hidden-value-22", "retcode": 1},
+            "start_time": "10:00:00.123456",
+            "duration": 12.5,
+        },
+        "file_|-cfg_|-/etc/made-up.conf_|-managed": {
+            "__id__": "cfg",
+            "__sls__": "db.check",
+            "__run_num__": 1,
+            "name": "/etc/made-up.conf",
+            "result": True,
+            "comment": "File /etc/made-up.conf is in the correct state",
+            "changes": {},
+        },
+        "cron_|-backup_|-/usr/bin/backup --with plain-hidden-value-23_|-present": {
+            "__run_num__": 2,
+            "name": "/usr/bin/backup --with plain-hidden-value-23",
+            "result": True,
+            "comment": "Cron /usr/bin/backup --with plain-hidden-value-23 already present",
+            "changes": {},
+        },
+    }
+    answers = _one_return(
+        {
+            "minion_id": "<minion-1>",
+            "jid": "1",
+            "fun": "state.apply",
+            "fun_args": ["db.check"],
+            "return": state_return,
+        }
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["return_withheld"] is False
+    assert row["states_total"] == 3
+    assert row["states_failed"] == 1
+    cmd_state = {
+        "state": "cmd.run",
+        "name": None,
+        "sls": "db.check",
+        "result": False,
+        "changed": True,
+        "run_num": 0,
+        "start_time": "10:00:00.123456",
+        "duration": 12.5,
+    }
+    assert row["failed_states"] == [cmd_state]
+    assert row["return"] == [
+        cmd_state,
+        {
+            **_state_entry(state="file.managed", name="/etc/made-up.conf", result=True),
+            "sls": "db.check",
+            "run_num": 1,
+        },
+        {**_state_entry(state="cron.present", result=True), "run_num": 2},
+    ]
+    assert result.audit_id is not None
+    spans = await _vendor_call_spans(result.audit_id)
+    assert len(spans) == 1
+    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    assert recorded["failed_states"] == [cmd_state]
+    assert recorded["return"] == row["return"]
+    for text in (json.dumps(result.result), _render(spans)):
+        assert "plain-hidden-value" not in text
+        assert "mysql" not in text
+        assert "/usr/bin/backup" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fun", ["pillar.get", "grains.get"])
+async def test_job_result_withholds_the_default_value_of_a_key_lookup(
+    _stub_embedding: AsyncMock, session: AsyncSession, fun: str
+) -> None:
+    """The second argument of ``pillar.get`` is a default value, which can be a password."""
+    await _register(_stub_embedding)
+    await _enable_trace_capture(session)
+    fun_args = [
+        "app:db:pw",
+        "plain-secret-value-24",
+        {"default": "plain-secret-value-25", "delimiter": ":", "__kwarg__": True},
+        "default=plain-secret-value-26",
+    ]
+    answers = _one_return(
+        {"minion_id": "<minion-1>", "jid": "1", "fun": fun, "fun_args": fun_args, "return": 5}
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["fun_args"] == [
+        "app:db:pw",
+        "[REDACTED:param_name]",
+        {"default": "[REDACTED:param_name]", "delimiter": ":", "__kwarg__": True},
+        "[REDACTED:param_name]",
+    ]
+    assert row["fun_args_withheld"] is False
+    assert result.audit_id is not None
+    spans = await _vendor_call_spans(result.audit_id)
+    assert len(spans) == 1
+    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    assert recorded["fun_args"] == row["fun_args"]
+    for text in (json.dumps(result.result), _render(spans)):
+        assert "plain-secret-value" not in text
 
 
 @pytest.mark.asyncio

@@ -127,13 +127,26 @@ _JOB_LIST = SaltTypedOp(
     },
 )
 
-_FAILED_STATE_SCHEMA: dict[str, Any] = {
+_STATE_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "One failed state.",
+    "description": (
+        "One state of a state run: only the fields whose content can be checked. The "
+        "state id, the comment and the changes are free text that can quote a command "
+        "with a password, so they are left out."
+    ),
     "properties": {
-        "state": {"type": "string", "description": "State id as Salt reports it."},
-        "name": _text("Name the state works on."),
-        "comment": _text("Salt's comment, at most 500 characters."),
+        "state": _text("State module and function (cmd.run, file.managed, pkg.installed)."),
+        "name": _text(
+            "Name the state works on, only for file, pkg, service, user, group and sysctl "
+            "states (a path or an object name); null for the others, because the name of a "
+            "cmd state is the command."
+        ),
+        "sls": _text("State file the state comes from."),
+        "result": {"type": ["boolean", "null"], "description": "Outcome of the state."},
+        "changed": {"type": "boolean", "description": "True when the state changed something."},
+        "run_num": {"type": ["integer", "null"], "description": "Position in the run."},
+        "start_time": _text("Start time of the state (HH:MM:SS.ffffff)."),
+        "duration": {"type": ["number", "null"], "description": "Duration in milliseconds."},
     },
 }
 
@@ -143,8 +156,8 @@ _JOB_RESULT = SaltTypedOp(
     summary="Read the results of one Salt job run, one row per minion, size-capped.",
     description=(
         "Calls ret.get_returns for one jid. One row per minion: success, return code, "
-        "errors, the failed states with their comments, and the return itself when it "
-        "is small and its content can be checked (a state run, a number or a boolean). "
+        "errors, the failed states (kind, outcome, timing), and the return itself when "
+        "it is small and its content can be checked (a state run, a number or a boolean). "
         "Values under a secret name are replaced."
     ),
     parameter_schema={
@@ -214,11 +227,10 @@ _JOB_RESULT = SaltTypedOp(
                             "description": (
                                 f"The return, when at most {RETURN_BYTES_LIMIT} bytes as "
                                 "JSON and its content can be checked; else null. A state "
-                                "run is shown per state with result, name, comment, "
-                                "__sls__, __id__, __run_num__, start_time, duration and "
-                                "changed (true when the state changed something); the "
-                                "changes text is left out. A number or a boolean is shown "
-                                "as is."
+                                "run is shown as a list with one entry per state: state, "
+                                "name, sls, result, changed, run_num, start_time and "
+                                "duration; the state id, the comment and the changes text "
+                                "are left out. A number or a boolean is shown as is."
                             ),
                         },
                         "return_bytes": {
@@ -249,7 +261,7 @@ _JOB_RESULT = SaltTypedOp(
                         "failed_states": {
                             "type": "array",
                             "description": "The failed states, at most 20.",
-                            "items": _FAILED_STATE_SCHEMA,
+                            "items": _STATE_SCHEMA,
                         },
                     },
                 },
@@ -269,10 +281,12 @@ _JOB_RESULT = SaltTypedOp(
             "{jid, count, failed_minions, results: [{minion_id, master_id, jid, fun, "
             "fun_args, fun_args_withheld, success, retcode, has_errors, alter_time, return, "
             "return_bytes, return_truncated, return_withheld, states_total, states_failed, "
-            "failed_states: [{state, name, comment}]}]}. return is shown only when its "
-            "content can be checked: a state run, per state {result, name, comment, "
-            "__sls__, __id__, __run_num__, start_time, duration, changed} without the "
-            "changes text, or a number or boolean. Every other return (a pillar read, a "
+            "failed_states: [{state, name, sls, result, changed, run_num, start_time, "
+            "duration}]}]}. return is shown only when its content can be checked: a state "
+            "run as a list of the same state entries, or a number or boolean. The state "
+            "id, the comment and the changes text of a state are left out, because they "
+            "can quote a command with a password; name is filled only for file, pkg, "
+            "service, user, group and sysctl states. Every other return (a pillar read, a "
             "text such as file.read or cmd.run returns, a list, another dict) is null "
             "with return_withheld true, because it can hold a secret under no name. "
             "return is also null when it is bigger than 8 KiB (return_truncated true); "
@@ -280,12 +294,14 @@ _JOB_RESULT = SaltTypedOp(
             "list of functions whose arguments are only names and keys (state.apply, "
             "pkg.remove, service.restart, grains.get, pillar.get, test.ping and the "
             "like); for every other function it is null with fun_args_withheld true, "
-            "because a positional argument can be a password. A pillar argument in "
-            "fun_args and every value under a secret name read [REDACTED:param_name]."
+            "because a positional argument can be a password. A pillar argument, the "
+            "default value of pillar.get or grains.get, and every value under a secret "
+            "name read [REDACTED:param_name]."
         ),
         "next_step": (
-            "Report the failed minions with the comments of their failed states. When "
-            "return_truncated is true, the failed_states list is the summary to use."
+            "Report the failed minions with the state (cmd.run, file.managed) and sls of "
+            "their failed states; the operator reads the comment in Salt with the jid. "
+            "When return_truncated is true, the failed_states list is the summary to use."
         ),
         "result_scalars": {"keys": ["jid", "count", "failed_minions"]},
     },

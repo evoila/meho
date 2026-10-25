@@ -26,7 +26,7 @@ Package: `backend/src/meho_backplane/connectors/salt/`.
 | `salt.minion.list` | One page of minions: minion id, master, key state, presence, last contact, OS, OS release, kernel, Salt version. | `minions.get_minion_key_state`, `minions.get_minion_presence`, `minions.get_minion_cache` | read (`safe`, no approval) | 8.18, 9.1+ |
 | `salt.key.list` | Minion keys by state: accepted, pending, rejected, denied. | `minions.get_minion_key_state` | read (`safe`, no approval) | 8.18, 9.1+ |
 | `salt.job.list` | Recent job runs, newest first: jid, function, saved target, state, user, start time and minion counts. Filter by state to find failed runs. | `cmd.get_cmds` | read (`safe`, no approval) | 8.18, 9.1+ |
-| `salt.job.result` | The results of one run (one `jid`), one row per minion: success, return code, errors, the failed states with their comments, and the return when it is small (at most 8 KiB). | `ret.get_returns` | read (`safe`, no approval) | 8.18, 9.1+ |
+| `salt.job.result` | The results of one run (one `jid`), one row per minion: success, return code, errors, the failed states (kind, outcome, timing), and the return when it is small (at most 8 KiB). | `ret.get_returns` | read (`safe`, no approval) | 8.18, 9.1+ |
 | `salt.target.list` | Saved targets (minion groups): id, name, description and, per master, the match type and match text. Pillar data is not read. | `tgt.get_target_group` | read (`safe`, no approval) | 8.18, 9.1+ |
 
 All six operations exist on every covered version, so none needs a
@@ -71,6 +71,7 @@ accepted; other modes raise `NotImplementedError`.
 - `*_RPC` constants (`connector.py`) -- every RPC method the connector
   calls, as `(resource, method)`. The reconcile lane reads them.
 - `reads.py` -- the bodies of the six reads.
+- `returns.py` -- what `salt.job.result` shows of one job return row.
 - `trace.py` -- the filter the flight recorder runs on every `/rpc` answer.
 - `SALT_TYPED_OPS`, `register_salt_typed_operations` (`typed_ops.py`) --
   the op list, the group texts and the registrar. The op metadata itself
@@ -137,18 +138,25 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   and the agent should narrow the read with `master_id` or `minion_id`.
 - **`salt.job.result`** shows the return of each minion only when it is
   at most 8 KiB as JSON and its content can be checked. A state run (a
-  return whose every value has a `result`) is shown per state with
-  `result`, `name`, `comment` (cut to 500 characters), `__sls__`, `__id__`,
-  `__run_num__`, `start_time`, `duration` and `changed`; the `changes`
-  text of a state (a file diff, a command's output) is left out. A number,
+  return whose every value has a `result`) is shown as a list with one
+  entry per state: `state` (module and function, `cmd.run`), `name`,
+  `sls`, `result`, `changed`, `run_num`, `start_time` and `duration`. The
+  state id, the `comment` and the `changes` text (a file diff, a command's
+  output) are left out: they are free text that can quote a command with a
+  password. `name` is filled only for `file`, `pkg`, `service`, `user`,
+  `group` and `sysctl` states, whose name is a path or an object name; the
+  name of a `cmd` state is the command, and the name of a `git` or `pip`
+  state can be a URL with a password (`_NAME_STATE_MODULES` in
+  `returns.py`). Every kept field is checked by shape (a boolean, a
+  number, a time, a state file name). A number,
   `true`, `false` or `null` is shown as is. Every other return (a text, a
   list, a dict that is not a state run) is `null` with
   `return_withheld: true`, because `file.read` or `cmd.run` can return a
   password under no name that a rule could match. A bigger return is
   `null` with `return_bytes` and `return_truncated: true`. For a state
-  run, `states_total`, `states_failed` and up to 20 `failed_states` (state
-  id, name, comment) are always filled, so a failure is visible without
-  the full return.
+  run, `states_total`, `states_failed` and up to 20 `failed_states` (the
+  same entries) are always filled, so a failure is visible without the
+  full return.
 - **Secrets.** `salt.about` returns no part of `opts` (the RaaS server
   settings, which hold database settings). `salt.target.list` asks for no
   pillar data and drops `pillars` and `metadata`. In job returns and
@@ -164,9 +172,13 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   one module can mix name arguments with value arguments
   (`grains.setval <key> <value>`), so `fun_args` is shown only for a short
   list of functions whose arguments are only names and keys
-  (`_SAFE_ARG_FUNS` in `reads.py`: `state.apply`, `pkg.remove`,
+  (`_SAFE_ARG_FUNS` in `returns.py`: `state.apply`, `pkg.remove`,
   `service.restart`, `grains.get`, `pillar.get`, `test.ping` and the
-  like). For every other function `fun_args` is `null` with
+  like). Two of them take a value after the key: the second positional
+  argument of `pillar.get` and `grains.get` is a default, which can be a
+  password. It reads `[REDACTED:param_name]`, in positional form, as a
+  `default` keyword and as `default=...` text (`_NAME_ARG_COUNT` and
+  `_VALUE_KWARGS`). For every other function `fun_args` is `null` with
   `fun_args_withheld: true`. The dispatcher's redaction then runs over the
   whole answer as for every connector.
 - **Traces.** The flight recorder stores the answer of each `/rpc` call

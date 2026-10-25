@@ -22,7 +22,8 @@ from meho_backplane.connectors.salt.connector import (
     RETURNS_RPC,
     TARGET_GROUP_RPC,
 )
-from meho_backplane.connectors.salt.reads import _result_row, _results
+from meho_backplane.connectors.salt.reads import _results
+from meho_backplane.connectors.salt.returns import result_row
 
 __all__ = ["trace_payload"]
 
@@ -40,7 +41,7 @@ def _with_results(ret: Any, rows: list[dict[str, Any]]) -> Any:
 def _trace_ret(call: tuple[Any, Any], ret: Any) -> Any:
     if call == RETURNS_RPC:
         rows, _ = _results(ret)
-        return _with_results(ret, [_result_row(row) for row in rows])
+        return _with_results(ret, [result_row(row) for row in rows])
     if call == TARGET_GROUP_RPC:
         rows, _ = _results(ret)
         kept = [

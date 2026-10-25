@@ -1343,6 +1343,25 @@ narrow-waist contract.
   MCP-only. The verb exits 1 on a non-ok envelope (`status="error"`
   for input faults, `status="unavailable"` for a typed/composite op
   with no literal HTTP request to preview).
+- `meho operation result-query <handle_id> [--offset N] [--limit N] | [--where ...] [--select ...] [--group-by ...] [--aggregate ...] [--order-by ...] [--query-limit N] | [--path <pointer>]`
+  — calls `POST /api/v1/operations/result-query`, the REST twin of the
+  MCP `result_query` tool. It reads a stored result back by its handle
+  id, in one of three modes (`cli/internal/cmd/operation/resultquery.go`):
+  paging a rows handle (`--offset` / `--limit`), one relational query
+  over a rows handle (`--where`, `--select`, `--group-by`, `--aggregate`,
+  `--order-by`, `--query-limit`; #3366), or a path read (`--path`,
+  #4888). `--path` takes an RFC 6901 JSON Pointer and sets `query.path`:
+  `""` is the whole document, `/a/0/b` goes one step per `/`. It reads
+  one value of a document handle, or a top-level field a rows handle
+  left out of its inline summary (`omitted_scalar_count`). An array
+  value pages with `--offset` / `--limit`. The CLI refuses `--path`
+  together with any query flag before the call. The reply carries
+  `path`, `value_type` and `value` (raw JSON) next to the paging fields;
+  the human render is one header line (handle, path, type) and the
+  pretty-printed value, or the item lines with the window for an array.
+  Paging a document handle without `--path` is a server 422; the CLI
+  shows the server's message and adds the `--path` form that works
+  (`resultquery_path.go`).
 
 ### Reserved flags (same shape across all three verbs)
 

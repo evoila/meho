@@ -3493,7 +3493,7 @@ meho operation preview <connector_id> <op_id> [flags]
 
 ### `meho operation result-query`
 
-Page or query rows back from a JSONFlux result handle
+Page or query rows back from a result handle, or read a document handle by path
 
 ```
 meho operation result-query <handle_id> [flags]
@@ -3506,6 +3506,7 @@ meho operation result-query <handle_id> [flags]
 - `--limit` — paging: page size; default 50, max 500 (matches the result_query MCP tool)
 - `--offset` — paging: zero-based index of the first row to return (advance by --limit)
 - `--order-by` — query: sort term "<field> [asc|desc]" (repeatable, max 4)
+- `--path` — path: RFC 6901 JSON Pointer into a document handle ("" is the whole document, /a/0/b one step per /); an array value pages with --offset / --limit
 - `--query-limit` — query: max output rows (clamps to 500); the result flags truncation when more matched
 - `--select` — query: projection column to return (repeatable; omit for all columns)
 - `--where` — query: WHERE predicate "<field> <op> [value]" (repeatable; op = != < <= > >= IN 'IS NULL')

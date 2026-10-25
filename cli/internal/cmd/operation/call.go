@@ -320,9 +320,7 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 				fmt.Fprintln(w, string(r.Handle))
 			}
 		}
-		if r.AuditID != nil {
-			fmt.Fprintf(w, "audit receipt: %s\n", *r.AuditID)
-		}
+		dispatch.WriteAuditReceipt(w, r.AuditID)
 		if r.Delivery != nil {
 			fmt.Fprintf(w, "delivery: %s\n", *r.Delivery)
 		}
@@ -341,7 +339,9 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 		}
 		return
 	}
-	// status == "error" (or any non-ok dispatcher envelope).
+	// status == "error" (or any non-ok dispatcher envelope). The audit
+	// receipt is printed here too: a failed call has an audit row that
+	// records why it failed (#4833).
 	if r.Error != nil && *r.Error != "" {
 		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
 	} else {
@@ -356,6 +356,7 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 			fmt.Fprintln(w, string(r.Extras))
 		}
 	}
+	dispatch.WriteAuditReceipt(w, r.AuditID)
 }
 
 func prettyJSON(raw json.RawMessage) (string, error) {

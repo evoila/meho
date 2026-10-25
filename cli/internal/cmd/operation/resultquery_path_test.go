@@ -86,6 +86,50 @@ func TestResultQueryPathPrettyPrintsAnObject(t *testing.T) {
 	}
 }
 
+// A number above 2^53 must print with every digit. Decoding the value into
+// `any` would round 9007199254740993 to 9007199254740992.
+func TestResultQueryPathKeepsLargeIntegerDigits(t *testing.T) {
+	f := fakeWithResultQueryResponse(http.StatusOK, pathReadResponse("/id", "number", `9007199254740993`))
+	out, _, err := executeResultQuery(t, f, "--path", "/id")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(out, "9007199254740993") {
+		t.Fatalf("large integer must keep its digits: %q", out)
+	}
+}
+
+func TestResultQueryPathKeepsLargeIntegerDigitsInsideAnObject(t *testing.T) {
+	f := fakeWithResultQueryResponse(http.StatusOK,
+		pathReadResponse("/stats", "object", `{"bytes":9007199254740993,"ratio":1.5}`))
+	out, _, err := executeResultQuery(t, f, "--path", "/stats")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for _, want := range []string{"\n  \"bytes\": 9007199254740993,\n  \"ratio\": 1.5\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("object render missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "9007199254740992") {
+		t.Errorf("large integer was rounded: %q", out)
+	}
+}
+
+func TestResultQueryPathKeepsLargeIntegerDigitsInArrayItems(t *testing.T) {
+	body := []byte(`{"handle_id":"` + pathTestHandle + `","path":"/ids","value_type":"array",` +
+		`"rows":[{"id":9007199254740993}],"offset":0,"limit":50,"returned_rows":1,"total_rows":1,` +
+		`"stored_rows":1,"truncated":false,"coverage":"complete","coverage_note":null}`)
+	f := fakeWithResultQueryResponse(http.StatusOK, body)
+	out, _, err := executeResultQuery(t, f, "--path", "/ids")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(out, `"id": 9007199254740993`) {
+		t.Fatalf("array item must keep the large integer digits: %q", out)
+	}
+}
+
 func TestResultQueryPathEmptyPointerReadsTheWholeDocument(t *testing.T) {
 	f := fakeWithResultQueryResponse(http.StatusOK, pathReadResponse("", "object", `{"name":"vm-01"}`))
 	out, _, err := executeResultQuery(t, f, "--path", "")

@@ -4,6 +4,7 @@
 package operation
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,22 +81,25 @@ func printPathReadResult(w io.Writer, r *ResultQueryResult) {
 	if len(r.Value) == 0 {
 		return
 	}
-	if pretty, err := prettyJSON(r.Value); err == nil {
-		fmt.Fprintln(w, pretty)
-	} else {
-		fmt.Fprintln(w, string(r.Value))
+	printIndentedJSON(w, r.Value)
+}
+
+// printRows pretty-prints each row on its own.
+func printRows(w io.Writer, rows []json.RawMessage) {
+	for _, row := range rows {
+		printIndentedJSON(w, row)
 	}
 }
 
-// printRows pretty-prints each row on its own, falling back to the raw
-// bytes for a row that is not valid JSON.
-func printRows(w io.Writer, rows []json.RawMessage) {
-	for _, row := range rows {
-		pretty, err := prettyJSON(row)
-		if err == nil {
-			fmt.Fprintln(w, pretty)
-		} else {
-			fmt.Fprintln(w, string(row))
-		}
+// printIndentedJSON re-indents the raw bytes without decoding them, so a
+// number keeps every digit the backplane stored (decoding into `any` would
+// turn an integer above 2^53 into a rounded float64). Bytes that are not
+// valid JSON print as they are.
+func printIndentedJSON(w io.Writer, raw json.RawMessage) {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		fmt.Fprintln(w, string(raw))
+		return
 	}
+	fmt.Fprintln(w, buf.String())
 }

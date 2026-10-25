@@ -12,11 +12,25 @@ bugs or security findings.
 
 ## What runs
 
-CI runs on main pushes, pull requests, and merge-queue commits. Eight Python
-coverage shards measure unit tests on main and PRs. Queue runs reuse the
-member PR results and do not repeat the coverage sweep. The combine job publishes `python-coverage`
-only when every shard completed its tests and supplied worker data. Go CI
-publishes `go-coverage`. Integration-test coverage is not included.
+CI runs on main pushes, pull requests, and merge-queue commits. Main and PRs
+run one unit-test sweep in eight coverage shards. Those shards also satisfy
+the existing required Python test check; the four ordinary unit shards do not
+run again. Queue commits keep the four fast unit shards and reuse the member
+PR Sonar results. No extra coverage sweep runs in the queue.
+
+Both sweeps select the same test files and use the same required prerequisites.
+Integration and migration tests stay in their separate jobs. Trusted runs use
+the existing private spec checkout and checks, Helm, PHP, embedding model, and
+spaCy setup. Fork coverage runs on hosted runners with public container images.
+It never reads the private spec shelf or schedules internal runners. Existing
+fork exclusions for lint and private-spec tests remain in place. The required
+Python check now requires the public fork coverage sweep to pass too. Proven
+docs-only PRs keep their lint skip, but still run the measured sweep to supply
+the report used by the Sonar gate.
+
+The combine job publishes `python-coverage` only when all eight shards finish
+and supply data. Go CI publishes `go-coverage`. Test failures propagate to the
+existing Python aggregate; missing reports also fail the Sonar gate.
 
 The `Quality Gate` workflow starts after CI completes. It runs on disposable
 GitHub-hosted infrastructure. Fork source is never executed by this workflow.
@@ -89,7 +103,9 @@ branch protection does not require SonarCloud. A maintainer must first check:
 4. All eight shards complete within the runner budget. PR coverage adds load;
    monitor queue time and memory before making this required. A successful
    October 25 run used about 150 runner-minutes across eight shards plus the
-   combine job. Each PR update adds a sweep. Queue runs do not repeat it.
+   combine job, before consolidation. PR/main coverage replaces the ordinary
+   unit sweep and excludes the separately tested migration files. Measure the
+   new workload live; queue runs retain only their ordinary fast unit sweep.
 
 The commit status still shares the GitHub Actions publisher identity with other
 repository workflows. Contributors who can run same-repository workflows with

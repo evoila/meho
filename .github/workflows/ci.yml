@@ -79,11 +79,11 @@
 #   * Secret + supply-chain scans   -> secret-scan.yml + security-scan.yml.
 #
 # The name CI is consumed by quality-gate.yml's workflow_run trigger.
-# Coverage is measured separately from required unit tests to limit memory.
-# It runs on main and PRs. Queue checks reuse exact PR head results. Coverage jobs remain
-# non-required individually; missing or incomplete reports fail the downstream
-# SonarCloud Quality Gate status. Artifact names are a cross-workflow contract.
-# Failed coverage jobs still upload diagnostic data where possible.
+# PR/main coverage shards feed the existing required Python check. Queue
+# commits use the ordinary fast shards. Only one sweep runs per event.
+# Missing or incomplete coverage also fails the downstream SonarCloud gate.
+# Artifact names are a cross-workflow contract. Failed tests still upload
+# diagnostic data where possible.
 #
 # All third-party actions pinned to immutable SHAs with the
 # human-readable tag in a trailing comment (devops_best_practices:
@@ -358,19 +358,11 @@ jobs:
     # 660 s budget; #4809 split by measured file time instead of every
     # 4th file) so its serial wall runs as parallel shards.
     #
-    # Fork-PR guard: never execute project code from a fork on the self-hosted
-    # runner pool. Same stance as the old lane — job-level so no step ever
-    # starts on a fork PR. On a fork PR all four legs skip (→ reported
-    # Success), which the fan-in's own fork guard mirrors. Plus the #3252
-    # docs-only skip (identical shape to python-lint): a proven docs-only PR
-    # skips all four legs → the fan-in reports success-by-skip. `needs:
-    # changes` makes `docs_only` readable; a detect-job failure skip-cascades
-    # these legs and the fan-in fails the required context CLOSED.
+    # Queue commits keep the original fast unit sweep. PR/main use the
+    # measured sweep below instead, so tests do not run twice. Fork PRs
+    # never schedule these internal-runner jobs.
     needs: changes
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.docs_only != 'true')
+    if: github.event_name == 'merge_group'
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
@@ -896,9 +888,8 @@ jobs:
         # COVERAGE stays OUT of this required gate (was `COVERAGE_CORE=sysmon
         # ... --cov=meho_backplane --cov-report=xml`): the xdist coverage combine
         # peaked the whole-suite pytest tree at 13.67 GiB (vs 7.86 GiB without),
-        # OOM-killing the heavy runner. Coverage is produced by the dedicated,
-        # non-blocking, sharded `python-coverage` + `python-coverage-combine`
-        # jobs below (#1982/#1987/#3172).
+        # OOM-killing the heavy runner. Queue commits keep this fast sweep;
+        # PR/main use the eight coverage shards below as their required sweep.
         run: |
           # Deterministic split by measured file time (#4809; #3251 used
           # every TOTAL-th file of the sorted list, which put the slow
@@ -1043,140 +1034,71 @@ jobs:
 
   python-unit-lane:
     name: Python (ruff + mypy + pytest)
-    # FAN-IN carrying the branch-protection required context (#3251). This job
-    # name is the EXACT string pinned in the `main` ruleset's
-    # required_status_checks, so branch protection / the ruleset are UNTOUCHED
-    # by this change — the required name simply moved off the old monolithic
-    # `python-lint-test` job onto this fan-in (the `python-coverage-combine`
-    # shape #3172/#3177 used to keep the downstream contract byte-identical).
-    #
-    # It depends on the change-detector (`changes`), python-lint (ruff + ruff
-    # format + mypy), and every python-unit-shard leg, and PASSES iff all of
-    # them passed OR were skipped for a PROVEN docs-only diff. Three
-    # correctness properties this shape must have:
-    #
-    #  1. NOT fail-open. A required aggregation gate that just `needs:` the
-    #     shards would be SKIPPED when a shard fails (GitHub's default
-    #     skip-on-needs-failure), and a skipped required check counts as
-    #     Success (#2140) — i.e. a red shard would let the PR merge. `always()`
-    #     forces this job to RUN regardless of upstream results, and the step
-    #     below inspects `needs.*.result` and FAILS on anything not permitted.
-    #     A shard that hangs → its own timeout-minutes → `cancelled` leg →
-    #     aggregate result `cancelled`/`failure` → this gate FAILS (not open).
-    #     Verified reasoning, not luck.
-    #  2. Clean fork-PR + skip behaviour. The fork guard is AND-ed in, so on a
-    #     fork PR (and only then) this job — like python-lint / python-unit-
-    #     shard — is skipped by its own `if:`, which reports the required
-    #     context as Success exactly as the old single job did (#2140). On
-    #     same-repo PRs / push / merge_group the guard is true and the gate
-    #     evaluates the real results.
-    #  3. Docs-only fast path WITHOUT weakening the code path (#3252). On a
-    #     proven docs-only PR, python-lint + every shard skip via their own
-    #     detect-gated `if:` and the step below must PASS on their `skipped`
-    #     results. But `skipped` must mean pass ONLY because the diff is
-    #     docs-only — never because a needed job was cancelled/failed. So the
-    #     step reads `needs.changes.outputs.docs_only` (available because
-    #     `changes` is in `needs`) and BRANCHES:
-    #       * docs_only == 'true'  → accept success|skipped (fast path).
-    #       * else (full run)      → require STRICT success (a skipped lint /
-    #                                shard here is anomalous — these jobs' only
-    #                                skip paths are fork-PR or docs-only, and we
-    #                                are in neither — so treat it as failure and
-    #                                fail CLOSED). This is STRICTER than the
-    #                                pre-#3252 gate; the fork path is handled by
-    #                                this job's own `if:` skip, not by this step.
-    #     And FIRST: if `changes` did not itself succeed, the docs_only value is
-    #     untrustworthy, so the gate fails CLOSED regardless.
-    #
-    # Concurrency: the shards, python-lint and this fan-in all share the
-    # workflow-level concurrency group, so a PR force-push cancels the whole
-    # in-flight run as a SET and a fresh run supersedes it — there is no
-    # partial-cancel path that could leave this gate green on stale shards.
-    # GitHub-hosted runner (#4626): this job does no setup and runs one bash
-    # step, and it is the last job of every CI run — it must never wait for a
-    # slot on the internal pool.
-    needs: [changes, python-lint, python-unit-shard]
-    if: >-
-      always() &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+    # PR/main use one measured sweep. Queue commits keep the four fast shards.
+    # This required context fails if any selected shard fails or is missing.
+    # Forks run only the public coverage tests on hosted runners; private-spec
+    # and lint jobs keep their existing fork exclusions.
+    needs: [changes, python-lint, python-unit-shard, python-coverage]
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
-        # needs.<job>.result is one of success / failure / cancelled / skipped.
-        # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
-        # success only if every leg succeeded, otherwise failure/cancelled.
+        env:
+          EVENT: ${{ github.event_name }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          DETECT_RESULT: ${{ needs.changes.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          LINT_RESULT: ${{ needs.python-lint.result }}
+          UNIT_RESULT: ${{ needs.python-unit-shard.result }}
+          COVERAGE_RESULT: ${{ needs.python-coverage.result }}
         run: |
-          detect='${{ needs.changes.result }}'
-          docs_only='${{ needs.changes.outputs.docs_only }}'
-          lint='${{ needs.python-lint.result }}'
-          shards='${{ needs.python-unit-shard.result }}'
-          echo "changes (detect): result=${detect}, docs_only=${docs_only}"
-          echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 4 shard legs): ${shards}"
-
-          # The detect job MUST have succeeded for its docs_only classification
-          # to be trustworthy. If not (failure / cancelled / an unexpected
-          # skip on a non-fork path), fail the required lane CLOSED — never
-          # infer docs-only from a broken detector. On a fork PR the detect job
-          # IS skipped, but so is THIS job via its own fork-guard `if:`, so this
-          # step never runs there.
-          if [ "${detect}" != "success" ]; then
-            echo "::error title=Python unit lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required unit lane closed."
+          set -euo pipefail
+          case "${EVENT}" in
+            merge_group)
+              selected="${UNIT_RESULT}"
+              unused="${COVERAGE_RESULT}"
+              ;;
+            pull_request|push)
+              selected="${COVERAGE_RESULT}"
+              unused="${UNIT_RESULT}"
+              ;;
+            *) echo "::error::Unsupported Python gate event"; exit 1 ;;
+          esac
+          if [ "${selected}" != "success" ] || [ "${unused}" != "skipped" ]; then
+            echo "::error::Selected pytest matrix did not pass, or both test sweeps ran"
             exit 1
           fi
-
-          fail=0
-          if [ "${docs_only}" = "true" ]; then
-            # DOCS-ONLY FAST PATH — python-lint + every shard were skipped by
-            # their detect-gated `if:` (they never ran). Accept `skipped` (the
-            # expected state) or `success` (defensive: if one somehow ran and
-            # passed). Anything else — failure/cancelled — still FAILS closed.
-            for r in "${lint}" "${shards}"; do
-              case "${r}" in
-                success|skipped) ;;
-                *) fail=1 ;;
-              esac
-            done
-          else
-            # FULL RUN — require STRICT success. A `skipped` lint/shard here is
-            # anomalous (no skip-cascade is possible: `changes` succeeded above,
-            # and their only other skip paths are fork-PR / docs-only, neither
-            # of which holds), so treat skipped as a failure and fail CLOSED.
-            for r in "${lint}" "${shards}"; do
-              case "${r}" in
-                success) ;;
-                *) fail=1 ;;
-              esac
-            done
+          if [ "${IS_FORK}" = "true" ]; then
+            # Forks cannot read the private spec shelf or run internal lint.
+            # Public coverage still has to pass; skipped tests are not a pass.
+            if [ "${LINT_RESULT}" != "skipped" ] || [ "${DETECT_RESULT}" != "skipped" ]; then
+              echo "::error::Fork private-job exclusions changed unexpectedly"
+              exit 1
+            fi
+            echo "Public fork coverage passed; private-spec and lint exclusions preserved"
+            exit 0
           fi
-
-          if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' jobs above for the failing detail."
+          if [ "${DETECT_RESULT}" != "success" ]; then
+            echo "::error::Change detector did not pass"
             exit 1
           fi
-
-          if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
-          else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest shards passed."
+          if [ "${LINT_RESULT}" != "success" ]; then
+            if [ "${DOCS_ONLY}" != "true" ] || [ "${LINT_RESULT}" != "skipped" ]; then
+              echo "::error::Lint and typecheck did not pass"
+              exit 1
+            fi
           fi
+          echo "Python gate passed: lint/typecheck and the selected complete pytest sweep"
 
   python-coverage:
     name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/8)
-    # Coverage runs separately from required unit tests because measuring
-    # the whole package uses much more memory. Eight file-level shards keep
-    # each pytest process within the runner budget. Each xdist worker saves
-    # its parallel data before reporting completion (tests/conftest.py).
-    # The combine job runs only after pytest exits, so combining is cheap.
-    #
-    # All shards must finish. Partial data remains useful for debugging but
-    # must never be published as the report used by the Sonar gate. The jobs
-    # remain non-required individually; missing coverage fails that gate.
-    # Raise the matrix count, TOTAL, and downloads together if memory or
-    # runtime approaches the limits. test_ci_coverage_shards.py checks this.
-    # Fork code runs only on disposable GitHub-hosted infrastructure.
+    # One unit-test sweep on PR/main, with coverage collected as it runs.
+    # Eight shards keep each worker within the existing memory budget.
+    # These results feed the required Python aggregate. Any failed, cancelled,
+    # or missing shard fails that check. The combine job publishes a report
+    # only after every shard finishes and uploads its completion marker.
+    # Forks use hosted runners, public images, and no private spec checkout.
     if: github.event_name != 'merge_group'
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'meho-runners-ci-heavy' }}
     strategy:
@@ -1186,64 +1108,26 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
-    # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
-    # runner-loss on this pool — which silently killed coverage on every main
-    # push from 2026-06-20, collapsing SonarCloud coverage 65.8% -> ~24% (see
-    # the memory table above and docs/codebase/sonarcloud.md) — was the pool's
-    # 8Gi runner limit vs this job's 12.48-GiB serial sweep. Fixed IN PLACE by
-    # rdc-gitops#115 (heavy pool resized to 14Gi request==limit); this
-    # `runs-on:` label is correct and stays. An OOM would still only skip one
-    # coverage upload; the downstream gate then fails for a missing report.
-    # THREE-LAYER hang defense (#2800 → #2806 → #2865). Ordered inner→outer;
-    # each layer catches what the one inside it structurally cannot:
-    #   1. IN-PROCESS, per test — pytest-timeout `--timeout=300` (signal) on
-    #      the Pytest step. A wedged test dies as a Failed carrying its own
-    #      traceback, from INSIDE the pytest process, so it does NOT depend on
-    #      the runner agent being healthy. This is the PRIMARY guard: #2865
-    #      showed a pytest hang can outlive the step `timeout-minutes` when the
-    #      runner itself is wedged — step 9 still `in_progress` at the ~60-min
-    #      job kill on the v0.28.0 cut (run 31199593016, cancelled 2×) — so a
-    #      runner-enforced timeout is not a reliable backstop for a pytest hang.
-    #   2. STEP `timeout-minutes: 30` (~19-min per-shard wall + growth
-    #      headroom, #3172) — runner-enforced backstop for a hang the per-test
-    #      SIGALRM cannot reach (a stall during COLLECTION before any test
-    #      item starts, or a GIL-locked C call that never returns to the main
-    #      thread). A step timeout is a step FAILURE, absorbed by whole-job
-    #      continue-on-error → run conclusion stays `success`.
-    #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
-    #      step (checkout / uv sync / model warm — never observed). Every
-    #      post-pytest step in this shard job is step-capped too (#3172:
-    #      shard-data upload 2, log upload 2, memory print 1 — the v0.31.0
-    #      cut proved a hang CAN escape into a post-pytest step via the
-    #      pytest step's debris), so the bounded-step worst case is
-    #      30 + 2 + 2 + 1 = 35 min + pre-pytest setup (35–75 s observed)
-    #      ≈ 36 — the step caps always fire before
-    #      this job cap for any hang under a bounded step, and a job-level
-    #      expiry (which CANCELS the job; `cancelled` leaks past
-    #      continue-on-error into the run conclusion — the exact
-    #      #2800/#2865/#3172 failure) is reserved for the never-observed
-    #      wedged setup step. 55 also sits below the ~60-min external pod
-    #      reap seen on the heavy pool, so GitHub's job timeout wins that
-    #      race. (The combine + coverage.xml upload moved to the
-    #      python-coverage-combine fan-in job below, with its own budget.)
-    # These caps protect against hangs. Check normal wall time and queue
-    # capacity separately before requiring the downstream gate.
+    # A per-test signal stops a hung test after 300s; the 30-minute pytest
+    # step cap catches collection stalls, and the 55-minute job cap is the
+    # outer backstop. No timeout is treated as a successful test result.
+    # Keep existing budgets; measure real runtime before changing them.
     timeout-minutes: 55
-    continue-on-error: true
     env:
+      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
+      MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT
       # available in a step-level `if:` (GitHub's context-availability
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+      MEHO_TEST_PGVECTOR_IMAGE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d' || 'harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d' }}
+      MEHO_TEST_VALKEY_IMAGE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'valkey/valkey:8' || 'harbor.evba.lab/dockerhub-proxy/valkey/valkey:8' }}
       # vcsim release-tag pin — see the comment on the first
       # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
-      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1
-      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_VCSIM_IMAGE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'vmware/vcsim:v0.55.1' || 'harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1' }}
+      MEHO_TEST_VAULT_IMAGE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'hashicorp/vault:1.18' || 'harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18' }}
     defaults:
       run:
         working-directory: backend
@@ -1292,6 +1176,147 @@ jobs:
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
           echo "Memory sampling started: one sample per second."
 
+      - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
+        # The vendor OpenAPI specs (vSphere: vcenter.yaml ~961 paths +
+        # vi-json.yaml ~2,195 paths; NSX: the manager-served
+        # nsx_api / nsx_policy_api pair, ~3,510 paths) are
+        # Broadcom/VMware vendor-licensed and deliberately NOT
+        # committed to this public repo — they live in the operator's
+        # private spec-shelf repo. This step fetches ONLY the pinned
+        # shelf directories into the ephemeral runner workspace so the
+        # real-spec ingest/reconcile lanes stop skipping. Licensing
+        # record + provisioning runbook (secret scope, signoff gate):
+        # docs/decisions/vendor-spec-ci-provisioning.md. The specs are
+        # never committed, never uploaded as artifacts (the
+        # upload-artifact steps in this workflow enumerate exact
+        # coverage files only), and never printed to logs.
+        #
+        # SPEC_SHELF_TOKEN is a fine-grained PAT: Contents read-only on
+        # the single private shelf repo, nothing else. Secret absent →
+        # this step skips → the spec lanes pytest.skip exactly as
+        # before this step existed. Fork PRs never reach this step (the
+        # job-level fork guard skips the whole job) and would not see
+        # the secret anyway (GitHub withholds secrets from fork-PR
+        # runs). Dependabot runs read the Dependabot secret store,
+        # where this secret is deliberately not mirrored, so they skip
+        # too.
+        #
+        # Sharded (#3251): every shard runs this checkout, because each
+        # shard's file set may include the spec-backed reconcile
+        # lanes; the cone-mode sparse + blob:none filter keeps it cheap
+        # (~0.4 MB argocd-3.3 + … a few tens of MB total), and the
+        # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
+        # safe.
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: evoila-bosnia/claude-rdc-hetzner-dc
+          token: ${{ secrets.SPEC_SHELF_TOKEN }}
+          path: spec-shelf
+          # Cone-mode sparse checkout of the shelf directories only +
+          # lazy blob filter: the runner materialises just the pinned
+          # spec files (~0.4 MB argocd-3.3 + ~13 MB esxi-9.0 + ~0.2 MB
+          # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
+          # ~2 MB sddc-manager-9.0 + ~38 MB vcenter-8.0 + ~18 MB
+          # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB each
+          # vcf-automation-9.0-reference / -9.1 / -9.1.1 + ~0.4 MB
+          # vcf-installer-9.0 + ~0.4 MB vcf-installer-9.1 + ~5 MB
+          # vcf-operations-9.0 + ~0.1 MB vcf-operations-orchestrator-9.0
+          # / -9.1 + ~1.3 MB vcf-protection-and-recovery-9.1
+          # + ~0.4 MB vks-9.0), not the
+          # whole consumer repo. No
+          # `ref:` pin — the shelf's default branch IS the
+          # operator-curated pin (the directories are version-named),
+          # matching the local-dev contract documented in
+          # tests/acceptance/_vcenter_spec.py + tests/_spec_shelf.py.
+          # Keep the list sorted.
+          sparse-checkout: |
+            docs/argocd-3.3
+            docs/esxi-9.0
+            docs/fleet-lcm-9.0
+            docs/harbor-2.12
+            docs/hetzner-robot-2026-04
+            docs/keycloak-26.3
+            docs/loki-3.7
+            docs/nsx-9.0
+            docs/proxmox-8.4
+            docs/rabbitmq-4.3
+            docs/sddc-manager-9.0
+            docs/sddc-manager-9.1
+            docs/vcenter-8.0
+            docs/vcenter-9.0
+            docs/vcf-automation-9.0
+            docs/vcf-automation-9.0-reference
+            docs/vcf-automation-9.1
+            docs/vcf-automation-9.1.1
+            docs/vcf-installer-9.0
+            docs/vcf-installer-9.1
+            docs/vcf-operations-9.0
+            docs/vcf-operations-orchestrator-9.0
+            docs/vcf-operations-orchestrator-9.1
+            docs/vcf-protection-and-recovery-9.1
+            docs/vks-9.0
+          filter: blob:none
+          # Read-only consumer; never pushes. Don't leave the token in
+          # the shelf clone's local git config after checkout.
+          persist-credentials: false
+
+      - name: Verify spec-shelf provisioned the pinned specs
+        # Fail-loud layout guard: once the secret exists, a shelf
+        # layout move (or a sparse-checkout typo here) must fail THIS
+        # job — otherwise the resolvers would return None and the spec
+        # lanes would silently go back to skipping, undetected (the
+        # exact regression #2949 closes). Without the secret this step
+        # skips and lane-skip stays the documented degraded mode.
+        # Prints file *presence* only — never spec content.
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          for f in \
+            spec-shelf/docs/argocd-3.3/argocd-swagger.json \
+            spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
+            spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
+            spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
+            spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
+            spec-shelf/docs/keycloak-26.3/keycloak-admin-openapi.json \
+            spec-shelf/docs/loki-3.7/loki-http-api.md \
+            spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
+            spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
+            spec-shelf/docs/proxmox-8.4/apidata.js \
+            spec-shelf/docs/rabbitmq-4.3/http-api-index.md \
+            spec-shelf/docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl \
+            spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
+            spec-shelf/docs/sddc-manager-9.1/sddc-manager-openapi.json \
+            spec-shelf/docs/vcenter-8.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
+            spec-shelf/docs/vcenter-9.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-9.0/vi-json.yaml \
+            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
+            spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
+            spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
+            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
+              exit 1
+            fi
+          done
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+
+
       - name: Docker Hub login (for testcontainers pulls)
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
@@ -1313,7 +1338,7 @@ jobs:
 
       - name: Cache fastembed model (drift-guard + slow-lane)
         # Same shared model cache the required lane uses — the unit suite this
-        # job re-runs instantiates the embedding model, so it must be warm here
+        # job runs instantiates the embedding model, so it must be warm here
         # too. Keyed identically so the two jobs share one cache entry.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -1329,18 +1354,82 @@ jobs:
         run: uv run python -m meho_backplane.retrieval.warm
 
       - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
-        # Same model the unit lane provisions — the Tier-2 redaction tests in
-        # the unit sweep need it, and this job re-runs that sweep.
+        # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
+        # (capability-flagged per policy). The acceptance gate
+        # (``Tier-2 redacts a free-text field containing a person
+        # name / IP / FQDN``) requires a spaCy model on the host;
+        # spaCy ships no model out of the box and Presidio's
+        # AnalyzerEngine raises ``Tier2NotAvailableError`` without one.
+        # ``en_core_web_sm`` (~12 MB) is the fast-CI choice; production
+        # Docker images bake ``en_core_web_lg`` (~560 MB, the Presidio
+        # documented default for higher NER recall). The acceptance
+        # tests in tests/test_redaction_presidio.py and the Tier-2
+        # middleware test gate on ``spacy.util.is_package(...)``,
+        # accepting either model -- so this step suffices for the
+        # unit lane's correctness signal without paying the ``lg``
+        # download wall every run. Each shard provisions the sm model
+        # (its file set may include the Tier-2 lanes); the ~12 MB
+        # download is cheap enough to not warrant caching.
+        #
+        # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
+        # presidio.py adapter reads; setting it here pins the unit
+        # job's engine to the ``sm`` model regardless of the
+        # adapter's default. Production deployments leave the env
+        # unset and let the adapter pick the documented default.
         run: |
           uv run python -m spacy download en_core_web_sm
+          # Smoke-test the import path so a presidio<->spacy model-
+          # version mismatch fails THIS PR, not the integration lane.
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
+
+      - name: Install Helm
+        # The chart render tests (tests/test_chart_*.py) call `helm
+        # template`. Without helm they skip, so a broken chart test could
+        # stay hidden on main. Same pinned action and Helm version as
+        # chart.yml and the helm-lint-template job below. Every shard
+        # needs it: the file split can put a chart test file in any shard.
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Install PHP CLI
+        # The pfSense user-write tests
+        # (tests/test_connectors_pfsense_user_write_ops.py) run the
+        # `pfSsh.php playback` fragment with the php command-line
+        # interpreter against a synthetic config. Without php they skip,
+        # so a fragment that changes the wrong user could stay hidden on
+        # main. Same `sudo -n apt-get` pattern as the Go lane's C-toolchain
+        # step below. Every shard needs it: the file split can put the
+        # test file in any shard.
+        #
+        # `apt-get update` exits 100 when any one package index fails to
+        # download, even one that php-cli does not need. The runner image
+        # carries the git-core PPA (it installs a newer git from there), and
+        # that mirror answered 503 in a merge-queue run (#4759), which
+        # dropped the pull request from the queue. apt had already retried
+        # the file three times in that run, so more retries alone do not
+        # help. So a failed update is a warning, not the end of the step:
+        # apt keeps the indexes it did download, and the install below
+        # fails on its own when the Ubuntu indexes are missing.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v php >/dev/null 2>&1; then
+            echo "php ready: $(php --version | head -1)"
+            exit 0
+          fi
+          if ! sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+            echo "::warning::apt-get update could not refresh every package index; installing php-cli from the indexes that did download"
+          fi
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
+          php --version | head -1
+
 
       - name: Pytest (unit) with offline coverage data
         # Runner-enforced STEP backstop (#2800/#2806) — layer 2 of the
         # three-layer defense documented on the job's `timeout-minutes`. A step
-        # timeout is a step FAILURE (absorbed by whole-job continue-on-error),
-        # never a cancellation. But #2865 proved a pytest hang can outlive it
+        # timeout is a step FAILURE, never a passing shard. But #2865 proved a pytest hang can outlive it
         # when the runner is wedged, so the PRIMARY guard is the in-process
         # `--timeout` on the run below, not this cap.
         # 30 per shard (#3172): set when 3 shards ran ~19 min each (57-min
@@ -1358,9 +1447,11 @@ jobs:
         # cancel the run, but it must read as a step FAILURE, not a false green.
         shell: bash
         env:
+          MEHO_REQUIRE_HELM: "1"
+          MEHO_REQUIRE_PHP: "1"
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Same lane-placement opt-out as the required unit lane's
-          # Pytest step (#2980) — this job re-runs that sweep, serially
+          # Pytest step (#2980) — this job runs that sweep, serially
           # and under a 30-min per-shard step cap, so the canary's full-ingest
           # tests are opted out here for the same budget reason. Today
           # this is belt-and-suspenders (this job has no spec-shelf
@@ -1385,7 +1476,7 @@ jobs:
         # (see the memory table in this job's header). --dist loadscope keeps a
         # module's tests on one worker so session-scoped fixtures instantiate
         # once. No --maxfail: a coverage run wants the whole suite measured even
-        # if one test is flaky; redness here is non-blocking anyway.
+        # if one test fails; a failed run still fails the required aggregate.
         #
         # PRIMARY hang guard (#2865): --timeout=300 arms a per-test SIGALRM, so a
         # wedged test dies IN-PROCESS as a pytest-timeout Failed carrying the
@@ -1403,7 +1494,7 @@ jobs:
         # honest test yet far below the 30-min step cap. tee preserves the full
         # log for the hang-diagnostic artifact below; `exit ${PIPESTATUS[0]}`
         # propagates pytest's OWN exit (not tee's) so a hang reads as a step
-        # FAILURE the job's continue-on-error absorbs — `shell: bash` above
+        # FAILURE that reaches the required aggregate — `shell: bash` above
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
           # Deterministic stride shard (#3172): the sorted test-file list,
@@ -1411,11 +1502,11 @@ jobs:
           # semantics identical to a full run; stride (vs contiguous
           # blocks) spreads the heavyweight suites across shards. The
           # eight shards partition the full set exactly (NR mod 8 hits
-          # each residue once); integration stays excluded by the find,
-          # matching the old --ignore.
+          # each residue once); integration and migrations stay excluded,
+          # matching the queue sweep's integration/migration exclusions.
           TOTAL=8
           SHARD="${{ matrix.shard }}"
-          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
+          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
           if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
             echo "::error::shard ${SHARD} selected 0 test files — stride selection broken"
@@ -1457,8 +1548,8 @@ jobs:
         # #2865: a coverage-job hang now dies as a pytest-timeout FAILURE with
         # the offending test's traceback in this log (see the Pytest step's
         # --timeout). Uploaded whenever the log exists so the NEXT hang says
-        # WHERE it hung, not just that the job ran long. continue-on-error is
-        # belt-and-suspenders on top of the whole-job continue-on-error.
+        # WHERE it hung, not just that the job ran long. A diagnostic upload
+        # failure must not replace the original pytest failure.
         if: always() && hashFiles('backend/pytest-coverage.log') != ''
         continue-on-error: true
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine

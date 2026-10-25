@@ -246,6 +246,15 @@ async def _stored_result_after_timeout(
             connector, operator, target, cluster_moid, from_cache=True
         )
     except Exception as cache_exc:
+        # Any failure of the stored read ends as the original timeout, with
+        # the explanation. The cause stays chained; this line names it in the
+        # log, where the dispatcher's connector_timeout answer does not.
+        _log.warning(
+            "vmware_host_vsan_health_stored_result_failed",
+            target=target.name,
+            cluster=cluster_moid,
+            error=type(cache_exc).__name__,
+        )
         raise httpx.ReadTimeout(
             f"{timeout_text} The last stored result could not be read either.",
             request=_request_of(timeout_exc),

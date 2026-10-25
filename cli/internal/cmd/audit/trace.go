@@ -148,8 +148,9 @@ func runTraceList(cmd *cobra.Command, opts traceListOptions) error {
 
 // printTraceListTable renders one line per operation run with a stored
 // trace. The audit id comes first so an operator can paste it into
-// `meho audit trace show`. The `meho audit query` table has no audit
-// id column, which is why this is not `printQueryTable`.
+// `meho audit trace show`. It is not `printQueryTable` because this
+// table drops the PRINCIPAL and CLASS columns, which say nothing about
+// whether a trace exists.
 func printTraceListTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no stored traces matched the filter")

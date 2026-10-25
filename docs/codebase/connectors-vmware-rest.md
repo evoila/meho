@@ -2997,9 +2997,9 @@ content-library byte source in `library_download.py`):
    the PUT's `Content-Length` is the download response's own `Content-Length`
    (the `File.Info.size` is not guaranteed set before the download completes).
    A `*` device-URL host is substituted with the host the client connected to
-   (the `HttpNfcLeaseDeviceUrl.url` spec contract). **Before a byte streams,
-   the device host's certificate is pinned to the lease's `sslThumbprint`**
-   (see the hardening note below).
+   (the `HttpNfcLeaseDeviceUrl.url` spec contract). Before disk bytes stream,
+   the upload checks the lease certificate or thumbprint, or uses verified
+   TLS when neither is supplied (see the certificate checks below).
 6. `HttpNfcLeaseComplete` on success; `HttpNfcLeaseAbort` on any failure after
    the lease exists — vCenter then removes the half-created inventory objects,
    so a failed import never leaves a partial VM behind.

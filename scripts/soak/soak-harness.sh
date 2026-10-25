@@ -124,6 +124,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BACKEND_DIR="$REPO_ROOT/backend"
 [[ -d "$BACKEND_DIR" ]] || usage_err "backend dir not found at $BACKEND_DIR"
+PYTHON="$BACKEND_DIR/.venv/bin/python"
+[[ -x "$PYTHON" ]] || usage_err "prepared backend environment missing: run uv sync --locked in $BACKEND_DIR before using this driver"
 
 require_file() {
   [[ -f "$EVIDENCE_DIR/$1" ]] || usage_err "missing evidence file: $EVIDENCE_DIR/$1 (see --help for the contract)"
@@ -154,7 +156,7 @@ set +e
   OP="$OP" CONNECTOR="$CONNECTOR" EVIDENCE_DIR="$EVIDENCE_DIR" \
   IDEMPOTENT="$IDEMPOTENT" SOAK_CLEAN="$SOAK_CLEAN" \
   EXPLAINED_FILE="$EXPLAINED_FILE" REPORT="$REPORT" \
-  uv run --locked python - <<'PY'
+  "$PYTHON" - <<'PY'
 import json
 import os
 from pathlib import Path

@@ -907,7 +907,15 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "unit_in_use",
             "timeout",
         },
-        "vmware.composite.host.evacuate": {"evacuated", "partial", "aborted"},
+        # #4895: a maintenance-task poll timeout is a status (the task still
+        # runs), and a host outside a cluster is refused before any change.
+        "vmware.composite.host.evacuate": {
+            "evacuated",
+            "partial",
+            "aborted",
+            "timeout",
+            "not_in_cluster",
+        },
         # #2970: the DVS detach is a polled vim ReconfigureDvs_Task.
         "vmware.composite.host.detach_from_vds": {"detached", "incomplete", "timeout"},
         # #3091: the portgroup writes are polled vim CreateDVPortgroup_Task /

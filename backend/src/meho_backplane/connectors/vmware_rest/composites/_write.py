@@ -114,7 +114,11 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     vim_moref,
 )
 from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
-from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
+from meho_backplane.connectors.vmware_rest.vim_task import (
+    TASK_STATE_ERROR,
+    VimTaskResult,
+    poll_vim_task,
+)
 from meho_backplane.operations.composite import (
     DispatchChild,
     composite_resume_scope_var,
@@ -832,6 +836,22 @@ _PROP_DVS_CONFIG_VERSION = "config.configVersion"
 # Required int ``timeout`` on the maintenance request types; ``0`` defers
 # entirely to the poll's wall-clock bound below.
 _MAINTENANCE_VIM_TIMEOUT: Final[int] = 0
+# host.evacuate (#4895): the host's ``parent`` is the cluster it is in (a
+# ``ClusterComputeResource`` MoRef); a host outside a cluster has a plain
+# ``ComputeResource`` parent, so the read doubles as the "in a cluster" check.
+_PROP_PARENT = "parent"
+# ``ClusterDrsConfigInfo.defaultVmBehavior`` value under which vCenter carries
+# out its own DRS moves -- including the ones maintenance mode needs.
+_DRS_BEHAVIOR_FULLY_AUTOMATED = "fullyAutomated"
+# ``Vcenter.VM.Summary.power_state`` value of a running VM; only running VMs
+# are moved (MEHO does not send ``evacuatePoweredOffVms``).
+_VM_POWER_STATE_ON = "POWERED_ON"
+# ``EnterMaintenanceModeRequestType.maintenanceSpec`` DataObjects (#3103:
+# every DataObject carries its ``_typeName``) and vCenter's own default for
+# ``VsanHostDecommissionMode.objectAction`` when the spec is left out.
+_HOST_MAINTENANCE_SPEC_TYPE = "HostMaintenanceSpec"
+_VSAN_HOST_DECOMMISSION_MODE_TYPE = "VsanHostDecommissionMode"
+_VSAN_MODE_DEFAULT = "ensureObjectAccessibility"
 
 # Wall-clock bounds for the #2970 vim task polls + the cluster.patch cis
 # task poll -- the 600s ``vm.disk.grow`` / ``vm.clone_from_template``
@@ -5320,6 +5340,68 @@ async def vm_power_composite(
 # ===========================================================================
 
 
+async def _run_host_maintenance_task(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+    op_id: str,
+    maintenance_spec: dict[str, Any] | None = None,
+) -> OperationResult | VimTaskResult:
+    """Gate, send and poll one vim maintenance transition on a host.
+
+    The pinned vcenter.yaml serves no host-maintenance REST path (#2970);
+    enter / exit are the vim ``HostSystem.EnterMaintenanceMode_Task`` /
+    ``ExitMaintenanceMode_Task`` methods, whose request types carry a
+    required int ``timeout`` (``<= 0`` = no vim-side bound -- the poll's
+    wall clock is the bound here). *maintenance_spec* is the optional
+    ``HostMaintenanceSpec`` of the enter call (the vSAN data option,
+    #4895); ``None`` leaves the body at ``{"timeout": 0}``, so vCenter
+    applies its own defaults. Returns the governance seam's
+    :class:`OperationResult` when it parks/denies the write, else the
+    polled :class:`VimTaskResult` (success, fault or poll timeout).
+    """
+    method_name = op_id.rsplit("/", 1)[-1]
+    body: dict[str, Any] = {"timeout": _MAINTENANCE_VIM_TIMEOUT}
+    if maintenance_spec is not None:
+        body["maintenanceSpec"] = maintenance_spec
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=op_id,
+        vmomi_path=f"/{_HOST_SYSTEM_MO_TYPE}/{host_moid}/{method_name}",
+        body=body,
+        params={"host": host_moid},
+    )
+    if gate is not None:
+        return gate
+    return await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_MAINTENANCE_TASK_TIMEOUT_SECONDS,
+    )
+
+
+def _maintenance_task_failure(outcome: VimTaskResult, op_id: str, host_moid: str) -> str | None:
+    """Why a maintenance task did not succeed, or ``None`` when it did."""
+    method_name = op_id.rsplit("/", 1)[-1]
+    if outcome.state == TASK_STATE_ERROR:
+        return (
+            f"{method_name} on host {host_moid!r} faulted: "
+            f"{outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return (
+            f"{method_name} task {outcome.task} on host {host_moid!r} did not reach a "
+            f"terminal state within {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s"
+        )
+    return None
+
+
 async def _host_maintenance_vim_step(
     *,
     connector: VmwareRestConnector,
@@ -5330,46 +5412,20 @@ async def _host_maintenance_vim_step(
 ) -> tuple[OperationResult | None, str | None]:
     """Run one governed vim maintenance transition on a host, polled to terminal.
 
-    The pinned vcenter.yaml serves no host-maintenance REST path (#2970);
-    enter / exit are the vim ``HostSystem.EnterMaintenanceMode_Task`` /
-    ``ExitMaintenanceMode_Task`` methods, whose request types carry a
-    required int ``timeout`` (``<= 0`` = no vim-side bound -- the poll's
-    wall clock is the bound here). Returns ``(gate, None)`` when the
-    governance seam parks/denies the write, ``(None, reason)`` when the
-    returned Task faults or the poll deadline elapses, ``(None, None)`` on
-    success. Shared by :func:`host_evacuate_composite` (enter) and
-    :func:`cluster_patch_composite` (enter + exit).
+    Returns ``(gate, None)`` when the governance seam parks/denies the
+    write, ``(None, reason)`` when the returned Task faults or the poll
+    deadline elapses, ``(None, None)`` on success. Used by
+    :func:`cluster_patch_composite` (enter + exit) with the plain
+    ``{"timeout": 0}`` body; :func:`host_evacuate_composite` drives
+    :func:`_run_host_maintenance_task` itself because it reports a poll
+    timeout as a status, not a failure.
     """
-    method_name = op_id.rsplit("/", 1)[-1]
-    gate, task_payload = await _write_vmomi_sub_op(
-        connector,
-        target,
-        operator,
-        op_id=op_id,
-        vmomi_path=f"/{_HOST_SYSTEM_MO_TYPE}/{host_moid}/{method_name}",
-        body={"timeout": _MAINTENANCE_VIM_TIMEOUT},
-        params={"host": host_moid},
+    outcome = await _run_host_maintenance_task(
+        connector=connector, target=target, operator=operator, host_moid=host_moid, op_id=op_id
     )
-    if gate is not None:
-        return gate, None
-    outcome = await poll_vim_task(
-        connector,
-        target,
-        operator,
-        task=_unwrap_value(task_payload),
-        timeout_seconds=_MAINTENANCE_TASK_TIMEOUT_SECONDS,
-    )
-    if outcome.state == TASK_STATE_ERROR:
-        return None, (
-            f"{method_name} on host {host_moid!r} faulted: "
-            f"{outcome.error_message or '<no fault reported>'}"
-        )
-    if outcome.timed_out:
-        return None, (
-            f"{method_name} task {outcome.task} on host {host_moid!r} did not reach a "
-            f"terminal state within {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s"
-        )
-    return None, None
+    if isinstance(outcome, OperationResult):
+        return outcome, None
+    return None, _maintenance_task_failure(outcome, op_id, host_moid)
 
 
 def _classify_vm_migrate_outcome(
@@ -5385,25 +5441,231 @@ def _classify_vm_migrate_outcome(
     return False, str(inner_status or "unknown")
 
 
-def _evacuate_aborted(
-    host_moid: str, migrated: list[str], failed: list[dict[str, str]]
+async def _resolve_host_cluster(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+) -> str | None:
+    """The moid of the cluster *host_moid* is in, or ``None`` for a host outside a cluster.
+
+    One ``RetrievePropertiesEx`` read of the host's ``parent`` (the same
+    vim path the vm.migrate DRS read uses). All VMs on a host share its
+    cluster, so one read serves every per-VM move. The vCenter VM listing
+    rows carry no cluster field (``Vcenter.VM.Summary``: ``vm``, ``name``,
+    ``power_state``, ``cpu_count``, ``memory_size_mib``), which is why the
+    cluster cannot be read per VM (#4895).
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(_HOST_SYSTEM_MO_TYPE, host_moid, _PROP_PARENT),
+    )
+    parent = _extract_single_prop(payload, _PROP_PARENT)
+    if not isinstance(parent, dict) or parent.get("type") != _CLUSTER_COMPUTE_RESOURCE_MO_TYPE:
+        return None
+    cluster_moid = parent.get("value")
+    return cluster_moid if isinstance(cluster_moid, str) and cluster_moid else None
+
+
+async def _read_cluster_drs_config(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    cluster_moid: str,
 ) -> dict[str, Any]:
-    """``aborted`` envelope: a VM failed to migrate and partial failure is not tolerated."""
+    """The cluster's ``ClusterDrsConfigInfo`` (``{}`` when vCenter has none set).
+
+    Reads the whole ``configurationEx`` and picks ``drsConfig`` in code, as
+    :func:`._read.cluster_drs_recommendations_composite` does -- vCenter
+    8.0 refuses the nested path ``configurationEx.drsConfig`` (#3617).
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(
+            _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, cluster_moid, _PROP_CONFIGURATION_EX
+        ),
+    )
+    config_ex = _extract_single_prop(payload, _PROP_CONFIGURATION_EX)
+    drs_config = config_ex.get("drsConfig") if isinstance(config_ex, dict) else None
+    return drs_config if isinstance(drs_config, dict) else {}
+
+
+def _drs_moves_running_vms(drs_config: dict[str, Any]) -> bool:
+    """Whether vCenter's DRS moves the running VMs itself when the host enters maintenance."""
+    return (
+        bool(drs_config.get("enabled"))
+        and drs_config.get("defaultVmBehavior") == _DRS_BEHAVIOR_FULLY_AUTOMATED
+    )
+
+
+def _vsan_maintenance_spec(vsan_mode: str) -> dict[str, Any]:
+    """``HostMaintenanceSpec`` carrying the vSAN data option (``vsanMode.objectAction``)."""
     return {
-        "status": "aborted",
+        VIM_TYPE_NAME_KEY: _HOST_MAINTENANCE_SPEC_TYPE,
+        "vsanMode": {
+            VIM_TYPE_NAME_KEY: _VSAN_HOST_DECOMMISSION_MODE_TYPE,
+            "objectAction": vsan_mode,
+        },
+    }
+
+
+def _vm_rows_by_moid(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Listing rows keyed by VM moid, in listing order; rows without a moid are dropped."""
+    return {row["vm"]: row for row in rows if isinstance(row.get("vm"), str)}
+
+
+def _remaining_vm_rows(
+    rows: dict[str, dict[str, Any]],
+    migrated: list[str],
+    failed: list[dict[str, str]],
+    default_reason: str,
+) -> list[dict[str, Any]]:
+    """The VMs of *rows* that are still on the host, each with the reason it stayed.
+
+    A VM MEHO moved is never "remaining", even when a listing still shows
+    it. The reason is the move error when MEHO tried to move the VM, the
+    power state when the VM was not running (MEHO moves only running VMs),
+    else *default_reason*.
+    """
+    failure_reasons = {entry["vm"]: entry["error"] for entry in failed}
+    remaining: list[dict[str, Any]] = []
+    for vm_moid, row in rows.items():
+        if vm_moid in migrated:
+            continue
+        power_state = row.get("power_state")
+        if vm_moid in failure_reasons:
+            reason = failure_reasons[vm_moid]
+        elif isinstance(power_state, str) and power_state != _VM_POWER_STATE_ON:
+            reason = power_state.lower()
+        else:
+            reason = default_reason
+        remaining.append(
+            {"vm": vm_moid, "name": row.get("name"), "power_state": power_state, "reason": reason}
+        )
+    return remaining
+
+
+def _evacuate_envelope(
+    *,
+    status: str,
+    host_moid: str,
+    migrated: list[str],
+    failed: list[dict[str, str]],
+    remaining: list[dict[str, Any]],
+    maintenance_entered: bool,
+    moved_by: str,
+    maintenance_task: str | None = None,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
         "host": host_moid,
         "migrated_vms": migrated,
         "failed_vms": failed,
-        "maintenance_entered": False,
-        "issues": [
+        "remaining_vms": remaining,
+        "maintenance_entered": maintenance_entered,
+        "maintenance_task": maintenance_task,
+        "moved_by": moved_by,
+        "guidance": guidance,
+    }
+
+
+def _evacuate_aborted(
+    host_moid: str,
+    vms: list[dict[str, Any]],
+    migrated: list[str],
+    failed: list[dict[str, str]],
+) -> dict[str, Any]:
+    """``aborted`` envelope: a VM could not be moved and partial failure is not tolerated."""
+    envelope = _evacuate_envelope(
+        status="aborted",
+        host_moid=host_moid,
+        migrated=migrated,
+        failed=failed,
+        remaining=_remaining_vm_rows(_vm_rows_by_moid(vms), migrated, failed, "not_attempted"),
+        maintenance_entered=False,
+        moved_by="meho",
+    )
+    envelope["issues"] = [
+        issue(
+            "connector",
+            "error",
+            f"evacuation of host {host_moid!r} stopped: {len(failed)} VM(s) could not "
+            "be migrated; maintenance mode was not entered",
+        )
+    ]
+    return envelope
+
+
+def _evacuate_finished(
+    *,
+    host_moid: str,
+    vms_before: list[dict[str, Any]],
+    vms_after: list[dict[str, Any]],
+    migrated: list[str],
+    failed: list[dict[str, str]],
+    outcome: VimTaskResult,
+    moved_by: str,
+) -> dict[str, Any]:
+    """The truthful answer after the maintenance task ended or MEHO stopped waiting.
+
+    Compares the host's VM list before and after the task: every VM that is
+    gone left the host (moved by MEHO or by vCenter), every VM still listed
+    stayed, with its reason. A VM that left is never reported as failed.
+    """
+    after = _vm_rows_by_moid(vms_after)
+    before_moids = list(_vm_rows_by_moid(vms_before))
+    left = [vm for vm in before_moids if vm in migrated or vm not in after]
+    failed_still_on_host = [entry for entry in failed if entry["vm"] in after]
+    remaining = _remaining_vm_rows(after, migrated, failed_still_on_host, "not_moved")
+    running_left_behind = [row for row in remaining if row["power_state"] == _VM_POWER_STATE_ON]
+    if outcome.timed_out:
+        status = "timeout"
+    elif running_left_behind:
+        status = "partial"
+    else:
+        status = "evacuated"
+    envelope = _evacuate_envelope(
+        status=status,
+        host_moid=host_moid,
+        migrated=left,
+        failed=failed_still_on_host,
+        remaining=remaining,
+        maintenance_entered=outcome.succeeded,
+        moved_by=moved_by,
+        maintenance_task=outcome.task,
+    )
+    if status == "timeout":
+        envelope["guidance"] = (
+            f"MEHO stopped waiting after {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s, but the "
+            f"maintenance-mode task {outcome.task} still runs on vCenter. The call did not "
+            "fail. Check the task (vmware.tasks.recent) before you work on the host."
+        )
+        envelope["issues"] = [
+            issue(
+                "connector",
+                "warning",
+                f"maintenance-mode task {outcome.task} on host {host_moid!r} still runs "
+                f"after {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s; the host is not yet in "
+                "maintenance mode",
+            )
+        ]
+    elif status == "partial":
+        envelope["issues"] = [
             issue(
                 "connector",
                 "error",
-                f"evacuation of host {host_moid!r} stopped: {len(failed)} VM(s) could not "
-                "be migrated; maintenance mode was not entered",
+                f"host {host_moid!r} entered maintenance but {len(running_left_behind)} "
+                "running VM(s) stayed on it",
             )
-        ],
-    }
+        ]
+    return envelope
 
 
 async def host_evacuate_composite(
@@ -5414,88 +5676,105 @@ async def host_evacuate_composite(
     connector: VmwareRestConnector,
     dispatch_child: DispatchChild,
 ) -> dict[str, Any] | OperationResult:
-    """Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.
+    """Move every running VM off a host, then put the host into maintenance mode.
 
-    Op-id: ``vmware.composite.host.evacuate``. First production composite
-    that calls another composite via ``dispatch_child`` -- that recursion
-    into ``vmware.composite.vm.migrate`` stays on the ``dispatch_child`` path
-    (a registrar-guaranteed ``source_kind="composite"`` row, #2248), while
-    the host's own VM listing read and the maintenance-enter write run
-    directly on the injected ``connector`` session.
+    Op-id: ``vmware.composite.host.evacuate``. Steps (#4895):
+
+    1. Read the host's cluster from its ``parent`` (vim). A host outside a
+       cluster is refused before any change (``not_in_cluster``).
+    2. Read the cluster's DRS config. When DRS is on and fully automated,
+       vCenter moves the running VMs itself as part of the maintenance-mode
+       task, so MEHO sends no per-VM move. Otherwise every running VM is
+       moved through the recursive ``vmware.composite.vm.migrate``
+       (``dispatch_child``, a registrar-guaranteed ``source_kind="composite"``
+       row, #2248) with the cluster from step 1; a VM DRS has no suggestion
+       for is ``no_recommendation`` and, unless ``tolerate_partial_failure``
+       is set, stops the operation before maintenance mode.
+    3. Send ``EnterMaintenanceMode_Task`` with the vSAN data option
+       (``vsan_mode``) and poll it.
+    4. Read the host's VM list again and report which VMs left, which
+       stayed and why, and whether the host is in maintenance mode. A poll
+       timeout is the ``timeout`` status with the task id, not a failure.
     """
     host_moid = params["host"]
     tolerate_partial = bool(params.get("tolerate_partial_failure", False))
+    vsan_mode = str(params.get("vsan_mode") or _VSAN_MODE_DEFAULT)
 
-    vms = await _resolve_vm_list(
+    cluster_moid = await _resolve_host_cluster(
+        connector=connector, target=target, operator=operator, host_moid=host_moid
+    )
+    if cluster_moid is None:
+        return _evacuate_envelope(
+            status="not_in_cluster",
+            host_moid=host_moid,
+            migrated=[],
+            failed=[],
+            remaining=[],
+            maintenance_entered=False,
+            moved_by="none",
+            guidance=(
+                f"host {host_moid!r} is not in a cluster, so there is no DRS to move its VMs. "
+                "Nothing was changed. Move the VMs with vm.migrate and a target_host first, "
+                "or put the host into maintenance mode without moving VMs."
+            ),
+        )
+    drs_config = await _read_cluster_drs_config(
+        connector=connector, target=target, operator=operator, cluster_moid=cluster_moid
+    )
+    drs_moves_vms = _drs_moves_running_vms(drs_config)
+    moved_by = "drs" if drs_moves_vms else "meho"
+
+    vms_before = await _resolve_vm_list(
         connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
     )
 
     migrated: list[str] = []
     failed: list[dict[str, str]] = []
-    for vm_entry in vms:
-        vm_moid = vm_entry.get("vm")
-        if not isinstance(vm_moid, str):
-            continue
-        # Resolve the cluster per-VM rather than once from ``vms[0]``. The
-        # vCenter listing row reports each VM's containing cluster; VMs on
-        # the same host can belong to different clusters when the host
-        # straddles a federation (and the listing payload may simply omit
-        # the field for a row mid-flight). Treat a missing cluster as a
-        # per-VM failure so the recursive migrate doesn't fire against an
-        # empty target — that would short-circuit to ``no_recommendation``
-        # without surfacing the underlying data gap.
-        vm_cluster = vm_entry.get("cluster")
-        if not isinstance(vm_cluster, str) or not vm_cluster:
-            failed.append({"vm": vm_moid, "error": "missing_cluster"})
+    if not drs_moves_vms:
+        for vm_moid, vm_entry in _vm_rows_by_moid(vms_before).items():
+            if vm_entry.get("power_state") != _VM_POWER_STATE_ON:
+                continue
+            migrate_result = await dispatch_child(
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_COMPOSITE_VM_MIGRATE,
+                params={"vm": vm_moid, "cluster": cluster_moid},
+            )
+            succeeded, err_text = _classify_vm_migrate_outcome(migrate_result)
+            if succeeded:
+                migrated.append(vm_moid)
+                continue
+            failed.append({"vm": vm_moid, "error": err_text})
             if not tolerate_partial:
-                return _evacuate_aborted(host_moid, migrated, failed)
-            continue
-        migrate_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_COMPOSITE_VM_MIGRATE,
-            params={"vm": vm_moid, "cluster": vm_cluster},
-        )
-        succeeded, err_text = _classify_vm_migrate_outcome(migrate_result)
-        if succeeded:
-            migrated.append(vm_moid)
-            continue
-        failed.append({"vm": vm_moid, "error": err_text})
-        if not tolerate_partial:
-            return _evacuate_aborted(host_moid, migrated, failed)
+                return _evacuate_aborted(host_moid, vms_before, migrated, failed)
 
-    gate, reason = await _host_maintenance_vim_step(
+    outcome = await _run_host_maintenance_task(
         connector=connector,
         target=target,
         operator=operator,
         host_moid=host_moid,
         op_id=_OP_ENTER_MAINTENANCE_TASK,
+        maintenance_spec=_vsan_maintenance_spec(vsan_mode),
     )
-    if gate is not None:
-        return gate
-    if reason is not None:
-        # The maintenance-enter is the load-bearing final step; a task
-        # fault / poll timeout raises so the dispatcher wraps it
-        # ``connector_error`` (mirrors the pre-#2970 propagate-on-HTTPError
-        # semantics of the synchronous REST fiction).
+    if isinstance(outcome, OperationResult):
+        return outcome
+    if outcome.state == TASK_STATE_ERROR:
+        # A faulted maintenance task is a failed call; the dispatcher wraps
+        # it ``connector_error`` (unchanged from #2970). A poll timeout is
+        # reported below instead.
+        reason = _maintenance_task_failure(outcome, _OP_ENTER_MAINTENANCE_TASK, host_moid)
         raise RuntimeError(f"host.evacuate: {reason}")
-    envelope: dict[str, Any] = {
-        "status": "partial" if failed else "evacuated",
-        "host": host_moid,
-        "migrated_vms": migrated,
-        "failed_vms": failed,
-        "maintenance_entered": True,
-    }
-    if failed:
-        # Even when tolerated, VMs left behind mean the evacuation is incomplete.
-        envelope["issues"] = [
-            issue(
-                "connector",
-                "error",
-                f"host {host_moid!r} entered maintenance but {len(failed)} VM(s) "
-                "could not be migrated off it",
-            )
-        ]
-    return envelope
+    vms_after = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
+    )
+    return _evacuate_finished(
+        host_moid=host_moid,
+        vms_before=vms_before,
+        vms_after=vms_after,
+        migrated=migrated,
+        failed=failed,
+        outcome=outcome,
+        moved_by=moved_by,
+    )
 
 
 # ===========================================================================

@@ -231,25 +231,40 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
     },
     _P + "host.evacuate": {
         "when_to_call": (
-            "Call to move every VM off one ESXi host and then put the host into "
+            "Call to move every running VM off one ESXi host and then put the host into "
             "maintenance mode, for example before hardware work."
         ),
         "preconditions": (
-            "The host must be in a cluster with DRS on: each VM moves where DRS "
-            "recommends (vm.migrate). The other hosts need room for these VMs. With "
-            "tolerate_partial_failure=true the host enters maintenance mode even when "
-            "some VMs could not be moved."
+            "The host must be in a cluster (else not_in_cluster, no change). When DRS is on "
+            "and fully automated, vCenter moves the running VMs itself as part of the "
+            "maintenance-mode request. Otherwise MEHO moves each running VM where DRS "
+            "recommends (vm.migrate); a VM without a DRS suggestion is no_recommendation and "
+            "stops the call before maintenance mode, unless tolerate_partial_failure=true. "
+            "Powered-off VMs are not moved and may stay on the host. The other hosts need "
+            "room for the VMs."
         ),
-        "parameter_hints": {"host": "Host moid, e.g. 'host-21'."},
+        "parameter_hints": {
+            "host": "Host moid, e.g. 'host-21'.",
+            "vsan_mode": (
+                "What vSAN does with the host's data: ensureObjectAccessibility (default, "
+                "keep objects reachable), evacuateAllData (move all data off), noAction."
+            ),
+        },
         "output_shape": (
-            "{status: evacuated|partial|aborted, host, migrated_vms: [...], failed_vms: "
-            "[{vm, error}], maintenance_entered, issues}. On aborted the host is not in "
-            "maintenance mode. A failed maintenance-mode step makes the call fail."
+            "{status: evacuated|partial|aborted|timeout|not_in_cluster, host, migrated_vms: "
+            "[...], failed_vms: [{vm, error}], remaining_vms: [{vm, name, power_state, "
+            "reason}], maintenance_entered, maintenance_task, moved_by: drs|meho|none, "
+            "guidance, issues}. migrated_vms are the VMs that left the host, moved by MEHO or "
+            "by vCenter. remaining_vms are the VMs still on the host with the reason "
+            "(powered_off, no_recommendation, not_moved, ...). On timeout the maintenance-mode "
+            "task still runs under maintenance_task; the call did not fail. A faulted "
+            "maintenance-mode task makes the call fail."
         ),
         "next_step": (
             "On aborted or partial, look at failed_vms (no_recommendation means DRS found "
             "no place) and move those VMs with vm.migrate and a target_host, then call "
-            "again."
+            "again. On timeout, check the task with vmware.tasks.recent before you work on "
+            "the host. On not_in_cluster, move the VMs with vm.migrate and a target_host."
         ),
     },
     _P + "host.service_control": {

@@ -261,18 +261,40 @@ async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
     recorder = _DepthRecordingConnector()
     recorder.responses.update(
         {
+            # Real ``Vcenter.VM.Summary`` rows: no cluster field (#4895).
             "/vcenter/vm": {
                 "value": [
-                    {"vm": "vm-aa", "cluster": "cluster-1"},
-                    {"vm": "vm-bb", "cluster": "cluster-1"},
+                    {"vm": "vm-aa", "name": "aa", "power_state": "POWERED_ON"},
+                    {"vm": "vm-bb", "name": "bb", "power_state": "POWERED_ON"},
                 ]
             },
-            # vim drsRecommendation property read (#2970), keyed by object type.
+            # vim ``HostSystem.parent`` read (#4895): the host's cluster.
+            "HostSystem": {
+                "objects": [
+                    {
+                        "obj": {"type": "HostSystem", "value": "host-source"},
+                        "propSet": [
+                            {
+                                "name": "parent",
+                                "val": {"type": "ClusterComputeResource", "value": "cluster-1"},
+                            }
+                        ],
+                    }
+                ]
+            },
+            # vim configurationEx (DRS manual, so MEHO moves the VMs) +
+            # drsRecommendation property reads (#2970), keyed by object type.
             "ClusterComputeResource": {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "cluster-1"},
                         "propSet": [
+                            {
+                                "name": "configurationEx",
+                                "val": {
+                                    "drsConfig": {"enabled": True, "defaultVmBehavior": "manual"}
+                                },
+                            },
                             {
                                 "name": "drsRecommendation",
                                 "val": [
@@ -301,7 +323,7 @@ async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
                                         ]
                                     }
                                 ],
-                            }
+                            },
                         ],
                     }
                 ]

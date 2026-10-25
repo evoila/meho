@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,9 +183,8 @@ func TestRunDeviceFlowHappyPath(t *testing.T) {
 				"verification_uri": "https://kc.example/device",
 				"expires_in":       600,
 				// Short interval keeps the test fast — RFC 8628 §3.5
-				// permits any non-negative value and the oauth2
-				// package's DeviceAccessToken honours it as the
-				// minimum poll period.
+				// permits any non-negative value and pollDeviceToken
+				// honours it as the minimum wait between checks.
 				"interval": 1,
 			})
 		case "/token":
@@ -194,6 +194,18 @@ func TestRunDeviceFlowHappyPath(t *testing.T) {
 			}
 			if r.PostForm.Get("device_code") != deviceCode {
 				http.Error(w, "wrong device_code", http.StatusBadRequest)
+				return
+			}
+			// RFC 8628 §3.4: a public client identifies itself in the
+			// form body and sends no Authorization header. The fix
+			// for #4892 hangs on this — the oauth2 package's
+			// auto-detect sent a header first and the body second.
+			if got := r.PostForm.Get("client_id"); got != "meho-cli" {
+				http.Error(w, "wrong client_id in token request: "+got, http.StatusBadRequest)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "" {
+				http.Error(w, "unexpected Authorization header: "+got, http.StatusBadRequest)
 				return
 			}
 			n := tokenCalls.Add(1)
@@ -262,8 +274,10 @@ func TestRunDeviceFlowHappyPath(t *testing.T) {
 	if got := result.Token.Extra("id_token"); got != "idt-from-fake-idp" {
 		t.Errorf("id_token extra: got %v, want idt-from-fake-idp", got)
 	}
-	if tokenCalls.Load() < 2 {
-		t.Errorf("token endpoint called %d times, expected at least 2 (pending then success)", tokenCalls.Load())
+	// Exactly two: one request per check, pending then success. The
+	// old "at least 2" let the doubled request of #4892 through.
+	if tokenCalls.Load() != 2 {
+		t.Errorf("token endpoint called %d times, expected exactly 2 (pending then success)", tokenCalls.Load())
 	}
 
 	// Convert to StoredToken and verify the mapping. This is the
@@ -271,6 +285,396 @@ func TestRunDeviceFlowHappyPath(t *testing.T) {
 	stored := ConvertOAuthToken(result.Token, "https://meho.example", result.Issuer, "meho-cli")
 	if stored.AccessToken != "at-from-fake-idp" || stored.IDToken != "idt-from-fake-idp" {
 		t.Errorf("ConvertOAuthToken dropped fields: %+v", stored)
+	}
+}
+
+// pollingFakeIdP is a fake IdP for the polling tests. Every token
+// request records its arrival time; answers come from the supplied
+// script in order (an empty entry means "issue the token").
+//
+// Like Keycloak, the fake answers slow_down to a token request that
+// arrives less than interval after the last accepted one, and counts
+// it in tooSoon. Such a request does not use up a script entry.
+type pollingFakeIdP struct {
+	srv       *httptest.Server
+	mu        sync.Mutex
+	started   time.Time
+	arrivals  []time.Time
+	authHdrs  []string
+	clientIDs []string
+	accepted  time.Time
+	tooSoon   int
+	// approveAfter, when set, replaces the script: token requests that
+	// arrive earlier than this after the device-auth answer are
+	// pending, later ones get the token.
+	approveAfter time.Duration
+	// stall makes the token endpoint hold every request open until
+	// the client gives up on it.
+	stall bool
+}
+
+// newPollingFakeIdP starts a fake IdP whose device-auth answer carries
+// expiresIn / interval and whose token endpoint follows script: each
+// entry is the RFC 8628 §3.5 error code to answer with, and "" issues
+// the token. Requests past the end of the script also get the token.
+func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *pollingFakeIdP {
+	t.Helper()
+	f := &pollingFakeIdP{}
+	minGap := time.Duration(interval) * time.Second
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/device":
+			f.mu.Lock()
+			f.started = time.Now()
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"device_code":      "dc",
+				"user_code":        "ABCD-EFGH",
+				"verification_uri": "https://kc.example/device",
+				"expires_in":       expiresIn,
+				"interval":         interval,
+			})
+		case "/token":
+			_ = r.ParseForm()
+			now := time.Now()
+			f.mu.Lock()
+			f.arrivals = append(f.arrivals, now)
+			f.authHdrs = append(f.authHdrs, r.Header.Get("Authorization"))
+			f.clientIDs = append(f.clientIDs, r.PostForm.Get("client_id"))
+			if f.stall {
+				f.mu.Unlock()
+				<-r.Context().Done()
+				return
+			}
+			answer := ""
+			switch {
+			case !f.accepted.IsZero() && now.Sub(f.accepted) < minGap:
+				f.tooSoon++
+				answer = "slow_down"
+			case f.approveAfter > 0:
+				f.accepted = now
+				if now.Sub(f.started) < f.approveAfter {
+					answer = "authorization_pending"
+				}
+			default:
+				n := len(f.arrivals) - 1 - f.tooSoon
+				f.accepted = now
+				if n < len(script) {
+					answer = script[n]
+				}
+			}
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if answer != "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": answer})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "at",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// setApproveAfter makes the fake approve the code d after the
+// device-auth answer, like a person who approves late.
+func (f *pollingFakeIdP) setApproveAfter(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approveAfter = d
+}
+
+// setStall makes the token endpoint hold every request open.
+func (f *pollingFakeIdP) setStall() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stall = true
+}
+
+func (f *pollingFakeIdP) doc() *DiscoveryDocument {
+	return &DiscoveryDocument{
+		Issuer:                      "iss",
+		DeviceAuthorizationEndpoint: f.srv.URL + "/auth/device",
+		TokenEndpoint:               f.srv.URL + "/token",
+	}
+}
+
+// gaps returns the time between consecutive token requests.
+func (f *pollingFakeIdP) gaps() []time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []time.Duration
+	for i := 1; i < len(f.arrivals); i++ {
+		out = append(out, f.arrivals[i].Sub(f.arrivals[i-1]))
+	}
+	return out
+}
+
+func (f *pollingFakeIdP) requests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.arrivals)
+}
+
+// rejectedTooSoon is how many token requests arrived less than
+// interval after the last accepted one.
+func (f *pollingFakeIdP) rejectedTooSoon() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tooSoon
+}
+
+// setPollKnobs shortens the polling knobs for one test and restores
+// them afterwards.
+func setPollKnobs(t *testing.T, step, maxWait, margin time.Duration) {
+	t.Helper()
+	oldStep, oldMax, oldMargin := slowDownStep, maxPollInterval, lastCheckMargin
+	slowDownStep, maxPollInterval, lastCheckMargin = step, maxWait, margin
+	t.Cleanup(func() { slowDownStep, maxPollInterval, lastCheckMargin = oldStep, oldMax, oldMargin })
+}
+
+// gapTolerance is how much later than planned a request may arrive
+// on a loaded test runner (-race, CI) before a timing assertion
+// fails. Gaps are never allowed to be shorter than planned.
+const gapTolerance = 750 * time.Millisecond
+
+func assertGapAbout(t *testing.T, name string, got, want time.Duration) {
+	t.Helper()
+	if got < want-20*time.Millisecond || got > want+gapTolerance {
+		t.Errorf("%s: gap %v, want about %v", name, got, want)
+	}
+}
+
+// runFlow runs the device flow against the fake and fails the test
+// when any check reached the fake sooner than its interval allows.
+func runFlow(t *testing.T, f *pollingFakeIdP) (*LoginResult, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := RunDeviceFlow(ctx, f.doc(), "meho-cli", DeviceFlowOptions{
+		HTTPClient: f.srv.Client(),
+		Prompter:   func(context.Context, *oauth2.DeviceAuthResponse) error { return nil },
+	})
+	if n := f.rejectedTooSoon(); n != 0 {
+		t.Errorf("%d token request(s) came sooner than the interval allows", n)
+	}
+	return result, err
+}
+
+// TestRunDeviceFlowOneRequestPerCheck pins the core of #4892: every
+// check is exactly one token request, the client id travels in the
+// form body, and no Authorization header is sent. The first wait is
+// the server's interval.
+func TestRunDeviceFlowOneRequestPerCheck(t *testing.T) {
+	f := newPollingFakeIdP(t, 600, 1, []string{"authorization_pending", "authorization_pending", ""})
+	start := time.Now()
+	if _, err := runFlow(t, f); err != nil {
+		t.Fatalf("RunDeviceFlow: %v", err)
+	}
+	if got := f.requests(); got != 3 {
+		t.Fatalf("token requests: %d, want 3 (one per check)", got)
+	}
+	for i, h := range f.authHdrs {
+		if h != "" {
+			t.Errorf("request %d carried an Authorization header: %q", i+1, h)
+		}
+	}
+	for i, id := range f.clientIDs {
+		if id != "meho-cli" {
+			t.Errorf("request %d client_id in body: %q, want meho-cli", i+1, id)
+		}
+	}
+	// First check comes one interval after the start, not at once.
+	f.mu.Lock()
+	first := f.arrivals[0].Sub(start)
+	f.mu.Unlock()
+	assertGapAbout(t, "first wait", first, time.Second)
+	for i, g := range f.gaps() {
+		assertGapAbout(t, fmt.Sprintf("gap %d", i+1), g, time.Second)
+	}
+}
+
+// TestRunDeviceFlowSlowDownAddsOneStep: after one slow_down the next
+// wait is one step longer (RFC 8628 §3.5), the login still works, and
+// the server sees exactly three requests.
+func TestRunDeviceFlowSlowDownAddsOneStep(t *testing.T) {
+	setPollKnobs(t, time.Second, 30*time.Second, 2*time.Second)
+	f := newPollingFakeIdP(t, 600, 1, []string{"slow_down", "authorization_pending", ""})
+	result, err := runFlow(t, f)
+	if err != nil {
+		t.Fatalf("RunDeviceFlow: %v", err)
+	}
+	if result.Token.AccessToken != "at" {
+		t.Errorf("access token: %q", result.Token.AccessToken)
+	}
+	if got := f.requests(); got != 3 {
+		t.Fatalf("token requests: %d, want 3", got)
+	}
+	gaps := f.gaps()
+	// interval 1s + one step of 1s = 2s after slow_down; the wait
+	// stays raised for all later checks.
+	assertGapAbout(t, "wait after slow_down", gaps[0], 2*time.Second)
+	assertGapAbout(t, "wait after pending", gaps[1], 2*time.Second)
+}
+
+// TestRunDeviceFlowSlowDownWaitIsCapped: a server that keeps
+// answering slow_down cannot stretch the wait past the upper limit.
+func TestRunDeviceFlowSlowDownWaitIsCapped(t *testing.T) {
+	setPollKnobs(t, time.Second, 1500*time.Millisecond, 2*time.Second)
+	f := newPollingFakeIdP(t, 600, 1, []string{"slow_down", "slow_down", "slow_down", ""})
+	if _, err := runFlow(t, f); err != nil {
+		t.Fatalf("RunDeviceFlow: %v", err)
+	}
+	if got := f.requests(); got != 4 {
+		t.Fatalf("token requests: %d, want 4", got)
+	}
+	for i, g := range f.gaps() {
+		// 1s + 1s would be 2s; the cap holds it at 1.5s.
+		assertGapAbout(t, fmt.Sprintf("gap %d", i+1), g, 1500*time.Millisecond)
+	}
+}
+
+// TestRunDeviceFlowLastCheckBeforeExpiry: with a code that lives 3s
+// and an interval of 10s the regular cadence would never check. The
+// loop checks once about 2s before the end and the approval is seen.
+func TestRunDeviceFlowLastCheckBeforeExpiry(t *testing.T) {
+	f := newPollingFakeIdP(t, 3, 10, []string{""})
+	start := time.Now()
+	result, err := runFlow(t, f)
+	if err != nil {
+		t.Fatalf("RunDeviceFlow: %v", err)
+	}
+	if result.Token.AccessToken != "at" {
+		t.Errorf("access token: %q", result.Token.AccessToken)
+	}
+	if got := f.requests(); got != 1 {
+		t.Fatalf("token requests: %d, want 1", got)
+	}
+	f.mu.Lock()
+	at := f.arrivals[0].Sub(start)
+	f.mu.Unlock()
+	assertGapAbout(t, "last check", at, time.Second)
+}
+
+// TestRunDeviceFlowExpiresWithoutApproval: no approval until the end
+// → the "device code expired" message, not the 10-minute timeout one.
+func TestRunDeviceFlowExpiresWithoutApproval(t *testing.T) {
+	setPollKnobs(t, 5*time.Second, 30*time.Second, 500*time.Millisecond)
+	pending := []string{"authorization_pending", "authorization_pending", "authorization_pending", "authorization_pending"}
+	f := newPollingFakeIdP(t, 3, 1, pending)
+	start := time.Now()
+	_, err := runFlow(t, f)
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	if !strings.Contains(err.Error(), "device code expired") {
+		t.Errorf("error should say the code expired, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error must not blame the 10-minute cap: %q", err.Error())
+	}
+	// A check at ~1s, then the last one at ~2.5s (a regular check at
+	// ~2s would leave only 0.5s to the last one); the loop stops
+	// before the 3s end instead of running into the cap.
+	if got := f.requests(); got != 2 {
+		t.Errorf("token requests: %d, want 2", got)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second+gapTolerance {
+		t.Errorf("loop ran %v, should stop at the code's end (3s)", elapsed)
+	}
+}
+
+// TestRunDeviceFlowLastCheckKeepsTheGap: the last check is planned
+// so that it keeps the full wait to the check before it. Here the code
+// lives 5s, the interval is 1s and the last check is meant for 1.5s
+// before the end: checks at ~1s and ~2s, then the last one at ~3.5s.
+// Moving only the final check (~3s regular, ~3.5s last) would put two
+// checks 0.5s apart; the fake, like Keycloak, answers slow_down to
+// that, and the approval at 3.2s would be reported as "expired".
+func TestRunDeviceFlowLastCheckKeepsTheGap(t *testing.T) {
+	setPollKnobs(t, time.Second, 30*time.Second, 1500*time.Millisecond)
+	f := newPollingFakeIdP(t, 5, 1, nil)
+	f.setApproveAfter(3200 * time.Millisecond)
+	result, err := runFlow(t, f)
+	if err != nil {
+		t.Fatalf("RunDeviceFlow: %v", err)
+	}
+	if result.Token.AccessToken != "at" {
+		t.Errorf("access token: %q", result.Token.AccessToken)
+	}
+	if got := f.requests(); got != 3 {
+		t.Fatalf("token requests: %d, want 3", got)
+	}
+	gaps := f.gaps()
+	assertGapAbout(t, "regular gap", gaps[0], time.Second)
+	assertGapAbout(t, "gap before the last check", gaps[1], 1500*time.Millisecond)
+}
+
+// TestRunDeviceFlowStalledAnswerEndsWithTheCode: an answer that never
+// arrives cannot keep the login waiting past the code's end. The code
+// lives 2s; the one check (at ~1.5s) stalls, and the loop stops at
+// ~2s with the "device code expired" message, not the 10-minute one.
+func TestRunDeviceFlowStalledAnswerEndsWithTheCode(t *testing.T) {
+	setPollKnobs(t, 5*time.Second, 30*time.Second, 500*time.Millisecond)
+	f := newPollingFakeIdP(t, 2, 1, nil)
+	f.setStall()
+	start := time.Now()
+	_, err := runFlow(t, f)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	if !strings.Contains(err.Error(), "device code expired") {
+		t.Errorf("error should say the code expired, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error must not blame the 10-minute cap: %q", err.Error())
+	}
+	if got := f.requests(); got != 1 {
+		t.Errorf("token requests: %d, want 1", got)
+	}
+	if elapsed < 2*time.Second-20*time.Millisecond || elapsed > 2*time.Second+gapTolerance {
+		t.Errorf("loop ran %v, should stop at the code's end (2s)", elapsed)
+	}
+}
+
+// TestNextCheck pins the arithmetic of the last check.
+func TestNextCheck(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name     string
+		wait     time.Duration
+		first    bool
+		expiry   time.Time
+		want     time.Duration
+		wantLast bool
+		wantOK   bool
+	}{
+		{"no expiry keeps cadence", 5 * time.Second, false, time.Time{}, 5 * time.Second, false, true},
+		{"far from the end", 5 * time.Second, false, now.Add(time.Minute), 5 * time.Second, false, true},
+		{"another wait still fits", 5 * time.Second, false, now.Add(12 * time.Second), 5 * time.Second, false, true},
+		{"another wait would not fit", 5 * time.Second, false, now.Add(11 * time.Second), 9 * time.Second, true, true},
+		{"last check keeps the gap", 5 * time.Second, false, now.Add(6 * time.Second), 5 * time.Second, true, true},
+		{"first check may run at the margin", 10 * time.Second, true, now.Add(3 * time.Second), time.Second, true, true},
+		{"first check already inside the margin", 5 * time.Second, true, now.Add(time.Second), 0, true, true},
+		{"no check fits before the end", 10 * time.Second, false, now.Add(3 * time.Second), 0, true, false},
+		{"gap-keeping check would be at the end", 5 * time.Second, false, now.Add(5 * time.Second), 0, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, last, ok := nextCheck(now, tc.wait, tc.first, tc.expiry)
+			if got != tc.want || last != tc.wantLast || ok != tc.wantOK {
+				t.Errorf("got (%v, %v, %v), want (%v, %v, %v)", got, last, ok, tc.want, tc.wantLast, tc.wantOK)
+			}
+		})
 	}
 }
 

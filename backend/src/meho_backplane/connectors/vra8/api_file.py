@@ -27,9 +27,10 @@ The read is narrow on purpose:
   names where it points (a path on the target, or ``scheme://host/path``
   for another host, without its query). A ``401`` is raised so the dispatcher
   renews the login and retries once; every other status comes back in
-  ``status``. The body of a ``401`` goes through the file check below
-  before the read raises it, and a body that cannot be checked is left
-  out, so the error result sees only a checked body.
+  ``status``. The body of a ``401`` goes through the same file check as a
+  returned file, with the same general redaction rules on its text
+  values, before the read raises it; a body that cannot be checked is
+  left out. So the error result sees only a checked body.
 * The file is checked before it comes back
   (:func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`).
   MEHO parses it as JSON, YAML, XML or HTML, replaces every value under a
@@ -87,6 +88,7 @@ from meho_backplane.connectors._shared.api_file_secrets import (
     check_api_file,
     scrub_query_string,
 )
+from meho_backplane.connectors._shared.api_file_values import TextRule
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH, _VCO_ABOUT_PATH
@@ -226,6 +228,7 @@ async def _fetch_file(
     headers: dict[str, str],
     span: flight_recorder_capture.SpanStart | None,
     max_bytes: int,
+    text_rule: TextRule,
 ) -> httpx.Response:
     """Send the one ``GET`` with the bearer and return the answer with its body.
 
@@ -252,7 +255,7 @@ async def _fetch_file(
     except (ApiFileTooLargeError, ApiFileNotTextError) as exc:
         raise Vra8ApiFileError(f"{path!r}: {exc}. The file was not returned.") from exc
     if response.status_code == httpx.codes.UNAUTHORIZED:
-        expired = _with_checked_body(response, path)
+        expired = _with_checked_body(response, path, text_rule)
         _record(span, headers, expired, expired.content)
         expired.raise_for_status()
     return response
@@ -270,25 +273,29 @@ def _record(
     )
 
 
-def _checked_body(response: httpx.Response, path: str) -> bytes:
+def _checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> bytes:
     """The body as the file check writes it back, or no body when it cannot be checked.
 
     For an answer the read does not return as a file: a ``401`` or another
-    error status. A secret-named value comes back as the placeholder; a
-    body that is not text, or does not parse, is left out.
+    error status. The check is the one a returned file gets: a
+    secret-named value comes back as the placeholder, and *text_rule*
+    (the general redaction rules) runs on every other text value, so a
+    credential inside an error message is replaced too. A body that is
+    not text, or does not parse, is left out.
     """
     try:
         checked = check_api_file(
             decode_text(response, path),
             content_type=response.headers.get("content-type"),
             path=path,
+            text_rule=text_rule,
         )
     except (ApiFileNotTextError, ApiFileFormatError):
         return b""
     return checked.text.encode("utf-8")
 
 
-def _with_checked_body(response: httpx.Response, path: str) -> httpx.Response:
+def _with_checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> httpx.Response:
     """The same answer with a checked body (:func:`_checked_body`).
 
     The status and the headers stay, so the dispatcher still sees the
@@ -300,7 +307,7 @@ def _with_checked_body(response: httpx.Response, path: str) -> httpx.Response:
         headers=[
             (k, v) for k, v in response.headers.multi_items() if k.lower() != "content-length"
         ],
-        content=_checked_body(response, path),
+        content=_checked_body(response, path, text_rule),
         request=response.request,
         extensions=response.extensions,
     )
@@ -370,22 +377,17 @@ def _decode_text(path: str, content_type: str | None, body: bytes) -> str:
 
 
 def _checked_fields(
-    path: str, content_type: str | None, text: str, operator: Operator, connector_id: str
+    path: str, content_type: str | None, text: str, text_rule: TextRule
 ) -> tuple[dict[str, Any], bytes]:
     """Check the file and build its fields: ``size`` and ``sha256`` of the copy, the parts.
 
     The shared check parses the file, replaces every value under a secret
-    name and runs MEHO's general redaction rules (with the labels the
-    dispatcher uses) on each text value, then writes the copy back. The
-    parts, ``size`` and ``sha256`` all describe that copy, which comes
-    back as bytes too, for the flight recorder.
+    name and runs *text_rule* (MEHO's general redaction rules, with the
+    labels the dispatcher uses) on each text value, then writes the copy
+    back. The parts, ``size`` and ``sha256`` all describe that copy, which
+    comes back as bytes too, for the flight recorder.
     """
-    checked = check_api_file(
-        text,
-        content_type=content_type,
-        path=path,
-        text_rule=text_redactor(operator, connector_id=connector_id, op_id=OP_ID),
-    )
+    checked = check_api_file(text, content_type=content_type, path=path, text_rule=text_rule)
     body = checked.text.encode("utf-8")
     parts = split_text_parts(body)
     fields = {
@@ -452,9 +454,13 @@ async def vra8_api_file_get_impl(
     max_record_bytes = get_settings().result_handle_max_record_bytes
     connector_id = f"{connector.impl_id}-{connector.version}"
 
+    text_rule = text_redactor(operator, connector_id=connector_id, op_id=OP_ID)
+
     headers = await connector.auth_headers(target, operator)
     span = flight_recorder_capture.span_start()
-    response = await _fetch_file(connector, target, path, headers, span, max_record_bytes)
+    response = await _fetch_file(
+        connector, target, path, headers, span, max_record_bytes, text_rule
+    )
     status = response.status_code
     content_type = response.headers.get("content-type")
     redirect_to = _redirect(response)
@@ -473,14 +479,14 @@ async def vra8_api_file_get_impl(
     if response.is_success:
         try:
             text = _decode_text(path, content_type, response.content)
-            fields, body = _checked_fields(path, content_type, text, operator, connector_id)
+            fields, body = _checked_fields(path, content_type, text, text_rule)
         except (Vra8ApiFileError, ApiFileFormatError):
             _record(span, headers, response, b"")
             raise
         _record(span, headers, response, body)
         answer.update(fields)
     else:
-        _record(span, headers, response, _checked_body(response, path))
+        _record(span, headers, response, _checked_body(response, path, text_rule))
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         file_text = "".join(part["text"] for part in answer["text_parts"])

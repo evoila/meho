@@ -293,8 +293,10 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   dispatcher's session-recovery arm drops the cached bearer, logs in again
   and retries once, like every other read of this connector. When the
   retry fails too, the dispatcher copies the body of the `401` into the
-  error result. So the read raises the `401` with a checked body: a
-  secret-named value is replaced, and a body that is not text or does not
+  error result. So the read raises the `401` with a checked body, checked
+  like a returned file: a secret-named value is replaced, the general
+  redaction rules run on every other text value (so a credential inside an
+  error message is replaced too), and a body that is not text or does not
   parse is left out.
 - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
   `size` (bytes) and `sha256` (both of the checked copy, see below),

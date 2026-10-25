@@ -564,6 +564,11 @@ async def test_file_get_is_kept_in_the_flight_recorder(monkeypatch: pytest.Monke
 
 
 _SECRET_FILE = '{"swagger":"2.0","x-example":{"password":"made-up-recorder-secret"}}'
+# A credential inside a text value under a key that is not a secret name. The
+# JSON escape is a literal backslash-n on the wire; only the parsed value
+# holds the line break the header rule crosses.
+_CREDENTIAL_IN_TEXT = '{"detail":"Authorization:\\nBasic made-up-recorder-secret"}'
+_REDACTED_HEADER = b"[REDACTED:authorization_header]"
 
 
 def _record_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -578,15 +583,16 @@ def _record_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize(
-    ("status", "body", "content_type"),
+    ("status", "body", "content_type", "expected"),
     [
-        (200, _SECRET_FILE, "application/json"),
-        (404, _SECRET_FILE, "application/json"),
-        (500, "<html><body>password: not parsed</body>", "text/plain"),
+        (200, _SECRET_FILE, "application/json", REDACTED.encode()),
+        (404, _SECRET_FILE, "application/json", REDACTED.encode()),
+        (404, _CREDENTIAL_IN_TEXT, "application/json", _REDACTED_HEADER),
+        (500, "<html><body>password: not parsed</body>", "text/plain", b""),
     ],
 )
 async def test_flight_recorder_gets_only_the_checked_body(
-    monkeypatch: pytest.MonkeyPatch, status: int, body: str, content_type: str
+    monkeypatch: pytest.MonkeyPatch, status: int, body: str, content_type: str, expected: bytes
 ) -> None:
     """The recorder gets the checked copy of the body, or no body when it cannot be checked."""
     recorded = _record_calls(monkeypatch)
@@ -598,8 +604,8 @@ async def test_flight_recorder_gets_only_the_checked_body(
     await connector.aclose()
 
     (call,) = [call for call in recorded if call["response"].url.path == _SWAGGER_PATH]
-    if content_type == "application/json":
-        assert REDACTED.encode() in call["response_body"]
+    if expected:
+        assert expected in call["response_body"]
     else:
         assert call["response_body"] == b""
     assert b"made-up-recorder-secret" not in call["response_body"]
@@ -630,6 +636,7 @@ async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
     ("body", "content_type", "expected"),
     [
         (_SECRET_FILE, "application/json", REDACTED.encode()),
+        (_CREDENTIAL_IN_TEXT, "application/json", _REDACTED_HEADER),
         ("password=made-up-recorder-secret", "text/plain", b""),
         ("\xff\xfe", "application/octet-stream", b""),
     ],
@@ -637,7 +644,11 @@ async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
 async def test_401_body_is_checked_before_it_is_raised(
     monkeypatch: pytest.MonkeyPatch, body: str, content_type: str, expected: bytes
 ) -> None:
-    """A 401 is raised with the checked body, or none; the status stays for the login retry."""
+    """A 401 is raised with the checked body, or none; the status stays for the login retry.
+
+    The checked body also had the general redaction rules on its text
+    values: a credential under a key that is not a secret name is gone too.
+    """
     recorded = _record_calls(monkeypatch)
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:

@@ -310,6 +310,7 @@ async def test_api_file_get_dispatches_zero_catalog_and_remints_on_401(
     ("body", "content_type"),
     [
         ('{"error":"expired","password":"made-up-401-secret"}', "application/json"),
+        ('{"detail":"Authorization:\\nBasic made-up-401-secret"}', "application/json"),
         ('{"password": "made-up-401-secret"', "text/plain"),
     ],
 )
@@ -323,8 +324,11 @@ async def test_api_file_get_401_body_never_reaches_the_error_result(
     """Two 401 answers: the login retry runs, and the error result holds no part of the body.
 
     The dispatcher copies the body of the last 401 into the error result. The read
-    raises it with a checked body (a secret-named value replaced) or with no body
-    when the body cannot be checked.
+    raises it with a checked body (a secret-named value replaced, and the general
+    redaction rules run on every other text value) or with no body when the body
+    cannot be checked. The second case is a credential inside a text value under a
+    key that is not a secret name, with a line break the error-message helper does
+    not cross in the raw JSON.
     """
     await _register_and_resolve()
 

@@ -1446,8 +1446,15 @@ scenarios.
   `status == "denied"` or `status == "rate_limited"` (connector raised,
   schema validation rejected, policy denied, or the caller is over its
   rate or concurrency limit). The envelope is printed first; a
-  `rate_limited` one shows `extras.retry_after_seconds`. Surfaced via
-  the `errOpError` sentinel.
+  `rate_limited` one shows `extras.retry_after_seconds`. When the
+  backplane committed an audit row, the text output ends with
+  `audit receipt: <id>` on every status, not only on `ok` (#4833) —
+  a failed call's row is the one that says why it failed; read it
+  with `meho audit show <id>`. A null `audit_id` prints no line. A
+  parked call (`awaiting_approval`, exit 0) shows the receipt too, after
+  the parked hint: a multi-step operation that stops for approval
+  already has its own audit row.
+  Surfaced via the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
 - `4` — `unexpected_response` (parse error, malformed JSON, or an
@@ -1736,6 +1743,15 @@ instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
+
+The failure render is shared too: every vendor package's
+`printErrorTrailer` delegates to `dispatch.WriteErrorTrailer`, which
+prints the connector error, the `extras` blob, then
+`audit receipt: <id>` when the envelope carried an `audit_id` (#4833).
+`dispatch.CallResult` keeps `audit_id` for that, so a vendor verb's
+`--json` output carries the key as well (null when the backplane
+committed no row). The vendor `CallResult` still drops `handle` and
+`delivery`; restoring those is #4659.
 
 ### Typed op_id repoint contract (typed connectors, #2942)
 

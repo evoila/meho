@@ -82,6 +82,12 @@ Examples in current use:
   ConnectorNotFoundError"` — #2481; existence is not leaked, so no
   `data` envelope, matching the REST 404's three indistinguishable
   failure modes)
+- `connector_legacy_tenant_copy` (connector review / enable /
+  enable-reads / disable / edits: the operator's tenant has rows for
+  the `connector_id` only under a former product name, so the copy can
+  never be called — #4889; REST `409`, MCP `-32602`; `data` carries
+  `legacy_product`, `product`, `tenant_id` and a message that names
+  `prefer=tenant` and `meho connector delete <id>` as the way out)
 
 Naming convention: domain prefix (`ui_`, `keycloak_`, `connector_`)
 when ambiguity is possible across surfaces; bare verb-noun otherwise.

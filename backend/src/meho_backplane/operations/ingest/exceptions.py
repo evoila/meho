@@ -87,6 +87,16 @@ Review-queue failures (T4 #402) — raised from
   by every tenant, so mutating it is a platform action; the fronts map
   this onto REST ``403`` / MCP ``-32602`` (not the ``404`` conflation),
   mirroring the doc-collection global-row seat (#3616).
+* :class:`LegacyTenantConnectorCopyError` — the operator's tenant has
+  rows for the ``connector_id`` only under a **former product name**
+  (``vcf-logs`` rows for ``vrli-rest-9.0``, whose product is now
+  ``vrli``). Dispatch looks the product up from the id, so that copy
+  can never be called, and a plain product-scoped probe does not see
+  it. The review service raises this instead of falling back to the
+  built-in row or answering a misleading 404; the fronts map it to
+  REST ``409`` / MCP ``-32602`` with a structured
+  ``connector_legacy_tenant_copy`` detail that names the old copy and
+  how to delete it (#4889).
 
 Ingest-pipeline failures (G0.9-T8) — raised from
 :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`:
@@ -129,6 +139,7 @@ __all__ = [
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
+    "LegacyTenantConnectorCopyError",
     "LlmOutputInvalid",
     "OpIdCollision",
     "ProductImplIdMismatch",
@@ -678,6 +689,69 @@ class BuiltinConnectorWriteForbiddenError(Exception):
             ),
         }
         super().__init__(self.detail["message"])
+
+
+class LegacyTenantConnectorCopyError(Exception):
+    """Raised when the tenant's only copy of a connector sits under a former product name.
+
+    A ``connector_id`` such as ``vrli-rest-9.0`` names the product by its
+    first segment (``vrli``). A tenant copy ingested before the product
+    was renamed (#1814) still carries the old name (``vcf-logs``) on its
+    ``endpoint_descriptor`` / ``operation_group`` rows. Dispatch resolves
+    the product from the id, so that copy is never used; the usual
+    product-scoped resolver does not see it either, so it fell back to
+    the built-in row (enable / disable / edits) or answered a 404 that
+    told the operator to ingest (review with ``prefer=tenant``) (#4889).
+
+    The service raises this instead. It is a refusal, not a miss: the
+    old copy exists, the operator can review it with ``prefer=tenant``
+    and remove it with ``connector delete`` in the tenant scope. The
+    fronts map it to REST ``409`` / MCP ``-32602`` with the structured
+    :attr:`detail` (code ``connector_legacy_tenant_copy``). The tenant
+    id echoed is the operator's own, so this is not a cross-tenant
+    oracle.
+
+    Attributes
+    ----------
+    connector_id:
+        The operator-facing identifier (``"vrli-rest-9.0"``).
+    legacy_product:
+        The former product name the tenant rows are stored under.
+    product:
+        The product name the id resolves to today.
+    tenant_id:
+        The operator's tenant that owns the old copy.
+    """
+
+    def __init__(
+        self,
+        *,
+        connector_id: str,
+        legacy_product: str,
+        product: str,
+        tenant_id: UUID,
+    ) -> None:
+        self.connector_id = connector_id
+        self.legacy_product = legacy_product
+        self.product = product
+        self.tenant_id = tenant_id
+        self.message = (
+            f"connector {connector_id!r} has an old copy in your tenant stored under "
+            f"the former product name {legacy_product!r}. Calls use the product name "
+            f"{product!r}, so this old copy is never used and cannot be enabled. "
+            f"Review it with prefer=tenant, or delete it with "
+            f"`meho connector delete {connector_id}` and retry. "
+            f"See docs/codebase/spec-ingestion.md."
+        )
+        self.detail: dict[str, object] = {
+            "detail": "connector_legacy_tenant_copy",
+            "connector_id": connector_id,
+            "legacy_product": legacy_product,
+            "product": product,
+            "tenant_id": str(tenant_id),
+            "message": self.message,
+        }
+        super().__init__(self.message)
 
 
 class VersionMismatchError(ValueError):

@@ -969,7 +969,72 @@ commands), `descriptor_exists_any_state`, `count_known_ops`,
 in `_search.py` and the SQLite fallback) all filter on it, so they always
 agree. The `GET /api/v1/connectors` listing still shows both rows; its
 `shadowed_by_tenant_scope` marker on the built-in row now means the
-built-in row is not used at all for that tenant.
+built-in row is not used at all for that tenant. The marker is set only
+when the tenant row has the same product as the built-in row (the rule
+dispatch uses); see the next section for the case where it does not.
+
+### Old tenant copy under a former product name (#4889)
+
+A connector id such as `vrli-rest-9.0` names the product by its first
+part (`vrli`). Before v0.17.0 the vRLI connector used the product name
+`vcf-logs` (#1814). A tenant that ingested its own copy back then still
+has `endpoint_descriptor` and `operation_group` rows under
+`product='vcf-logs'`. Migrations 0038, 0049 and 0052 moved or removed
+only the built-in rows, on purpose, so such tenant copies stay. Since
+#1817 the ingest refuses a product that does not match the id, so no
+new copy like this can be made.
+
+This old copy is never used: dispatch reads the product from the id
+and looks for `vrli` rows, so the tenant keeps running the built-in
+copy. Every product-scoped probe in `ReviewService` misses the old rows
+too. Before #4889 that meant: `review --prefer tenant` answered a 404
+that said "not yet ingested", enable / disable / enable-reads and the
+edits fell back to the built-in row (a 403 for a tenant admin, a change
+to the shared built-in row for a platform admin), delete answered 404,
+and the list marked the built-in row as shadowed even though calls used
+it.
+
+The rule now:
+
+- `legacy_tenant_products` in `operations/ingest/_internals.py` finds
+  the tenant's rows for the id by `(tenant_id, version, impl_id)` only
+  and returns the products that differ from the one in the id. It
+  never looks at built-in rows.
+- **Review.** `--prefer tenant` resolves to the old copy; the payload
+  carries the former name in `product`. `--prefer builtin` shows the
+  built-in copy. Without `--prefer` the service raises
+  `LegacyTenantConnectorCopyError` (whether or not a built-in row
+  exists) instead of showing the built-in row as if the tenant had
+  nothing.
+- **Enable, disable, enable-reads, edit group, edit operation, enable
+  group.** They raise `LegacyTenantConnectorCopyError` instead of
+  falling back to the built-in row. `enable-reads --prefer tenant` is
+  refused too: the old copy's reads can never be dispatched.
+  `enable-reads --prefer builtin` still works for a platform admin,
+  because that is the copy calls use.
+- **Delete.** In the tenant scope the delete targets the old copy when
+  the tenant has no rows under the current product. The built-in copy
+  stays, and the audit payload records the deleted `product`. The
+  residual probe and the auto-shim walk in `delete_connector.py` use
+  the triple parsed from the id, so rows under a former name never keep
+  a shim alive and never count as residual.
+- **Error shape.** The fronts map the error to REST `409` and MCP
+  `-32602` with the structured detail `connector_legacy_tenant_copy`
+  (`connector_id`, `legacy_product`, `product`, `tenant_id`,
+  `message`). The message names the old copy, says that calls use the
+  current product name, and gives the way out: review it with
+  `prefer=tenant`, or `meho connector delete <id>`. It never suggests
+  an ingest. The CLI prints the message as a plain `HTTP 409` error.
+- **List.** The built-in row is marked `shadowed_by_tenant_scope` only
+  when the tenant row has the same `(connector_id, product)`. The old
+  tenant row is listed with `dispatchable=false` and a `next_step`
+  whose `verb` is `meho connector delete <id>` and whose `rationale`
+  says the copy can never be called. No new list field was added.
+
+Do not fix such a copy by renaming its rows to the current product.
+Since #3870 a tenant's own copy is the only copy used for that tenant,
+and the old copy lacks the hand-written ops of the built-in copy
+(`vrli.event.query`), so the tenant would lose them.
 
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 
@@ -2651,6 +2716,11 @@ Both delegate to `ReviewService.delete_connector`
   advisory rides the MCP response body (`warnings[]`, the `edit_op`
   #1630 discipline), the `connector_delete_enabled_ops` log event,
   and the audit payload. The REST response stays a body-less 204.
+* **Old tenant copy under a former product name (#4889).** When the
+  tenant has rows for the id only under a former product (`vcf-logs`
+  rows for `vrli-rest-9.0`), the tenant-scoped delete removes that
+  copy. The built-in row is untouched; the audit payload's `product`
+  says which copy went.
 * **Re-ingest revives.** A later ingest of the same triple
   re-registers the shim (`connector_registered=True`) and re-lands
   rows from scratch.

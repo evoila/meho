@@ -521,8 +521,13 @@ def _mark_shadowed_builtin_rows(
     (:func:`~meho_backplane.operations._lookup.lookup_descriptor`). This
     post-pass mirrors that precedence on the listing so a consumer knows
     which twin ``call_operation`` resolves: a ``scope="builtin"`` row
-    whose ``connector_id`` also appears on a ``scope="tenant"`` row in
-    the same response is flagged shadowed.
+    whose ``(connector_id, product)`` also appears on a ``scope="tenant"``
+    row in the same response is flagged shadowed.
+
+    The match includes ``product`` because dispatch keys on the full
+    triple: a tenant row stored under a former product name (#4889)
+    shares the id but is never used, so it does not shadow anything —
+    the built-in row stays the one calls reach and keeps ``False``.
 
     Runs over the full response (DB-backed + class-side rows) so the
     marker reflects exactly what the caller sees. Built on
@@ -531,15 +536,48 @@ def _mark_shadowed_builtin_rows(
     twin pair are rewritten, so single-scope responses are returned
     untouched.
     """
-    tenant_scoped_ids = {item.connector_id for item in items if item.scope == "tenant"}
-    if not tenant_scoped_ids:
+    tenant_scoped_keys = {
+        (item.connector_id, item.product) for item in items if item.scope == "tenant"
+    }
+    if not tenant_scoped_keys:
         return items
     return [
         item.model_copy(update={"shadowed_by_tenant_scope": True})
-        if item.scope == "builtin" and item.connector_id in tenant_scoped_ids
+        if item.scope == "builtin" and (item.connector_id, item.product) in tenant_scoped_keys
         else item
         for item in items
     ]
+
+
+def _legacy_tenant_copy_hint(
+    connector_id: str,
+    *,
+    product: str,
+    tenant_uuid: UUID | None,
+) -> NextStep | None:
+    """Return the delete hint for a tenant row stored under a former product name (#4889).
+
+    Dispatch reads the product from ``connector_id``; a tenant row whose
+    stored ``product`` differs (``vcf-logs`` rows for ``vrli-rest-9.0``)
+    can therefore never be called. Such a row is listed so the operator
+    can see it, but it is marked not dispatchable and carries this hint
+    naming the clean-up verb. ``None`` for built-in rows and for rows
+    whose product matches the id. Rows with an unparseable id never
+    reach this helper (:func:`_resolves_through_dispatcher` drops them).
+    """
+    if tenant_uuid is None:
+        return None
+    parsed_product, _version, _impl_id = parse_connector_id(connector_id)
+    if parsed_product == product:
+        return None
+    return NextStep(
+        verb=f"meho connector delete {connector_id}",
+        rationale=(
+            f"this copy is stored under the former product name {product!r}; calls "
+            f"use the product name {parsed_product!r}, so this copy can never be "
+            f"called. Delete it to remove it from the list."
+        ),
+    )
 
 
 async def _emit_db_backed_rows(
@@ -588,6 +626,11 @@ async def _emit_db_backed_rows(
             enabled_operation_count=enabled_op_count,
             has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
         )
+        legacy_hint = _legacy_tenant_copy_hint(
+            connector_id, product=product, tenant_uuid=tenant_uuid
+        )
+        if legacy_hint is not None:
+            dispatchable = False
         items.append(
             ConnectorListItem(
                 connector_id=connector_id,
@@ -602,6 +645,7 @@ async def _emit_db_backed_rows(
                 operation_count=op_counts.get("total", 0),
                 enabled_operation_count=enabled_op_count,
                 state="ingested",
+                next_step=legacy_hint,
                 kind=kind,
                 dispatchable=dispatchable,
                 scope="tenant" if tenant_uuid is not None else "builtin",

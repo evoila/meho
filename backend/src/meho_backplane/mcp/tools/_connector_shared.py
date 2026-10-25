@@ -34,6 +34,7 @@ from meho_backplane.operations.ingest import (
     ConnectorNotFoundError,
     InvalidSchemaError,
     InvalidSpecError,
+    LegacyTenantConnectorCopyError,
     LlmOutputInvalid,
     OpIdCollision,
     ProductImplIdMismatch,
@@ -41,6 +42,7 @@ from meho_backplane.operations.ingest import (
     UnsupportedSpecError,
     UpstreamNotSpecError,
     VersionMismatchError,
+    build_connector_legacy_tenant_copy_detail,
     build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
@@ -259,6 +261,26 @@ def raise_invalid_params_for_ambiguous_scope(
     raise McpInvalidParamsError(
         str(exc),
         data=build_connector_scope_ambiguous_detail(exc),
+    ) from exc
+
+
+def raise_invalid_params_for_legacy_tenant_copy(
+    exc: LegacyTenantConnectorCopyError,
+) -> NoReturn:
+    """Map :class:`LegacyTenantConnectorCopyError` onto :class:`McpInvalidParamsError`.
+
+    The review / enable / enable_reads / disable / edit tools raise this
+    when the operator's tenant holds rows for the ``connector_id`` only
+    under a former product name (#4889). The REST siblings render it as a
+    structured ``409``; MCP's only structured handler-error channel is
+    ``-32602``, so the wire code differs while the ``data`` envelope is
+    identical (one builder, shared with the route). The message is
+    load-bearing — it names the old copy and how to review or delete it —
+    so it is forwarded verbatim.
+    """
+    raise McpInvalidParamsError(
+        str(exc),
+        data=build_connector_legacy_tenant_copy_detail(exc),
     ) from exc
 
 

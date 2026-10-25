@@ -73,6 +73,7 @@ operator's-tenant rows when both exist.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
@@ -99,6 +100,7 @@ from meho_backplane.operations.ingest._internals import (
     count_needs_reingest_in_scope,
     count_ops_in_scope,
     enable_time_auto_shim_warnings,
+    legacy_tenant_products,
     load_group,
     load_groups,
     load_ingested_writes_in_scope,
@@ -126,6 +128,7 @@ from meho_backplane.operations.ingest.exceptions import (
     ConnectorNotFoundError,
     ConnectorScopeCandidate,
     InvalidStateTransitionError,
+    LegacyTenantConnectorCopyError,
 )
 from meho_backplane.operations.ingest.group_truth import build_group_advisory
 from meho_backplane.operations.ingest.parser import parse_connector_id
@@ -326,6 +329,54 @@ class ReviewService:
             tenant_id=tenant_id,
         )
 
+    async def _find_legacy_tenant_copy(
+        self,
+        scope: ConnectorScope,
+        session: AsyncSession,
+    ) -> ConnectorScope | None:
+        """Return the tenant's old copy of *scope* stored under a former product name.
+
+        Callers have already found no tenant rows under ``scope.product``.
+        The probe keys on ``(tenant_id, version, impl_id)`` only
+        (:func:`legacy_tenant_products`); when it finds rows under another
+        product, the same scope with that product is returned so review
+        and delete can reach the copy (#4889). ``None`` for the built-in
+        scope or when no such rows exist. Should more than one former
+        product exist (not seen in practice), the first in sorted order
+        is used; a delete of that copy exposes the next one.
+        """
+        products = await legacy_tenant_products(session, scope)
+        if not products:
+            return None
+        return replace(scope, product=products[0])
+
+    async def _refuse_legacy_tenant_copy(
+        self,
+        connector_id: str,
+        scope: ConnectorScope,
+        session: AsyncSession,
+    ) -> None:
+        """Raise :class:`LegacyTenantConnectorCopyError` when the tenant's only copy is an old one.
+
+        A no-op when *scope* is built-in, when the tenant has rows under
+        the current product (its own copy is then the one to act on), or
+        when no rows exist under a former product name. Otherwise the
+        caller must not fall back to the built-in row or answer a
+        "not ingested" 404: the operator has an old copy that can never
+        be called, and the error says how to review or delete it (#4889).
+        """
+        if scope.tenant_id is None or await scope_has_rows(session, scope):
+            return
+        legacy = await self._find_legacy_tenant_copy(scope, session)
+        if legacy is None:
+            return
+        raise LegacyTenantConnectorCopyError(
+            connector_id=connector_id,
+            legacy_product=legacy.product,
+            product=scope.product,
+            tenant_id=scope.tenant_id,
+        )
+
     async def _resolve_preferred_scope(
         self,
         connector_id: str,
@@ -334,6 +385,7 @@ class ReviewService:
         session: AsyncSession,
         *,
         prefer: Literal["tenant", "builtin"],
+        allow_legacy_tenant_copy: bool,
     ) -> ConnectorScope:
         """Resolve a connector to the explicitly-``prefer``-named scope (#2029).
 
@@ -348,7 +400,13 @@ class ReviewService:
           tenant row must hold rows or :class:`ConnectorNotFoundError` is
           raised. There is **no** built-in fall-back: an explicit
           ``prefer=tenant`` against a built-in-only label is a genuine
-          miss, not a silent slide to the built-in row.
+          miss, not a silent slide to the built-in row. When the tenant
+          has rows for the id only under a former product name (#4889),
+          *allow_legacy_tenant_copy* decides: ``True`` (the review read)
+          resolves to that old copy so the operator can look at it;
+          ``False`` (``enable_reads``) raises
+          :class:`LegacyTenantConnectorCopyError`, because enabling ops
+          on a copy dispatch never uses would only mislead.
         * ``prefer == "builtin"`` — the built-in (``tenant_id IS NULL``)
           scope, which must hold rows or :class:`ConnectorNotFoundError`.
           No scope selection happens beyond naming the built-in row:
@@ -377,10 +435,22 @@ class ReviewService:
                 tenant_id=None,
             )
         # prefer == "tenant"
-        if tenant_id is not None and await scope_has_rows(session, scope):
+        if tenant_id is None:
+            raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=None)
+        if await scope_has_rows(session, scope):
             return scope
-        raise ConnectorNotFoundError(
+        legacy = await self._find_legacy_tenant_copy(scope, session)
+        if legacy is None:
+            raise ConnectorNotFoundError(
+                connector_id=connector_id,
+                tenant_id=tenant_id,
+            )
+        if allow_legacy_tenant_copy:
+            return legacy
+        raise LegacyTenantConnectorCopyError(
             connector_id=connector_id,
+            legacy_product=legacy.product,
+            product=scope.product,
             tenant_id=tenant_id,
         )
 
@@ -391,6 +461,7 @@ class ReviewService:
         session: AsyncSession,
         *,
         prefer: Literal["tenant", "builtin"] | None = None,
+        allow_legacy_tenant_copy: bool = False,
     ) -> ConnectorScope:
         """Resolve ``(connector_id, tenant_id)`` to the one row-scope to act on.
 
@@ -422,6 +493,16 @@ class ReviewService:
         probe + fail-loud raise below is byte-identical to the pre-#2029
         resolver.
 
+        An old tenant copy under a former product name (#4889) is
+        neither of the two scopes: the tenant has no rows under the
+        parsed product, so without a guard the probe would fall back to
+        the built-in row and hide the copy. When ``prefer`` is ``None``
+        and such a copy exists, :class:`LegacyTenantConnectorCopyError`
+        is raised instead (whether or not a built-in row exists). With
+        ``prefer="tenant"``, *allow_legacy_tenant_copy* decides between
+        resolving to the old copy (the review read) and refusing
+        (``enable_reads``); see :meth:`_resolve_preferred_scope`.
+
         A cross-tenant ``tenant_id`` (≠ the operator's, not ``None``)
         never reaches this method: :meth:`_resolve_scope` ->
         :meth:`_authorize_scope` already collapsed it into
@@ -436,23 +517,33 @@ class ReviewService:
                 scope,
                 session,
                 prefer=prefer,
+                allow_legacy_tenant_copy=allow_legacy_tenant_copy,
             )
-        if tenant_id is None:
-            # Explicit built-in probe (admin path) — single-pass, no
-            # fallback, no ambiguity.
+        return await self._resolve_probed_scope(connector_id, scope, session)
+
+    async def _resolve_probed_scope(
+        self,
+        connector_id: str,
+        scope: ConnectorScope,
+        session: AsyncSession,
+    ) -> ConnectorScope:
+        """The un-preferred half of :meth:`_resolve_existing_scope`.
+
+        Built-in *scope* (``tenant_id is None``): single-pass, no
+        fall-back. Tenant *scope*: probe both the tenant row and the
+        built-in row; both → :class:`AmbiguousConnectorScopeError`, one →
+        that row, neither → :class:`ConnectorNotFoundError`. A missing
+        tenant row is first checked for an old copy under a former product
+        name (#4889), which raises instead of sliding to the built-in row.
+        """
+        if scope.tenant_id is None:
             if await scope_has_rows(session, scope):
                 return scope
-            raise ConnectorNotFoundError(
-                connector_id=connector_id,
-                tenant_id=tenant_id,
-            )
-        builtin_scope = ConnectorScope(
-            product=scope.product,
-            version=scope.version,
-            impl_id=scope.impl_id,
-            tenant_id=None,
-        )
+            raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=None)
+        builtin_scope = replace(scope, tenant_id=None)
         tenant_exists = await scope_has_rows(session, scope)
+        if not tenant_exists:
+            await self._refuse_legacy_tenant_copy(connector_id, scope, session)
         builtin_exists = await scope_has_rows(session, builtin_scope)
         if tenant_exists and builtin_exists:
             raise AmbiguousConnectorScopeError(
@@ -476,10 +567,7 @@ class ReviewService:
             return scope
         if builtin_exists:
             return builtin_scope
-        raise ConnectorNotFoundError(
-            connector_id=connector_id,
-            tenant_id=tenant_id,
-        )
+        raise ConnectorNotFoundError(connector_id=connector_id, tenant_id=scope.tenant_id)
 
     def _require_platform_admin_for_builtin(
         self,
@@ -557,10 +645,20 @@ class ReviewService:
         again (#3870). With the group-only probe that edit either
         ``404``'d or slid to the built-in row while the tenant op stayed
         enabled.
+
+        When the tenant has rows for the id only under a former product
+        name (#4889), :class:`LegacyTenantConnectorCopyError` is raised
+        before the built-in fall-back: the old copy can never be called,
+        so enabling or editing the built-in row in its place would hide it
+        and, for a ``platform_admin``, change a row every tenant shares.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
-        if tenant_id is not None and await probe(session, scope):
-            return scope
+        if tenant_id is not None:
+            if await probe(session, scope):
+                return scope
+            # #4889: an old tenant copy under a former product name must
+            # not slide to the built-in row; refuse with the way out.
+            await self._refuse_legacy_tenant_copy(connector_id, scope, session)
         builtin_scope = ConnectorScope(
             product=scope.product,
             version=scope.version,
@@ -622,6 +720,12 @@ class ReviewService:
         row directly, ``prefer="builtin"`` the built-in row, and
         ``prefer=None`` (the default) keeps the fail-loud probe. See
         :meth:`_resolve_existing_scope`.
+
+        An old tenant copy stored under a former product name (#4889) is
+        reviewable with ``prefer="tenant"``: the payload then carries the
+        former name in ``product``. Without ``prefer`` the resolver raises
+        :class:`LegacyTenantConnectorCopyError` rather than showing the
+        built-in row as if the tenant had nothing.
         """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
@@ -630,6 +734,7 @@ class ReviewService:
                 tenant_id,
                 session,
                 prefer=prefer,
+                allow_legacy_tenant_copy=True,
             )
             return await self._render_payload(connector_id, scope, session)
 
@@ -1041,6 +1146,13 @@ class ReviewService:
         ``prefer="builtin"`` to the built-in row (still behind the
         ``platform_admin`` gate this method applies after resolution),
         and ``prefer=None`` (the default) keeps the fail-loud raise.
+
+        An old tenant copy under a former product name (#4889) is refused
+        with :class:`LegacyTenantConnectorCopyError` for both
+        ``prefer=None`` and ``prefer="tenant"``: its reads can never be
+        dispatched, so flipping them on would only mislead. An explicit
+        ``prefer="builtin"`` still works (behind the ``platform_admin``
+        gate) because the built-in row is the one calls actually use.
         """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
@@ -1120,11 +1232,14 @@ class ReviewService:
         Allowed source states: ``staged`` or ``disabled``. Cascade
         matches :meth:`enable_connector` but applies only to the
         single group's children. Idempotent on a group already in
-        ``enabled``.
+        ``enabled``. A group that exists only on an old tenant copy under
+        a former product name is refused with
+        :class:`LegacyTenantConnectorCopyError` (#4889), not a bare 404.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            await self._refuse_legacy_tenant_copy(connector_id, scope, session)
             group = await load_group(session, scope, connector_id, group_key)
             if group.review_status == "enabled":
                 return
@@ -1194,10 +1309,19 @@ class ReviewService:
         (warnings never block the write — the
         :meth:`edit_op` discipline). Re-ingesting the same triple
         afterwards re-registers the connector from scratch.
+
+        When the tenant has rows for the id only under a former product
+        name (#4889), the delete targets that old copy: the operator's
+        only way to remove rows no other route can reach. The built-in
+        row is untouched, so the tenant keeps using it for calls.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            if tenant_id is not None and not await scope_has_rows(session, scope):
+                legacy = await self._find_legacy_tenant_copy(scope, session)
+                if legacy is not None:
+                    scope = legacy
             staged = await stage_connector_delete(session, scope, connector_id)
             await write_audit_row(
                 session,

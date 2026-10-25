@@ -388,6 +388,46 @@ def test_post_query_unknown_event_class_returns_422(client: TestClient) -> None:
     mock_query.assert_not_awaited()
 
 
+@pytest.mark.parametrize("has_trace", [True, False])
+def test_post_query_has_trace_reaches_the_substrate(client: TestClient, has_trace: bool) -> None:
+    """#4855: ``has_trace`` in the body becomes the substrate trace filter."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"has_trace": has_trace, "since": "30d"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    filters = mock_query.await_args.args[0]
+    assert filters.has_trace is has_trace
+
+
+def test_post_query_without_has_trace_applies_no_trace_filter(client: TestClient) -> None:
+    """#4855: a body without ``has_trace`` keeps rows with and without a trace."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"event_class": "operation_execution"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    assert mock_query.await_args.args[0].has_trace is None
+
+
 def test_post_query_bad_duration_returns_400(client: TestClient) -> None:
     """A garbage ``since`` value surfaces as 400, not 500."""
     key = make_rsa_keypair("kid-A")

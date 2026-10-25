@@ -3227,6 +3227,30 @@ class VmwareRestConnector(HttpConnector):
 
         return await vm_info_impl(self, operator, target, params)
 
+    async def snapshot_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.snapshot.list`` -- the snapshots of one VM, as a flat list.
+
+        A ``source_kind="typed"`` read: the dispatcher binds this method to the
+        connector instance and invokes it with ``(operator, target, params)``
+        (see :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        the VM's ``snapshot`` property through PropertyCollector on the
+        connector session, so it works with zero catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_snapshot_list.snapshot_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_snapshot_list import (
+            snapshot_list_impl,
+        )
+
+        return await snapshot_list_impl(self, operator, target, params)
+
     async def object_collect(
         self,
         operator: Operator,
@@ -3308,6 +3332,27 @@ class VmwareRestConnector(HttpConnector):
 
         return await tasks_history_impl(self, operator, target, params)
 
+    async def alarm_triggered_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.alarm.triggered.list`` -- the alarms that are triggered now (#4383).
+
+        A ``source_kind="typed"`` read. Reads ``triggeredAlarmState`` of the
+        root folder (the whole vCenter) or of one object, then the alarm and
+        object names. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered.alarm_triggered_list_impl`
+        (imported lazily, like the other typed reads). Returns
+        ``{"scope", "alarms": [...], "read_note"}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered import (
+            alarm_triggered_list_impl,
+        )
+
+        return await alarm_triggered_list_impl(self, operator, target, params)
+
     async def sso_admin_api_file_get(
         self,
         operator: Operator,
@@ -3327,6 +3372,114 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await sso_admin_api_file_get_impl(self, operator, target, params)
+
+    async def vm_hardware_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.hardware.show`` -- one VM's CPU, memory, CD drives and controllers.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware.vm_hardware_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
+            vm_hardware_show_impl,
+        )
+
+        return await vm_hardware_show_impl(self, operator, target, params)
+
+    async def license_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.license.list`` -- the licences in the vCenter's licence inventory.
+
+        A ``source_kind="typed"`` read. Every key is masked to its last 5
+        characters. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_license.license_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_license import license_list_impl
+
+        return await license_list_impl(self, operator, target, params)
+
+    async def license_assigned_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.license.assigned.list`` -- which licence each asset uses.
+
+        A ``source_kind="typed"`` read. Every key is masked to its last 5
+        characters. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_license.license_assigned_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_license import (
+            license_assigned_list_impl,
+        )
+
+        return await license_assigned_list_impl(self, operator, target, params)
+
+    # The four ``vmware.appliance.local_account.*`` typed ops. Each delegates to
+    # :mod:`.appliance_local_accounts` (imported lazily, like the other typed ops).
+
+    async def appliance_local_account_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.list`` -- every local account of the appliance."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_list_impl,
+        )
+
+        return await local_account_list_impl(self, operator, target, params)
+
+    async def appliance_local_account_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.get`` -- one local account of the appliance."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_get_impl,
+        )
+
+        return await local_account_get_impl(self, operator, target, params)
+
+    async def appliance_local_account_password_set(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.password.set`` -- a new password from Vault."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_password_set_impl,
+        )
+
+        return await local_account_password_set_impl(self, operator, target, params)
+
+    async def appliance_local_account_policy_set(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.appliance.local_account.policy.set`` -- the password expiry rules."""
+        from meho_backplane.connectors.vmware_rest.appliance_local_accounts import (
+            local_account_policy_set_impl,
+        )
+
+        return await local_account_policy_set_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.

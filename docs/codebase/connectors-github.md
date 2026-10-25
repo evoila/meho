@@ -209,6 +209,49 @@ requests together, as GitHub does.
   `test_connectors_github_composites_register.py` checks the posture and
   runs the contract rules against the registered row.
 
+### Create a repository in an organisation (`gh.composite.repo_create`)
+
+`gh.composite.repo_create` creates one repository in a GitHub
+organisation with `POST /orgs/{org}/repos`. Parameters: `org`, `name`,
+optional `description`, `visibility` (`private` when omitted; `public`
+only when the caller asks for it by name) and `with_readme` (when true,
+GitHub makes a first commit with an empty README, so the default branch
+exists at once). The result is small: `status`, `name`, `full_name`,
+`owner`, `url`, `visibility`, `default_branch` and a one-sentence
+`guidance`.
+
+- Safe to run twice: the handler reads `GET /repos/{org}/{name}` first.
+  When the repository exists, it returns `status="unchanged"` with the
+  existing repository's facts and writes nothing. Only a 404 on that
+  read leads to the create call. Any other error on the read (403, for
+  example) propagates, as does an error on the create call (403 when the
+  identity may not create repositories there, 422 when GitHub rejects
+  the name).
+- Names in the request path: `org` and `name` become path parts of the
+  two requests. The parameter schema allows letters, digits, `.`, `-`
+  and `_` only, so the dispatcher refuses anything else as
+  `invalid_params`. The handler checks both again before the first
+  request, refuses `.` and `..` (they would point at another API path),
+  and percent-encodes the values. `.github` is a valid name.
+- Handler: `repo_create_composite` in `composites/_repos.py`. Same
+  direct-session substrate as the other composites (`connector._get_json`
+  / `connector._post_json` through `mount_op_path`, no
+  `endpoint_descriptor` lookup).
+- Group: `repos`, shared with `repo_view`.
+- Posture: `safety_level="caution"`, `requires_approval=True`. Every
+  call waits for approval, from a person or from an agent.
+- Contract: the registrar row carries `llm_instructions` (`when_to_call`,
+  `preconditions`, `output_shape`, `next_step`) and one example call
+  (`example-org` / `example-repo`, values that pass the name rule), so
+  the operation contract check passes with no gap.
+- Tests: `test_connectors_github_composites_repos.py` drives the handler
+  with the saved answer in `tests/data/github_repo_create_response.json`
+  (and the saved `repo_view` answer for the existing-name path), checks
+  the exact request paths, and proves that an unsafe `org` or `name`
+  sends no request and fails the parameter schema;
+  `test_connectors_github_composites_register.py` checks the posture and
+  runs the contract rules against the registered row.
+
 ### Git composites: read a branch, read a file tree, commit files
 
 Three hand-written operations in the `git` group replace the raw git calls
@@ -281,7 +324,7 @@ older-commit, refused-update and unsafe-name cases.
 `backend/tests/test_connectors_github_composites_git_register.py` checks the
 risk level and approval flag of each operation, the `git` group, the
 preview builder, and that each operation passes the operation contract
-rules of `test_vmware_operation_contracts.py` with no gap.
+rules of `test_operation_contracts.py` with no gap.
 
 ## Key types
 

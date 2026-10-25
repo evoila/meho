@@ -47,8 +47,10 @@ the next page. See ``docs/architecture/jsonflux.md``.
 
 The ``info`` handlers emit a flat dict structured around the API
 object's spec + status. Pod info includes container statuses (with
-ready / restartCount / lastState) because the operator's "is this pod
-healthy?" question is the dominant ``kubectl describe pod`` use case.
+ready / restartCount / lastState, the running image digest and the
+waiting / terminated reason) because the operator's "is this pod
+healthy, and if not, why?" question is the dominant ``kubectl
+describe pod`` use case.
 Deployment info includes the rollout status (replicas / available /
 ready / updated) because that's what ``kubectl rollout status`` reads.
 
@@ -192,14 +194,31 @@ def container_status_row(status: V1ContainerStatus) -> dict[str, Any]:
     ``"running"`` / ``"waiting"`` / ``"terminated"``) so the caller
     sees the operator-visible string ``kubectl get pods`` prints,
     not the union nesting.
+
+    ``image`` is the image the pod asked for; ``image_id`` is the
+    digest of the image the container really runs (empty until the
+    image is pulled). ``reason`` / ``message`` / ``exit_code`` come
+    from the populated ``waiting`` or ``terminated`` branch of
+    ``state`` and are ``None`` for a running container.
+    ``last_reason`` / ``last_exit_code`` read the same fields off
+    ``last_state`` so a ``CrashLoopBackOff`` row says why the
+    container stopped the last time (e.g. ``OOMKilled`` / 137).
     """
+    reason, message, exit_code = _container_state_detail(status.state)
+    last_reason, _last_message, last_exit_code = _container_state_detail(status.last_state)
     return {
         "name": status.name,
         "image": status.image,
+        "image_id": status.image_id,
         "ready": bool(status.ready),
         "restart_count": int(status.restart_count or 0),
         "state": _container_state_label(status.state),
+        "reason": reason,
+        "message": message,
+        "exit_code": exit_code,
         "last_state": _container_state_label(status.last_state),
+        "last_reason": last_reason,
+        "last_exit_code": last_exit_code,
     }
 
 
@@ -220,6 +239,24 @@ def _container_state_label(state: Any) -> str | None:
     if state.terminated is not None:
         return "terminated"
     return None
+
+
+def _container_state_detail(state: Any) -> tuple[str | None, str | None, int | None]:
+    """Return ``(reason, message, exit_code)`` from a :class:`V1ContainerState`.
+
+    Only the ``waiting`` and ``terminated`` branches carry a reason
+    (``ImagePullBackOff``, ``CrashLoopBackOff``, ``OOMKilled``, ...);
+    ``exit_code`` exists on ``terminated`` only. A running or absent
+    state yields all ``None``.
+    """
+    if state is None:
+        return None, None, None
+    if state.waiting is not None:
+        return state.waiting.reason, state.waiting.message, None
+    if state.terminated is not None:
+        terminated = state.terminated
+        return terminated.reason, terminated.message, terminated.exit_code
+    return None, None, None
 
 
 def pod_ready_string(pod: V1Pod) -> str:
@@ -288,8 +325,12 @@ def _container_row(container: V1Container) -> dict[str, Any]:
 
     Ports / env / resources are surfaced as lightweight nested dicts so
     the operator sees what they need without the full openapi model
-    shape. Volume mounts are projected by name + mount path; the full
-    volume definition lives on the pod-level ``volumes`` key.
+    shape. Each ``env`` entry carries ``value_from`` when the variable
+    is set from a Secret, ConfigMap, pod field or container resource,
+    and ``env_from`` lists the Secrets / ConfigMaps loaded whole; both
+    name the source only (#4890). Volume mounts are projected by name
+    + mount path; the full volume definition lives on the pod-level
+    ``volumes`` key.
     """
     ports = [
         {
@@ -300,7 +341,8 @@ def _container_row(container: V1Container) -> dict[str, Any]:
         }
         for p in (container.ports or [])
     ]
-    env = [{"name": e.name, "value": e.value} for e in (container.env or [])]
+    env = [_env_var_row(e) for e in (container.env or [])]
+    env_from = [_env_from_row(source) for source in (container.env_from or [])]
     resources_block: dict[str, Any] = {}
     resources = container.resources
     if resources is not None:
@@ -321,9 +363,82 @@ def _container_row(container: V1Container) -> dict[str, Any]:
         "image": container.image,
         "ports": ports,
         "env": env,
+        "env_from": env_from,
         "resources": resources_block,
         "volume_mounts": volume_mounts,
     }
+
+
+def _env_var_row(env_var: Any) -> dict[str, Any]:
+    """Project a :class:`V1EnvVar` into ``{name, value[, value_from]}``.
+
+    A variable that takes its value from a Secret, a ConfigMap, a pod
+    field or a container resource has ``value=None`` on the API object.
+    Without ``value_from`` such a variable looks the same as an empty
+    one, so the row names the source whenever the entry has one. Only
+    names, keys and field paths are copied -- never the value behind
+    them (#4890).
+    """
+    row: dict[str, Any] = {"name": env_var.name, "value": env_var.value}
+    value_from = _env_value_from(env_var.value_from)
+    if value_from is not None:
+        row["value_from"] = value_from
+    return row
+
+
+#: Branches of ``V1EnvVarSource`` and the reference fields each one
+#: carries. Only names, keys and paths -- never a value.
+_ENV_SOURCE_FIELDS: dict[str, tuple[str, ...]] = {
+    "secret_key_ref": ("name", "key", "optional"),
+    "config_map_key_ref": ("name", "key", "optional"),
+    "field_ref": ("field_path",),
+    "resource_field_ref": ("container_name", "resource"),
+    "file_key_ref": ("volume_name", "path", "key", "optional"),
+}
+
+
+def _env_value_from(source: Any) -> dict[str, Any] | None:
+    """Name the populated branch of a :class:`V1EnvVarSource` union.
+
+    Exactly one branch in :data:`_ENV_SOURCE_FIELDS` is set. The
+    result keys the branch name to a dict of the reference's own
+    fields (object name, key, field path), so the operator can see
+    which Secret and key a container asks for without reading the
+    Secret itself. ``optional`` defaults to ``False`` like the API.
+    """
+    if source is None:
+        return None
+    for branch, fields in _ENV_SOURCE_FIELDS.items():
+        ref = getattr(source, branch, None)
+        if ref is None:
+            continue
+        row = {name: getattr(ref, name) for name in fields}
+        if "optional" in row:
+            row["optional"] = bool(row["optional"])
+        return {branch: row}
+    return None
+
+
+def _env_from_row(source: Any) -> dict[str, Any]:
+    """Project a :class:`V1EnvFromSource` into ``{kind, name, optional, prefix}``.
+
+    ``envFrom`` loads every key of a Secret or ConfigMap as a variable.
+    The row records which object is loaded (``kind`` is ``secret_ref``
+    or ``config_map_ref``) and the optional key prefix; the keys and
+    values themselves are never read.
+    """
+    kind: str | None = None
+    name: str | None = None
+    optional = False
+    if source.secret_ref is not None:
+        kind = "secret_ref"
+        name = source.secret_ref.name
+        optional = bool(source.secret_ref.optional)
+    elif source.config_map_ref is not None:
+        kind = "config_map_ref"
+        name = source.config_map_ref.name
+        optional = bool(source.config_map_ref.optional)
+    return {"kind": kind, "name": name, "optional": optional, "prefix": source.prefix}
 
 
 def _pod_volume_row(volume: Any) -> dict[str, Any]:
@@ -946,7 +1061,24 @@ K8S_POD_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
         "qos_class, age_seconds, labels, containers, init_containers, "
         "volumes, container_statuses, init_container_statuses, "
         "conditions}. ``container_statuses`` carries per-container "
-        "ready/restart_count/state for unhealthy-container diagnosis."
+        "{name, image, image_id, ready, restart_count, state, reason, "
+        "message, exit_code, last_state, last_reason, last_exit_code} "
+        "for unhealthy-container diagnosis. ``image_id`` is the digest "
+        "of the image the container really runs (empty until pulled); "
+        "``reason`` / ``message`` say why a container is waiting "
+        "(e.g. ImagePullBackOff with the pull error) or terminated "
+        "(e.g. OOMKilled with exit_code); ``last_reason`` / "
+        "``last_exit_code`` say why it stopped the last time "
+        "(the CrashLoopBackOff case). Each ``containers[].env`` entry is "
+        "{name, value} plus ``value_from`` when the variable is set from "
+        "a source: {secret_key_ref: {name, key, optional}} / "
+        "{config_map_key_ref: {name, key, optional}} / {field_ref: "
+        "{field_path}} / {resource_field_ref: {container_name, "
+        "resource}}; such an entry has value=null. ``containers[].env_from`` "
+        "lists {kind: secret_ref|config_map_ref, name, optional, prefix} "
+        "for every Secret / ConfigMap loaded whole. Only names and keys "
+        "are shown, never a secret value. Use these to check which "
+        "Secret and key a CreateContainerConfigError container asks for."
     ),
 }
 
@@ -1022,7 +1154,12 @@ K8S_DEPLOYMENT_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Flat dict: {name, namespace, replicas_desired, age_seconds, "
         "labels, strategy, containers, status, conditions}. ``status`` "
         "is the live replica breakdown (replicas / ready / available / "
-        "updated / unavailable / observed_generation)."
+        "updated / unavailable / observed_generation). ``containers`` has "
+        "the same per-container shape as k8s.pod.info: each ``env`` entry "
+        "carries ``value_from`` (secret_key_ref / config_map_key_ref / "
+        "field_ref / resource_field_ref, names and keys only) when set "
+        "from a source, and ``env_from`` lists the Secrets / ConfigMaps "
+        "loaded whole ({kind, name, optional, prefix})."
     ),
 }
 
@@ -1146,10 +1283,13 @@ WORKLOAD_OPS: tuple[KubernetesOp, ...] = (
             "Resolves ``pod_name`` against the namespace (exact match "
             "wins; otherwise unique prefix) and returns the full spec + "
             "status snapshot the operator's ``kubectl describe pod`` "
-            "habit reads: containers (image / ports / env / resources / "
-            "volume mounts), init containers, volumes (name + source "
+            "habit reads: containers (image / ports / env with its Secret "
+            "/ ConfigMap / field source, env_from, resources / volume "
+            "mounts), init containers, volumes (name + source "
             "type), per-container statuses (ready / restart_count / "
-            "state), conditions, node assignment, QoS class. Ambiguous "
+            "state / running image digest / waiting or terminated "
+            "reason, message and exit code), conditions, node "
+            "assignment, QoS class. Ambiguous "
             "prefixes return a structured error listing the candidates."
         ),
         parameter_schema=K8S_POD_INFO_PARAMETER_SCHEMA,
@@ -1188,7 +1328,9 @@ WORKLOAD_OPS: tuple[KubernetesOp, ...] = (
         description=(
             "Resolves ``deployment_name`` against the namespace and "
             "returns the full template + rollout status: pod-template "
-            "containers, strategy block (RollingUpdate's maxSurge / "
+            "containers (image / ports / env with its Secret / ConfigMap "
+            "/ field source, env_from, resources / volume mounts), "
+            "strategy block (RollingUpdate's maxSurge / "
             "maxUnavailable when present), live replica breakdown "
             "(replicas / ready / available / updated / unavailable / "
             "observed_generation), and deployment conditions "

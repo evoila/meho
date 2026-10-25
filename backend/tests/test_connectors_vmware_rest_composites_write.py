@@ -152,6 +152,7 @@ class _RecordingConnector:
         self.calls: list[dict[str, Any]] = []
         self.mount_calls: list[str] = []
         self.vmomi_calls: list[tuple[str, Any]] = []
+        self.continue_sessions: list[str] = []
 
     async def _about_version(self, target: Any, operator: Operator) -> str | None:
         """Serve the live ``about.version`` the version-aware deploy path reads."""
@@ -218,7 +219,15 @@ class _RecordingConnector:
         return payload
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: Any = None,
+        promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         """Serve the vim (VI-JSON) sub-calls the #2970 composite steps issue.
 
@@ -229,8 +238,15 @@ class _RecordingConnector:
         ``DistributedVirtualSwitch`` / ``Task`` -- the seam a real vCenter
         keys them by, mirroring ``_DiskGrowConnector``). An unkeyed
         ``Task`` read serves a terminal-success ``Task.info`` so tests
-        only model the poll when a fault/timeout is the point.
+        only model the poll when a fault/timeout is the point. A
+        ``ContinueRetrievePropertiesEx`` page is keyed by its path like any
+        other method; the session token it was pinned to is recorded.
         """
+        del promote_managed_object_not_found
+        if session_used is not None:
+            session_used.token = "<session-1>"
+        if session_token is not None:
+            self.continue_sessions.append(session_token)
         self.vmomi_calls.append((path, json))
         if path.endswith("/RetrievePropertiesEx"):
             spec_type = json["specSet"][0]["propSet"][0]["type"]
@@ -1022,7 +1038,7 @@ class _UnifiedRecordingConnector(_RecordingConnector):
     """
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self, target: Any, path: str, *, operator: Operator, json: Any = None, **kwargs: Any
     ) -> Any:
         self.calls.append(
             {
@@ -1033,7 +1049,7 @@ class _UnifiedRecordingConnector(_RecordingConnector):
                 "timeout": httpx.USE_CLIENT_DEFAULT,
             }
         )
-        return await super()._post_vmomi_json(target, path, operator=operator, json=json)
+        return await super()._post_vmomi_json(target, path, operator=operator, json=json, **kwargs)
 
 
 _VMOMI_TASK_INFO_READ_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
@@ -3327,6 +3343,156 @@ async def test_deploy_from_library_without_name_and_no_ovf_name_refuses(
     assert out["issues"][0]["category"] == "input"
     assert "set name" in out["issues"][0]["message"]
     assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
+    assert gate.calls == []
+
+
+def _ovf_summary_with_options(*keys: str) -> dict[str, Any]:
+    """An OVF summary whose ``DeploymentOptionParams`` lists *keys* (#4035)."""
+    return {
+        **_OVF_SUMMARY,
+        "additional_params": [
+            {"type": "PropertyParams", "properties": []},
+            {
+                "type": "DeploymentOptionParams",
+                "deployment_options": [
+                    {"key": key, "label": key, "description": key, "default_choice": i == 0}
+                    for i, key in enumerate(keys)
+                ],
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deployment_option_sent_as_selected_key(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A listed ``deployment_option`` rides the deploy as ``selected_key`` (#4035).
+
+    With ``name`` set the summary is read only to check the key. The option
+    entry follows the ``PropertyParams`` entry of ``ovf_properties``.
+    """
+    conn = _RecordingConnector(
+        {
+            _FILTER_PATH: _ovf_summary_with_options("small", "medium", "large"),
+            _DEPLOY_PATH: _deployment_result(succeeded=True),
+        },
+        vmomi=_rename_vmomi("vm-ovf-9"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "ovf_properties": {"guestinfo.hostname": "router-01"},
+            "deployment_option": "medium",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _FILTER_PATH),
+        ("POST", _DEPLOY_PATH),
+    ]
+    spec = conn.calls[1]["body"]["deployment_spec"]
+    assert spec["name"] == _DEPLOY_NAME
+    assert spec["additional_parameters"] == [
+        {
+            "type": "PropertyParams",
+            "properties": [{"id": "guestinfo.hostname", "value": "router-01"}],
+        },
+        {"type": "DeploymentOptionParams", "selected_key": "medium"},
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deployment_option_without_name_uses_one_summary_read(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """Without ``name`` one summary read gives both the default name and the option check."""
+    conn = _RecordingConnector(
+        {
+            _FILTER_PATH: _ovf_summary_with_options("small", "large"),
+            _DEPLOY_PATH: _deployment_result(succeeded=True),
+        },
+        vmomi=_rename_vmomi("vm-ovf-9"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "resource_pool": "resgroup-8",
+            "deployment_option": "large",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert [c["path"] for c in conn.calls] == [_FILTER_PATH, _DEPLOY_PATH]
+    spec = conn.calls[1]["body"]["deployment_spec"]
+    assert spec["name"] == _OVF_DEFAULT_DEPLOY_NAME
+    assert spec["additional_parameters"] == [
+        {"type": "DeploymentOptionParams", "selected_key": "large"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("summary", "offered"),
+    [
+        (_ovf_summary_with_options("small", "medium"), ["small", "medium"]),
+        # An OVF with no DeploymentOptionSection offers no option at all.
+        (_OVF_SUMMARY, []),
+    ],
+)
+@pytest.mark.asyncio
+async def test_deploy_from_library_unknown_deployment_option_refused(
+    gate: _GateRecorder, summary: dict[str, Any], offered: list[str]
+) -> None:
+    """A key the OVF does not offer → ``invalid_reference`` with the offered keys; no deploy."""
+    conn = _RecordingConnector({_FILTER_PATH: summary})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "deployment_option": "huge",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_reference"
+    assert out["library_item_id"] == "li-ovf"
+    assert out["vm_id"] is None
+    assert out["candidates"] == offered
+    assert out["issues"][0]["category"] == "input"
+    assert "'huge'" in out["issues"][0]["message"]
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deployment_option_summary_fault_is_resolve_error(
+    gate: _GateRecorder,
+) -> None:
+    """A faulted summary read while checking the option → ``resolve_error``; no deploy."""
+    conn = _RecordingConnector([httpx.ReadTimeout("")])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "deployment_option": "small",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "resolve_error"
+    assert out["issues"][0]["category"] == "resolve"
     assert gate.calls == []
 
 
@@ -10050,3 +10216,88 @@ async def test_vm_customize_gate_short_circuits(monkeypatch: pytest.MonkeyPatch)
     assert out.status == "awaiting_approval"
     # The resolve GET fired but the PUT did not.
     assert [c["method"] for c in conn.calls] == ["GET"]
+
+
+# ---------------------------------------------------------------------------
+# vm.deploy_from_library clean-up: the vApp name read follows every page (#4862)
+# ---------------------------------------------------------------------------
+
+_CONTINUE_RETRIEVE_PATH = "/PropertyCollector/propertyCollector/ContinueRetrievePropertiesEx"
+
+
+def _paged_vapp_cleanup_vmomi(second_page: Any) -> dict[str, Any]:
+    """The vApp lookup with the deploy-named vApp on page two of the name read.
+
+    Page one holds another vApp and a token; *second_page* is the answer to
+    ``ContinueRetrievePropertiesEx`` (a page, or an exception to raise).
+    """
+    vmomi = _vapp_cleanup_vmomi(
+        ("resgroup-v2", "other-vapp"), ("resgroup-v9", _DEPLOY_NAME), destroy="resgroup-v9"
+    )
+    names = vmomi[_VAPP_TYPE]
+    first, second = names["objects"]
+    vmomi[_VAPP_TYPE] = {**names, "objects": [first], "token": "<token-1>"}
+    vmomi[_CONTINUE_RETRIEVE_PATH] = (
+        second_page if isinstance(second_page, Exception) else {**names, "objects": [second]}
+    )
+    return vmomi
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_finds_a_vapp_on_a_later_page(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A vApp on page two of the name read is found and destroyed."""
+    conn = _InventoryConnector(
+        {_DEPLOY_PATH: httpx.ReadTimeout("")},
+        vms=[{"vm": "vm-web", "name": "web-01"}],
+        vmomi=_paged_vapp_cleanup_vmomi(second_page=None),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    paths = [path for path, _ in conn.vmomi_calls]
+    assert paths[:4] == [
+        _VMOMI_TASK_INFO_READ_PATH,
+        _VMOMI_TASK_INFO_READ_PATH,
+        _CONTINUE_RETRIEVE_PATH,
+        "/VirtualApp/resgroup-v9/Destroy_Task",
+    ]
+    # The token of page one went once, on the session of the first call.
+    assert conn.vmomi_calls[2][1] == {"token": "<token-1>"}
+    assert conn.continue_sessions == ["<session-1>"]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DESTROY_VAPP_OP]
+    assert "resgroup-v2" not in str(out["issues"])
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_failed_page_warns_and_still_removes_the_vm(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A lost page of the vApp name read adds the warning; the VM removal still runs."""
+    conn = _InventoryConnector(
+        {_DEPLOY_PATH: httpx.ReadTimeout(""), "/api/vcenter/vm/vm-partial": None},
+        vms=[{"vm": "vm-partial", "name": _DEPLOY_NAME}],
+        vmomi=_paged_vapp_cleanup_vmomi(second_page=httpx.ConnectError("page lost")),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    warnings = [i for i in out["issues"] if i["severity"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["message"].startswith(f"could not list vApps named {_DEPLOY_NAME!r}")
+    assert "ConnectError" in warnings[0]["message"]
+    # No vApp was destroyed on the partial list; the VM found by name was removed.
+    assert not any(path.endswith("/Destroy_Task") for path, _ in conn.vmomi_calls)
+    assert ("DELETE", "/api/vcenter/vm/vm-partial") in [
+        (c["method"], c["path"]) for c in conn.calls
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DELETE_VM_OP]

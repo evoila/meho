@@ -11,9 +11,10 @@ and ``gh.composite.branch_commit_files``:
 * the ``git`` group with its text;
 * the write has a preview builder;
 * every operation meets the operation contract rules that
-  :mod:`tests.test_vmware_operation_contracts` checks (summary, field
+  :mod:`tests.test_operation_contracts` checks (summary, field
   descriptions, response schema, agent guidance, example, no ticket
-  numbers, approval, group, preview builder).
+  numbers, approval, group, preview builder, no write word in the id of a
+  read).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.settings import get_settings
-from tests.test_vmware_operation_contracts import OperationContract, check_operation
+from tests.test_operation_contracts import OperationContract, check_operation
 
 _GIT_OP_IDS: tuple[str, ...] = (
     "gh.composite.git_ref_view",
@@ -130,7 +131,7 @@ async def test_git_ops_are_composites_on_the_gh_rest_triple(
 async def test_git_ops_meet_the_operation_contract_rules(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Each operation passes the nine contract rules with no gap."""
+    """Each operation passes the ten contract rules with no gap."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     rows, groups = await _registered_git_ops()
     problems: dict[str, dict[str, list[str]]] = {}

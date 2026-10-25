@@ -113,6 +113,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     unwrap_vim_value,
     vim_moref,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
 from meho_backplane.operations.composite import (
     DispatchChild,
@@ -266,6 +267,11 @@ _OVF_LIBRARY_ITEM_TYPE = "ovf"
 # mount); a single ``PropertyParams`` entry carries the operator's
 # ``ovf_properties`` map as ``{id, value}`` rows.
 _OVF_PROPERTY_PARAMS_TYPE = "PropertyParams"
+# ``Vcenter.Ovf.OvfParams`` subtype for the OVF deployment option (the size
+# profile of an appliance). The ``?action=filter`` summary lists the keys in
+# ``deployment_options[].key``; the deploy takes the choice as
+# ``selected_key`` (#4035).
+_OVF_DEPLOYMENT_OPTION_PARAMS_TYPE = "DeploymentOptionParams"
 _OP_GET_TASK = "GET:/cis/tasks/{task}"
 # Per-host vLCM remediation (``Esx.Settings.Hosts.Software_apply$Task``).
 # The pinned spec serves no ``POST:/vcenter/host/{host}?action=patch``
@@ -351,6 +357,10 @@ _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 # form the ingest parser emits and the pinned-spec reconcile asserts).
 _OP_RECONFIG_VM_TASK = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# A read of many objects in one call follows the continuation pages vCenter
+# may send (#4862, ``vim_retrieve.retrieve_all_pages``). Listed on the
+# manifest of every composite that reads that way.
+_OP_CONTINUE_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
 # #3697: vm.deploy_from_library deploys under a unique name and renames the
 # finished VM or vApp to the requested name through the core vim
 # ``ManagedEntity.Rename_Task`` (no REST rename exists in the pinned spec).
@@ -1097,9 +1107,11 @@ _SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
 #: vm.deploy_from_library's vim leg (#3697): the ``Rename_Task`` that gives
 #: the finished VM (or vApp) its requested name, the ``Destroy_Task`` that
 #: removes a vApp a failed deploy left (with its VMs), and the property
-#: read that polls the tasks and finds such a vApp by its deploy name.
+#: read that polls the tasks and finds such a vApp by its deploy name (with
+#: the continuation pages of the vApp name read, #4862).
 _VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RENAME_VM_TASK,
     _OP_RENAME_VAPP_TASK,
     _OP_DESTROY_VAPP_TASK,
@@ -3106,7 +3118,9 @@ def _build_ovf_deploy_body(params: dict[str, Any], eula_field: str, *, name: str
     ``resource_pool`` is the required deploy-target anchor; ``host`` / ``folder``
     refine it. ``network_mappings`` is sent verbatim as the OVF-key → network-moid
     map (the pinned 9.0 spec models it as a map, not an array). ``ovf_properties``
-    folds into a single ``PropertyParams`` entry in ``additional_parameters``.
+    folds into a single ``PropertyParams`` entry in ``additional_parameters``,
+    and ``deployment_option`` into a ``DeploymentOptionParams`` entry with
+    ``selected_key`` (#4035).
     The EULA-accept flag defaults to true (deploying a curated item accepts its
     EULA) and is keyed by *eula_field* — the version-aware wire name resolved by
     :func:`_deploy_eula_field_name`. *name* is the unique deploy name from
@@ -3120,14 +3134,22 @@ def _build_ovf_deploy_body(params: dict[str, Any], eula_field: str, *, name: str
     _put_if_str(deployment_spec, "storage_provisioning", params.get("storage_provisioning"))
     _put_if_str(deployment_spec, "storage_profile_id", params.get("storage_profile"))
     _put_if_str(deployment_spec, "default_datastore_id", params.get("datastore"))
+    additional_parameters: list[dict[str, Any]] = []
     ovf_properties = params.get("ovf_properties")
     if isinstance(ovf_properties, dict) and ovf_properties:
-        deployment_spec["additional_parameters"] = [
+        additional_parameters.append(
             {
                 "type": _OVF_PROPERTY_PARAMS_TYPE,
                 "properties": [{"id": str(k), "value": str(v)} for k, v in ovf_properties.items()],
             }
-        ]
+        )
+    deployment_option = params.get("deployment_option")
+    if isinstance(deployment_option, str) and deployment_option:
+        additional_parameters.append(
+            {"type": _OVF_DEPLOYMENT_OPTION_PARAMS_TYPE, "selected_key": deployment_option}
+        )
+    if additional_parameters:
+        deployment_spec["additional_parameters"] = additional_parameters
 
     return {"deployment_spec": deployment_spec, "target": _build_ovf_deploy_target(params)}
 
@@ -3218,28 +3240,20 @@ def _deploy_vm_name(name: str, token: str) -> str:
     return f"{name[: _VM_NAME_MAX_LENGTH - len(suffix)]}{suffix}"
 
 
-async def _resolve_deploy_vm_name(
+async def _read_ovf_summary(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     *,
     item_id: str,
     params: dict[str, Any],
-) -> tuple[str | None, dict[str, Any] | None]:
-    """The name the deployed VM must end up with: ``name``, or the OVF default.
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read the OVF summary of *item_id* (``?action=filter``, un-gated).
 
-    Without ``name`` vCenter would take the VM name from the OVF descriptor.
-    The composite needs that name before the deploy (#3697): the VM is
-    deployed under a unique name and renamed afterwards. So the default is
-    read from the un-gated ``?action=filter`` summary (``OvfSummary.name``).
-    Returns ``(name, None)``, or ``(None, envelope)`` when the summary call
-    faulted (``resolve_error``) or the descriptor names nothing
-    (``invalid_reference`` — the caller must set ``name``). Both refusals
-    happen before any VM is created.
+    Returns ``(summary, None)``, or ``({}, envelope)`` with a
+    ``resolve_error`` envelope when the call faulted. A summary that is not
+    an object comes back as ``{}``.
     """
-    name = params.get("name")
-    if isinstance(name, str) and name:
-        return name, None
     method, path, body = _split_sub_op(
         _OP_FILTER_OVF_LIBRARY_ITEM,
         {"ovfLibraryItemId": item_id, "target": _build_ovf_deploy_target(params)},
@@ -3250,7 +3264,7 @@ async def _resolve_deploy_vm_name(
             target, mounted, operator=operator, verb=method, json=body
         )
     except httpx.HTTPError as exc:
-        return None, _deploy_failure(
+        return {}, _deploy_failure(
             "resolve_error",
             library_item_id=item_id,
             issues=[
@@ -3262,7 +3276,92 @@ async def _resolve_deploy_vm_name(
             ],
         )
     summary = _unwrap_value(payload)
-    default = summary.get("name") if isinstance(summary, dict) else None
+    return (summary if isinstance(summary, dict) else {}), None
+
+
+def _ovf_deployment_option_keys(summary: dict[str, Any]) -> list[str]:
+    """The deployment-option keys the OVF summary lists, in its order (#4035)."""
+    keys: list[str] = []
+    for entry in summary.get("additional_params") or []:
+        if not isinstance(entry, dict) or entry.get("type") != _OVF_DEPLOYMENT_OPTION_PARAMS_TYPE:
+            continue
+        for option in entry.get("deployment_options") or []:
+            key = option.get("key") if isinstance(option, dict) else None
+            if isinstance(key, str) and key:
+                keys.append(key)
+    return keys
+
+
+def _check_deployment_option(
+    option: str, summary: dict[str, Any], item_id: str
+) -> dict[str, Any] | None:
+    """Refuse a ``deployment_option`` the OVF item does not offer (#4035).
+
+    Returns ``None`` when *option* is one of the keys the summary lists.
+    Otherwise an ``invalid_reference`` envelope whose ``candidates`` are the
+    keys the item offers (empty when it offers none). The refusal comes
+    before any VM is created.
+    """
+    keys = _ovf_deployment_option_keys(summary)
+    if option in keys:
+        return None
+    offered = ", ".join(repr(key) for key in keys) if keys else "none"
+    return _deploy_failure(
+        "invalid_reference",
+        library_item_id=item_id,
+        candidates=keys,
+        issues=[
+            issue(
+                "input",
+                "error",
+                f"deployment_option {option!r} is not offered by this OVF item; "
+                f"its deployment options are: {offered}",
+            )
+        ],
+    )
+
+
+async def _resolve_deploy_vm_name(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    item_id: str,
+    params: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The name the deployed VM must end up with, after the pre-deploy checks.
+
+    The name is ``name``, or the OVF default. Without ``name`` vCenter would
+    take the VM name from the OVF descriptor. The composite needs that name
+    before the deploy (#3697): the VM is deployed under a unique name and
+    renamed afterwards. So the default is read from the un-gated
+    ``?action=filter`` summary (``OvfSummary.name``). The same summary read
+    checks ``deployment_option`` against the keys the item offers (#4035);
+    with ``name`` set and no ``deployment_option`` no summary is read.
+    Returns ``(name, None)``, or ``(None, envelope)`` when the summary call
+    faulted (``resolve_error``), the option is not offered
+    (``invalid_reference``) or the descriptor names nothing
+    (``invalid_reference`` — the caller must set ``name``). Every refusal
+    happens before any VM is created.
+    """
+    name = params.get("name")
+    has_name = isinstance(name, str) and bool(name)
+    option = params.get("deployment_option")
+    has_option = isinstance(option, str) and bool(option)
+    if has_name and not has_option:
+        return name, None
+    summary, summary_error = await _read_ovf_summary(
+        connector, target, operator, item_id=item_id, params=params
+    )
+    if summary_error is not None:
+        return None, summary_error
+    if has_option:
+        option_error = _check_deployment_option(str(option), summary, item_id)
+        if option_error is not None:
+            return None, option_error
+    if has_name:
+        return name, None
+    default = summary.get("name")
     if not isinstance(default, str) or not default:
         return None, _deploy_failure(
             "invalid_reference",
@@ -3449,11 +3548,12 @@ async def _find_vapps_named(
 
     Two un-gated ``RetrievePropertiesEx`` reads: the pool's ``resourcePool``
     children (a vApp is a child resource pool of the pool it was deployed
-    into), then the ``name`` of every child that is a ``VirtualApp``. No
-    read leaves the named objects (no traversal). An unexpected shape
-    yields no match; a transport fault, the connector's :exc:`RuntimeError`
-    for an unavailable VI-JSON API, or a response that is not JSON raises
-    for the caller.
+    into), then the ``name`` of every child that is a ``VirtualApp``, with
+    every continuation page vCenter sends (#4862). No read leaves the named
+    objects (no traversal). An unexpected shape yields no match; a
+    transport fault, a failed page, the connector's :exc:`RuntimeError` for
+    an unavailable VI-JSON API, or a response that is not JSON raises for
+    the caller.
     """
     children_read = await connector._post_vmomi_json(
         target,
@@ -3473,11 +3573,11 @@ async def _find_vapps_named(
     ]
     if not vapp_ids:
         return []
-    names_read = await connector._post_vmomi_json(
+    names_read = await retrieve_all_pages(
+        connector,
         target,
-        _VMOMI_RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
+        operator,
+        retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
     )
     return [moid for moid, vapp_name in _entity_names(names_read).items() if vapp_name == name]
 
@@ -4596,16 +4696,18 @@ async def vm_snapshot_revert_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Revert a VM to a named snapshot. Idempotent; ambiguity-rejecting.
+    """Revert a VM to a snapshot, by name or by id. Idempotent; ambiguity-rejecting.
 
     Op-id: ``vmware.composite.vm.snapshot.revert``. Multiple snapshots
     sharing the name -> ``status='ambiguous'``; missing -> ``not_found``.
-    Revert never dispatches on either. The revert is a vim ``*_Task``:
-    a task fault raises (the dispatcher wraps it ``connector_error``);
-    a poll timeout returns ``status='timeout'`` with the task id.
+    A ``snapshot_id`` must be in the VM's own snapshot tree, else
+    ``not_found``. Revert never dispatches on any of these. The revert is a
+    vim ``*_Task``: a task fault raises (the dispatcher wraps it
+    ``connector_error``); a poll timeout returns ``status='timeout'`` with
+    the task id.
     """
     vm_moid = params["vm"]
-    snapshot_name = params["snapshot_name"]
+    snapshot_id = params.get("snapshot_id")
 
     tree_result = await connector._post_vmomi_json(
         target,
@@ -4616,13 +4718,21 @@ async def vm_snapshot_revert_composite(
     snapshot_info = _extract_single_prop(tree_result, _PROP_SNAPSHOT)
     root_list = snapshot_info.get("rootSnapshotList") if isinstance(snapshot_info, dict) else None
     entries = _flatten_snapshot_tree(root_list)
-    matches = [e for e in entries if e["name"] == snapshot_name]
+    if isinstance(snapshot_id, str):
+        matches = [e for e in entries if e["snapshot"] == snapshot_id]
+        missing = (
+            f"vm {vm_moid!r} has no snapshot {snapshot_id!r}; list its snapshots with "
+            "vmware.snapshot.list"
+        )
+    else:
+        matches = [e for e in entries if e["name"] == params["snapshot_name"]]
+        missing = f"no snapshot named {params['snapshot_name']!r} on vm {vm_moid!r}"
     if not matches:
         return {
             "status": "not_found",
             "snapshot_id": None,
             "candidates": [],
-            "guidance": f"no snapshot named {snapshot_name!r} on vm {vm_moid!r}",
+            "guidance": missing,
         }
     if len(matches) > 1:
         return {
@@ -4642,7 +4752,7 @@ async def vm_snapshot_revert_composite(
         op_id=_OP_REVERT_TO_SNAPSHOT_TASK,
         vmomi_path=f"/{_VM_SNAPSHOT_MO_TYPE}/{snapshot_moid}/RevertToSnapshot_Task",
         body={},
-        params={"vm": vm_moid, "snapshot_name": snapshot_name, "snapshot": snapshot_moid},
+        params={"vm": vm_moid, "snapshot_name": matches[0]["name"], "snapshot": snapshot_moid},
     )
     if gate is not None:
         return gate

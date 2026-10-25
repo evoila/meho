@@ -430,7 +430,9 @@ failed-release window. Automatic downgrades stay banned.
   a failure, so a corrupted or foreign `alembic_version` value passes
   readiness. The dangerous direction (DB behind the code — expected tables
   or columns missing) still fails closed, and the tolerated state stays
-  visible on `/ready` as `db_ahead=true`.
+  visible on `/ready` as `db_ahead=true`, and in `meho status` /
+  `meho_status` as a database revision newer than the one this version
+  expects (`db.revision` vs `db.head` on `/api/v1/health`, #4830).
 - The tolerance ships *in the image being rolled back to*. Rolling back to
   a pre-tolerance image (strict-equality probe) across a migration still
   bricks readiness — recover by rolling forward.

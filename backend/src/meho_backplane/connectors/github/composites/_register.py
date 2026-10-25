@@ -22,8 +22,10 @@ handles upsert, body-hash dedupe, embedding pipeline, and
 Scope
 -----
 
-Nine composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
-``gh.composite.repo_view`` (one repository, read) are read-only. #2081
+Ten composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
+``gh.composite.repo_view`` (one repository, read) are read-only.
+``gh.composite.repo_create`` (one repository in an organization) is a
+``caution`` write that waits for approval (``requires_approval=True``). #2081
 adds four more: ``gh.composite.project_view`` (read),
 ``gh.composite.project_item_add`` /
 ``gh.composite.project_item_set_field`` (Projects-v2 GraphQL writes),
@@ -76,6 +78,9 @@ from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
     repo_view_composite,
 )
+from meho_backplane.connectors.github.composites._repos import (
+    repo_create_composite,
+)
 from meho_backplane.connectors.github.composites._sub_issues import (
     sub_issue_add_composite,
 )
@@ -88,6 +93,8 @@ from meho_backplane.connectors.github.composites.schemas import (
     PROJECT_ITEM_SET_FIELD_RESPONSE_SCHEMA,
     PROJECT_VIEW_PARAMETER_SCHEMA,
     PROJECT_VIEW_RESPONSE_SCHEMA,
+    REPO_CREATE_PARAMETER_SCHEMA,
+    REPO_CREATE_RESPONSE_SCHEMA,
     REPO_VIEW_PARAMETER_SCHEMA,
     REPO_VIEW_RESPONSE_SCHEMA,
     SUB_ISSUE_ADD_PARAMETER_SCHEMA,
@@ -161,7 +168,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "default branch, is it archived, how many issues are open, when "
         "was the last push, and what may the connector's identity do in "
         "it. Start here before you read branches, files, issues or pull "
-        "requests of a repository you have not seen in this session."
+        "requests of a repository you have not seen in this session. "
+        "Use repo_create to make a new repository in an organisation; it "
+        "waits for approval and changes nothing when the name exists."
     ),
     "git": (
         "Use to work with the git objects of a repository: which commit a "
@@ -342,6 +351,50 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
                 "identity cannot see it. Use default_branch as the branch for "
                 "later reads of files or commits. If permissions.write is false, "
                 "do not plan a write to this repository."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.repo_create",
+        handler=repo_create_composite,
+        summary=(
+            "Create a repository in an organisation: name, description, visibility, "
+            "optional README."
+        ),
+        description=(
+            "Creates one repository in an organisation with POST /orgs/{org}/repos. "
+            "Private unless visibility is 'public'. With with_readme, GitHub makes a "
+            "first commit. When a repository with that name already exists, nothing is "
+            "written and status is 'unchanged'. A change that waits for approval."
+        ),
+        parameter_schema=REPO_CREATE_PARAMETER_SCHEMA,
+        response_schema=REPO_CREATE_RESPONSE_SCHEMA,
+        group_key="repos",
+        tags=["composite", "write", "repos"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_call": (
+                "Call when a person asks for a new repository in a GitHub organisation. "
+                "Do not call to change an existing repository; use repo_view first if "
+                "you are not sure the name is free."
+            ),
+            "preconditions": (
+                "The connector's identity must be allowed to create repositories in "
+                "the organisation. Pass visibility 'public' only when the person asked "
+                "for a public repository by name; the default is private. The call "
+                "waits until an approver accepts it."
+            ),
+            "output_shape": (
+                "{status: 'created' | 'unchanged', name, full_name, owner, url, "
+                "visibility, default_branch, guidance}. 'unchanged' means a repository "
+                "with that name already exists and nothing was written."
+            ),
+            "next_step": (
+                "On 'created', tell the person the url and default_branch. On "
+                "'unchanged', say the name is taken and ask whether to use the existing "
+                "repository or pick another name. A 403 means the identity may not "
+                "create repositories there; a 422 means GitHub rejected the name."
             ),
         },
     ),

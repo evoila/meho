@@ -45,6 +45,7 @@ from meho_backplane.connectors.rabbitmq import (
     RABBITMQ_REDACTED_OP_IDS,
     RabbitMqConnector,
 )
+from meho_backplane.connectors.rabbitmq.ops import _op
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
     clear_registry,
@@ -408,3 +409,31 @@ def test_no_write_or_mutating_op_is_registered() -> None:
         assert op.safety_level == "safe"
         assert "write" not in op.tags
         assert not any(tok in op.op_id for tok in (".create", ".delete", ".set", ".update"))
+
+
+def test_op_helper_has_no_default_for_safety_level_or_requires_approval() -> None:
+    """Every op states both values itself; the helper refuses to fill them in."""
+    with pytest.raises(TypeError, match="safety_level"):
+        _op(  # type: ignore[call-arg]
+            op_id="rabbitmq.example",
+            handler_attr="overview",
+            summary="Example.",
+            description="Example.",
+            group_key="rabbitmq-cluster",
+            user_tag="monitoring",
+            when_to_use="Example.",
+            output_shape="Example.",
+            requires_approval=False,
+        )
+    with pytest.raises(TypeError, match="requires_approval"):
+        _op(  # type: ignore[call-arg]
+            op_id="rabbitmq.example",
+            handler_attr="overview",
+            summary="Example.",
+            description="Example.",
+            group_key="rabbitmq-cluster",
+            user_tag="monitoring",
+            when_to_use="Example.",
+            output_shape="Example.",
+            safety_level="safe",
+        )

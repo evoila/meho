@@ -94,6 +94,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.import_from_library",
     "vmware.composite.vm.clone_from_template",
     "vmware.composite.vm.snapshot.revert",
+    # VM snapshot create (caution + approval) and delete (destructive).
+    "vmware.composite.vm.snapshot.create",
+    "vmware.composite.vm.snapshot.delete",
     "vmware.composite.vm.destroy",
     "vmware.composite.vm.migrate",
     "vmware.composite.vm.power",
@@ -103,6 +106,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.resize",
     "vmware.composite.vm.nic.repoint",
     "vmware.composite.vm.device.cdrom",
+    # Add a CD drive (dangerous) and unmount the Tools installer (caution).
+    "vmware.composite.vm.cdrom.add",
+    "vmware.composite.vm.tools.installer.unmount",
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
@@ -146,6 +152,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.item.delete",
     # The destructive DRS rule delete; special-cased in the tier assertion below.
     "vmware.composite.cluster.drs_rule.delete",
+    # Licence assign: dangerous + approval (the default tier).
+    "vmware.composite.license.assign",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -186,6 +194,9 @@ _READ_OP_IDS: tuple[str, ...] = (
 _CAUTION_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.subscribed.create",
     "vmware.composite.content_library.subscribed.sync",
+    # The two alarm changes (#4383), caution + approval as well.
+    "vmware.composite.alarm.acknowledge",
+    "vmware.composite.alarm.reset",
 )
 
 # 54 total -- 14 read (T5 / #508 + 4 guest-ops reads / #3100 + the
@@ -226,6 +237,12 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "vmware.composite.vm.snapshot.revert": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_snapshot_revert_composite"
+    ),
+    "vmware.composite.vm.snapshot.create": (
+        "meho_backplane.connectors.vmware_rest.composites._snapshot.vm_snapshot_create_composite"
+    ),
+    "vmware.composite.vm.snapshot.delete": (
+        "meho_backplane.connectors.vmware_rest.composites._snapshot.vm_snapshot_delete_composite"
     ),
     "vmware.composite.vm.destroy": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_destroy_composite"
@@ -293,6 +310,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.vm.resource_allocation.set": (
         "meho_backplane.connectors.vmware_rest.composites._vm_allocation."
         "vm_resource_allocation_set_composite"
+    ),
+    "vmware.composite.license.assign": (
+        "meho_backplane.connectors.vmware_rest.composites._license.license_assign_composite"
     ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
@@ -377,6 +397,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.import_from_library": "vm",
     "vmware.composite.vm.clone_from_template": "vm",
     "vmware.composite.vm.snapshot.revert": "vm",
+    "vmware.composite.vm.snapshot.create": "vm",
+    "vmware.composite.vm.snapshot.delete": "vm",
     "vmware.composite.vm.destroy": "vm",
     "vmware.composite.vm.migrate": "vm",
     "vmware.composite.vm.power": "vm",
@@ -386,7 +408,10 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.resize": "vm",
     "vmware.composite.vm.nic.repoint": "vm",
     "vmware.composite.vm.device.cdrom": "vm",
+    "vmware.composite.vm.cdrom.add": "vm",
+    "vmware.composite.vm.tools.installer.unmount": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
+    "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
@@ -593,6 +618,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.storage_policy.create",
         "vmware.composite.namespace.create",
         "vmware.composite.datastore.dir.create",
+        "vmware.composite.vm.tools.installer.unmount",
+        "vmware.composite.vm.snapshot.create",
     }
     for row in rows:
         if row.op_id in (
@@ -608,6 +635,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.content_library.item.delete",
             # The DRS rule delete.
             "vmware.composite.cluster.drs_rule.delete",
+            # The VM snapshot delete.
+            "vmware.composite.vm.snapshot.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:
@@ -738,11 +767,24 @@ async def test_write_composite_parameter_schemas_persist_with_required_fields(
     # vm.clone requires source_vm / target_name / library_item.
     clone_schema: dict[str, Any] = dict(by_op["vmware.composite.vm.clone"].parameter_schema)
     assert set(clone_schema["required"]) == {"source_vm", "target_name", "library_item"}
-    # vm.snapshot.revert requires vm + snapshot_name.
+    # vm.snapshot.revert requires vm + one of snapshot_name / snapshot_id.
     revert_schema: dict[str, Any] = dict(
         by_op["vmware.composite.vm.snapshot.revert"].parameter_schema
     )
-    assert set(revert_schema["required"]) == {"vm", "snapshot_name"}
+    assert set(revert_schema["required"]) == {"vm"}
+    assert revert_schema["oneOf"] == [
+        {"required": ["snapshot_name"]},
+        {"required": ["snapshot_id"]},
+    ]
+    # vm.snapshot.create requires vm + snapshot_name; delete requires vm + snapshot_id.
+    snap_create: dict[str, Any] = dict(
+        by_op["vmware.composite.vm.snapshot.create"].parameter_schema
+    )
+    assert set(snap_create["required"]) == {"vm", "snapshot_name"}
+    snap_delete: dict[str, Any] = dict(
+        by_op["vmware.composite.vm.snapshot.delete"].parameter_schema
+    )
+    assert set(snap_delete["required"]) == {"vm", "snapshot_id"}
     # vm.migrate requires vm + cluster (target_host is optional).
     migrate_schema: dict[str, Any] = dict(by_op["vmware.composite.vm.migrate"].parameter_schema)
     assert set(migrate_schema["required"]) == {"vm", "cluster"}
@@ -830,6 +872,20 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         # #2970: the revert is a polled vim *_Task -> a poll timeout is a
         # legible status.
         "vmware.composite.vm.snapshot.revert": {"reverted", "ambiguous", "not_found", "timeout"},
+        "vmware.composite.vm.snapshot.create": {
+            "created",
+            "unchanged",
+            "not_found",
+            "invalid_request",
+            "timeout",
+        },
+        "vmware.composite.vm.snapshot.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "still_present",
+            "timeout",
+        },
         "vmware.composite.vm.migrate": {"migrated", "no_recommendation"},
         "vmware.composite.vm.power": {"ok", "error", "tools_unavailable"},
         "vmware.composite.vm.disk.grow": {"grown", "invalid_shrink", "disk_not_found", "timeout"},
@@ -971,6 +1027,14 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "precondition_failed",
             "still_present",
             "timeout",
+        },
+        # Licence assign: the write, the no-op, and three refusals before any change.
+        "vmware.composite.license.assign": {
+            "assigned",
+            "unchanged",
+            "license_not_found",
+            "license_ambiguous",
+            "asset_not_found",
         },
     }
     for op_id, expected_values in expected_status_values.items():

@@ -101,7 +101,7 @@ pinned.
 **Operation contracts.** The 29 typed ops (the seven reads above, the
 nine provisioning ops, the four image ops and the nine network and deploy ops
 below) meet the VMware operation-contract check
-(`backend/tests/test_vmware_operation_contracts.py`) and have no entry in its
+(`backend/tests/test_operation_contracts.py`) and have no entry in its
 gap list:
 
 - Each read's `response_schema` names the vendor fields, nested ones too

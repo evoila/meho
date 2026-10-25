@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""CI check for the contracts of the VMware and Broadcom operations.
+"""CI check for the contracts of every hand-written operation.
 
 An AI picks an operation from its summary, description, group text and
 safety level, and fills in the parameters from the field descriptions. This
-test checks every hand-written (typed and multi-step) operation of the
-connectors in :data:`VMWARE_CONNECTORS` against nine rules:
+test checks every hand-written (typed and multi-step) operation that MEHO
+registers at start-up, of every connector, against ten rules:
 
 1. ``summary`` -- a one-line summary (at most 120 characters) and a short
    description (at most 300 characters).
@@ -25,14 +25,20 @@ connectors in :data:`VMWARE_CONNECTORS` against nine rules:
 8. ``group`` -- the operation's group exists and has a text.
 9. ``preview_builder`` -- every ``destructive`` operation has a preview
    builder (``register_preview_builder``).
+10. ``write_name`` -- a ``safe`` operation has no write word in its id
+    (``create``, ``delete``, ``set``, ``start``, ...; the list is
+    :data:`meho_backplane.delete_names.WRITE_WORDS`). The real reads whose
+    id holds such a word are in :data:`READS_WITH_A_WRITE_WORD`, each with
+    a reason.
 
-Today's gaps live in ``tests/data/vmware_operation_contract_gaps.yaml``. The
-test fails on a gap that is not in that list (a new gap) and on a listed gap
-that is gone (remove the entry). So the list only shrinks.
+Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
+fails on a gap that is not in that list (a new gap) and on a listed gap that
+is gone (remove the entry). So the list only shrinks.
 
 The check reads what MEHO registers at start-up. It calls no vendor system.
-The checker's own tests, with fake operations, are in
-``test_vmware_operation_contract_rules.py``.
+A new connector is covered as soon as its registrar runs; nothing needs to
+be added here. The checker's own tests, with fake operations, are in
+``test_operation_contract_rules.py``.
 """
 
 from __future__ import annotations
@@ -50,36 +56,13 @@ from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.delete_names import write_word_in_op_id
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
 
-#: The VMware and Broadcom connectors this check covers, by connector id.
-#: To add a connector, add one line here.
-VMWARE_CONNECTORS: Final[frozenset[str]] = frozenset(
-    {
-        "vmware-rest",
-        "nsx-rest",
-        "hcx-rest",
-        "sddc-rest",
-        "sddc-vcf5",
-        "fleet-lcm",
-        "fleet-rest",
-        "vcfa-rest",
-        "vcfa-vra8",
-        "vrops-rest",
-        "vrops-vrops8",
-        "vrli-rest",
-        "vrli-vrli8",
-        "vcd-rest",
-        "installer-rest",
-        "holodeck-ssh",
-        "srm-rest",
-    }
-)
-
-GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "vmware_operation_contract_gaps.yaml"
+GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "operation_contract_gaps.yaml"
 
 RULES: Final[tuple[str, ...]] = (
     "summary",
@@ -91,7 +74,17 @@ RULES: Final[tuple[str, ...]] = (
     "requires_approval",
     "group",
     "preview_builder",
+    "write_name",
 )
+
+#: Real reads whose id holds a write word, with the reason. The live test
+#: fails when an entry names an operation that no longer exists or is no
+#: longer ``safe``, so this list stays tidy.
+READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
+    "installer.system.depot.sync-status": "reads the state of the depot sync; starts none",
+    "mssql.ha.sync-health": "reads the health of the availability-group sync",
+    "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
+}
 
 SUMMARY_MAX: Final[int] = 120
 DESCRIPTION_MAX: Final[int] = 300
@@ -123,7 +116,7 @@ class OperationContract:
 
 
 # ---------------------------------------------------------------------------
-# The nine rules. Each returns a list of problems; an empty list means pass.
+# The ten rules. Each returns a list of problems; an empty list means pass.
 # ---------------------------------------------------------------------------
 
 
@@ -270,6 +263,18 @@ def check_preview_builder(op: OperationContract) -> list[str]:
     return []
 
 
+def check_write_name(op: OperationContract) -> list[str]:
+    if op.safety_level != "safe" or op.op_id in READS_WITH_A_WRITE_WORD:
+        return []
+    word = write_word_in_op_id(op.op_id)
+    if word is None:
+        return []
+    return [
+        f"the id says it writes ({word!r}) but the operation is 'safe'; make it a change, "
+        "or add a real read to READS_WITH_A_WRITE_WORD with a reason"
+    ]
+
+
 CHECKS: Final[Mapping[str, Any]] = {
     "summary": check_summary,
     "field_descriptions": check_field_descriptions,
@@ -280,6 +285,7 @@ CHECKS: Final[Mapping[str, Any]] = {
     "requires_approval": check_requires_approval,
     "group": check_group,
     "preview_builder": check_preview_builder,
+    "write_name": check_write_name,
 }
 
 
@@ -361,14 +367,13 @@ def _stub_embedding_service() -> AsyncMock:
     return service
 
 
-async def _registered_vmware_operations() -> list[OperationContract]:
+async def _registered_operations() -> list[OperationContract]:
     await run_typed_op_registrars(embedding_service=_stub_embedding_service())
     async with get_sessionmaker()() as session:
         rows = (
             (
                 await session.execute(
                     select(EndpointDescriptor).where(
-                        EndpointDescriptor.impl_id.in_(VMWARE_CONNECTORS),
                         EndpointDescriptor.tenant_id.is_(None),
                         EndpointDescriptor.source_kind.in_(("typed", "composite")),
                     )
@@ -400,26 +405,32 @@ async def _registered_vmware_operations() -> list[OperationContract]:
 
 
 @pytest.mark.asyncio
-async def test_vmware_operation_contracts_match_the_gap_list() -> None:
-    """Every VMware operation meets the nine rules, or its gap is in the list."""
-    ops = await _registered_vmware_operations()
+async def test_operation_contracts_match_the_gap_list() -> None:
+    """Every hand-written operation meets the ten rules, or its gap is in the list."""
+    ops = await _registered_operations()
+    assert ops, "no typed or multi-step operation was registered"
 
+    gaps = load_gaps()
     seen_connectors = {op.connector for op in ops}
-    assert seen_connectors == VMWARE_CONNECTORS, (
-        "some listed connectors registered no operation: "
-        f"{sorted(VMWARE_CONNECTORS - seen_connectors)}"
-    )
+    unknown = {connector for connector, _, _ in gaps} - seen_connectors
+    assert not unknown, f"the gap list names connectors that registered nothing: {sorted(unknown)}"
 
-    messages = compare_with_gaps(find_problems(ops), load_gaps())
+    messages = compare_with_gaps(find_problems(ops), gaps)
     assert not messages, (
-        "VMware operation contracts do not match "
+        "operation contracts do not match "
         f"tests/data/{GAPS_FILE.name}. Fix a new gap in the operation; "
         "never add it to the list. Remove an entry once its gap is fixed.\n" + "\n".join(messages)
     )
 
 
-def test_gap_list_names_only_known_connectors_and_rules() -> None:
-    """A typo in the gap list must not hide a gap."""
-    gaps = load_gaps()
-    assert {connector for connector, _, _ in gaps} <= VMWARE_CONNECTORS
-    assert {rule for _, _, rule in gaps} <= set(RULES)
+@pytest.mark.asyncio
+async def test_reads_with_a_write_word_are_registered_and_safe() -> None:
+    """The allow list names only real, 'safe' operations, so a stale entry is caught."""
+    safe_ops = {op.op_id for op in await _registered_operations() if op.safety_level == "safe"}
+    stale = sorted(set(READS_WITH_A_WRITE_WORD) - safe_ops)
+    assert not stale, f"not registered as a 'safe' operation; remove from the allow list: {stale}"
+
+
+def test_gap_list_names_only_known_rules() -> None:
+    """A typo in a rule name must not hide a gap."""
+    assert {rule for _, _, rule in load_gaps()} <= set(RULES)

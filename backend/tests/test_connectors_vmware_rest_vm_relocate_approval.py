@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from meho_backplane.connectors.vmware_rest import vm_relocate_preview as previews
@@ -620,3 +621,43 @@ async def test_read_helpers_name_the_properties_vcenter_could_not_read() -> None
     assert spaces[_TARGET].unreadable_properties == ("summary (NoPermission)",)
     assert spaces[_SOURCE].name == "local-a"
     assert spaces[_SOURCE].unreadable_properties == ()
+
+
+# ---------------------------------------------------------------------------
+# The datastore read follows every page (#4862)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_datastore_on_a_later_page_shows_its_free_space() -> None:
+    conn = _vcenter()
+    conn.vim.page_size = 1
+    params = _rest_params({"placement": {"datastore": _TARGET}})
+
+    preview = await previews.vm_relocate_preview(preview_ctx(params, conn))
+
+    assert preview is not None
+    assert preview["source_datastores"] == [{"id": _SOURCE, "name": "local-a"}]
+    assert preview["target_datastores"][0]["name"] == "local-b"
+    assert preview["target_datastores"][0]["free_space_bytes"] == 2000 * _GIB
+    assert "size_unavailable_reason" not in preview
+    # The VM read is one object (one page); the datastore read took two pages.
+    assert conn.vim.methods() == [
+        "RetrievePropertiesEx",
+        "RetrievePropertiesEx",
+        "ContinueRetrievePropertiesEx",
+    ]
+    assert conn.vim.continue_calls == [("<token-1>", "<session-1>")]
+
+
+async def test_a_failed_datastore_page_keeps_the_size_and_says_why() -> None:
+    conn = _vcenter()
+    conn.vim.page_size = 1
+    conn.vim.fail_continue = httpx.ConnectError("page lost")
+    params = _rest_params({"placement": {"datastore": _TARGET}})
+
+    preview = await previews.vm_relocate_preview(preview_ctx(params, conn))
+
+    assert preview is not None
+    assert preview["copied_now_bytes"] == 365 * _GIB
+    assert preview["target_datastores"][0]["free_space_bytes"] is None
+    assert preview["size_unavailable_reason"].startswith("the datastore read failed (")

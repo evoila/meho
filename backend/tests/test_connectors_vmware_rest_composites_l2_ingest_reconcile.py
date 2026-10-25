@@ -711,6 +711,7 @@ def test_vm_deploy_from_library_vi_json_sub_op_manifest_is_expected() -> None:
         "POST:/VirtualApp/{moId}/Rename_Task",
         "POST:/VirtualApp/{moId}/Destroy_Task",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
     }
 
 
@@ -1235,6 +1236,7 @@ def test_host_vi_json_sub_op_manifests_are_the_expected_sets() -> None:
     """Pin the host-domain vi-json manifests so a drift can't shrink the reconcile."""
     assert set(_host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS) == {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
         "POST:/HostDatastoreSystem/{moId}/CreateNasDatastore",
     }
     assert set(_host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH) == {
@@ -1328,6 +1330,7 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _teardown_network,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/DistributedVirtualSwitch/{moId}/FetchDVPorts",
             "POST:/DistributedVirtualPortgroup/{moId}/Destroy_Task",
         },
@@ -1336,6 +1339,7 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _teardown_network,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/HostNetworkSystem/{moId}/RemovePortGroup",
         },
     ),
@@ -1343,6 +1347,7 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _teardown,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/Folder/{moId}/Destroy_Task",
         },
     ),
@@ -1375,6 +1380,7 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         _drs_rule_delete,
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
         },
     ),

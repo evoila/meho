@@ -363,6 +363,32 @@ func TestPrintAboutErrorRendersErrorString(t *testing.T) {
 	}
 }
 
+// TestPrintAboutErrorRendersAuditReceipt — a failed vendor call shows the
+// id of its audit row, so the operator can read why it failed (#4833).
+// The trailer is shared across every vendor package (dispatch.WriteErrorTrailer).
+func TestPrintAboutErrorRendersAuditReceipt(t *testing.T) {
+	errMsg := "Connection refused"
+	auditID := "77777777-7777-7777-7777-777777777777"
+	r := &CallResult{
+		Status:     "error",
+		OpID:       "GET:/api/about",
+		Error:      &errMsg,
+		AuditID:    &auditID,
+		DurationMs: 5.0,
+	}
+	var buf bytes.Buffer
+	printAbout(&buf, r)
+	if !strings.Contains(buf.String(), "audit receipt: "+auditID+"\n") {
+		t.Errorf("printAbout error missing the audit receipt:\n%s", buf.String())
+	}
+	r.AuditID = nil
+	buf.Reset()
+	printAbout(&buf, r)
+	if strings.Contains(buf.String(), "audit receipt:") {
+		t.Errorf("null audit_id must not render a receipt:\n%s", buf.String())
+	}
+}
+
 // TestPrintVMListTable — happy-path render with 2 VMs.
 func TestPrintVMListTable(t *testing.T) {
 	r := &CallResult{

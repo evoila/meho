@@ -23,6 +23,13 @@ this connector after the files are pinned.
 
 Package: `backend/src/meho_backplane/connectors/srm/`.
 
+The login, the session cache, the version read and both reads are shared
+with the vSphere Replication connector (`docs/codebase/connectors-vr.md`).
+Both APIs are served by the same REST API gateway, so the shared part
+lives in `connectors/_shared/dr_rest.py` (the base class
+`DrRestConnector`) and `connectors/_shared/dr_api_file.py` (the read).
+`SrmConnector` sets the SRM paths.
+
 | Operation | What it does | Vendor call | Risk | Versions |
 |---|---|---|---|---|
 | `srm.about` | SRM server name, status, version, build and the paired vCenter, plus a short view of the certificates. MEHO uses the same call to detect the version. | `GET /api/rest/srm/v2/server/info` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
@@ -46,9 +53,8 @@ meho targets add <vr-target-name> --product vr --host <appliance-address> \
 
 MEHO picks one connector class per target, by product and version, so
 each target gets its own connector and its own login. The `vr` target
-needs the vSphere Replication connector (#4506); until it lands, MEHO
-does not know the `vr` product. The two targets
-may name the same Vault path.
+uses the vSphere Replication connector (`docs/codebase/connectors-vr.md`).
+The two targets may name the same Vault path.
 
 **SRM 8.8 and Live Site Recovery 9.0.** The SRM appliance and the
 vSphere Replication appliance are separate machines. Register one target
@@ -61,20 +67,32 @@ other modes raise `NotImplementedError`.
 
 ## Key types
 
-- `SrmConnector` (`connector.py`) -- the connector class. Caches one
-  session id per target and tenant (`target_cache_key`).
+- `SrmConnector` (`connector.py`) -- the connector class, a subclass of
+  `DrRestConnector` (`connectors/_shared/dr_rest.py`). It sets the SRM
+  paths (`api_base`, `session_path`, `info_path`, `api_files`) and
+  defines the entry methods `about` and `api_file_get`, which call the
+  shared code. The entry methods live on this class, not on the base, so
+  the stored handler of `srm.about` names `SrmConnector`. MEHO binds it
+  only to an `SrmConnector`, so an `srm.*` operation cannot run on a `vr`
+  target (the call ends with a `connector_error` before any HTTP
+  request). The base caches one session id per target and tenant
+  (`target_cache_key`).
 - `SrmTargetLike` (`session.py`) -- the minimum target shape: `id`,
   `tenant_id`, `name`, `host`, `port`, `secret_ref`, `auth_model`.
 - `SrmSessionLoader` (`session.py`) -- an async callable
   `(target, operator) -> {"username", "password"}`. The default,
   `load_session_credentials_from_vault`, reads the target's `secret_ref`
   from Vault under the operator's identity. Tests inject a static loader.
-- `SrmServerVersion`, `parse_server_version`, `summarise_server_info`
-  (`connector.py`) -- the version read and the `srm.about` answer.
+- `DrServerVersion`, `parse_server_version`, `summarise_server_info`
+  (`connectors/_shared/dr_rest.py`) -- the version read and the
+  `srm.about` answer.
 - `SrmTypedOp`, `SRM_TYPED_OPS`, `register_srm_typed_operations`
-  (`typed_ops.py`) -- the op metadata and the registrar.
-- `srm_api_file_get_impl`, `API_FILES` (`api_file.py`) -- the read's body
-  and the two files it can fetch.
+  (`typed_ops.py`) -- the op metadata and the registrar. The response
+  schemas and the shared `llm_instructions` texts come from
+  `connectors/_shared/dr_rest_schemas.py`.
+- `API_FILES` (`api_file.py`) -- the two files the read can fetch.
+- `dr_api_file_get` (`connectors/_shared/dr_api_file.py`) -- the read's
+  body, shared with `vr.api_file.get`.
 - `connectors/_shared/api_file_read.py` -- the vendor-neutral steps of an
   API file read (bounded fetch, text check, parts, size check, one
   redaction pass over the whole text). See "The read" below.
@@ -243,7 +261,7 @@ call is sent.
 ## References
 
 - Task #4505 (this connector); #4506 (the vSphere Replication connector,
-  the second target of a 9.1 appliance).
+  the second target of a 9.1 appliance, `connectors-vr.md`).
 - `docs/codebase/connectors-hcx.md`, `docs/codebase/connectors-vcf-fleet.md`
   -- the sibling API file reads.
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the reconcile lane.

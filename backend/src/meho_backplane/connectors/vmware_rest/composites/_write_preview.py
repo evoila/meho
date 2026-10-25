@@ -176,6 +176,10 @@ from typing import Any
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._alarm import (
+    alarm_acknowledge_preview,
+    alarm_reset_preview,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_preview,
     datastore_file_delete_preview,
@@ -187,6 +191,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_preview,
     content_library_item_delete_preview,
 )
+from meho_backplane.connectors.vmware_rest.composites._license import license_assign_preview
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     _OP_GET_NAMESPACE,
 )
@@ -1772,15 +1777,22 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     # The DRS rule delete is destructive too: its blast radius is the
     # handler's own plan (the rule, its type, its VMs or groups).
     "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
+    # Licence assign: live-read of the asset's licence now and the licence it
+    # would get, from the handler's own plan. Keys are masked.
+    "vmware.composite.license.assign": license_assign_preview,
+    # #4383 alarm changes: a live read of the alarm, or of the alarms the
+    # reset filter matches now.
+    "vmware.composite.alarm.acknowledge": alarm_acknowledge_preview,
+    "vmware.composite.alarm.reset": alarm_reset_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 48 write-composite park-time preview builders. Import-time.
+    """Wire the 51 write-composite park-time preview builders. Import-time.
 
-    The 13 read composites register no builder — they are
-    ``requires_approval=False`` and never park, so a preview would be
-    dead code.
+    The read composites register no builder here. The one read that can
+    wait for approval, the ``caution`` ``vm.guest.file.read``, registers
+    its own in :mod:`._guest_file_read_preview` (#4850).
     """
     for op_id, builder in _WRITE_PREVIEW_BUILDERS.items():
         register_preview_builder(op_id, builder)

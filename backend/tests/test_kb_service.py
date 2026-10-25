@@ -34,6 +34,7 @@ engine. PG-real coverage of the search + BM25 ranking lives in
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -534,6 +535,77 @@ async def test_ingest_admits_directory_inside_root(
     assert result.inserted_count == 2
     assert result.error_count == 0
     assert stub_embedding.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ingest_rejects_sibling_directory_with_root_as_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """``<root>-old`` is not inside ``<root>``: whole folder names are compared."""
+    root = tmp_path / "allowed"
+    root.mkdir()
+    sibling = tmp_path / "allowed-old"
+    _make_corpus(sibling, n=2)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    with pytest.raises(KbIngestRootError):
+        await service.ingest_directory(sibling, uuid.uuid4())
+
+    assert stub_embedding.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_admits_linked_directory_inside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """The requested directory may be a link when its real location is inside the root."""
+    root = tmp_path / "allowed"
+    _make_corpus(root / "releases" / "one", n=2)
+    (root / "current").symlink_to(root / "releases" / "one", target_is_directory=True)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    result = await service.ingest_directory(root / "current", uuid.uuid4())
+
+    assert result.inserted_count == 2
+    assert result.error_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_reads_only_regular_files_inside_the_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """Only the regular file is ingested; links and special files are skipped."""
+    root = tmp_path / "allowed"
+    corpus = root / "kb"
+    elsewhere = tmp_path / "elsewhere"
+    _write(corpus / "regular.md", "Regular entry about Kubernetes.")
+    _write(elsewhere / "note.md", "Not part of the kb.")
+    _write(elsewhere / "folder" / "deep.md", "Not part of the kb either.")
+    (corpus / "linked-file.md").symlink_to(elsewhere / "note.md")
+    (corpus / "linked-folder").symlink_to(elsewhere / "folder", target_is_directory=True)
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(corpus / "pipe.md")
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    service = KbService()
+    result = await service.ingest_directory(corpus, tenant_id)
+
+    assert result.inserted_count == 1
+    assert result.error_count == 0
+    assert [entry.slug for entry in await service.list_entries(tenant_id)] == ["regular"]
+    assert stub_embedding.call_count == 1
 
 
 # ---------------------------------------------------------------------------

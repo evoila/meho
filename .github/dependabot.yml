@@ -51,7 +51,14 @@ updates:
   # at `/.` (the manifest directory recorded on the 89 phantom alerts)
   # and dying with `No files found in /` — a security-update job runs at
   # its alerts' recorded path, which no dependabot.yml entry can change.
-  # Resolved 2026-08-04 by dismissing the phantom alerts (#2801).
+  # Dismissing the phantom alerts on 2026-08-04 (#2801) did not last:
+  # the stale snapshot stayed in the graph, and every new advisory since
+  # then created new alerts for it (126 open by 2026-10-23). The graph
+  # only forgets the path when a graph job reads the root again. That is
+  # what the temporary `/` block below does, together with the placeholder
+  # pyproject.toml + uv.lock at the repo root (#4808, step 1 of 2). The
+  # follow-up pull request removes all three once the SBOM no longer
+  # lists the pre-pivot packages.
   - package-ecosystem: "uv"
     directory: "/backend"
     schedule:
@@ -74,6 +81,24 @@ updates:
       # that ignore also suppresses future *security*-update PRs for this
       # package (none open today), so drop it immediately if an alert lands.
       - dependency-name: "presidio-anonymizer"
+
+  # TEMPORARY (#4808, step 1 of 2). Makes the dependency graph re-read the
+  # repository root, so the pre-pivot uv.lock snapshot is replaced by the
+  # empty placeholder lock. The root has no real Python project, so the
+  # weekly job finds nothing to update. Remove this block, /pyproject.toml
+  # and /uv.lock in the follow-up pull request.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
 
   # The backplane image's base is `FROM python:3.12-slim@sha256:…` in
   # backend/Dockerfile. Dependabot's docker ecosystem bumps that literal,

@@ -64,8 +64,11 @@ shortcuts over the same substrate.
 1000), and `cursor`. Calling it with **no** filters returns the most
 recent 100 rows of your tenant — bounded, never the whole ledger.
 
-The REST route `POST /api/v1/audit/query` also accepts `event_class`. It
-returns only rows of that class. Without it you get every class, as before.
+`query_audit` and the REST route `POST /api/v1/audit/query` also accept
+`event_class` (one of the five record kinds above). It returns only rows
+of that kind. Without it you get every kind, as before. The CLI has no
+flag for it yet.
+
 `POST /api/v1/audit/class-counts` takes the same filters and returns how
 many rows of each class match. Without `since` it counts only the last
 24 hours. The answer's `since` field says where the counted window starts.

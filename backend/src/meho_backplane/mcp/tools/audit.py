@@ -75,7 +75,7 @@ from meho_backplane.audit_query import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
@@ -170,6 +170,22 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Add `event_class` to pick one kind of row."
             ),
             "maxLength": 16,
+        },
+        "event_class": {
+            "type": ["string", "null"],
+            "enum": [*(c.value for c in AuditEventClass), None],
+            "description": (
+                "What kind of record to return (exact match). "
+                "`operation_execution`: an action ran, with success or "
+                "failure. `policy_decision`: a gate decided before the "
+                "action ran (deny, rate limit, or wait for approval). "
+                "`approval_decision`: a person approved or rejected a "
+                "request, or it expired. `security_event`: a security "
+                "signal. `legacy_request`: a row from before record "
+                "kinds existed. Without it you get every kind. Same "
+                "filter as the REST route `POST /api/v1/audit/query`."
+            ),
+            "maxLength": 32,
         },
         "since": {
             "type": ["string", "null"],

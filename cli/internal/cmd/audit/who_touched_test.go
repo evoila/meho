@@ -83,7 +83,10 @@ func TestRunWhoTouchedHappyPath(t *testing.T) {
 		t.Fatalf("runWhoTouched: %v; stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"TIME", "tarik", "rdc-vcenter", "nsx.firewall.update", "write"} {
+	for _, want := range []string{
+		"AUDIT_ID", "00000000-0000-0000-0000-000000000001",
+		"TIME", "tarik", "rdc-vcenter", "nsx.firewall.update", "write",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q in %s", want, out)
 		}

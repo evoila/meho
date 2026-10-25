@@ -37,6 +37,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -213,15 +214,16 @@ async def read_names(
     mo_type: str,
     moids: list[str],
 ) -> dict[str, str]:
-    """Best-effort ``{moid: name}`` for display only; any failure yields ``{}``."""
+    """Best-effort ``{moid: name}`` for display only; any failure yields ``{}``.
+
+    Reads every page of the answer (#4862). A failed page counts as a failed
+    read: no names at all, never the names of the first page only.
+    """
     if not moids:
         return {}
     try:
-        result = await connector._post_vmomi_json(
-            target,
-            _VMOMI_RETRIEVE_PROPERTIES_PATH,
-            operator=operator,
-            json=retrieve_properties_body(mo_type, moids, ["name"]),
+        result = await retrieve_all_pages(
+            connector, target, operator, retrieve_properties_body(mo_type, moids, ["name"])
         )
     except Exception:
         return {}

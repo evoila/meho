@@ -230,11 +230,14 @@ type DeviceFlowOptions struct {
 // device code expires, the user denies the grant, or the context is
 // cancelled.
 //
-// We use the oauth2 package's DeviceAuth / DeviceAccessToken
-// helpers rather than rolling our own POSTs — that gets us the
-// authorization_pending / slow_down handling, the interval-doubling
-// on slow_down, and the expired_token classification for free, all
-// of which are subtle to implement correctly per the spec.
+// The oauth2 package's DeviceAuth helper starts the flow. The
+// polling is our own (pollDeviceToken): the package's
+// DeviceAccessToken runs with "auto-detect" client authentication,
+// which sends every pending check twice — once with the client id in
+// an Authorization header, then again in the form body — and the
+// second request lands inside the server's interval and draws a
+// slow_down answer on every check. The wait then grows until the
+// code's last minute is never checked at all.
 func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string, opts DeviceFlowOptions) (*LoginResult, error) {
 	if opts.Prompter == nil {
 		return nil, errors.New("meho: RunDeviceFlow requires a Prompter")
@@ -267,9 +270,6 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 		Endpoint: oauth2.Endpoint{
 			DeviceAuthURL: doc.DeviceAuthorizationEndpoint,
 			TokenURL:      doc.TokenEndpoint,
-			// AuthStyle left at the zero value (AuthStyleAutoDetect)
-			// because Keycloak's device-code flow uses public
-			// clients in v0.1 — no client_secret to negotiate.
 		},
 		Scopes: scopes,
 	}
@@ -283,14 +283,197 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 		return nil, err
 	}
 
-	// DeviceAccessToken implements the polling loop, respecting the
-	// interval and slow_down semantics in RFC 8628 §3.5.
-	tok, err := cfg.DeviceAccessToken(flowCtx, deviceResp)
+	tok, err := pollDeviceToken(ctx, httpClient, doc.TokenEndpoint, clientID, deviceResp)
 	if err != nil {
 		return nil, classifyDeviceTokenError(opts.ParentContext, err)
 	}
 
 	return &LoginResult{Token: tok, Issuer: doc.Issuer}, nil
+}
+
+// deviceCodeGrantType is the grant_type of the device access token
+// request (RFC 8628 §3.4).
+const deviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+
+// defaultPollInterval is the wait between two checks when the server
+// sends no interval (RFC 8628 §3.2).
+const defaultPollInterval = 5 * time.Second
+
+// Polling knobs. Package variables, not constants, so tests can
+// shorten them and still exercise the real loop.
+var (
+	// slowDownStep is added to the wait after a slow_down answer, for
+	// that check and all later ones (RFC 8628 §3.5).
+	slowDownStep = 5 * time.Second
+	// maxPollInterval caps how far slow_down answers can stretch the
+	// wait. A server interval longer than this is honoured as is.
+	maxPollInterval = 30 * time.Second
+	// lastCheckMargin is how long before the code's end the final
+	// check runs when the regular cadence would miss it.
+	lastCheckMargin = 2 * time.Second
+)
+
+// errDeviceCodeExpired is returned when the code's lifetime ran out
+// before the IdP approved it — either because the IdP said so
+// (expired_token) or because our own last check before the end was
+// still pending.
+var errDeviceCodeExpired = errors.New("meho: device code expired before authorisation; rerun `meho login`")
+
+// pollDeviceToken asks the token endpoint for the device-code grant
+// until the IdP issues a token, refuses the grant, the code's
+// lifetime ends, or ctx is done.
+//
+// One request per check, with client_id in the form body and no
+// Authorization header: the CLI is a public client (RFC 8628 §3.4).
+// The wait starts when an answer has arrived, so two checks never
+// reach the server closer together than the wait. The wait follows
+// §3.5: the server's interval first, plus slowDownStep after every
+// slow_down, capped at maxPollInterval (or the server's interval, if
+// longer). When the next regular check would fall inside the last
+// lastCheckMargin of the code's life, that check moves to the margin
+// and is the final one.
+func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, clientID string, da *oauth2.DeviceAuthResponse) (*oauth2.Token, error) {
+	wait := defaultPollInterval
+	if da.Interval > 0 {
+		wait = time.Duration(da.Interval) * time.Second
+	}
+	maxWait := max(maxPollInterval, wait)
+
+	form := url.Values{
+		"grant_type":  {deviceCodeGrantType},
+		"device_code": {da.DeviceCode},
+		"client_id":   {clientID},
+	}
+
+	for {
+		delay, last := nextCheckDelay(time.Now(), wait, da.Expiry)
+		if err := sleepCtx(ctx, delay); err != nil {
+			return nil, err
+		}
+
+		tok, err := requestDeviceToken(ctx, httpClient, tokenURL, form)
+		if err == nil {
+			return tok, nil
+		}
+		var retr *oauth2.RetrieveError
+		if !errors.As(err, &retr) {
+			return nil, err
+		}
+		switch retr.ErrorCode {
+		case "slow_down":
+			wait = min(wait+slowDownStep, maxWait)
+		case "authorization_pending":
+			// Not approved yet; check again after the wait.
+		default:
+			// access_denied, expired_token, or anything unexpected.
+			return nil, err
+		}
+		if last {
+			return nil, errDeviceCodeExpired
+		}
+	}
+}
+
+// nextCheckDelay returns how long to wait before the next check and
+// whether that check is the last one before the code's end. A zero
+// expiry means the server sent no expires_in; then the regular
+// cadence continues until the caller's context ends.
+func nextCheckDelay(now time.Time, wait time.Duration, expiry time.Time) (time.Duration, bool) {
+	if expiry.IsZero() {
+		return wait, false
+	}
+	lastCheckAt := expiry.Add(-lastCheckMargin)
+	if now.Add(wait).Before(lastCheckAt) {
+		return wait, false
+	}
+	return max(lastCheckAt.Sub(now), 0), true
+}
+
+// sleepCtx waits for d or until ctx is done, whichever comes first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// requestDeviceToken sends one device access token request (RFC 8628
+// §3.4) and decodes the answer. A non-2xx answer becomes an
+// *oauth2.RetrieveError carrying the RFC 6749 §5.2 error fields, so
+// the loop and classifyDeviceTokenError read it the same way they
+// read the oauth2 package's own errors.
+func requestDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL string, form url.Values) (*oauth2.Token, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("meho: read token response: %w", err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, tokenErrorFromBody(resp, body)
+	}
+	return tokenFromBody(body)
+}
+
+func tokenErrorFromBody(resp *http.Response, body []byte) *oauth2.RetrieveError {
+	retr := &oauth2.RetrieveError{Response: resp, Body: body}
+	var payload struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+		ErrorURI         string `json:"error_uri"`
+	}
+	if json.Unmarshal(body, &payload) == nil {
+		retr.ErrorCode = payload.Error
+		retr.ErrorDescription = payload.ErrorDescription
+		retr.ErrorURI = payload.ErrorURI
+	}
+	return retr
+}
+
+// tokenFromBody decodes an RFC 6749 §5.1 JSON token response. Every
+// field of the body is kept in the token's Extra map, so id_token
+// (an OIDC addition) stays readable through Token.Extra as before.
+func tokenFromBody(body []byte) (*oauth2.Token, error) {
+	var payload struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("meho: decode token response: %w", err)
+	}
+	if payload.AccessToken == "" {
+		return nil, errors.New("meho: token response has no access_token")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("meho: decode token response: %w", err)
+	}
+	tok := &oauth2.Token{
+		AccessToken:  payload.AccessToken,
+		TokenType:    payload.TokenType,
+		RefreshToken: payload.RefreshToken,
+	}
+	if payload.ExpiresIn > 0 {
+		tok.Expiry = time.Now().Add(time.Duration(payload.ExpiresIn) * time.Second)
+	}
+	return tok.WithExtra(raw), nil
 }
 
 // classifyDeviceTokenError unwraps the oauth2.RetrieveError the
@@ -311,11 +494,14 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 // `context deadline exceeded`. A nil parentCtx is treated the same
 // as a non-cancelled parent.
 func classifyDeviceTokenError(parentCtx context.Context, err error) error {
+	if errors.Is(err, errDeviceCodeExpired) {
+		return err
+	}
 	var retr *oauth2.RetrieveError
 	if errors.As(err, &retr) {
 		switch retr.ErrorCode {
 		case "expired_token":
-			return fmt.Errorf("meho: device code expired before authorisation; rerun `meho login`")
+			return errDeviceCodeExpired
 		case "access_denied":
 			return fmt.Errorf("meho: authorisation denied by the operator at the verification URI")
 		}
@@ -394,8 +580,8 @@ func NewDeviceFlowContext(parent context.Context) (context.Context, context.Canc
 
 	// Step 3: cap the whole interactive wait at PollTimeout. Keeps
 	// the worst case bounded if the IdP wedges and the operator
-	// walks away. The oauth2 package additionally caps polling at
-	// `deviceResp.Expiry` internally, so this is the *outer* bound.
+	// walks away. pollDeviceToken additionally stops at the code's
+	// own end (`deviceResp.Expiry`), so this is the *outer* bound.
 	flowCtx, cancelTimeout := context.WithTimeout(signalCtx, PollTimeout)
 
 	// Compose both cleanup hooks into one cancel func. Callers only

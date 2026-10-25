@@ -15,6 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/oauth2"
 
 	"github.com/evoila/meho/cli/internal/migrate"
 )
@@ -229,6 +232,44 @@ func TestLoginCommandHelpListsFlags(t *testing.T) {
 // its output pins the contract — mirroring status_test.go's redaction
 // test, which pins the isolated redaction helper rather than driving the
 // whole command.
+// TestStdoutPrompterShowsCodeLifetime: the waiting line tells the
+// operator how long the code is valid and until when (local time).
+// Without expires_in from the IdP the line stays as it was.
+func TestStdoutPrompterShowsCodeLifetime(t *testing.T) {
+	expiry := time.Now().Add(10 * time.Minute)
+	var buf bytes.Buffer
+	err := stdoutPrompter(&buf)(context.Background(), &oauth2.DeviceAuthResponse{
+		UserCode:        "ABCD-EFGH",
+		VerificationURI: "https://kc.example/device",
+		Expiry:          expiry,
+	})
+	if err != nil {
+		t.Fatalf("prompter: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Waiting for authorisation… The code is valid for ") {
+		t.Errorf("waiting line missing the lifetime: %q", out)
+	}
+	if want := ", until " + expiry.Local().Format("15:04") + ".\n"; !strings.Contains(out, want) {
+		t.Errorf("waiting line missing %q: %q", want, out)
+	}
+	if !strings.Contains(out, "valid for 10m0s") && !strings.Contains(out, "valid for 9m59s") {
+		t.Errorf("waiting line should say about 10m: %q", out)
+	}
+
+	buf.Reset()
+	err = stdoutPrompter(&buf)(context.Background(), &oauth2.DeviceAuthResponse{
+		UserCode:        "ABCD-EFGH",
+		VerificationURI: "https://kc.example/device",
+	})
+	if err != nil {
+		t.Fatalf("prompter: %v", err)
+	}
+	if !strings.HasSuffix(buf.String(), "Waiting for authorisation…\n") {
+		t.Errorf("without expiry the line must stay plain: %q", buf.String())
+	}
+}
+
 func TestLoginPrintTokenEmitsExactlyTheToken(t *testing.T) {
 	const token = "eyJ.PRINT-TOKEN-TEST.SIGNATURE"
 	var stdout bytes.Buffer

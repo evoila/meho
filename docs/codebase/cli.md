@@ -511,14 +511,46 @@ Authorization Grant (RFC 8628). End-to-end shape:
    deferred to a future Task per the v0.1 scope.) Under `--print-token`
    this prompt is written to stderr instead, so stdout stays reserved
    for the token — see step 7.
-5. **Polling.** `Config.DeviceAccessToken` polls the token endpoint
-   at the IdP-supplied `interval`, honouring RFC 8628's
-   `authorization_pending` and `slow_down` semantics. The polling
-   loop returns when the IdP issues a token, the device code
-   expires (`expires_in`, enforced inside the oauth2 package), the
-   operator denies the grant (`access_denied`), or the polling
-   context is cancelled. The outer timeout is 10 minutes
+5. **Polling.** `auth.pollDeviceToken` (our own loop, not the oauth2
+   package's `DeviceAccessToken`) asks the token endpoint again and
+   again whether the person has approved. Each check is **one** form
+   POST with `grant_type`, `device_code` and `client_id` in the body
+   and no `Authorization` header (RFC 8628 §3.4; the CLI is a public
+   client). The loop returns when the IdP issues a token, the code's
+   lifetime ends, the operator denies the grant (`access_denied`), or
+   the polling context is cancelled. The outer timeout is 10 minutes
    (`auth.PollTimeout`).
+
+   The wait between checks follows RFC 8628 §3.5 and starts when an
+   answer has arrived, so two checks never reach the server closer
+   together than the wait:
+
+   * The first wait is the IdP's `interval` (5 seconds when it sends
+     none, §3.2). `authorization_pending` → check again after the wait.
+   * `slow_down` → the wait grows by 5 seconds, for this check and all
+     later ones. It never grows past 30 seconds (or past the IdP's own
+     `interval`, if that is longer). The cap only stops an IdP that
+     keeps answering `slow_down` from stretching the wait without end.
+   * **Last check before the end.** When the next regular check would
+     fall inside the last 2 seconds of the code's life (`expires_in`),
+     it moves to that moment and is the final one. If it is still
+     pending, the login stops with "device code expired before
+     authorisation", not with the 10-minute timeout message. Without
+     `expires_in` the regular cadence continues until `PollTimeout`.
+   * The "Waiting for authorisation…" line in step 4 also says how long
+     the code is valid and until when (local time), when the IdP sent
+     `expires_in`.
+
+   Why our own loop (#4892): the oauth2 package's `DeviceAccessToken`
+   leaves the client-auth style at "auto-detect", which sends every
+   token request twice — first with the client id in an `Authorization`
+   header, then in the form body — and only remembers the working
+   style after a success. Before the approval every answer is an
+   error, so each check was two requests, the second one landed inside
+   the IdP's `interval` and drew `slow_down`, the wait grew by 5
+   seconds at every check, and the code's last ~75 seconds were never
+   checked. The refresh path (`api/refresh.go`) had the same cause and
+   now pins `oauth2.AuthStyleInParams`.
 
    **Detached from ambient deadlines.** The interactive approval
    wait runs on a context built by `auth.NewDeviceFlowContext`,
@@ -2308,9 +2340,10 @@ Direct:
 * `github.com/zalando/go-keyring` — cross-platform OS keyring,
   chosen over `99designs/keyring` (which ADR 0004 rejected on
   maintenance-cadence grounds — last release December 2022).
-* `golang.org/x/oauth2` — supplies `Config.DeviceAuth` and
-  `Config.DeviceAccessToken` for the RFC 8628 device-code flow,
-  plus `Config.TokenSource` for the T3 refresh path. Pinned at
+* `golang.org/x/oauth2` — supplies `Config.DeviceAuth` to start the
+  RFC 8628 device-code flow (the token polling is our own loop, see
+  "Login flow" step 5), plus `Config.TokenSource` for the T3 refresh
+  path. Pinned at
   `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
   upgrades is lifted now that the module requires Go 1.26.10.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated

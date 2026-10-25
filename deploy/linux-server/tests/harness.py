@@ -36,13 +36,15 @@ LINUX_SERVER = Path(__file__).resolve().parents[1]
 INSTALL_SH = LINUX_SERVER / "install.sh"
 FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 
-# The fake values the stubs answer with. A test greps for them.
+# The fake values the stubs answer with. A test greps for them. The two
+# login values stand in for the first-login passwords of the Secret; they
+# are fixed test strings, not credentials.
 TENANT_ID = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 INSTALL_DATE = "2026-10-23T12:00:00Z"
-ADMIN_PASSWORD = "Fake-Admin-Password-7f3a"
-APPROVER_PASSWORD = "Fake-Approver-Password-9c1d"
+ADMIN_LOGIN_VALUE = "fake-admin-login-7f3a"
+APPROVER_LOGIN_VALUE = "fake-approver-login-9c1d"
 UNSEAL_KEY = "fake-unseal-key-5e2b8a4c"
-SECRET_VALUES = (ADMIN_PASSWORD, APPROVER_PASSWORD, UNSEAL_KEY)
+SECRET_VALUES = (ADMIN_LOGIN_VALUE, APPROVER_LOGIN_VALUE, UNSEAL_KEY)
 
 REAL_TOOLS = (
     "bash",
@@ -161,9 +163,9 @@ DEFAULT_ANSWERS = {
     "kube_storageclass": "true",
     "kube_deployment": "1",
     "kube_secret_first_login": (
-        f"admin_password={ADMIN_PASSWORD}\n"
+        f"admin_password={ADMIN_LOGIN_VALUE}\n"
         "admin_username=admin\n"
-        f"approver_password={APPROVER_PASSWORD}\n"
+        f"approver_password={APPROVER_LOGIN_VALUE}\n"
         "approver_username=approver\n"
     ),
     "kube_secret_first_login_rc": "0",

@@ -18,6 +18,8 @@ import unittest
 from pathlib import Path
 
 from harness import (
+    ADMIN_LOGIN_VALUE,
+    APPROVER_LOGIN_VALUE,
     INSTALL_DATE,
     LINUX_SERVER,
     SECRET_VALUES,
@@ -170,8 +172,8 @@ class CoreInstallTests(InstallTestCase):
         unseal_key = self.machine.host_path(UNSEAL_KEY_FILE)
         self.assertEqual(0o600, mode(first_login))
         self.assertEqual(0o600, mode(unseal_key))
-        self.assertIn("admin_password=Fake-Admin-Password-7f3a\n", first_login.read_text())
-        self.assertIn("approver_password=Fake-Approver-Password-9c1d\n", first_login.read_text())
+        self.assertIn(f"admin_password={ADMIN_LOGIN_VALUE}\n", first_login.read_text())
+        self.assertIn(f"approver_password={APPROVER_LOGIN_VALUE}\n", first_login.read_text())
         self.assertEqual(f"{UNSEAL_KEY}\n", unseal_key.read_text())
 
     def test_no_secret_in_the_output_or_the_records(self) -> None:

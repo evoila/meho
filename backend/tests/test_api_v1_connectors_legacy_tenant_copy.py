@@ -6,8 +6,9 @@
 The service matrix lives in
 :mod:`tests.test_operations_ingest_legacy_tenant_copy`; this module pins
 what the ``/api/v1/connectors`` routes answer for the same rows: the old
-copy is reviewable with ``prefer=tenant``, every other read / write on the
-id is a structured ``409 connector_legacy_tenant_copy`` that never says
+copy is reviewable with ``prefer=tenant`` and ``prefer=legacy``, every
+other read / write on the id is a structured ``409
+connector_legacy_tenant_copy`` that never says
 "not yet ingested", DELETE removes only the old copy, and the listing
 marks the right row.
 """
@@ -93,10 +94,44 @@ def _authed(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _seed(tenant_id: uuid.UUID) -> None:
-    """Built-in ``vrli`` copy (one enabled typed op) + old ``vcf-logs`` tenant copy."""
+async def _seed(tenant_id: uuid.UUID, *, current_copy: bool = False) -> None:
+    """Built-in ``vrli`` copy (one enabled typed op) + old ``vcf-logs`` tenant copy.
+
+    *current_copy* adds a tenant copy under the current product too, with
+    one staged group and one op.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        if current_copy:
+            current_group = uuid.uuid4()
+            session.add(
+                OperationGroup(
+                    id=current_group,
+                    tenant_id=tenant_id,
+                    product=_PRODUCT,
+                    version=_VERSION,
+                    impl_id=_IMPL_ID,
+                    group_key="current",
+                    name="Current",
+                    when_to_use="Use the current copy.",
+                    review_status="staged",
+                )
+            )
+            session.add(
+                EndpointDescriptor(
+                    tenant_id=tenant_id,
+                    product=_PRODUCT,
+                    version=_VERSION,
+                    impl_id=_IMPL_ID,
+                    op_id="GET:/api/v1/current",
+                    source_kind="ingested",
+                    method="GET",
+                    path="/api/v1/current",
+                    group_id=current_group,
+                    summary="Current operation",
+                    is_enabled=False,
+                )
+            )
         builtin_group = uuid.uuid4()
         session.add(
             OperationGroup(
@@ -225,6 +260,36 @@ async def test_review_prefer_tenant_returns_old_copy(client: TestClient) -> None
     assert body["product"] == _LEGACY_PRODUCT
     assert body["tenant_id"] == str(tenant_id)
     assert body["total_op_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_review_prefer_legacy_returns_old_copy_next_to_current_copy(
+    client: TestClient,
+) -> None:
+    """With a current tenant copy too, ``prefer=legacy`` is the way to the old copy."""
+    tenant_id = uuid.uuid4()
+    await _seed(tenant_id, current_copy=True)
+    key, token = _token(tenant_id=tenant_id)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        seen = {
+            prefer: client.get(
+                f"/api/v1/connectors/{_CONNECTOR_ID}/review",
+                params={"prefer": prefer},
+                headers=_authed(token),
+            )
+            for prefer in ("legacy", "tenant", "builtin")
+        }
+
+    for response in seen.values():
+        assert response.status_code == 200, response.text
+    legacy, current, builtin = (seen[p].json() for p in ("legacy", "tenant", "builtin"))
+    assert (legacy["product"], legacy["tenant_id"]) == (_LEGACY_PRODUCT, str(tenant_id))
+    assert legacy["total_op_count"] == 3
+    assert (current["product"], current["tenant_id"]) == (_PRODUCT, str(tenant_id))
+    assert current["total_op_count"] == 1
+    assert (builtin["product"], builtin["tenant_id"]) == (_PRODUCT, None)
 
 
 @pytest.mark.asyncio

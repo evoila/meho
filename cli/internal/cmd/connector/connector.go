@@ -406,18 +406,20 @@ func scopeAmbiguousConnectorID(body []byte) (connectorID string, ok bool) {
 // the verbs whose route can answer 409 connector_scope_ambiguous
 // (`review` and `enable-reads`).
 const preferFlagUsage = "which connector to use when the id matches both a built-in connector " +
-	"and one in your tenant: tenant or builtin (default: stop with an error that asks you to pick one)"
+	"and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a " +
+	"former product name; the copy delete removes first) (default: stop with an error that asks " +
+	"you to pick one)"
 
-// checkPreferFlag rejects a --prefer value other than tenant or
-// builtin before any network call, so a typo fails fast with a clear
+// checkPreferFlag rejects a --prefer value other than tenant, builtin
+// or legacy before any network call, so a typo fails fast with a clear
 // message instead of a 422 from the backplane.
 func checkPreferFlag(cmd *cobra.Command, prefer string, jsonOut bool) error {
 	switch prefer {
-	case "", "tenant", "builtin":
+	case "", "tenant", "builtin", "legacy":
 		return nil
 	}
 	return output.RenderError(cmd.ErrOrStderr(),
-		output.Unexpected(fmt.Sprintf("--prefer must be one of: tenant, builtin; got %q", prefer)),
+		output.Unexpected(fmt.Sprintf("--prefer must be one of: tenant, builtin, legacy; got %q", prefer)),
 		jsonOut,
 	)
 }

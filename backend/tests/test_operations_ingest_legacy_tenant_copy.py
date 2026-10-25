@@ -26,6 +26,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     ConnectorNotFoundError,
     LegacyTenantConnectorCopyError,
     ReviewService,
@@ -208,7 +209,7 @@ def _assert_names_old_copy(exc: LegacyTenantConnectorCopyError, tenant_id: uuid.
     message = str(exc)
     assert _LEGACY_PRODUCT in message
     assert f"meho connector delete {_CONNECTOR_ID}" in message
-    assert "prefer=tenant" in message
+    assert "prefer=legacy" in message
     assert "not yet ingested" not in message
     assert "connector ingest" not in message
     assert exc.detail["detail"] == "connector_legacy_tenant_copy"
@@ -276,6 +277,61 @@ async def test_review_prefer_builtin_shows_builtin_copy() -> None:
     assert payload.total_op_count == 2
 
 
+@pytest.mark.asyncio
+async def test_review_prefer_legacy_shows_old_copy_next_to_current_copy() -> None:
+    """With both tenant copies and the built-in copy, every copy has one selector.
+
+    ``prefer=tenant`` reaches the current tenant copy, so without
+    ``prefer=legacy`` the old copy, the one ``delete`` removes first,
+    could not be looked at before it is removed.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_builtin_copy()
+    await _seed_tenant_copy(tenant_id)
+    await _seed_tenant_copy(tenant_id, product=_PRODUCT)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    legacy = await service.get_review_payload(_CONNECTOR_ID, tenant_id, prefer="legacy")
+    current = await service.get_review_payload(_CONNECTOR_ID, tenant_id, prefer="tenant")
+    builtin = await service.get_review_payload(_CONNECTOR_ID, tenant_id, prefer="builtin")
+
+    assert (legacy.product, legacy.tenant_id) == (_LEGACY_PRODUCT, tenant_id)
+    assert legacy.total_op_count == _LEGACY_GROUP_COUNT * _LEGACY_OPS_PER_GROUP
+    assert legacy.dispatchable is False
+    assert (current.product, current.tenant_id) == (_PRODUCT, tenant_id)
+    assert (builtin.product, builtin.tenant_id) == (_PRODUCT, None)
+    # The current copy and the built-in copy still clash without a selector.
+    with pytest.raises(AmbiguousConnectorScopeError):
+        await service.get_review_payload(_CONNECTOR_ID, tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_review_prefer_legacy_shows_old_copy_without_current_copy() -> None:
+    tenant_id = uuid.uuid4()
+    await _seed_builtin_copy()
+    await _seed_tenant_copy(tenant_id)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload(_CONNECTOR_ID, tenant_id, prefer="legacy")
+
+    assert payload.product == _LEGACY_PRODUCT
+    assert payload.tenant_id == tenant_id
+
+
+@pytest.mark.asyncio
+async def test_review_prefer_legacy_without_old_copy_is_not_found() -> None:
+    """``prefer=legacy`` never slides to the current or the built-in copy."""
+    tenant_id = uuid.uuid4()
+    await _seed_builtin_copy()
+    await _seed_tenant_copy(tenant_id, product=_PRODUCT)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload(_CONNECTOR_ID, tenant_id, prefer="legacy")
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload(_CONNECTOR_ID, None, prefer="legacy")
+
+
 # ---------------------------------------------------------------------------
 # enable / disable / enable-reads / edits
 # ---------------------------------------------------------------------------
@@ -297,6 +353,10 @@ async def _enable_reads_prefer_tenant(service: ReviewService, tenant_id: uuid.UU
     await service.enable_reads(_CONNECTOR_ID, tenant_id=tenant_id, prefer="tenant")
 
 
+async def _enable_reads_prefer_legacy(service: ReviewService, tenant_id: uuid.UUID) -> None:
+    await service.enable_reads(_CONNECTOR_ID, tenant_id=tenant_id, prefer="legacy")
+
+
 async def _edit_group(service: ReviewService, tenant_id: uuid.UUID) -> None:
     await service.edit_group(_CONNECTOR_ID, "group-0", tenant_id=tenant_id, name="Renamed")
 
@@ -316,6 +376,7 @@ _MUTATIONS = [
     _disable,
     _enable_reads,
     _enable_reads_prefer_tenant,
+    _enable_reads_prefer_legacy,
     _edit_group,
     _edit_op,
     _enable_group,
@@ -412,6 +473,9 @@ async def test_delete_with_both_tenant_copies_removes_old_copy_first() -> None:
     current_before = await _rows(tenant_id, _PRODUCT)
     assert len(current_before[0]) == _LEGACY_GROUP_COUNT
     service = ReviewService(_make_operator(tenant_id=tenant_id))
+    # The operator can look at the copy the delete removes before removing it.
+    to_delete = await service.get_review_payload(_CONNECTOR_ID, tenant_id, prefer="legacy")
+    assert to_delete.product == _LEGACY_PRODUCT
 
     result = await service.delete_connector(_CONNECTOR_ID, tenant_id=tenant_id)
 
@@ -421,6 +485,10 @@ async def test_delete_with_both_tenant_copies_removes_old_copy_first() -> None:
     assert await _rows(None, _PRODUCT) == _BUILTIN_BEFORE
     payload = await _legacy_delete_audit_payload()
     assert payload["product"] == _LEGACY_PRODUCT
+
+    # The old copy is gone, so there is nothing left for prefer=legacy to show.
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload(_CONNECTOR_ID, tenant_id, prefer="legacy")
 
     # The second delete removes the current tenant copy; the built-in copy stays.
     await service.delete_connector(_CONNECTOR_ID, tenant_id=tenant_id)

@@ -1000,16 +1000,22 @@ The rule now:
   the tenant's rows for the id by `(tenant_id, version, impl_id)` only
   and returns the products that differ from the one in the id. It
   never looks at built-in rows.
-- **Review.** `--prefer tenant` resolves to the old copy; the payload
-  carries the former name in `product`. `--prefer builtin` shows the
+- **Review.** `--prefer legacy` resolves to the old copy, and only to
+  it; the payload carries the former name in `product`. It also works
+  when the tenant has a copy under the current product, so the operator
+  can look at the copy the delete removes first. `--prefer tenant`
+  resolves to the old copy only while the tenant has no current copy;
+  with one, it shows the current copy. `--prefer builtin` shows the
   built-in copy. Without `--prefer` the service raises
   `LegacyTenantConnectorCopyError` (whether or not a built-in row
   exists) instead of showing the built-in row as if the tenant had
-  nothing.
+  nothing. `--prefer legacy` without an old copy is a 404, never a
+  slide to another copy.
 - **Enable, disable, enable-reads, edit group, edit operation, enable
   group.** They raise `LegacyTenantConnectorCopyError` instead of
-  falling back to the built-in row. `enable-reads --prefer tenant` is
-  refused too: the old copy's reads can never be dispatched.
+  falling back to the built-in row. `enable-reads --prefer tenant` and
+  `enable-reads --prefer legacy` are refused too: the old copy's reads
+  can never be dispatched.
   `enable-reads --prefer builtin` still works for a platform admin,
   because that is the copy calls use.
 - **Delete.** In the tenant scope the delete targets the old copy
@@ -1027,7 +1033,7 @@ The rule now:
   (`connector_id`, `legacy_product`, `product`, `tenant_id`,
   `message`). The message names the old copy, says that calls use the
   current product name, and gives the way out: review it with
-  `prefer=tenant`, or `meho connector delete <id>`. It never suggests
+  `prefer=legacy`, or `meho connector delete <id>`. It never suggests
   an ingest. The CLI prints the message as a plain `HTTP 409` error.
 - **List.** The built-in row is marked `shadowed_by_tenant_scope` only
   when the tenant row has the same `(connector_id, product)`. The old

@@ -87,7 +87,7 @@ Examples in current use:
   the `connector_id` only under a former product name, so the copy can
   never be called — #4889; REST `409`, MCP `-32602`; `data` carries
   `legacy_product`, `product`, `tenant_id` and a message that names
-  `prefer=tenant` and `meho connector delete <id>` as the way out)
+  `prefer=legacy` and `meho connector delete <id>` as the way out)
 
 Naming convention: domain prefix (`ui_`, `keycloak_`, `connector_`)
 when ambiguity is possible across surfaces; bare verb-noun otherwise.

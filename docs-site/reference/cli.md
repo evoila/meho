@@ -1139,7 +1139,7 @@ meho connector enable-reads <connector_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--confirm` — skip the interactive confirmation prompt
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
-- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant or builtin (default: stop with an error that asks you to pick one)
+- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a former product name; the copy delete removes first) (default: stop with an error that asks you to pick one)
 
 ### `meho connector ingest`
 
@@ -1197,7 +1197,7 @@ meho connector review <connector_id> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human render
-- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant or builtin (default: stop with an error that asks you to pick one)
+- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a former product name; the copy delete removes first) (default: stop with an error that asks you to pick one)
 
 ## `meho conventions`
 

@@ -1011,7 +1011,9 @@ def test_review_tool_schema_advertises_prefer() -> None:
 
     The closed-set selector is part of the tool contract an agent reads
     off ``tools/list``; assert both scope-resolving tools advertise the
-    ``prefer`` property with the closed ``tenant``/``builtin`` vocabulary.
+    ``prefer`` property with the closed ``tenant``/``builtin``/``legacy``
+    vocabulary (``legacy`` selects the tenant's old copy under a former
+    product name, #4889).
     """
     import meho_backplane.mcp.tools.connector_admin  # noqa: F401  (ensure registration)
     from meho_backplane.mcp.registry import get_tool
@@ -1021,7 +1023,7 @@ def test_review_tool_schema_advertises_prefer() -> None:
         assert registered is not None, tool_name
         definition, _handler = registered
         prefer = definition.inputSchema["properties"]["prefer"]
-        assert prefer["enum"] == ["tenant", "builtin", None]
+        assert prefer["enum"] == ["tenant", "builtin", "legacy", None]
         assert definition.inputSchema["additionalProperties"] is False
 
 

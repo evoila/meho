@@ -174,7 +174,7 @@ def build_connector_legacy_tenant_copy_detail(
       carry and the product the id resolves to today.
     * ``tenant_id`` — the operator's own tenant (not an info leak).
     * ``message`` — the rendered text: what the old copy is, why it is
-      never used, and the ``prefer=tenant`` / ``connector delete`` way out.
+      never used, and the ``prefer=legacy`` / ``connector delete`` way out.
     """
     return dict(exc.detail)
 

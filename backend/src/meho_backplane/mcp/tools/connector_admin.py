@@ -538,7 +538,9 @@ register_mcp_tool(
             "maps to BOTH a tenant-curated row and a built-in row the "
             "call fails with a structured ambiguous-scope error listing "
             "the candidates; pass prefer='tenant' or prefer='builtin' to "
-            "target one directly."
+            "target one directly. prefer='legacy' shows the tenant's old "
+            "copy stored under a former product name, the copy "
+            "meho_connector_delete removes first."
         ),
         inputSchema={
             "type": "object",

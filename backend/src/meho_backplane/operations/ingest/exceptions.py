@@ -704,7 +704,7 @@ class LegacyTenantConnectorCopyError(Exception):
     told the operator to ingest (review with ``prefer=tenant``) (#4889).
 
     The service raises this instead. It is a refusal, not a miss: the
-    old copy exists, the operator can review it with ``prefer=tenant``
+    old copy exists, the operator can review it with ``prefer=legacy``
     and remove it with ``connector delete`` in the tenant scope. The
     fronts map it to REST ``409`` / MCP ``-32602`` with the structured
     :attr:`detail` (code ``connector_legacy_tenant_copy``). The tenant
@@ -739,7 +739,7 @@ class LegacyTenantConnectorCopyError(Exception):
             f"connector {connector_id!r} has an old copy in your tenant stored under "
             f"the former product name {legacy_product!r}. Calls use the product name "
             f"{product!r}, so this old copy is never used and cannot be enabled. "
-            f"Review it with prefer=tenant, or delete it with "
+            f"Review it with prefer=legacy, or delete it with "
             f"`meho connector delete {connector_id}` and retry. "
             f"See docs/codebase/spec-ingestion.md."
         )

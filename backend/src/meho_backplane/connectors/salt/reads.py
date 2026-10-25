@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.salt.session import SaltTargetLike
 
 __all__ = [
+    "JOB_FIELDS",
     "JOIN_LIMIT",
     "KEY_PAGE_LIMIT",
     "LIST_PAGE_LIMIT",
@@ -242,7 +243,8 @@ async def minion_list_impl(
     }
 
 
-_JOB_FIELDS: Final[tuple[str, ...]] = (
+#: The fields of a ``cmd.get_cmds`` row that ``salt.job.list`` returns.
+JOB_FIELDS: Final[tuple[str, ...]] = (
     "jid",
     "cmd",
     "fun",
@@ -284,7 +286,7 @@ async def job_list_impl(
     }
     ret = await connector.rpc(target, operator, CMDS_RPC, kwarg)
     rows, count = _results(ret)
-    jobs = [{field: row.get(field) for field in _JOB_FIELDS} for row in rows]
+    jobs = [{field: row.get(field) for field in JOB_FIELDS} for row in rows]
     return {"count": count if count is not None else len(jobs), "jobs": jobs}
 
 

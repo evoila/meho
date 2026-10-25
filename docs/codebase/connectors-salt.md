@@ -182,12 +182,15 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   `fun_args_withheld: true`. The dispatcher's redaction then runs over the
   whole answer as for every connector.
 - **Traces.** The flight recorder stores the answer of each `/rpc` call
-  only after `SaltConnector.trace_response_body` has run it through the
-  same rules as the read (`trace_payload` in `trace.py`): job returns and
-  arguments pass the `salt.job.result` rules, saved targets lose `pillars`
-  and `metadata`, the versions answer loses `opts`, and every other value
-  is scrubbed of secret-named values. A value a read withholds never
-  reaches the stored trace.
+  only after `SaltConnector.trace_response_body` has run it through
+  `trace_payload` (`trace.py`). The stored `ret` keeps only the fields the
+  read that made the call uses, under their vendor names. Every other
+  field is left out: custom grains and pillar data of the minion cache,
+  command arguments of `cmd.get_cmds`, the `pillars` and `metadata` of
+  saved targets, the server settings (`opts`). Job returns and arguments
+  pass the `salt.job.result` rules. The answer of a method no read calls
+  keeps no `ret`. All kept values are also scrubbed of secret-named
+  values. So a value a read does not show never reaches the stored trace.
 - Each read returns a dict with one list of flat rows, so MEHO stores a
   long list behind a result handle; `result_scalars` keeps the counts
   inline.
@@ -213,8 +216,8 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   answer, a `401` that logs in again for one target only, secret
   replacement, the checked returns, the withheld arguments and the size
   cap in job results, no password, cookie or xsrf value in a result, no
-  withheld value in a stored trace, registration shape, version parsing,
-  fingerprint.
+  withheld value and no unread field (a custom grain, for example) in a
+  stored trace, registration shape, version parsing, fingerprint.
 - `backend/tests/test_connectors_salt_spec_reconcile.py` -- every `*_RPC`
   method is in the pinned RaaS 8.18 reference list
   (`salt-raas-8.18/salt-raas-8.18-reference-operations.tsv` on the spec

@@ -1247,8 +1247,94 @@ async def test_traces_hold_no_withheld_value(
     assert len(spans) == len(calls)
     assert all(span.attributes["body_recorded"] is True for span in spans)
     rendered = _render(spans)
-    for secret in (_PASSWORD, _XSRF, _SESSION_COOKIE, "<db-host>", "secret_pillar", "plain-secret"):
+    for secret in (
+        _PASSWORD,
+        _XSRF,
+        _SESSION_COOKIE,
+        "<db-host>",
+        "secret_pillar",
+        "plain-secret",
+        "should-not-appear",
+    ):
         assert secret not in rendered
+
+
+#: A value under an ordinary field name that no read shows. The shared
+#: redaction cannot know it is a secret, so only the field allowlist of
+#: the trace keeps it out.
+_EXTRA = "plain-extra-value"
+
+
+def _with_extra(answer: dict[str, Any], number: int) -> dict[str, Any]:
+    """A paged answer whose rows carry one more field, and one more top-level key."""
+    rows = [{**row, "notes": f"{_EXTRA}-{number}"} for row in answer["results"]]
+    return {**answer, "results": rows, "summary": f"{_EXTRA}-{number}"}
+
+
+_EXTRA_ANSWERS: _Answers = {
+    ("api", "get_versions"): {**_VERSIONS, "build_env": f"{_EXTRA}-1"},
+    ("master", "get_master_presence"): _with_extra(_MASTERS, 2),
+    ("minions", "get_minion_key_state"): _with_extra(_KEYS, 3),
+    ("minions", "get_minion_presence"): _with_extra(_PRESENCE, 4),
+    ("minions", "get_minion_cache"): {
+        "<master-1>": {
+            "<minion-1>": {
+                "grains": {
+                    **_CACHE["<master-1>"]["<minion-1>"]["grains"],
+                    "app_conf": f"{_EXTRA}-5",
+                },
+                "pillar": {"app": f"{_EXTRA}-6"},
+            }
+        }
+    },
+    ("cmd", "get_cmds"): {
+        **_with_extra(_CMDS, 7),
+        "results": [{**_CMDS["results"][0], "arg": ["<user>", f"{_EXTRA}-7"]}],
+    },
+    ("ret", "get_returns"): _RETURNS,
+    ("tgt", "get_target_group"): {
+        **_with_extra(_TARGETS, 8),
+        "results": [
+            {
+                **_TARGETS["results"][0],
+                "tgt": {"*": {"tgt": "web*", "tgt_type": "glob", "notes": f"{_EXTRA}-8"}},
+            }
+        ],
+    },
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params", "kept"),
+    [
+        ("salt.about", {}, ("8.18.0+made.up", "<master-1>")),
+        ("salt.minion.list", {}, ("Made-Up-OS", "<minion-1>", "accepted")),
+        ("salt.key.list", {}, ("<minion-2>", "pending")),
+        ("salt.job.list", {}, ("20260101000000000001", "completed_failures")),
+        ("salt.target.list", {}, ("t-uuid-1", "web*")),
+    ],
+)
+async def test_traces_keep_only_the_fields_the_read_uses(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    op_id: str,
+    params: dict[str, Any],
+    kept: tuple[str, ...],
+) -> None:
+    """A custom grain, a cache pillar or any other unread field stays out of the stored trace."""
+    await _register(_stub_embedding)
+    await _enable_trace_capture(session)
+    result, calls, _ = await _run(op_id, params, _EXTRA_ANSWERS)
+    assert result.status == "ok", result.error
+    assert result.audit_id is not None
+    spans = await _vendor_call_spans(result.audit_id)
+    assert len(spans) == len(calls)
+    assert all(span.attributes["body_recorded"] is True for span in spans)
+    rendered = _render(spans)
+    assert _EXTRA not in rendered
+    for value in kept:
+        assert value in rendered
 
 
 @pytest.mark.parametrize(

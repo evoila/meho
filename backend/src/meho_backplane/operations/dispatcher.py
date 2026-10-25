@@ -363,6 +363,7 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations._vendor_text import withhold_vendor_text
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -1836,7 +1837,13 @@ async def _audit_error_and_return(
     #3864: when the row commits, the returned result carries its ``audit_id``,
     the same receipt the success path returns. So an approver, and the stored
     result of an approved run, can point at the row that records the failure.
+
+    #4854: for an operation that sends a secret, the vendor's text is replaced
+    first (:func:`~meho_backplane.operations._vendor_text.withhold_vendor_text`).
+    Every error result passes here, so the caller's answer, the audit row and
+    the stored approval result all hold the same text.
     """
+    result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,

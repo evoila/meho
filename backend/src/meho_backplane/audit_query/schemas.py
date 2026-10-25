@@ -114,6 +114,12 @@ class AuditQueryFilters(BaseModel):
     # default) applies no class filter, so a query returns every class --
     # the same rows it returned before the column existed.
     event_class: AuditEventClass | None = None
+    # Whether the row has a stored flight-recorder trace (#4855). ``True``
+    # keeps only the ``operation_execution`` rows with a ``dispatch_trace``
+    # row for the same audit id and tenant: the rows the trace route
+    # returns a trace for. ``False`` keeps the other rows. ``None`` (the
+    # default) applies no filter.
+    has_trace: bool | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 

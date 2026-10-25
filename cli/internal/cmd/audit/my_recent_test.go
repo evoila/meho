@@ -90,7 +90,10 @@ func TestRunMyRecentSendsParamsToWire(t *testing.T) {
 		t.Fatalf("runMyRecent: %v; stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"TIME", "damir", "meho.retrieval.query", "audit_query"} {
+	for _, want := range []string{
+		"AUDIT_ID", "00000000-0000-0000-0000-000000000001",
+		"TIME", "damir", "meho.retrieval.query", "audit_query",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q in %s", want, out)
 		}

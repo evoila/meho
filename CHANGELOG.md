@@ -90,6 +90,259 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-24
+
+MEHO 0.37.0 adds the operations the open lab work needs: VM snapshots,
+vSphere licences, the vCenter appliance's local accounts, and vCenter
+alarms. It also brings the Site Recovery Manager
+connector, eight HCX reads, GitHub repository create and view, and VCF
+Automation operations for a project's network, a first deployment and
+image names.
+
+It fixes two problems from 0.36.0: a `vault.kv.patch` with the right
+Vault rights was refused before it could wait for approval, and sensors
+read `unknown` once an answer was shortened. The flight recorder no
+longer stores deployment passwords and licence keys in its traces, and
+SDDC Manager licence keys are now masked like the other licence reads.
+
+There is no database migration. Two licence reads now mask the licence
+key (see Breaking changes), so a script that reads the old key field
+must change. If you are still on 0.35.x, do the 0.36.0 steps first:
+back up the database, then follow its Breaking changes.
+
+### Security — the flight recorder kept deployment passwords and licence keys in its traces (#4856)
+
+- For tenants with the flight recorder on, it kept the request and
+  answer bodies of seven typed deployment and depot operations in stored
+  traces, and in the copy of the trace that an agent can read. These
+  bodies hold the deployment passwords and licence keys. The seven
+  operations are `sddc.domain.validate`, `sddc.domain.create`,
+  `installer.sddc.spec.validate`, `installer.sddc.bringup.start`,
+  `installer.sddc.bringup.retry`, `installer.composite.sddc.bringup` and
+  `installer.system.depot.set`. 0.37.0 keeps the bodies of these
+  operations out of traces. Traces written before the upgrade keep their
+  bodies until they expire. If the flight recorder is on for a tenant,
+  check its trace retention, and change (rotate) the passwords and keys
+  that went through these operations if needed.
+
+### Security
+
+- The container image now has `filelock` 4.2.4 (#4865). It fixes
+  CVE-2026-112940 (high): a file could be overwritten through an
+  insecure file reopen. filelock comes in through other libraries, such
+  as the Hugging Face client.
+- The image scan now also skips CVE-2026-112398, a critical Pillow
+  finding published after the earlier list, until 2026-11-30 (#4865). As
+  for the other Pillow findings: Pillow 13 fixes it, but `fastembed`
+  does not allow Pillow 13 yet, and MEHO never opens image files. The
+  real fix is tracked in #4729.
+
+### Breaking changes
+
+- `sddc.license.list` now returns `key_masked` instead of `key` (#4853).
+  Only the last 5 characters of a licence key stay visible, and the
+  value is `null` when the key is empty. What to do: read `key_masked`
+  instead of `key`.
+- `vrops.license.info` now uses the same shared masking rule (#4853).
+  The masked key keeps its dashes, for example
+  `*****-*****-*****-*****-EEEEE`, and an empty key gives `null`. What
+  to do: a script that reads the masked key must accept the dashes and
+  `null`.
+
+### Added
+
+#### Audit log
+
+- A new standing check finds audit rows whose parent row is missing
+  ("loose rows"), for example the step rows of a multi-step operation
+  that stopped before it saved its own row (#4804). The new connector
+  `audit-integrity-1.x` has one safe read, `audit.loose_rows`, which a
+  sensor can run; a sensor template runs it every hour (degraded on one
+  loose row younger than a day, critical on more than ten). Every audit
+  replay view now shows `loose_row_count`.
+
+#### vCenter and ESXi
+
+- vSphere licences through MEHO, on vCenter 8.0 U1 to 9.1.1 (#4384 /
+  #4847). `vmware.license.list` (safe) lists the licences in the
+  vCenter's inventory: name, edition, product, used and total units, end
+  date. `vmware.license.assigned.list` (safe) shows which licence each
+  asset uses: the vCenter, every host and vSAN clusters.
+  `vmware.composite.license.assign` assigns a licence to one host or to
+  the vCenter; it is `dangerous` and waits until a second person
+  approves. A full key never shows: rows carry `key_masked` with only
+  the last 5 characters, the caller names a licence by `license_name` or
+  `key_suffix`, and the flight recorder keeps no body of these calls.
+  vCenter 7.0 and 8.0 GA are not served. Tested against fakes; not yet
+  run against a live vCenter.
+- Four operations for the local accounts of the vCenter appliance, its
+  own operating-system accounts such as `root`, on both vCenter
+  connectors (#4849 / #4851). `vmware.appliance.local_account.list` and
+  `vmware.appliance.local_account.get` are safe reads: roles, the last
+  password change, the expiry date, whether it expired, and the day
+  limits. `vmware.appliance.local_account.password.set` sets a new
+  password that MEHO reads from a Vault path (`password_secret_ref`);
+  the password is never a parameter and never in the result.
+  `vmware.appliance.local_account.policy.set` changes when the password
+  expires and when the account locks. Both changes are `dangerous` and
+  wait until a second person approves; the approver sees the account and
+  the Vault path, and needs read access to that path. The password
+  change can wait for approval only with approval custody on
+  (`approvalHandoff`; `GET /ready` shows `features.approval_custody`).
+  For the two changes, the vCenter service account must be in the SSO
+  group `SystemConfiguration.BashShellAdministrators`. Tested against
+  fakes; not yet run against a live vCenter.
+- Three operations for vCenter alarms, on both vCenter connectors, in
+  the new group `alarms` (#4383 / #4852). `vmware.alarm.triggered.list`
+  (safe) lists every alarm that is red or yellow now, for the whole
+  vCenter or under one object, with the trigger kind and who
+  acknowledged it. `vmware.composite.alarm.acknowledge` acknowledges one
+  alarm on one object, so its actions stop; the alarm stays red or
+  yellow. `vmware.composite.alarm.reset` resets triggered alarms to
+  green by status, object kind and trigger kind; the vSphere API cannot
+  reset one alarm alone, so the answer lists every alarm the reset
+  cleared. Both changes are `caution` and wait for approval. If vCenter
+  does not return the list of triggered alarms, the read fails and the
+  changes stop before they change anything. Tested against fakes; not
+  yet run against a live vCenter.
+- Hand-written VM snapshot operations for vCenter 8.0 and 9.x, with no
+  API file to load (#4844 / #4846). `vmware.snapshot.list` (safe) lists
+  one VM's snapshots in tree order and marks the current one.
+  `vmware.composite.vm.snapshot.create` waits for approval; it takes
+  disks only unless `memory` is set, `quiesce` is optional, and a name
+  the VM already uses changes nothing.
+  `vmware.composite.vm.snapshot.delete` is destructive: it needs a
+  preview and a second person, and child snapshots stay unless
+  `remove_children` is set. `vmware.composite.vm.snapshot.revert` now
+  also takes a snapshot id. Tested against fakes; not yet run against a
+  live vCenter.
+- The five guest operations that log into a VM (`process.list`,
+  `env.read`, `file.read`, `file.write`, `program.run`) take an optional
+  `guest_secret_ref`, so one vCenter target can serve VMs with different
+  guest logins (#3364 / #4839). The reference must fall under the
+  target's allowed prefix (the namespace of the target's own secret, or
+  `extras.guest_secret_prefix`); otherwise MEHO refuses it before it
+  reads any secret. The value never enters parameters, results, audit
+  rows or logs. Without the field nothing changes.
+- `vmware.composite.vm.deploy_from_library` takes an optional
+  `deployment_option`, for example the small, medium or large size of an
+  appliance (#4035 / #4842). MEHO checks the key against the options the
+  item offers before it creates a VM; an unknown key is refused with
+  `invalid_reference` and the list of valid keys. The approval preview
+  shows the chosen option. On both vCenter connectors.
+- Three hand-written operations for a VM's hardware, on both vCenter
+  connectors, with no API file to load (#4695 / #4843).
+  `vmware.vm.hardware.show` (safe) shows CPU, memory, each CD drive,
+  each SCSI, SATA and NVMe controller, and whether the VMware Tools
+  installer is mounted; a part that cannot be read is `null`, and
+  `read_notes` says why. `vmware.composite.vm.cdrom.add` adds an empty
+  CD drive or one with an ISO file; it is `dangerous` and waits for
+  approval. `vmware.composite.vm.tools.installer.unmount` takes the
+  Tools installer out and waits for approval. Both changes take the VM
+  id (`vm`, for example `vm-42`) only, so a change runs on the VM the
+  approver saw.
+- For contributors: a tested helper copies vCenter downloads to a PUT
+  destination, for the coming content-library export, host configuration
+  backup and datastore file export operations (#4343 / #4840). It
+  streams one file at a time, checks size and SHA-256, follows no
+  redirect, and adds no operation yet.
+
+#### Other VMware products
+
+- New Site Recovery Manager connector (`srm-rest`) for SRM 8.8, Live
+  Site Recovery 9.0 and VCF 9.1 Protection and Recovery, with two safe
+  reads: `srm.about` (version, status, paired vCenter) and
+  `srm.api_file.get` (one of the two API files the appliance serves,
+  with secret values replaced) (#4799).
+- Eight typed reads for the HCX Manager: version and role, site
+  pairings, service meshes, appliances with their tunnel state, one job,
+  alerts and the resource containers of each site, plus starting the
+  service mesh diagnostics (#4545 / #4798). They work without loading an
+  API file. Fields named like a password, token, private key or licence
+  key are masked. Not yet checked against a pinned HCX API file.
+- VCF Automation (`vcfa-rest-9.0`, tenant plane) can now build a
+  project's own network and its first deployment (#3963 / #4795): reads
+  for vSphere networks, computes, regions, cloud zones and one deploy
+  request; changes that wait for approval for a network's address
+  settings and tags, a network profile, and a deploy from a cloud
+  template (with a dry run); and a deployment delete that a second
+  person must approve. `vcfa.tenant.project.create` also takes a quota
+  per cloud zone and network tag rules.
+- Four VCF Automation operations for the image names of an
+  organisation (#4797): `vcfa.tenant.image_profile.list`,
+  `vcfa.tenant.fabric_image.list`,
+  `vcfa.tenant.cloud_account.enumerate_images` and
+  `vcfa.tenant.image_profile.mapping.update` (a person must approve; the
+  approval card shows the old and the new template).
+- New safe read `vrops.resource_kind.properties` lists the property keys
+  of a VCF Operations 9.x resource kind, with name, description, data
+  type and unit (#4706 / #4794).
+
+#### Other connectors
+
+- Two typed GitHub operations: `gh.composite.repo_view`, a safe read that
+  returns a short summary of one repository (#4708 / #4832), and
+  `gh.composite.repo_create`, which creates a repository in an
+  organisation and waits for approval (private unless you ask for public;
+  safe to run twice: an existing repository answers `unchanged`)
+  (#4709 / #4838).
+- New safe read `msad.user.password-expiry` shows when a Windows
+  account's password was last set and when it expires, so a sensor can
+  warn before a service account stops working (#4693 / #4826).
+  `winsrv.localuser.list` rows now also carry `PasswordLastSet` and
+  `PasswordExpires`.
+
+#### Install and Helm chart
+
+- With the built-in OpenBao on (`coreVault.enabled`), OpenBao now
+  unlocks itself after a restart, so MEHO comes back without a person
+  (#4046 / #4769). A second container in the OpenBao pod reads the
+  unlock (unseal) key from the Secret `<release>-core-vault-unseal` while
+  OpenBao is locked; the key is never on a command line or in a log. If
+  a person must unlock OpenBao at every restart, delete that Secret and
+  restart OpenBao. New value: `coreVault.unseal.resources`. Nothing
+  creates the Secret yet; a later change sets OpenBao up.
+
+### Fixed
+
+- `sddc.license.list` now shows each licence key masked, like
+  `vmware.license.list` and `vrops.license.info` (#4853). Before, it
+  returned the full key. One shared rule masks every character before
+  the last 5 except dashes; a key of 10 characters or fewer is hidden in
+  full, and an empty key gives `null`. The flight recorder keeps no body
+  of this call. The new field names are under Breaking changes.
+- The VCF 9.1 fleet lifecycle connector (`fleet-lcm-9.0`) now logs in by
+  itself (#4476 / #4848). It gets a token from VCF Operations with the
+  user and password from Vault and trades it for a fleet lifecycle
+  token. Before, it sent a token stored in Vault, which expires, so the
+  connector stopped working after a while. A stored token still works as
+  a fallback. The new optional secret field `vcf_ops_url` sends the
+  login to VCF Operations when it has another address than the target.
+- `vault.kv.patch` with a Vault role that has `read` and `update` is no
+  longer refused before it can wait for approval (#3897, #4831 / #4837).
+  Since 0.36.0 the check asked for `create` and `update`, which a patch
+  never needs. `vault.kv.put` still needs `create` and `update`.
+- Sensors now check their rule against the full result of their call,
+  not the shortened answer (#4117 / #4819). Since 0.36.0, a rule on the
+  rows or on a nested object read `unknown` ("missing key") as soon as
+  the answer passed 50 rows or 4 KB. A rule that reads the summary on
+  purpose, such as `$.row_count`, still works. A result too large to
+  check reads `unknown` with `reason: result_too_large`.
+- When MEHO refuses a call before it runs, the answer now carries
+  `audit_id`, the id of the audit row of the refusal (#4669 / #4801).
+  Before, it was `null`. `audit_id` stays `null` only when the audit row
+  could not be written.
+
+### Documentation
+
+- The hosted-agents guide now says that a run you start by hand is also
+  limited by the agent's grants (#4806 / #4863). Before, it said only
+  your own permissions applied, which stopped being true with the
+  direct-run change in 0.36.0.
+- The MCP docs now give the right tool counts: 26 tools by default, 22
+  without the docs add-on (#4673 / #4825). The sandbox-mode decision
+  record marks its open questions as answered (#4671 / #4818).
+
 ## [0.36.0] - 2026-10-23
 
 MEHO 0.36.0 makes risky work wait for a second person more often: a VM

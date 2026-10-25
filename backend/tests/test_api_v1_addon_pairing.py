@@ -19,6 +19,7 @@ Keycloak admin is monkey-patched so tests need no live Keycloak.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -358,3 +359,45 @@ async def test_events_durable_resume(client: TestClient) -> None:
         )
         assert resumed.status_code == 200, resumed.text
         assert resumed.json() == {"items": [], "next_cursor": None}
+
+
+@pytest.mark.asyncio
+async def test_pair_secret_is_not_in_audit_row_or_logs(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """The one-time ``client_secret`` is only in the HTTP answer (#4891).
+
+    After a pair call, the ``addon.pair`` audit row and the captured log
+    output (structlog prints to stdout; stdlib records land in caplog) must
+    not contain the secret. The ``addon_pair`` log line is checked to be
+    present so the negative assertion is proven to look at real output.
+    """
+    await _seed_tenant()
+    key = make_rsa_keypair("kid-secret")
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+    with patch(_PATCH_TARGET, _mock_kc_ok()), respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        created = client.post("/api/v1/addons/pairings", json=_pair_body(), headers=headers)
+    assert created.status_code == 201, created.text
+    secret = created.json()["client_secret"]
+    assert secret == "generated-secret"
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+    pair_rows = [
+        row
+        for row in rows
+        if isinstance(row.payload, dict) and row.payload.get("op_id") == "addon.pair"
+    ]
+    assert pair_rows, "expected an addon.pair audit row"
+    for row in pair_rows:
+        rendered = json.dumps(row.payload, default=str) + row.path + row.operator_sub
+        assert secret not in rendered, row.payload
+
+    captured = capfd.readouterr()
+    logs = captured.out + captured.err + caplog.text
+    assert "addon_pair" in logs
+    assert secret not in logs

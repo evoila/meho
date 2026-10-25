@@ -498,6 +498,7 @@ async def test_dispatcher_maps_connector_missing_resource_to_not_found(
         source_kind="typed",
         handler_ref=f"{__name__}._raise_missing_resource",
         op_id="vmware.vm.info",
+        tags=[],
     )
 
     result = await dispatcher_module._run_branch_with_error_handling(

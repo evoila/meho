@@ -14,6 +14,7 @@ op_id                             preview stored in ``ApprovalRequest.proposed_e
 ``keycloak.realm.create``         ``{realm, representation}`` (realm body, scrubbed)
 ``keycloak.user.create``          ``{username, realm, representation}`` (user, scrubbed)
 ``keycloak.role_mapping.assign``  ``{username, id, realm, granted_roles}`` (role names)
+``keycloak.user.reset_password``  ``{username, id, realm, password_secret_ref, ...}``
 ``keycloak.user.delete``          ``{blast_radius}`` — user name, enabled, groups
 ``keycloak.group.delete``         ``{blast_radius}`` — name, members, sub-groups
 ``keycloak.client.delete``        ``{blast_radius}`` — client id, enabled, type
@@ -263,6 +264,30 @@ async def _role_mapping_assign_preview(ctx: PreviewContext) -> dict[str, Any] | 
         "realm": _managed_realm(ctx),
         "granted_roles": roles,
     }
+
+
+async def _user_reset_password_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``keycloak.user.reset_password`` — which user, never the password.
+
+    Shows the user (``username`` and/or ``id``), the realm, and where the new
+    password comes from: the Vault path, mount and field. Those are a path
+    and two names, not the password. The password itself is read only when
+    the approved call runs, so it is never in the params or the preview.
+    """
+    preview: dict[str, Any] = {
+        "resource": "user_password",
+        "username": _opt_str(ctx.params.get("username")),
+        "id": _opt_str(ctx.params.get("id")),
+        "realm": _managed_realm(ctx),
+        "password_source": "vault",
+        "password_secret_ref": _opt_str(ctx.params.get("password_secret_ref")),
+        "temporary": bool(ctx.params.get("temporary", False)),
+    }
+    for key in ("password_secret_mount", "password_secret_key"):
+        value = _opt_str(ctx.params.get(key))
+        if value is not None:
+            preview[key] = value
+    return preview
 
 
 def _attribute_keys(ctx: PreviewContext) -> list[str]:
@@ -540,6 +565,7 @@ def _register_keycloak_preview_builders() -> None:
     register_preview_builder("keycloak.realm.create", _realm_create_preview)
     register_preview_builder("keycloak.user.create", _user_create_preview)
     register_preview_builder("keycloak.role_mapping.assign", _role_mapping_assign_preview)
+    register_preview_builder("keycloak.user.reset_password", _user_reset_password_preview)
     register_preview_builder("keycloak.group.create", _group_create_preview)
     register_preview_builder("keycloak.group.update_attributes", _group_update_attributes_preview)
     register_preview_builder("keycloak.group.member.add", _group_membership_preview("add"))

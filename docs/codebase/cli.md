@@ -48,6 +48,11 @@ names.
   tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
   `--max-depth`; a 413 `session_too_large` redirects to
   `query --session-id`) — plus a `--session-id` filter on `query`.
+  #4855 adds `trace list` (the operation runs that still have a stored
+  flight-recorder trace, via `query` with `has_trace=true`, audit id
+  first) and `trace show <audit-id>` (one trace over
+  `GET /api/v1/audit/{audit_id}/trace`; headers and bodies only in
+  `--json`).
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
@@ -197,10 +202,14 @@ cli/
     │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
     │   │   ├── my_recent.go      # `meho audit my-recent` (GET /api/v1/audit/my-recent).
     │   │   ├── replay.go         # `meho audit replay <session-id>` (GET /api/v1/audit/sessions/{id}/replay) — ASCII tree + 413 redirect.
+    │   │   ├── trace.go          # `meho audit trace` group + `trace list` (#4855; POST /api/v1/audit/query with has_trace=true, audit id first).
+    │   │   ├── trace_show.go     # `meho audit trace show <audit-id>` (GET /api/v1/audit/{id}/trace) — header + one line per span; no header/body values.
     │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
     │   │   ├── query_test.go     # body-marshal + render + 400-passthrough + --session-id tests.
     │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
     │   │   ├── replay_test.go    # tree render + --json + --max-depth fold + 413 redirect tests.
+    │   │   ├── trace_test.go     # has_trace body + audit-id-first table + --json + 403 tests.
+    │   │   ├── trace_show_test.go # span lines without header/body values + --json unchanged + no-trace exit 0 + 404 / 403 tests.
     │   │   ├── who_touched_test.go # query-param emit + table render tests.
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.
@@ -715,6 +724,42 @@ backplane validates the JWT against Keycloak, forwards it to Vault
 via JWT/OIDC federation, reads a sentinel secret, probes the DB
 migration state, and returns a structured response. The CLI
 renders that response in one of two formats.
+
+### What the human format prints (#4830)
+
+One line per subsystem, in this order. The first three lines are the
+v0.1 contract; the rest appear only when the backplane sends the
+field, so a response from an older backplane prints as it always did.
+
+| Line | Source field | Example |
+|---|---|---|
+| `Logged in as …` | `operator` | `Logged in as alice@example.com (sub: …)` |
+| `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)` |
+| `DB: …` | `db` | `DB: migrated, revision 0115` |
+| `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
+| `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
+| `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
+| `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+
+The DB line (`formatDB` in `internal/output/format.go`) uses the
+database revision and the revision this version expects, which the
+backplane sends as values since #4830 (`db.revision`, `db.head`):
+
+- `DB: migrated, revision 0115` — the database is at the expected revision.
+- `DB: not migrated (database at 0114, this version expects 0115)` — the
+  migration did not run.
+- `DB: migrated, revision 0116 (newer than this version, which expects
+  0115; normal after a rollback)` — the database is ahead; see
+  `docs/codebase/migrations.md`, "Rollback contract".
+- `DB: not migrated (check_failed: OperationalError)` — the probe could
+  not read the database; the detail is the text `/ready` shows.
+
+When readiness fails, the line becomes a header followed by one indented
+line per failing check with its detail, and one `ok: …` line naming the
+checks that passed. This is how an operator confirms an upgrade through
+MEHO instead of a shell into the pod: the database revision, the
+readiness checks and the approval key state all come from one
+`meho status` call, and `--json` carries the same fields.
 
 ### Pipeline
 
@@ -1298,6 +1343,25 @@ narrow-waist contract.
   MCP-only. The verb exits 1 on a non-ok envelope (`status="error"`
   for input faults, `status="unavailable"` for a typed/composite op
   with no literal HTTP request to preview).
+- `meho operation result-query <handle_id> [--offset N] [--limit N] | [--where ...] [--select ...] [--group-by ...] [--aggregate ...] [--order-by ...] [--query-limit N] | [--path <pointer>]`
+  — calls `POST /api/v1/operations/result-query`, the REST twin of the
+  MCP `result_query` tool. It reads a stored result back by its handle
+  id, in one of three modes (`cli/internal/cmd/operation/resultquery.go`):
+  paging a rows handle (`--offset` / `--limit`), one relational query
+  over a rows handle (`--where`, `--select`, `--group-by`, `--aggregate`,
+  `--order-by`, `--query-limit`; #3366), or a path read (`--path`,
+  #4888). `--path` takes an RFC 6901 JSON Pointer and sets `query.path`:
+  `""` is the whole document, `/a/0/b` goes one step per `/`. It reads
+  one value of a document handle, or a top-level field a rows handle
+  left out of its inline summary (`omitted_scalar_count`). An array
+  value pages with `--offset` / `--limit`. The CLI refuses `--path`
+  together with any query flag before the call. The reply carries
+  `path`, `value_type` and `value` (raw JSON) next to the paging fields;
+  the human render is one header line (handle, path, type) and the
+  pretty-printed value, or the item lines with the window for an array.
+  Paging a document handle without `--path` is a server 422; the CLI
+  shows the server's message and adds the `--path` form that works
+  (`resultquery_path.go`).
 
 ### Reserved flags (same shape across all three verbs)
 
@@ -1382,8 +1446,15 @@ scenarios.
   `status == "denied"` or `status == "rate_limited"` (connector raised,
   schema validation rejected, policy denied, or the caller is over its
   rate or concurrency limit). The envelope is printed first; a
-  `rate_limited` one shows `extras.retry_after_seconds`. Surfaced via
-  the `errOpError` sentinel.
+  `rate_limited` one shows `extras.retry_after_seconds`. When the
+  backplane committed an audit row, the text output ends with
+  `audit receipt: <id>` on every status, not only on `ok` (#4833) —
+  a failed call's row is the one that says why it failed; read it
+  with `meho audit show <id>`. A null `audit_id` prints no line. A
+  parked call (`awaiting_approval`, exit 0) shows the receipt too, after
+  the parked hint: a multi-step operation that stops for approval
+  already has its own audit row.
+  Surfaced via the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
 - `4` — `unexpected_response` (parse error, malformed JSON, or an
@@ -1672,6 +1743,15 @@ instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
+
+The failure render is shared too: every vendor package's
+`printErrorTrailer` delegates to `dispatch.WriteErrorTrailer`, which
+prints the connector error, the `extras` blob, then
+`audit receipt: <id>` when the envelope carried an `audit_id` (#4833).
+`dispatch.CallResult` keeps `audit_id` for that, so a vendor verb's
+`--json` output carries the key as well (null when the backplane
+committed no row). The vendor `CallResult` still drops `handle` and
+`delivery`; restoring those is #4659.
 
 ### Typed op_id repoint contract (typed connectors, #2942)
 

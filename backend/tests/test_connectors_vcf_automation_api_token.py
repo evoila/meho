@@ -55,6 +55,7 @@ from meho_backplane.operations import (
 from meho_backplane.operations._audit import policy_decision_var
 from meho_backplane.operations._handler_resolve import reset_handler_cache
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from tests._vcfa_provisioning_support import (
     BASE_URL,
@@ -721,9 +722,12 @@ async def test_create_register_403_is_an_upstream_error(
         routes = _mount_user_flow(mock)
         routes["register"].respond(403, json={"message": "Missing right API Tokens: Manage"})
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
-    # An upstream 403 is the dispatcher's authorization-denied envelope.
+    # An upstream 403 is the dispatcher's authorization-denied envelope. The
+    # op holds a secret (its tags), so the vendor's text is withheld (#4854).
     assert result["extras"]["error_code"] == "connector_http_403"
-    assert "API Tokens: Manage" in result["extras"]["upstream_message"]
+    assert result["extras"]["http_status"] == 403
+    assert result["extras"]["upstream_message"] == VENDOR_TEXT_WITHHELD
+    assert "API Tokens: Manage" not in json.dumps(result)
     assert vault_writes == []
 
 

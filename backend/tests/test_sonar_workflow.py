@@ -103,7 +103,8 @@ const github = {rest: {repos: {
         assert value["outputs"]["pr"] == ""
 
 
-def test_preparation_ignores_checkout_python_modules(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source_links", [False, True])
+def test_preparation_ignores_checkout_python_modules(tmp_path: Path, source_links: bool) -> None:
     """A PR's Python modules must not run in the privileged scan job."""
     steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["sonarcloud"]["steps"]
     prepare = next(step for step in steps if step.get("name") == "Prepare trusted scan settings")
@@ -129,8 +130,14 @@ def test_preparation_ignores_checkout_python_modules(tmp_path: Path) -> None:
     # must use only the separately downloaded reports and trusted settings.
     source = tmp_path / "analyzed-source"
     (source / "backend").mkdir(parents=True)
-    (source / "backend/coverage.xml").write_text("invalid attacker report")
-    (source / "sonar-project.properties").write_text("sonar.host.url=https://attacker.invalid\n")
+    if source_links:
+        (source / "backend/coverage.xml").symlink_to(settings)
+        (source / "sonar-project.properties").symlink_to(settings)
+    else:
+        (source / "backend/coverage.xml").write_text("invalid attacker report")
+        (source / "sonar-project.properties").write_text(
+            "sonar.host.url=https://attacker.invalid\n"
+        )
     (source / ".scannerwork").mkdir()
     (source / ".scannerwork/poison").write_text("untrusted scanner workspace")
     marker = tmp_path / "checkout-code-ran"
@@ -176,8 +183,13 @@ def test_preparation_ignores_checkout_python_modules(tmp_path: Path) -> None:
     assert f"sonar.python.coverage.reportPaths={python_reports / 'coverage.xml'}\n" in output
     assert f"sonar.go.coverage.reportPaths={go_reports / 'coverage.out'}\n" in output
     assert f"sonar.working.directory={temporary / 'sonar-work'}\n" in output
-    assert (source / "backend/coverage.xml").read_text() == "invalid attacker report"
+    assert settings.read_text() == "sonar.projectKey=test\n"
+    expected_source_report = (
+        "sonar.projectKey=test\n" if source_links else "invalid attacker report"
+    )
+    assert (source / "backend/coverage.xml").read_text() == expected_source_report
     assert (source / "sonar-project.properties").read_text() == output
+    assert not (source / "sonar-project.properties").is_symlink()
 
 
 def test_privileged_work_files_stay_outside_analyzed_source() -> None:

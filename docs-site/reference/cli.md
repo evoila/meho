@@ -19,6 +19,61 @@ Every command accepts the global flags below.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Some commands have their own `--work-ref` flag (for example `operation call`, or the filter on `audit query`). On those commands the flag means what that command says, and only `$MEHO_WORK_REF` is sent as the header.
 
+## `meho addon`
+
+Manage add-on pairings (pair / list / show / unpair)
+
+```
+meho addon
+```
+
+### `meho addon list`
+
+List the add-on pairings of your tenant (operator)
+
+```
+meho addon list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw PairedAddonListResponse JSON instead of the human table
+
+### `meho addon pair`
+
+Pair an add-on with MEHO (tenant_admin)
+
+```
+meho addon pair <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--contract-version` — contract version the add-on speaks (required; MEHO speaks version 1 today)
+- `--json` — emit the whole PairAddonResult JSON, with client_secret, instead of the human summary
+- `--min-backplane-version` — oldest MEHO contract version the add-on accepts (required)
+- `--owner-sub` — OIDC sub of the pairing's owner (defaults to the caller)
+
+### `meho addon show`
+
+Show one add-on pairing by name (operator)
+
+```
+meho addon show <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw PairedAddonRead JSON instead of the human summary
+
+### `meho addon unpair`
+
+Remove an add-on pairing (tenant_admin)
+
+```
+meho addon unpair <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit a {"name","unpaired"} JSON object instead of the human summary
+
 ## `meho admin`
 
 Deployer-side install-time provisioning verbs

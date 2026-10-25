@@ -34,6 +34,7 @@ descriptor), so it works on a fresh boot with **zero catalog ingest**.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -58,7 +59,12 @@ __all__ = [
     "object_collect_impl",
 ]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> Any:
+    """Get the logger per call, so a cached proxy never hides events from
+    ``structlog.testing.capture_logs`` (same as ``checks/investigate.py``)."""
+    return structlog.get_logger(__name__)
+
 
 # PropertyCollector RetrievePropertiesEx against the singleton
 # ``propertyCollector`` moId (carried in the path, so the body is only
@@ -76,6 +82,12 @@ _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrieveProper
 #: a *partial* per-field ``NoPermission`` (some properties readable) is a real
 #: permission outcome and is excluded structurally by the "no property came
 #: back" guard in :func:`_all_properties_missing_with_auth_fault`.
+#:
+#: Known tradeoff of including ``NoPermission``: on a target whose principal
+#: really lost all permissions, every such read costs one extra login and
+#: evicts the shared per-target session. We accept that cost, because the
+#: reset happens at most once per read and the same symptom also marks a
+#: stale session that the reset recovers.
 _AUTH_CLASS_MISSING_FAULT_TYPES = frozenset({"NotAuthenticated", "NoPermission"})
 
 #: Maximum number of property paths accepted in one request. Caps the
@@ -221,7 +233,9 @@ async def _collect_with_auth_health_reset(
     mo_type: str,
     moid: str,
     properties: list[str],
-) -> tuple[dict[str, Any], list[str], list[dict[str, str]], dict[str, int]]:
+    *,
+    on_reset: Callable[[list[str]], None] | None = None,
+) -> tuple[dict[str, Any], list[str], list[dict[str, str]], dict[str, int], list[str]]:
     """Read the object's properties, self-healing a stale-but-live session once (#3773b).
 
     Issues the ``RetrievePropertiesEx`` read and flattens it. If the object
@@ -244,7 +258,15 @@ async def _collect_with_auth_health_reset(
     ``ManagedObjectNotFound``) never trigger it and are returned unchanged.
 
     Returns the ``(props, missing, missing_properties, fault_counts)`` tuple of
-    :func:`_extract_object_content` for the read that stands.
+    :func:`_extract_object_content` for the read that stands, plus
+    ``reset_fault_types``: the sorted fault class names that triggered the
+    reset, or an empty list when no reset ran (#3777). Callers use it to mark
+    a recovery; it holds class names only, never fault text.
+
+    ``on_reset`` is called with those fault class names right before the
+    retried read. The retry can raise (re-login refused, transport error), and
+    then nothing is returned; a caller that must record every reset even in
+    that case passes ``on_reset`` to learn about it.
     """
     body = build_object_collect_retrieve_params(mo_type, moid, properties)
 
@@ -260,19 +282,22 @@ async def _collect_with_auth_health_reset(
     result = await _read()
     read_props, missing, missing_properties, fault_counts = _extract_object_content(result)
     if not _all_properties_missing_with_auth_fault(properties, read_props, missing_properties):
-        return read_props, missing, missing_properties, fault_counts
+        return read_props, missing, missing_properties, fault_counts, []
 
-    _log.info(
+    reset_fault_types = sorted(fault_counts)
+    _log().info(
         "vmware_object_collect_auth_reset",
         target=target.name,
         mo_type=mo_type,
         moid=moid,
         requested=len(properties),
-        missing_fault_types=sorted(fault_counts),
+        missing_fault_types=reset_fault_types,
     )
+    if on_reset is not None:
+        on_reset(reset_fault_types)
     await connector.invalidate_session(target)
     result = await _read()
-    return _extract_object_content(result)
+    return (*_extract_object_content(result), reset_fault_types)
 
 
 async def object_collect_impl(
@@ -324,11 +349,17 @@ async def object_collect_impl(
     moid = params["moid"]
     properties: list[str] = list(params["properties"])
 
-    read_props, missing, missing_properties, fault_counts = await _collect_with_auth_health_reset(
+    (
+        read_props,
+        missing,
+        missing_properties,
+        fault_counts,
+        reset_fault_types,
+    ) = await _collect_with_auth_health_reset(
         connector, operator, target, mo_type, moid, properties
     )
 
-    _log.info(
+    _log().info(
         "vmware_object_collect_read",
         target=target.name,
         mo_type=mo_type,
@@ -338,7 +369,7 @@ async def object_collect_impl(
         missing=len(missing),
         missing_fault_types=sorted(fault_counts),
     )
-    return {
+    out: dict[str, Any] = {
         "type": mo_type,
         "moid": moid,
         "properties": read_props,
@@ -346,6 +377,11 @@ async def object_collect_impl(
         "missing_properties": missing_properties,
         "missing_fault_summary": fault_counts,
     }
+    if reset_fault_types:
+        # Present only when the session was reset and the read ran again
+        # (#3777), so an operator can see and count recoveries.
+        out["session_health_reset"] = 1
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +428,13 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["type", "moid", "properties"],
     "additionalProperties": False,
+    "examples": [
+        {
+            "type": "Datastore",
+            "moid": "datastore-12",
+            "properties": ["summary.freeSpace", "summary.capacity"],
+        }
+    ],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -454,11 +497,21 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             ),
             "additionalProperties": {"type": "integer"},
         },
+        "session_health_reset": {
+            "type": "integer",
+            "enum": [1],
+            "description": (
+                "Present (value 1) only when MEHO found the cached session "
+                "dead, logged in again and read the object a second time. "
+                "Absent on a normal read."
+            ),
+        },
     },
     # ``missing_properties`` / ``missing_fault_summary`` are deliberately NOT
     # required: they are additive (#3708), always emitted by the current
     # handler but kept optional so historically-captured / older-connector
-    # responses validate unchanged.
+    # responses validate unchanged. ``session_health_reset`` (#3777) is only
+    # present after a session reset, so a clean read must validate without it.
     "required": ["type", "moid", "properties", "missing"],
 }
 
@@ -480,21 +533,12 @@ OBJECT_COLLECT_WHEN_TO_USE = (
 VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
     op_id="vmware.object.collect",
     handler_attr="object_collect",
-    summary="Bounded generic PropertyCollector read of one managed object.",
+    summary="Read chosen properties of one vSphere managed object, by type and moid.",
     description=(
-        "Reads a caller-specified set of property paths off a single "
-        "managed object addressed by 'type' + 'moid', returning "
-        "{properties: {path: value}, missing: [path]}. The bounded generic "
-        "escape hatch for the long tail of one-off managed-object reads: "
-        "no purpose-built op needed. Bounded by construction to keep it a "
-        "dumb substrate -- exactly one object, no TraversalSpec (cannot "
-        "walk the inventory), at most 64 property paths each a dotted vim "
-        "identifier up to 16 segments deep; an oversized / malformed "
-        "request fails parameter validation as a structured invalid_params "
-        "error before any read is issued. Reads via PropertyCollector "
-        "directly on the connector session, so it works with zero catalog "
-        "ingest. Prefer a purpose-built typed op when one covers the "
-        "property set. safety_level=safe, read-only."
+        "Reads up to 64 property paths of one managed object. Returns type, moid, properties, "
+        "missing, missing_properties, missing_fault_summary and, after a session reset, "
+        "session_health_reset. vCenter 8.0.x refuses 'configurationEx.<field>': request "
+        "'configurationEx' whole. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -503,27 +547,43 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call to read specific vim25 property paths off one managed "
-            "object when no dedicated typed op fits. Supply the object 'type' "
-            "and 'moid' and the exact 'properties' list. Bounded: one object, "
-            "no traversal, <=64 paths. Prefer vm.info / host.usage / "
-            "host.vsan_health when they cover what you need."
+        "when_to_call": (
+            "Call to read some vim25 property paths of one managed object when no "
+            "dedicated typed op fits. Give the object 'type' and 'moid' and the exact "
+            "'properties' list. It reads one object, follows no links and takes at most "
+            "64 paths. Prefer vm.info, host.usage or host.vsan_health when they cover "
+            "what you need. Use it for distributed switch and distributed portgroup "
+            "settings (type 'DistributedVirtualPortgroup' or "
+            "'VmwareDistributedVirtualSwitch')."
         ),
         "parameter_hints": {
             "type": "MO type, e.g. 'VirtualMachine' / 'HostSystem' / 'Datastore'.",
             "moid": "MO id, e.g. 'vm-42' / 'host-12' / 'datastore-5'.",
-            "properties": "1-64 dotted property paths, e.g. ['summary.freeSpace'].",
+            "properties": (
+                "1-64 dotted property paths, e.g. ['summary.freeSpace']. For a "
+                "cluster's DRS rules, groups or DRS settings, request "
+                "['configurationEx'] and pick 'rule', 'group' or 'drsConfig' "
+                "from the result: vCenter 8.0.x rejects 'configurationEx.<field>' "
+                "with InvalidProperty. Read a polymorphic field whole: for a "
+                "distributed portgroup's VLAN or security policy, request "
+                "['config.defaultPortConfig'], not "
+                "'config.defaultPortConfig.vlan'. The field's declared type is "
+                "the base DVPortSetting, so a path into a subclass-only field "
+                "fails with InvalidProperty."
+            ),
         },
         "output_shape": (
-            "{type, moid, properties: {path: raw_value, ...}, missing: "
-            "[path, ...], missing_properties: [{path, fault_type?}, ...], "
-            "missing_fault_summary: {fault_type: count}}. 'missing' names "
-            "paths the collector could not read; 'missing_properties' adds "
-            "each one's vim fault type name (names only, no fault text) so a "
-            "permission/auth/invalid fault is distinguishable from a "
-            "genuinely-unset property, and 'missing_fault_summary' counts "
-            "them by type."
+            "{type, moid, properties: {path: raw_value}, missing: [path], "
+            "missing_properties: [{path, fault_type}], missing_fault_summary: "
+            "{fault_type: count}, session_health_reset}. Values are raw VI-JSON. "
+            "fault_type is a vim fault name only (never fault text); an entry with no "
+            "fault_type is a property that is not set. session_health_reset is there "
+            "only when MEHO logged in again and read a second time."
+        ),
+        "next_step": (
+            "For a path in missing with fault_type InvalidProperty, read the parent path "
+            "whole. With NoPermission, the MEHO account cannot see it; report that. A "
+            "moref value in properties ({type, value}) can be read next with this op."
         ),
     },
 )

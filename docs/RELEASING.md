@@ -21,6 +21,7 @@ automatically on the tag push:
 | Helm chart | `oci://ghcr.io/evoila/meho-chart` | [`chart.yml`](../.github/workflows/chart.yml) | chart workflow sets `version` + `appVersion` |
 | CLI tarballs + GitHub Release | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | GoReleaser bakes `{{.Tag}}` into `version.Version` |
 | Claude Desktop `.mcpb` bundle | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | `clients/claude-desktop-mcpb/build.sh` stamps the tag version |
+| Form-2 download `meho-linux-X.Y.Z-amd64.tar` (Linux server, no internet), with `SHA256SUMS-linux` and its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`linux-download.yml`](../.github/workflows/linux-download.yml), called by `cli-release.yml` | `deploy/linux-server/build-download.sh` takes the tag's chart, image and CLI, and writes `VERSION` |
 | Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest` |
 
 The Desktop `.mcpb` bundle rides `cli-release.yml`, attached to the same
@@ -29,6 +30,13 @@ four workflows fire on `tags: ['v*']` (image/chart have **no** path filter
 on tags — a tag always publishes). `cli-release.yml` is **tag-only**: a
 main push never cuts a release. Docs versions are cut **per minor** — a
 patch tag republishes its minor's docs in place.
+
+The form-2 download is the sixth artefact. After its `release` job,
+`cli-release.yml` calls `linux-download.yml`. That workflow waits until
+`chart.yml` and `image.yml` have published and signed the chart and the
+image of the tag (at most 60 minutes). Then it builds the download, checks
+it, and attaches it to the same Release
+([`docs/codebase/linux-server-download.md`](codebase/linux-server-download.md)).
 
 ## Supply-chain and CI baseline
 
@@ -46,7 +54,9 @@ across every cut:
   `cosign verify` that digest against the keyless workflow identity before
   `helm upgrade` — ideally enforced at admission (a Sigstore
   policy-controller / Kyverno rule). CLI tarballs carry `SHA256SUMS` plus
-  cosign signatures for the same reason. Full recipes:
+  cosign signatures for the same reason; the Desktop `.mcpb` bundle carries
+  its own signed `SHA256SUMS-mcpb`, and the form-2 download its own signed
+  `SHA256SUMS-linux`. Full recipes:
   [`docs/codebase/devops.md` § Image reference / Verifying provenance](codebase/devops.md)
   and the [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures).
 
@@ -84,6 +94,33 @@ Choose the bump from what's in `[Unreleased]`:
   final `X.Y.Z`, used for the v1.0.0 series; the same tag-driven
   publish, marked pre-release. See
   [Release candidates — the rc series](#release-candidates--the-rc-series).
+
+### Claude Code plugin version
+
+The Claude Code plugin (`clients/claude-code-plugin/`) is **not** a release
+artefact, and its version does **not** come from the git tag:
+
+- Users install the plugin straight from `main`
+  (`claude plugin marketplace add evoila/meho`). A release does not change
+  what they get.
+- Claude Code installs a new copy of the plugin only when its `version`
+  goes up. So the version is raised **in the pull request that changes the
+  plugin**, not at release time. That way each fix reaches users as soon
+  as it is merged.
+- The version is written in three places that must agree:
+  `clients/claude-code-plugin/.claude-plugin/plugin.json` and the two
+  `version` fields in `.claude-plugin/marketplace.json`.
+- The `Plugin Version Check` workflow
+  ([`plugin-version-check.yml`](../.github/workflows/plugin-version-check.yml),
+  script [`scripts/ci/check_plugin_version.py`](../scripts/ci/check_plugin_version.py))
+  fails a pull request when those places disagree, or when it changes a
+  file under `clients/claude-code-plugin/` (except `test/`) and does not
+  raise the version. It also runs in the merge queue.
+- So a release needs **no plugin step**. Do not set the plugin version to
+  the MEHO version.
+
+How users get the new version is in the
+[plugin README](../clients/claude-code-plugin/README.md#get-updates).
 
 ## The runbook
 
@@ -142,7 +179,9 @@ Choose the bump from what's in `[Unreleased]`:
 ### 2. Roll the CHANGELOG — the load-bearing step
 
 This is the step that keeps getting skipped. Do it in the
-**release-cutting PR**, before the tag.
+**release-cutting PR**, before the tag. The release pull request is the
+only pull request that edits `CHANGELOG.md`. Code pull requests add no
+lines. The **Backfill** item below adds the lines for them.
 
 1. **Audit completeness.** Every merged PR since the last tag must have a
    bullet. Cross-check:
@@ -247,6 +286,7 @@ git push origin vX.Y.Z
 ```
 
 The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
+`cli-release.yml` then calls `linux-download.yml` for the form-2 download.
 
 ### 5. Verify the artefacts
 
@@ -259,6 +299,31 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] CLI tarballs attached to the Release; `meho version` prints `vX.Y.Z`.
 - [ ] Claude Desktop bundle `meho-claude-desktop-X.Y.Z.mcpb` attached to
   the Release (fifth asset, uploaded by `cli-release.yml` after GoReleaser).
+- [ ] The bundle's checksum file `SHA256SUMS-mcpb` and its
+  `SHA256SUMS-mcpb.cosign.bundle` are attached too. Download the bundle and
+  the checksum file into one folder; `shasum -a 256 -c SHA256SUMS-mcpb`
+  prints `OK`.
+- [ ] The form-2 download `meho-linux-X.Y.Z-amd64.tar`, `SHA256SUMS-linux`
+  and `SHA256SUMS-linux.cosign.bundle` are attached (job `linux-download`
+  of `cli-release.yml` green). The signature names `linux-download.yml`,
+  not `cli-release.yml`. Check the signature first, then the file:
+
+  ```bash
+  TAG=vX.Y.Z
+  BASE=https://github.com/evoila/meho/releases/download/$TAG
+  curl -fLO "$BASE/meho-linux-${TAG#v}-amd64.tar"
+  curl -fLO "$BASE/SHA256SUMS-linux"
+  curl -fLO "$BASE/SHA256SUMS-linux.cosign.bundle"
+  cosign verify-blob \
+    --certificate-identity "https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/$TAG" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --bundle SHA256SUMS-linux.cosign.bundle SHA256SUMS-linux
+  sha256sum -c SHA256SUMS-linux
+  ```
+
+  If the job failed, read its `[FAIL]` line. The most likely one is the
+  size limit (1.9 GiB): the design's answer is to split the download into
+  two release files.
 
 #### Maintainer one-time setup — GHCR package visibility
 
@@ -323,7 +388,8 @@ features will work out of the box?":
     "agent_runtime":  {"configured": false, "missing_env": ["KEYCLOAK_ADMIN_URL", "..."], "docs": "..."},
     "ui_surface":     {"configured": false, "missing_env": ["UI_KEYCLOAK_CLIENT_ID", "..."], "docs": "..."},
     "audit_replay":   {"configured": true,  "capture_mode": "enforced", "missing_env": []},
-    "approval_queue": {"configured": false, "depends_on": "agent_runtime", "effective_posture": "four_eyes_enforced"}
+    "approval_queue": {"configured": false, "depends_on": "agent_runtime", "effective_posture": "four_eyes_enforced"},
+    "approval_custody": {"configured": false, "custody": "missing", "missing_env": ["APPROVAL_HANDOFF_ENCRYPTION_KEY"], "docs": "docs/codebase/approvals.md"}
   }
 }
 ```
@@ -380,6 +446,14 @@ Walk the four gates in the order an operator hits them:
   the deploy set the emergency `APPROVAL_ALLOW_SELF_APPROVAL=true`
   escape (see `docs/codebase/approvals.md` — the endorsed
   single-operator answer is an agent-requester, not the flag).
+
+- [ ] **Approval custody** (required wherever a credential-write
+  operation may wait for approval, #3712). Set
+  `APPROVAL_HANDOFF_ENCRYPTION_KEY` to a Fernet key through the Helm
+  `approvalHandoff` Secret reference. Without it, MEHO denies every
+  credential-write operation that must wait for approval. The `/ready`
+  entry `approval_custody.custody` reads `configured`, `missing` or
+  `malformed`. Steps: [`docs/codebase/approvals.md`](codebase/approvals.md).
 
 - [ ] **GitHub `gh-rest-3` connector credential** (optional;
   enables the `gh/3` typed connector landed by Initiative
@@ -512,7 +586,7 @@ dot-separated numeric counter (`v1.0.0-rc.1`, `v1.0.0-rc.2`, …):
   `v1.0.0-rc.N` promotes to `v1.0.0`, never to `v1.0.1`.
 - `N` only increments. A re-cut is always `rc.N+1`, never a moved tag:
   `cli-release.yml` tolerates a re-pushed tag (concurrency group,
-  L63–69), but a moved tag leaves the image alias, chart version and
+  L65–71), but a moved tag leaves the image alias, chart version and
   Release assets pointing at bytes no tag describes any more.
 - No other identifiers (`-beta`, `-alpha`, `-rc1`). Every
   tag-consuming workflow derives the version by stripping the leading
@@ -651,15 +725,16 @@ git push origin v1.0.0-rc.N
 ```
 
 The push fans out to the same four workflows as a final tag (all four
-match `tags: ['v*']`: `cli-release.yml` L54, `image.yml` L96,
+match `tags: ['v*']`: `cli-release.yml` L56, `image.yml` L96,
 `chart.yml` L70, `docs-site.yml` L66). What each one does with a
 pre-release identifier, read from the YAML:
 
 | Artefact | What `v1.0.0-rc.N` produces | Where |
 |---|---|---|
-| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. `[Unreleased]` must therefore be audited and non-empty; an empty body here is the step-2 failure mode, not a quirk of rcs. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) L264–269; [`cli-release.yml`](../.github/workflows/cli-release.yml) L164–172, L204–208 |
-| CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L366 |
-| `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L285–292; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L74–78 |
+| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. `[Unreleased]` must therefore be audited and non-empty; an empty body here is the step-2 failure mode, not a quirk of rcs. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) L264–269; [`cli-release.yml`](../.github/workflows/cli-release.yml) L167–175, L207–211 |
+| CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L396 |
+| `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L283–295; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L74–78 |
+| Form-2 download | `meho-linux-1.0.0-rc.N-amd64.tar`, `SHA256SUMS-linux` and `SHA256SUMS-linux.cosign.bundle` on the pre-release. The build waits for the rc's chart `1.0.0-rc.N` and image `:v1.0.0-rc.N`. The cosign identity is `linux-download.yml@refs/tags/v1.0.0-rc.N`, so the step-5 recipe works with `TAG=v1.0.0-rc.N`. | [`linux-download.yml`](../.github/workflows/linux-download.yml); `cli-release.yml` job `linux-download` |
 | Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L160–163, L235–269, L305–335 |
 | Helm chart | Version `1.0.0-rc.N` (`VERSION="${REF#refs/tags/v}"`), `appVersion` = the git SHA; pushed to `oci://ghcr.io/evoila/meho-chart:1.0.0-rc.N` and anonymously pulled back by exact version. Hyphenated chart versions are already the norm for `main` pushes (`0.1.<date>-<sha>`), so the push path is proven. Always pass the exact `--version 1.0.0-rc.N` when installing. | [`chart.yml`](../.github/workflows/chart.yml) L1247–1265, L1309, L1440 |
 | Docs site | Publishes under **`1.0`** and **moves `latest` + the site default to it**: the `v[0-9]*.[0-9]*` case matches, `sed` truncates to MAJOR.MINOR, then `mike deploy --push --update-aliases 1.0 latest` and `mike set-default --push latest`. Deploying under the minor is intended ("the rc docs are that minor's docs in progress"); moving `latest` before GA is **Known gap 1**. | [`docs-site.yml`](../.github/workflows/docs-site.yml) L60–66, L156–173 |
@@ -821,9 +896,9 @@ follow-up task.
    pre-releases from the `semver` type, add `type=raw,value={{ref}}`
    (or equivalent) for tag pushes.
 5. **The rc Release body is the raw `[Unreleased]` block.**
-   `.github/workflows/cli-release.yml` L204–208 — by design, but
+   `.github/workflows/cli-release.yml` L207–211 — by design, but
    nothing labels it as cumulative rc notes, and the GoReleaser git-log
-   fallback (L216) kicks in silently if `[Unreleased]` is empty.
+   fallback (L219) kicks in silently if `[Unreleased]` is empty.
    Suggested fix: prepend a one-line "Release candidate `rc.N` for
    1.0.0 — cumulative notes since `PREV`" header when the tag contains
    a hyphen, and fail the step (not warn) when both sections are empty.
@@ -846,7 +921,8 @@ follow-up task.
        appended; release-cutting PR merged to main
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
-       CLI tarballs all published
+       CLI tarballs all published; form-2 download + SHA256SUMS-linux
+       attached, signature and checksum checked
 [ ] 6. Deployed to rke2-infra; smoke-green
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
         configure the env vars per the cited Vault doc; verify gate

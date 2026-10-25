@@ -23,8 +23,6 @@ Coverage matrix (G0.6-T5 / Task #396 acceptance criteria):
 * Audit row written synchronously: one row per dispatch with the
   resolved ``op_id`` / ``target_id`` / ``params_hash`` /
   ``result_status``.
-* Broadcast event emitted via the shipped :func:`publish_event` hook;
-  the event carries the right ``op_class`` + redacted payload.
 * Pass-through reducer: the dispatcher invokes the reducer; the v0.2
   default returns the response unchanged + a ``None`` handle.
 * Handler-import error -> ``handler_unreachable`` error code.
@@ -32,29 +30,27 @@ Coverage matrix (G0.6-T5 / Task #396 acceptance criteria):
   principal to the approval queue (``awaiting_approval``), not a
   hard-deny (G11.7-T1 #1401); agents floor to ``needs-approval``.
 
-The audit + broadcast assertions read the actual ``audit_log`` rows
+The audit assertions read the actual ``audit_log`` rows
 written by the dispatcher (the conftest autouse fixture runs the
-Alembic migration so the table exists). The broadcast publisher is
-patched to a recording stub so tests can assert on the
-:class:`BroadcastEvent` without standing up a Valkey container.
+Alembic migration so the table exists).
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from packaging.version import Version
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult, resolve_connector
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.base import Connector
@@ -63,6 +59,7 @@ from meho_backplane.connectors.registry import (
     register_connector,
     register_connector_v2,
 )
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.connectors.vmware_rest.connector import (
     VmwareRest80Connector,
@@ -76,7 +73,9 @@ from meho_backplane.operations import (
     import_handler,
     register_typed_operation,
     reset_dispatcher_caches,
+    set_default_reducer,
 )
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
 from meho_backplane.operations.ingest import (
@@ -84,7 +83,9 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     register_ingested_operations,
 )
+from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryResultStore
 
 # ---------------------------------------------------------------------------
 # Settings / fixtures
@@ -120,24 +121,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub.
-
-    The audit helper invokes ``publish_event`` via the imported
-    reference inside :mod:`meho_backplane.operations._audit`; patching
-    the module's attribute is sufficient -- no need to swap the
-    broadcast package's bind.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -279,6 +262,39 @@ async def _module_composite_handler_connector(
     return {"has_connector": connector is not None}
 
 
+async def _module_composite_handler_issue_list(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite handler returning a terminal-error envelope with many issues.
+
+    ``issue_count`` warnings of ``message_chars`` characters each, padded with
+    ``fill`` (ASCII by default), plus one ``error`` entry at ``error_index``
+    (#3813 follow-up: the inline result must stay bounded however long this
+    list is).
+    """
+    del operator, target
+    count = int(params["issue_count"])
+    chars = int(params.get("message_chars", 40))
+    fill = str(params.get("fill", "x"))
+    error_index = int(params.get("error_index", count - 1))
+    issues = [
+        {
+            "category": "deploy",
+            "severity": "warning",
+            "message": f"disk {n} skipped ".ljust(chars, fill),
+        }
+        for n in range(count)
+    ]
+    issues[error_index] = {
+        "category": "deploy",
+        "severity": "error",
+        "message": "deploy failed: ".ljust(chars, fill),
+    }
+    return {"status": "deploy_error", "vm_id": None, "issues": issues}
+
+
 async def _module_composite_handler_terminal_error(
     operator: Operator,
     target: Any,
@@ -302,6 +318,150 @@ async def _module_composite_handler_terminal_error(
             }
         ],
     }
+
+
+class _AmbiguousVmFolderConnector:
+    """Two datacenters, both with a root VM folder named ``vm`` (#3588)."""
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        return query
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        return {
+            "value": [{"folder": "group-v4", "name": "vm"}, {"folder": "group-v115", "name": "vm"}]
+        }
+
+
+async def _module_composite_handler_folder_create_ambiguous(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> Any:
+    """Run the real ``folder.create`` handler against an ambiguous ``vm`` parent (#3588)."""
+    from meho_backplane.connectors.vmware_rest.composites._write import folder_create_composite
+
+    return await folder_create_composite(
+        operator=operator,
+        target=target,
+        params={"parent_folder": "vm", "folder_name": "X"},
+        connector=_AmbiguousVmFolderConnector(),  # type: ignore[arg-type]
+    )
+
+
+#: Enough same-named folders to push the refusal envelope well past the 4 KB
+#: inline byte threshold (#4223).
+_MANY_VM_FOLDER_IDS: list[str] = [f"group-v{i}" for i in range(400)]
+
+
+class _ManyVmFolderConnector(_AmbiguousVmFolderConnector):
+    """A vCenter where hundreds of VM folders share the name ``vm`` (#4223)."""
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        return {"value": [{"folder": moid, "name": "vm"} for moid in _MANY_VM_FOLDER_IDS]}
+
+
+async def _module_composite_handler_folder_create_many_candidates(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> Any:
+    """Run the real ``folder.create`` handler against hundreds of ``vm`` parents (#4223)."""
+    from meho_backplane.connectors.vmware_rest.composites._write import folder_create_composite
+
+    return await folder_create_composite(
+        operator=operator,
+        target=target,
+        params={"parent_folder": "vm", "folder_name": "X"},
+        connector=_ManyVmFolderConnector(),  # type: ignore[arg-type]
+    )
+
+
+class _FakeResultRedis:
+    """In-memory async Valkey double for the result-handle store (``set`` / ``get``)."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+class _RaisingReducer(PassThroughReducer):
+    """A reducer that fails on every reduce (the #4223 error-arm fallback)."""
+
+    async def reduce(
+        self, payload: Any, schema: dict[str, Any] | None, context: dict[str, Any] | None = None
+    ) -> Any:
+        raise RuntimeError("reducer exploded")
+
+
+async def _module_composite_handler_gated_subop(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | OperationResult:
+    """Composite handler with one approval-gated write step (#3542).
+
+    The step goes through the direct-session sub-op gate
+    (``enforce_subop_policy``), like the shipped write composites. When the
+    gate returns a result (parked, denied, refused) the handler returns it as
+    is and never runs the write.
+    """
+    from meho_backplane.operations.composite import enforce_subop_policy
+
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.gated_step",
+        safety_level="caution",
+        requires_approval=True,
+        target=target,
+        params={"path": params.get("path", "?")},
+    )
+    if gate is not None:
+        return gate
+    return {"parent": "ok", "step": "ran"}
+
+
+async def _module_composite_handler_reports_refused_step(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite that reports a refused follow-on step as a warning (#4646).
+
+    Its main change is done before the gated step runs, so the handler keeps
+    its own result and reports the step's refusal as a warning issue. The
+    parent then writes its own audit row after the step gate wrote the step's.
+    """
+    from meho_backplane.operations.composite import enforce_subop_policy
+
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.gated_step",
+        safety_level="caution",
+        requires_approval=True,
+        target=target,
+        params={"path": params.get("path", "?")},
+    )
+    issues: list[dict[str, Any]] = []
+    if gate is not None:
+        issues.append({"category": "step", "severity": "warning", "message": gate.status})
+    return {"parent": "ok", "issues": issues}
 
 
 async def _module_composite_handler_warning_only(
@@ -483,15 +643,27 @@ def test_import_handler_caches_resolved_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_returns_unknown_op_when_descriptor_missing(
-    captured_events: list[BroadcastEvent],
+    stub_embedding_service: AsyncMock,
 ) -> None:
     """No descriptor -> ``OperationResult.error`` starts with ``"unknown_op:"``."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
     operator = _make_operator()
     target = _FakeTarget(product="vault")
 
     result = await dispatch(
         operator=operator,
-        connector_id="vault",
+        connector_id="vault-1.x",
         op_id="vault.kv.read.notpresent",
         target=target,
         params={},
@@ -511,7 +683,6 @@ async def test_dispatch_returns_unknown_op_when_descriptor_missing(
 @pytest.mark.asyncio
 async def test_dispatch_returns_invalid_params_when_schema_violated(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Invalid params -> ``invalid_params`` error with ``validation_errors`` list."""
     await register_typed_operation(
@@ -549,14 +720,111 @@ async def test_dispatch_returns_invalid_params_when_schema_violated(
     assert result.extras["error_code"] == "invalid_params"
     validation = result.extras["validation_errors"]
     assert isinstance(validation, list)
-    assert any(err["validator"] == "required" for err in validation)
+    assert validation == [
+        {
+            "path": "$",
+            "validator": "required",
+            "expected": 'required property missing: "path"',
+            "remediation": "add the missing property to params",
+        }
+    ]
+    assert result.extras["validation_errors_suppressed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_invalid_params_never_echoes_the_rejected_value(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#3669: a rejected value never rides the ``invalid_params`` envelope.
+
+    jsonschema's own message quotes the bad value. A credential sent to the
+    wrong field would then come back in cleartext. The entry is built from
+    the schema side only, so the value (here a bearer token, which the
+    default redaction policy matches) is absent from the whole envelope.
+    """
+    secret = "eyJtoken" + "$value!123" + "abcdef"
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "version": {"type": "integer"},
+                "mode": {"enum": ["latest", "pinned"]},
+                "path": {"type": "string", "pattern": "^[a-z/]+$"},
+            },
+            "additionalProperties": False,
+        },
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_FakeTarget(product="vault"),
+        params={
+            "version": "Bearer " + secret,
+            "mode": "Bearer " + secret,
+            "path": "Bearer " + secret,
+        },
+    )
+    assert result.extras["error_code"] == "invalid_params"
+    entries = result.extras["validation_errors"]
+    assert {e["validator"] for e in entries} == {"type", "enum", "pattern"}
+    for entry in entries:
+        assert set(entry) == {"path", "validator", "expected", "remediation"}
+    dumped = json.dumps(result.model_dump(mode="json"))
+    assert secret not in dumped
+
+
+@pytest.mark.asyncio
+async def test_dispatch_invalid_params_caps_the_error_list(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#3669: many violations -> a capped list plus a suppressed count."""
+    from meho_backplane.operations._errors import _MAX_VALIDATION_ERRORS
+
+    count = _MAX_VALIDATION_ERRORS + 5
+    properties = {f"p{i}": {"type": "integer"} for i in range(count)}
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV v2 secret.",
+        description="Read a secret.",
+        parameter_schema={"type": "object", "properties": properties},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_FakeTarget(product="vault"),
+        params=dict.fromkeys(properties, "x"),
+    )
+    assert result.extras["error_code"] == "invalid_params"
+    assert len(result.extras["validation_errors"]) <= _MAX_VALIDATION_ERRORS
+    assert result.extras["validation_errors_suppressed"] == 5
+    assert result.error == (
+        f"invalid_params: {count} validation error(s); showing the first {_MAX_VALIDATION_ERRORS}"
+    )
 
 
 @pytest.mark.asyncio
 async def test_dispatch_ingested_rejects_undeclared_param(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#293 (S05): an undeclared param on an ingested op -> ``invalid_params``.
 
@@ -626,15 +894,11 @@ async def test_dispatch_ingested_rejects_undeclared_param(
     validation = result.extras["validation_errors"]
     assert isinstance(validation, list)
     assert any(err["validator"] == "additionalProperties" for err in validation)
-    # No vendor request was built -- the reject is a pre-dispatch fault, so
-    # no broadcast event fires for a would-be call.
-    assert captured_events == []
 
 
 @pytest.mark.asyncio
 async def test_dispatch_returns_invalid_op_schema_for_poisoned_descriptor(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A stored schema with a dangling $ref -> structured ``invalid_op_schema``.
 
@@ -688,7 +952,7 @@ async def test_dispatch_returns_invalid_op_schema_for_poisoned_descriptor(
 
 
 # ---------------------------------------------------------------------------
-# Typed dispatch + audit + broadcast
+# Typed dispatch + audit
 # ---------------------------------------------------------------------------
 
 
@@ -717,7 +981,6 @@ class _NoOpVaultConnector(Connector):
 @pytest.mark.asyncio
 async def test_dispatch_typed_invokes_handler_and_returns_result(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Typed handler runs; its return value lands in ``result.result``."""
     register_connector_v2(
@@ -775,23 +1038,10 @@ async def test_dispatch_typed_invokes_handler_and_returns_result(
     assert row.payload["result_status"] == "ok"
     assert "params_hash" in row.payload
 
-    # Broadcast event emitted.
-    assert len(captured_events) == 1
-    event = captured_events[0]
-    assert event.op_id == "vault.kv.read"
-    assert event.op_class == "credential_read"  # vault.kv.read is in the allowlist
-    assert event.result_status == "ok"
-    assert event.tenant_id == operator.tenant_id
-    assert event.audit_id == row.id
-    # credential_read payload is aggregate-only -- the broadcast must
-    # NOT contain the params.
-    assert "params" not in event.payload
-
 
 @pytest.mark.asyncio
 async def test_dispatch_typed_handler_without_operator_param(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A typed handler with signature ``(target, params)`` is also accepted."""
     register_connector_v2(
@@ -836,7 +1086,6 @@ async def test_dispatch_typed_handler_without_operator_param(
 async def test_dispatch_ingested_returns_no_connector_when_resolver_misses(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Ingested op with no matching connector -> ``no_connector`` error."""
     # Insert an ingested descriptor directly -- T4 only registers typed
@@ -899,7 +1148,6 @@ async def test_dispatch_ingested_returns_no_connector_when_resolver_misses(
 async def test_no_connector_error_names_target_product_not_connector_id(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#2701: the ``no_connector`` error names the TARGET's product, not the caller's.
 
@@ -992,7 +1240,6 @@ async def test_no_connector_error_names_target_product_not_connector_id(
 @pytest.mark.asyncio
 async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Typed branch mirrors the ingested branch's resolver-miss label.
 
@@ -1045,7 +1292,6 @@ async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
 @pytest.mark.asyncio
 async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Typed branch surfaces ``ambiguous_connector`` with the resolver's diagnostic message.
 
@@ -1146,7 +1392,6 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
 @pytest.mark.asyncio
 async def test_dispatch_self_first_handler_no_target_returns_target_required(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Self-first typed op + ``target=None`` -> structured ``target_required``.
 
@@ -1201,7 +1446,6 @@ async def test_dispatch_self_first_handler_no_target_returns_target_required(
 @pytest.mark.asyncio
 async def test_dispatch_module_level_handler_no_target_still_dispatches(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A legitimately target-less module-level typed op still dispatches.
 
@@ -1264,7 +1508,6 @@ def test_handler_requires_target_flags_connector_declaring_composite() -> None:
 async def test_dispatch_ingested_returns_ambiguous_when_resolver_cant_tiebreak(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Ingested branch catches ``AmbiguousConnectorResolution`` the same way.
 
@@ -1432,7 +1675,6 @@ class _VmwareFakeHttpConnector(_FakeHttpConnector):
 async def test_vmware_ingested_hardware_write_parks_before_http_execution(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The connector floor parks a raw NIC create before its HTTP branch runs."""
     register_connector_v2(
@@ -1482,7 +1724,6 @@ async def test_vmware_ingested_hardware_write_parks_before_http_execution(
     instance = _CONNECTOR_INSTANCE_CACHE[_VmwareFakeHttpConnector]
     assert isinstance(instance, _VmwareFakeHttpConnector)
     assert instance.calls == []
-    assert captured_events == []
 
 
 class _VmwareGuardHttpConnector(VmwareRestConnector):
@@ -1518,6 +1759,9 @@ async def _add_vmware_guard_descriptor(
     source_kind: str = "ingested",
     requires_approval: bool = True,
     version: str = "9.0",
+    is_enabled: bool = True,
+    parameter_schema: dict[str, Any] | None = None,
+    safety_level: str = "dangerous",
 ) -> None:
     descriptor = EndpointDescriptor(
         id=uuid.uuid4(),
@@ -1537,12 +1781,12 @@ async def _add_vmware_guard_descriptor(
         summary="VMware guard test",
         description="VMware guard test.",
         tags=[],
-        parameter_schema={"type": "object", "properties": {}},
+        parameter_schema=parameter_schema or {"type": "object", "properties": {}},
         response_schema=None,
         llm_instructions=None,
-        safety_level="dangerous",
+        safety_level=safety_level,
         requires_approval=requires_approval,
-        is_enabled=True,
+        is_enabled=is_enabled,
         embedding=[0.1] * 384,
         custom_description=None,
         custom_notes=None,
@@ -1615,6 +1859,7 @@ async def test_vmware_ingested_catalog_guard_rejects_before_policy_and_transport
         )
         assert len(audits) == 1
         assert audits[0].payload["result_status"] == "unqualified_target_version"
+        assert result.audit_id == audits[0].id
         approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
         assert approvals == []
 
@@ -1729,11 +1974,563 @@ async def test_vmware_8_0_catalog_serves_fingerprinted_8_0_x_target(
     assert result.extras.get("error_code") != "unqualified_target_version"
 
 
+# ---------------------------------------------------------------------------
+# #3600 -- sibling-catalog fallback for ingested ops
+# ---------------------------------------------------------------------------
+
+
+class _RecordingVmwareTransport:
+    """Transport-free seam that records which catalog class sent the request."""
+
+    sent: ClassVar[list[tuple[str, str]]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        del target, operator
+        return path
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        del target, operator, verb, params, json, extra_headers
+        _RecordingVmwareTransport.sent.append((cast(Connector, self).version, path))
+        return {"ok": True}
+
+
+class _RecordingVmware90Connector(_RecordingVmwareTransport, VmwareRestConnector):  # type: ignore[misc]
+    """9.0 catalog class with the recording transport."""
+
+
+class _RecordingVmware80Connector(_RecordingVmwareTransport, VmwareRest80Connector):  # type: ignore[misc]
+    """8.0 catalog class with the recording transport."""
+
+
+def _register_vmware_sibling_catalogs() -> None:
+    """Register the 9.0 and 8.0 catalogs (plus the wildcard) like production does."""
+    _RecordingVmwareTransport.sent = []
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_RecordingVmware90Connector
+    )
+    register_connector_v2(
+        product="vmware", version="8.0", impl_id="vmware-rest", cls=_RecordingVmware80Connector
+    )
+    register_connector("vmware", _RecordingVmware90Connector)
+
+
+async def _audit_rows_for_guard_op() -> list[AuditLog]:
+    async with get_sessionmaker()() as fresh:
+        rows = await fresh.execute(
+            select(AuditLog).where(AuditLog.path == "POST:/api/vcenter/vm/example")
+        )
+        return list(rows.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_vmware_9_0_pin_falls_back_to_8_0_sibling_for_8_0_x_target(
+    session: AsyncSession,
+) -> None:
+    """A ``vmware-rest-9.0`` call for an 8.0.x target runs on the 8.0 catalog (#3600)."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert len(audits) == 1
+    assert audits[0].payload["result_status"] == "ok"
+    assert audits[0].payload["connector_version"] == "8.0"
+    assert audits[0].payload["connector_impl_id"] == "vmware-rest"
+
+
+@pytest.mark.asyncio
+async def test_vmware_8_0_pin_falls_back_to_9_0_sibling_for_9_x_target(
+    session: AsyncSession,
+) -> None:
+    """The fallback works in both directions: an 8.0 pin for a 9.x target runs on 9.0."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="9.0.1"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("9.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert [a.payload["connector_version"] for a in audits] == ["9.0"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_state", ["absent", "disabled"])
+async def test_vmware_sibling_fallback_keeps_rejection_when_op_not_enabled_there(
+    sibling_state: str,
+    session: AsyncSession,
+) -> None:
+    """No fallback when the qualified sibling lacks the op or has it disabled."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    if sibling_state == "disabled":
+        await _add_vmware_guard_descriptor(
+            session, requires_approval=False, version="8.0", is_enabled=False
+        )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert result.extras["reason"] == (
+        "target version is outside the supported 9.x catalog boundary"
+        "; use connector vmware-rest-8.0 for this target"
+    )
+    assert result.extras["target_product"] == "vmware"
+    assert result.extras["target_version"] == "8.0.3"
+    assert _RecordingVmwareTransport.sent == []
+    audits = await _audit_rows_for_guard_op()
+    assert len(audits) == 1
+    assert audits[0].payload["result_status"] == "unqualified_target_version"
+    assert audits[0].payload["connector_version"] == "9.0"
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_not_taken_when_named_catalog_qualifies(
+    session: AsyncSession,
+) -> None:
+    """A target the named catalog serves runs on that catalog, even if a sibling has the op."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="9.0.1"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("9.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert [a.payload["connector_version"] for a in audits] == ["9.0"]
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_skips_typed_descriptors(
+    session: AsyncSession,
+) -> None:
+    """A typed descriptor in the sibling catalog is never a fallback target."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(
+        session, source_kind="typed", requires_approval=False, version="8.0"
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert _RecordingVmwareTransport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_parks_approval_under_resolved_connector_id(
+    session: AsyncSession,
+) -> None:
+    """A parked fallback call names the sibling catalog, so the resume runs there."""
+    from meho_backplane.db.models import ApprovalRequest
+
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, version="9.0")
+    await _add_vmware_guard_descriptor(session, version="8.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    assert _RecordingVmwareTransport.sent == []
+    async with get_sessionmaker()() as fresh:
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_resume_stays_on_the_approved_catalog(
+    session: AsyncSession,
+) -> None:
+    """An approved request never switches catalogs when the target version moved.
+
+    The request parked under ``vmware-rest-8.0`` (the sibling chosen for an
+    8.0.3 target). By the time it resumes, the target reports 9.0.1. The
+    resume runs with the policy gate skipped, so running the 9.0 catalog's
+    op here would be an operation the approver never saw. The resume is
+    refused instead; the caller must make a new request.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, version="9.0")
+    await _add_vmware_guard_descriptor(session, version="8.0")
+
+    parked = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    async with get_sessionmaker()() as fresh:
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
+
+    resumed = await dispatch(
+        operator=_make_operator(),
+        connector_id=approvals[0].connector_id,
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="9.0.1"),
+        params={},
+        _approved=True,
+    )
+
+    assert resumed.status == "error"
+    assert resumed.extras["error_code"] == "unqualified_target_version"
+    assert resumed.extras["reason"] == (
+        "target version is outside the supported 8.0.x catalog boundary"
+        "; use connector vmware-rest-9.0 for this target"
+    )
+    assert resumed.extras["target_product"] == "vmware"
+    assert resumed.extras["target_version"] == "9.0.1"
+    assert _RecordingVmwareTransport.sent == []
+    audits = await _audit_rows_for_guard_op()
+    assert len(audits) == 1
+    assert audits[0].payload["result_status"] == "unqualified_target_version"
+    assert audits[0].payload["connector_version"] == "8.0"
+
+
+class _RecordingVmware80WideConnector(_RecordingVmwareTransport, VmwareRest80Connector):  # type: ignore[misc]
+    """A second 8.x catalog whose band overlaps the 8.0 catalog's band."""
+
+    version = "8.x"
+    supported_version_range = ">=8.0,<9.0"
+    _catalog_version_floor = Version("8.0")
+    _catalog_version_ceiling = Version("9.0")
+    _catalog_version_band_label = "8.x"
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_uses_resolver_tie_break_when_two_siblings_qualify(
+    session: AsyncSession,
+) -> None:
+    """If two sibling catalogs qualify a target, the resolver's tie-break picks one.
+
+    Both the ``8.0`` band (``>=8.0,<8.1``) and the wider ``8.x`` band
+    (``>=8.0,<9.0``) qualify an 8.0.3 target. The resolver's
+    most-specific-range step picks ``8.0``, so the fallback runs there.
+    """
+    _register_vmware_sibling_catalogs()
+    register_connector_v2(
+        product="vmware",
+        version="8.x",
+        impl_id="vmware-rest",
+        cls=_RecordingVmware80WideConnector,
+    )
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.x")
+    target = _FakeTarget(product="vmware", version="8.0.3")
+    assert resolve_connector(target) is _RecordingVmware80Connector
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
+    audits = await _audit_rows_for_guard_op()
+    assert [a.payload["connector_version"] for a in audits] == ["8.0"]
+
+
+_NAME_ONLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}},
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_checks_params_against_the_sibling_schema(
+    session: AsyncSession,
+) -> None:
+    """Params are checked against the catalog that runs, not the one the caller named.
+
+    The 9.0 schema has no ``name`` param and refuses undeclared params; the
+    8.0 schema accepts ``name``. An 8.0.3 target runs on 8.0, so the call
+    passes.
+    """
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    await _add_vmware_guard_descriptor(
+        session, requires_approval=False, version="8.0", parameter_schema=_NAME_ONLY_SCHEMA
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={"name": "vm-a"},
+    )
+
+    assert result.status == "ok", result.error
+    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
+
+
+@pytest.mark.asyncio
+async def test_vmware_catalog_guard_reports_target_before_bad_params(
+    session: AsyncSession,
+) -> None:
+    """With no sibling to run on, the target error comes before the params error."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={"not_declared": 1},
+    )
+
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert _RecordingVmwareTransport.sent == []
+
+
+async def _sibling_blast_radius_builder(ctx: Any) -> dict[str, Any]:
+    del ctx
+    return {
+        "blast_radius": {
+            "object": {"kind": "vm", "id": "vm-1"},
+            "children": [],
+            "irreversibility": "permanent",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_destructive_preview_hash_binds_the_sibling(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preview taken with the named catalog binds the call that runs on the sibling.
+
+    Preview with ``vmware-rest-9.0`` for an 8.0.3 target, then call with that
+    ``preview_hash``: the destructive op waits for approval under
+    ``vmware-rest-8.0`` instead of failing with ``preview_hash_mismatch``.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+
+    monkeypatch.setitem(
+        _PREVIEW_BUILDERS, "POST:/api/vcenter/vm/example", _sibling_blast_radius_builder
+    )
+    _register_vmware_sibling_catalogs()
+    for version in ("9.0", "8.0"):
+        await _add_vmware_guard_descriptor(
+            session,
+            version=version,
+            safety_level="destructive",
+            parameter_schema=_NAME_ONLY_SCHEMA if version == "8.0" else None,
+        )
+    target = _FakeTarget(product="vmware", version="8.0.3")
+    params = {"name": "vm-a"}
+
+    preview = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params=params,
+    )
+    assert preview["status"] == "ok", preview
+    assert preview["connector_id"] == "vmware-rest-8.0"
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params=params,
+        preview_hash=preview["preview_hash"],
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    assert _RecordingVmwareTransport.sent == []
+    async with get_sessionmaker()() as fresh:
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
+    assert [a.preview_hash for a in approvals] == [preview["preview_hash"]]
+
+
+class _VmwareTasksList80Connector(VmwareRest80Connector):
+    """8.0 catalog connector that records the outbound body and returns two tasks."""
+
+    sent: ClassVar[list[tuple[str, str, dict[str, Any] | None]]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        del target, operator
+        return f"/api{path}"
+
+    async def _post_json(  # type: ignore[override]
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        del target, operator, params, extra_headers
+        type(self).sent.append((verb, path, json))
+        return {
+            "task-1": {"service": "com.vmware.vcenter.vm", "status": "SUCCEEDED"},
+            "task-2": {"service": "com.vmware.vcenter.vm", "status": "RUNNING"},
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expect_ok"),
+    [
+        ({"filter_spec": {"services": ["com.vmware.vcenter.vm"]}}, True),
+        ({"filter_spec": {"tasks": ["task-1"]}, "result_spec": {"exclude_result": True}}, True),
+        ({"return_all": True, "exclude_result": True}, False),
+        ({"filter_spec": {}}, False),
+        ({"filter_spec": {"services": []}}, False),
+    ],
+)
+async def test_vmware_8_0_tasks_list_dispatch_sends_two_level_body(
+    body: dict[str, Any],
+    expect_ok: bool,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The corrected 8.0 tasks-list op sends ``{filter_spec, result_spec}`` (#3700).
+
+    A non-empty ``services`` / ``tasks`` filter reaches vCenter and returns
+    rows. The old flat body and an empty filter are refused with
+    ``invalid_params`` before any request leaves MEHO.
+    """
+    _VmwareTasksList80Connector.sent = []
+    register_connector_v2(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        cls=_VmwareTasksList80Connector,
+    )
+    flat = EndpointDescriptorProto(
+        op_id="POST:/cis/tasks?action=list",
+        method="POST",
+        path="/cis/tasks?action=list",
+        summary="List tasks",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "exclude_result": {"type": "boolean"},
+                        "return_all": {"type": "boolean"},
+                    },
+                    "x-meho-param-loc": "body",
+                }
+            },
+            "additionalProperties": False,
+        },
+        safety_level="caution",
+    )
+    await register_ingested_operations(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=[flat],
+        embedding_service=stub_embedding_service,
+    )
+    row = (
+        await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
+            )
+        )
+    ).scalar_one()
+    row.is_enabled = True
+    await session.commit()
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/cis/tasks?action=list",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={"body": body},
+    )
+
+    if expect_ok:
+        assert result.status == "ok", result.error
+        assert _VmwareTasksList80Connector.sent == [("POST", "/api/cis/tasks?action=list", body)]
+        assert isinstance(result.result, dict)
+        assert set(result.result) == {"task-1", "task-2"}
+    else:
+        assert result.extras.get("error_code") == "invalid_params"
+        assert _VmwareTasksList80Connector.sent == []
+
+
 @pytest.mark.asyncio
 async def test_dispatch_ingested_builds_request_via_request_json(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Ingested dispatch: path vars substituted, query/body split, ``_request_json`` called."""
     from datetime import UTC, datetime
@@ -1808,7 +2605,6 @@ async def test_dispatch_ingested_builds_request_via_request_json(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["method"] == "GET"
-    assert len(captured_events) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1917,7 +2713,6 @@ async def test_dispatch_ingested_post_sends_unwrapped_request_body(
     issue_body: dict[str, Any],
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """gh-rest issue-create sends the body param's *value* (unwrapped) on the wire.
 
@@ -1968,7 +2763,6 @@ async def test_dispatch_ingested_post_sends_unwrapped_request_body(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["number"] == 7
-    assert len(captured_events) == 1
 
 
 def _gh_update_issue_descriptor(embedding: Any, *, verb: str) -> Any:
@@ -2026,7 +2820,6 @@ async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
     verb: str,
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An ingested PUT/PATCH/DELETE reaches the wire with its real verb + header param.
 
@@ -2082,7 +2875,6 @@ async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["state"] == "closed"
-    assert len(captured_events) == 1
 
 
 class _QueryParamRoundTripHttpConnector(_RoundTripHttpConnector):
@@ -2151,7 +2943,6 @@ def _acme_thing_action_descriptor(embedding: Any) -> Any:
 async def test_dispatch_ingested_post_forwards_query_param(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An ingested POST forwards an ``in: query`` param (not in the path) to the wire.
 
@@ -2202,7 +2993,6 @@ async def test_dispatch_ingested_post_forwards_query_param(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["status"] == "queued"
-    assert len(captured_events) == 1
 
 
 def test_unwrap_body_returns_value_not_wrapper() -> None:
@@ -2244,7 +3034,6 @@ def test_unwrap_body_rejects_multiple_body_params() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_composite_receives_dispatch_and_emits_child_row(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Composite handler receives ``dispatch`` + child audit row carries ``parent_audit_id``."""
     register_connector_v2(
@@ -2397,7 +3186,6 @@ async def _register_module_composite(op_id: str, handler_ref: str, embedding: An
 @pytest.mark.asyncio
 async def test_dispatch_composite_terminal_error_envelope_audits_error(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A composite envelope with an ``error``-severity issue dispatches as an error (#3809).
 
@@ -2428,6 +3216,9 @@ async def test_dispatch_composite_terminal_error_envelope_audits_error(
     # Upstream detail preserved in the caller-facing payload.
     assert isinstance(result.result, dict)
     assert result.result["issues"][0]["message"].endswith("RESOURCE_INACCESSIBLE")
+    # A small envelope passes through whole: no bounded view, no handle.
+    assert "issues_total" not in result.result
+    assert result.handle is None
     assert "RESOURCE_INACCESSIBLE" in (result.error or "")
 
     async with get_sessionmaker()() as fresh:
@@ -2443,14 +3234,326 @@ async def test_dispatch_composite_terminal_error_envelope_audits_error(
     assert row.payload["result_status"] == "error"
     assert row.status_code == 500
     assert row.payload["error"]["error_code"] == "create_error"
-    # The broadcast frame carries the failed status, not a false ``ok``.
-    assert any(e.result_status == "error" for e in captured_events)
+
+
+async def _dispatch_issue_list_error(
+    stub_embedding_service: AsyncMock, params: dict[str, Any]
+) -> tuple[OperationResult, MemoryResultStore, Operator]:
+    """Dispatch the many-issues composite through the real JSONFlux reducer."""
+    from meho_backplane.operations import set_default_reducer
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.issue_list",
+        "tests.test_operations_dispatcher._module_composite_handler_issue_list",
+        stub_embedding_service.encode_one.return_value,
+    )
+    operator = _make_operator()
+    store = MemoryResultStore()
+    set_default_reducer(JsonFluxReducer(store=store))
+    try:
+        result = await dispatch(
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id="vault.composite.issue_list",
+            target=_FakeTarget(product="vault"),
+            params=params,
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+    return result, store, operator
+
+
+async def _stored_rows(
+    store: MemoryResultStore, operator: Operator, result: OperationResult
+) -> list[dict[str, Any]]:
+    assert result.handle is not None
+    assert operator.tenant_id is not None
+    spilled = await store.fetch_rows(
+        tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=result.handle.handle_id
+    )
+    assert spilled is not None
+    return spilled.rows
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_terminal_error_with_many_issues_stays_bounded(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failed composite with 120 issues keeps a bounded view inline (#3813).
+
+    The full list goes behind the result handle. Inline: at most five entries,
+    the ``error`` one among them even though it sits deep in the list, plus
+    ``issues_total``. The inline result stays under the 4 KB budget.
+    """
+    result, store, operator = await _dispatch_issue_list_error(
+        stub_embedding_service, {"issue_count": 120, "error_index": 100}
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "deploy_error"
+    assert result.handle is not None
+    assert result.handle.total_rows == 120
+    assert isinstance(result.result, dict)
+    assert result.result["status"] == "deploy_error"
+    assert result.result["issues_total"] == 120
+    inline = result.result["issues"]
+    assert len(inline) == 5
+    assert [item["severity"] for item in inline] == ["warning"] * 4 + ["error"]
+    assert inline[-1]["message"].startswith("deploy failed")
+    assert json_text_bytes(result.result) < 4096
+    assert "deploy failed" in (result.error or "")
+
+    rows = await _stored_rows(store, operator, result)
+    assert len(rows) == 120
+    assert rows[100]["severity"] == "error"
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "vault.composite.issue_list")
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "deploy_error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_terminal_error_with_long_messages_stays_bounded(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Three issues with 10 KB messages do not come back inline in full (#3813).
+
+    Few rows, many bytes: the reducer still hands out a handle, and each inline
+    message is cut to the text cap. The stored rows keep the full text.
+    """
+    result, store, operator = await _dispatch_issue_list_error(
+        stub_embedding_service, {"issue_count": 3, "message_chars": 10_000, "error_index": 0}
+    )
+
+    assert result.status == "error"
+    assert result.handle is not None
+    assert isinstance(result.result, dict)
+    assert result.result["issues_total"] == 3
+    inline = result.result["issues"]
+    assert len(inline) == 3
+    assert all(item["message"].endswith("...<truncated>") for item in inline)
+    assert all(len(item["message"]) < 300 for item in inline)
+    assert json_text_bytes(result.result) < 4096
+
+    rows = await _stored_rows(store, operator, result)
+    assert [len(row["message"]) for row in rows] == [10_000] * 3
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_terminal_error_with_non_ascii_messages_stays_bounded(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Five long non-ASCII messages stay within the inline byte budget (#3813).
+
+    The transport escapes a non-ASCII character to six bytes, so a cap that
+    counted characters let five truncated messages reach 8 KB of JSON text.
+    The caps count JSON bytes: each message is at most 256 bytes escaped, the
+    list stays under its 2 KB budget, the error stays visible, and the stored
+    rows keep the full text.
+    """
+    result, store, operator = await _dispatch_issue_list_error(
+        stub_embedding_service,
+        {"issue_count": 5, "message_chars": 2_000, "error_index": 0, "fill": "\u00fc"},
+    )
+
+    assert result.status == "error"
+    assert result.handle is not None
+    assert isinstance(result.result, dict)
+    assert result.result["issues_total"] == 5
+    inline = result.result["issues"]
+    assert inline[0]["severity"] == "error"
+    assert inline[0]["message"].startswith("deploy failed: ")
+    assert all(item["message"].endswith("...<truncated>") for item in inline)
+    assert all(json_text_bytes(item["message"]) - 2 <= 256 for item in inline)
+    assert json_text_bytes(inline) <= 2048
+    assert json_text_bytes(result.result) < 4096
+    assert "deploy failed" in (result.error or "")
+
+    rows = await _stored_rows(store, operator, result)
+    assert [len(row["message"]) for row in rows] == [2_000] * 5
+    assert rows[0]["message"].endswith("\u00fc")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_folder_create_ambiguous_parent_audits_error(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """An unresolved ``folder.create`` parent is a failed op, not an ``ok`` no-op (#3588).
+
+    Before the fix the handler returned a bare ``ambiguous_parent`` dict and the
+    dispatcher audited it ``ok`` although no folder was created.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.folder_create_ambiguous",
+        "tests.test_operations_dispatcher._module_composite_handler_folder_create_ambiguous",
+        stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.folder_create_ambiguous",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "ambiguous_parent"
+    assert isinstance(result.result, dict)
+    assert result.result["candidate_folders"] == ["group-v4", "group-v115"]
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "vault.composite.folder_create_ambiguous"
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "ambiguous_parent"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_folder_create_oversized_candidates_land_behind_a_handle(
+    stub_embedding_service: AsyncMock,
+    result_reducer_cls: type[Any],
+) -> None:
+    """An oversized refusal envelope ships a handle, not the whole list (#4223).
+
+    Hundreds of same-named parent folders made the ``ambiguous_parent`` envelope
+    far larger than the inline limit, and the error arm skipped the reducer. The
+    envelope must now take the reducer path: a bounded inline summary, the full
+    envelope behind a result handle, and the operation and audit row still
+    ``error`` with the ``ambiguous_parent`` code.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.folder_create_many",
+        "tests.test_operations_dispatcher._module_composite_handler_folder_create_many_candidates",
+        stub_embedding_service.encode_one.return_value,
+    )
+    redis = _FakeResultRedis()
+    store = ResultHandleStore(redis)  # type: ignore[arg-type]
+    set_default_reducer(result_reducer_cls(store=store))
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.composite.folder_create_many",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "ambiguous_parent"
+    # The error line is short: the match count, never the ids.
+    assert result.error == "ambiguous_parent: parent VM folder name 'vm' matched 400 VM folders"
+    # The inline result is a bounded summary, and the ids are not in it.
+    assert isinstance(result.result, dict)
+    assert result.result["result_record"] == "document"
+    assert result.result["status"] == "ambiguous_parent"
+    inline = json.dumps(result.result)
+    assert len(inline) < 4096
+    assert "group-v" not in inline
+    # The full envelope is behind the handle and readable from the store.
+    assert result.handle is not None
+    assert result.handle.fetch_more.drill_in.available is True
+    assert operator.tenant_id is not None
+    stored = await store.fetch_document(
+        tenant_id=operator.tenant_id,
+        operator_sub=operator.sub,
+        handle_id=result.handle.handle_id,
+    )
+    assert stored is not None
+    assert stored.document["candidate_folders"] == _MANY_VM_FOLDER_IDS
+    assert stored.document["issues"][0]["severity"] == "error"
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "vault.composite.folder_create_many")
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "ambiguous_parent"
+    assert row.payload["handle_id"] == str(result.handle.handle_id)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_error_envelope_reducer_failure_stays_error(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A reducer failure on the error arm keeps the error and drops the envelope (#4223).
+
+    The success arm turns a reducer failure into ``ok`` + ``delivery="unavailable"``
+    because the handler already ran. The error arm must not: the operation
+    stays ``error`` with its code, the unbounded envelope is not shipped inline,
+    and the audit row reads ``error``.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.folder_create_ambiguous",
+        "tests.test_operations_dispatcher._module_composite_handler_folder_create_ambiguous",
+        stub_embedding_service.encode_one.return_value,
+    )
+    set_default_reducer(_RaisingReducer())
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.folder_create_ambiguous",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "ambiguous_parent"
+    assert result.error == "ambiguous_parent: parent VM folder name 'vm' matched 2 VM folders"
+    assert result.result is None
+    assert result.handle is None
+    assert result.delivery == "unavailable"
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "vault.composite.folder_create_ambiguous"
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "ambiguous_parent"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_composite_warning_only_envelope_stays_ok(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A composite envelope carrying only a ``warning`` issue stays ``ok`` (#3809).
 
@@ -2498,7 +3601,6 @@ async def test_dispatch_composite_warning_only_envelope_stays_ok(
 @pytest.mark.asyncio
 async def test_dispatch_invokes_reducer_pass_through_by_default(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The pass-through reducer leaves the response shape untouched."""
     register_connector_v2(
@@ -2539,7 +3641,6 @@ async def test_dispatch_invokes_reducer_pass_through_by_default(
 @pytest.mark.asyncio
 async def test_dispatch_uses_swapped_reducer(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A non-default reducer (T6 will install one) sees the response."""
 
@@ -2642,7 +3743,6 @@ def test_isolate_global_registries_restores_default_reducer() -> None:
 async def test_dispatch_returns_handler_unreachable_when_import_fails(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``handler_ref`` pointing at a deleted module -> ``handler_unreachable``."""
     from datetime import UTC, datetime
@@ -2703,7 +3803,6 @@ async def test_dispatch_returns_handler_unreachable_when_import_fails(
 @pytest.mark.asyncio
 async def test_dispatch_returns_connector_error_when_handler_raises(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Handler exception -> ``connector_error`` + audit row with ``result_status='error'``."""
     register_connector_v2(
@@ -2750,15 +3849,13 @@ async def test_dispatch_returns_connector_error_when_handler_raises(
         )
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
-
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
+    # #3733: a failed run is still an execution record.
+    assert rows[0].event_class == "operation_execution"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A denied ``vault.kv.put`` -> ``vault_write_identity_forbidden`` (#2331).
 
@@ -2784,7 +3881,8 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     )
 
     operator = _make_operator(sub="op-writer")
-    target = _FakeTarget(product="vault")
+    target = _FakeTarget(product="vault", name="vault-main")
+    target.extras = {"vault_role": "meho-writer"}  # type: ignore[attr-defined]
 
     result = await dispatch(
         operator=operator,
@@ -2800,6 +3898,8 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     # Data path rendered from mount default + params; identity is the caller.
     assert result.extras["path"] == "secret/data/meho/test/x"
     assert result.extras["identity_hint"] == "op-writer"
+    # #3716: the acting target and its vault_role are named in the text.
+    assert "target 'vault-main' under vault_role 'meho-writer'" in result.error
     # NOT mislabelled as the read-path credential-resolution cause.
     assert "connector_vault_forbidden" not in result.error
     assert result.extras["error_code"] != "connector_vault_forbidden"
@@ -2813,7 +3913,6 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
 @pytest.mark.asyncio
 async def test_dispatch_denies_dangerous_op_by_safety_level(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``safety_level='dangerous'`` → ``denied`` for an **agent** principal.
 
@@ -2867,14 +3966,10 @@ async def test_dispatch_denies_dangerous_op_by_safety_level(
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].status_code == 403
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "denied"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_agent_deny_grant_on_client_id_denies_safe_op(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A ``deny`` grant keyed on the agent clientId denies a safe op + audits it (#3795).
 
@@ -2950,14 +4045,13 @@ async def test_dispatch_agent_deny_grant_on_client_id_denies_safe_op(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].status_code == 403
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "denied"
+    # #4669: the refused call answers with the id of its own denied row.
+    assert result.audit_id == rows[0].id
 
 
 @pytest.mark.asyncio
 async def test_dispatch_pending_caution_op_no_permission_row(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``safety_level='caution'`` + no permission row → ``awaiting_approval`` (agent).
 
@@ -3032,15 +4126,10 @@ async def test_dispatch_pending_caution_op_no_permission_row(
     assert len(request_rows) == 1
     assert request_rows[0].status_code == 202
 
-    # The approval-queue path writes audit directly, not via the
-    # broadcast helper, so no broadcast event is emitted here.
-    assert len(captured_events) == 0
-
 
 @pytest.mark.asyncio
 async def test_audit_row_stamps_policy_decision_per_verdict(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#130 AC1: each governed dispatch stamps its gate verdict on ``policy_decision``.
 
@@ -3118,11 +4207,16 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
     assert by_path["approval.request"].policy_decision == "needs-approval"
     assert "vault.kv.needsapproval" not in by_path
 
+    # #3733: each writer declares its event class. The executed op is an
+    # execution record; the deny and the park are gate decisions.
+    assert by_path["vault.kv.autoexec"].event_class == "operation_execution"
+    assert by_path["vault.kv.deny"].event_class == "policy_decision"
+    assert by_path["approval.request"].event_class == "policy_decision"
+
 
 @pytest.mark.asyncio
 async def test_dispatch_human_dangerous_op_auto_executes(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A **human** dispatching a ``dangerous`` op keeps the v0.2 contract.
 
@@ -3161,7 +4255,6 @@ async def test_dispatch_human_dangerous_op_auto_executes(
 @pytest.mark.asyncio
 async def test_dispatch_human_caution_op_auto_executes(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A **human** dispatching a ``caution`` op auto-executes (v0.2 contract)."""
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
@@ -3192,7 +4285,6 @@ async def test_dispatch_human_caution_op_auto_executes(
 @pytest.mark.asyncio
 async def test_dispatch_human_requires_approval_op_queues(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``requires_approval=True`` queues a **human**, not hard-deny (G11.7-T1 #1401).
 
@@ -3234,7 +4326,6 @@ async def test_dispatch_human_requires_approval_op_queues(
 @pytest.mark.asyncio
 async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``requires_approval=True`` floors an agent's ``safe`` op to approval.
 
@@ -3276,7 +4367,6 @@ async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
 @pytest.mark.asyncio
 async def test_park_populates_proposed_effect_from_builder(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A parked op with a registered preview builder stores its preview.
 
@@ -3344,7 +4434,6 @@ async def test_park_populates_proposed_effect_from_builder(
 @pytest.mark.asyncio
 async def test_park_without_builder_uses_identifier_default(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An op with no preview builder (and empty params) parks with the identifier-only default.
 
@@ -3406,13 +4495,13 @@ async def test_park_without_builder_uses_identifier_default(
 @pytest.mark.asyncio
 async def test_park_merges_permission_preflight_onto_identifier_default(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """A parked write with a registered permission preflight stores its banner.
+    """A parked write with a registered permission preflight stores its result.
 
     G0.20-T4 (#1504): the capability-only permission preflight runs and is
     merged under ``proposed_effect["permission_preflight"]`` — so the
-    reviewer sees "this write will be denied" at park time. Since #1856,
+    reviewer sees whether the write is authorized at park time (a
+    will-be-denied verdict refuses the park instead, #3542). Since #1856,
     a non-credential write with no bespoke builder also carries the
     generic params-echo default, so the preflight rides on the
     ``{op_class, params_echo}`` base rather than the bare identifier
@@ -3430,8 +4519,8 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             "check": "vault.capabilities-self",
             "path": f"secret/data/{ctx.params.get('path', '?')}",
             "required": ["create", "update"],
-            "granted": ["read"],
-            "will_be_denied": True,
+            "granted": ["create", "read", "update"],
+            "will_be_denied": False,
             "principal_sub": ctx.operator.sub,
         }
 
@@ -3444,7 +4533,7 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
         op_id="vault.kv.preflight_op",
         handler=_module_handler_returning_dict,
         summary="Op with a registered permission preflight.",
-        description="Parks for approval; the preflight flags a will-be-denied write.",
+        description="Parks for approval; the preflight says the write is authorized.",
         parameter_schema={"type": "object"},
         safety_level="caution",
         requires_approval=True,
@@ -3471,9 +4560,9 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             assert row.proposed_effect["op_class"] == "other"
             assert row.proposed_effect["params_echo"] == {"path": "meho/test/x"}
             preflight = row.proposed_effect["permission_preflight"]
-            assert preflight["will_be_denied"] is True
+            assert preflight["will_be_denied"] is False
             assert preflight["required"] == ["create", "update"]
-            assert preflight["granted"] == ["read"]
+            assert preflight["granted"] == ["create", "read", "update"]
             # No raw secret material — only the capability banner.
             assert "data" not in row.proposed_effect
     finally:
@@ -3481,21 +4570,90 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("will_be_denied", [True, False])
-async def test_park_stamps_write_capability_warning_when_denied(
+async def test_park_params_echo_masks_secret_named_params(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked op's ``params_echo`` never stores a secret-named param value (#3808).
+
+    The params carry secret values under names the old exact-name list
+    missed (``vcsa_root_password``, camelCase ``adminPassword``,
+    ``sddcManagerApiKey``). The broadcast scrub flags them as secret, and
+    the echo on the stored approval row masks the same keys, so the two
+    paths agree. Non-secret params stay readable.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.secret_params_op",
+        handler=_module_handler_returning_dict,
+        summary="Dangerous op whose params carry secret values.",
+        description="Parks for approval; the echo must mask the secret values.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    secret_values = ["FAKE-root-pw-0001", "FAKE-nsx-pw-0002", "FAKE-api-key-0003"]
+    params: dict[str, Any] = {
+        "appliance": "fake-appliance-01",
+        "vcsa_root_password": secret_values[0],
+        "nsx": {"adminPassword": secret_values[1], "size": "medium"},
+        "sddcManagerApiKey": secret_values[2],
+    }
+    # The broadcast scrub (the source of ``broadcast_params_secret_detected``)
+    # flags these params as secret.
+    _scrubbed, secret_detected = scrub_broadcast_params(params)
+    assert secret_detected is True
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.secret_params_op",
+        target=target,
+        params=params,
+    )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        echo = row.proposed_effect["params_echo"]
+        assert echo == {
+            "appliance": "fake-appliance-01",
+            "vcsa_root_password": "***REDACTED***",
+            "nsx": {"adminPassword": "***REDACTED***", "size": "medium"},
+            "sddcManagerApiKey": "***REDACTED***",
+        }
+        stored = repr(row.proposed_effect)
+        for value in secret_values:
+            assert value not in stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("will_be_denied", [True, False])
+async def test_park_refused_when_preflight_says_write_will_be_denied(
+    stub_embedding_service: AsyncMock,
     will_be_denied: bool,
 ) -> None:
-    """A will-be-denied preflight promotes a named top-level warning (#2331).
+    """A will-be-denied preflight refuses the park (#3542).
 
     When the park-time capability probe reports ``will_be_denied: true``,
-    the envelope carries ``write_capability_warning =
-    "connector_identity_may_lack_write"`` so the approval surface can render
-    a banner without reaching into ``permission_preflight``. It is a
-    warning, not a gate — the park still proceeds and the op is
-    ``awaiting_approval`` either way. Absent when the write will be
-    authorized.
+    no approval row is written: the caller gets ``denied`` /
+    ``write_capability_denied`` with ``granted`` / ``required`` and the
+    write-policy ``doc_ref``, so no person spends an approval on a write
+    that cannot land. The refusal still lands as one ``denied`` audit row
+    on the op's own path (with the refusal details under ``error``),
+    exactly like a policy denial. When the
+    write is authorized the op parks as before, with no
+    ``write_capability_warning``.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._preview import (
@@ -3539,21 +4697,313 @@ async def test_park_stamps_write_capability_warning_when_denied(
             target=target,
             params={"path": "meho/test/x"},
         )
-        assert result.status == "awaiting_approval"
-        approval_request_id = UUID(result.extras["approval_request_id"])
         sessionmaker = get_sessionmaker()
-        async with sessionmaker() as fresh:
-            row = await fresh.get(ApprovalRequest, approval_request_id)
-            assert row is not None
-            if will_be_denied:
-                assert (
-                    row.proposed_effect["write_capability_warning"]
-                    == "connector_identity_may_lack_write"
+        if will_be_denied:
+            assert result.status == "denied"
+            assert result.extras["error_code"] == "write_capability_denied"
+            assert result.extras["path"] == "secret/data/meho/test/x"
+            assert result.extras["granted"] == ["read"]
+            assert result.extras["required"] == ["create", "update"]
+            assert result.extras["doc_ref"] == (
+                "docs/cross-repo/connector-vault-policy.md#6-kv-v2-write-surface"
+            )
+            assert result.error is not None
+            assert "did not create an approval request" in result.error
+            async with sessionmaker() as fresh:
+                count = await fresh.scalar(
+                    select(func.count())
+                    .select_from(ApprovalRequest)
+                    .where(ApprovalRequest.op_id == "vault.kv.warn_op")
                 )
-            else:
+                op_rows = (
+                    (
+                        await fresh.execute(
+                            select(AuditLog).where(AuditLog.path == "vault.kv.warn_op")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                request_rows = (
+                    (
+                        await fresh.execute(
+                            select(AuditLog).where(AuditLog.path == "approval.request")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert count == 0
+            assert len(request_rows) == 0
+            assert len(op_rows) == 1
+            assert op_rows[0].payload["result_status"] == "denied"
+            assert op_rows[0].status_code == 403
+            assert op_rows[0].payload["error"]["error_code"] == "write_capability_denied"
+            assert result.audit_id == op_rows[0].id
+            assert op_rows[0].payload["error"]["granted"] == ["read"]
+            assert op_rows[0].payload["error"]["required"] == ["create", "update"]
+        else:
+            assert result.status == "awaiting_approval"
+            approval_request_id = UUID(result.extras["approval_request_id"])
+            async with sessionmaker() as fresh:
+                row = await fresh.get(ApprovalRequest, approval_request_id)
+                assert row is not None
                 assert "write_capability_warning" not in row.proposed_effect
     finally:
         _PERMISSION_PREFLIGHTS.pop("vault.kv.warn_op", None)
+
+
+async def _seed_gated_composite(
+    embedding: list[float],
+    *,
+    op_id: str = "vault.composite.gated_write",
+    handler: str = "_module_composite_handler_gated_subop",
+) -> None:
+    """Store a ``safe`` composite whose one step needs approval."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id=op_id,
+                source_kind="composite",
+                method=None,
+                path=None,
+                handler_ref=f"tests.test_operations_dispatcher.{handler}",
+                summary="Composite with one gated write step.",
+                description="The step parks for approval unless its preflight refuses.",
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=embedding,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+
+
+def _register_refusing_preflight(op_id: str) -> None:
+    """Register a permission check for *op_id* that says the write will be denied."""
+    from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+        }
+
+    register_permission_preflight(op_id, _preflight)
+
+
+async def _audit_rows(path: str) -> list[AuditLog]:
+    async with get_sessionmaker()() as s:
+        return list(
+            (await s.execute(select(AuditLog).where(AuditLog.path == path))).scalars().all()
+        )
+
+
+@pytest.mark.asyncio
+async def test_composite_step_wait_records_needs_approval_on_request_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A step that waits inside a multi-step operation records its own verdict (#4646).
+
+    The parent composite is ``safe`` and auto-executes; its step needs
+    approval. The ``approval.request`` row the step gate writes must say
+    ``needs-approval`` (the step's verdict), not ``auto-execute`` (the
+    parent's), the same as a top-level call that waits.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(stub_embedding_service.encode_one.return_value)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.gated_write",
+        target=_FakeTarget(product="vault"),
+        params={"path": "meho/test/x"},
+    )
+    assert result.status == "awaiting_approval"
+    assert result.op_id == "vault.kv.gated_step"
+
+    rows = await _audit_rows("approval.request")
+    assert len(rows) == 1
+    assert rows[0].policy_decision == "needs-approval"
+
+
+@pytest.mark.asyncio
+async def test_composite_step_refusal_row_records_needs_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The ``denied`` row of a refused step wait carries the step's verdict (#4646).
+
+    The permission check says the step's write will be denied, so the step
+    gate refuses the wait and writes a ``denied`` row on the step's path.
+    That row says ``needs-approval``, the same as the top-level refusal.
+    """
+    from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(stub_embedding_service.encode_one.return_value)
+    _register_refusing_preflight("vault.kv.gated_step")
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.gated_write",
+            target=_FakeTarget(product="vault"),
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "denied"
+    assert result.op_id == "vault.kv.gated_step"
+
+    rows = await _audit_rows("vault.kv.gated_step")
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].policy_decision == "needs-approval"
+
+
+@pytest.mark.asyncio
+async def test_composite_parent_row_keeps_its_own_verdict_after_step_gate(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parent's own audit row keeps the parent's verdict after a step gate (#4646).
+
+    The step gate binds the step's verdict only for its own call. A composite
+    that goes on after a refused step and returns its own result gets a row
+    with the parent's verdict, ``auto-execute``, while the step's ``denied``
+    row says ``needs-approval``.
+    """
+    from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(
+        stub_embedding_service.encode_one.return_value,
+        op_id="vault.composite.reports_refused_step",
+        handler="_module_composite_handler_reports_refused_step",
+    )
+    _register_refusing_preflight("vault.kv.gated_step")
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.reports_refused_step",
+            target=_FakeTarget(product="vault"),
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "ok", result.error
+    assert result.result["issues"][0]["message"] == "denied"
+
+    step_rows = await _audit_rows("vault.kv.gated_step")
+    assert len(step_rows) == 1
+    assert step_rows[0].policy_decision == "needs-approval"
+    parent_rows = await _audit_rows("vault.composite.reports_refused_step")
+    assert len(parent_rows) == 1
+    assert parent_rows[0].payload["result_status"] == "ok"
+    assert parent_rows[0].policy_decision == "auto-execute"
+    assert step_rows[0].parent_audit_id == parent_rows[0].id
+
+
+@pytest.mark.asyncio
+async def test_composite_with_refused_step_writes_one_denied_audit_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A parent operation with a refused step leaves the step's denial record (#3542).
+
+    The composite's gated step has a permission preflight that says the write
+    will be denied. The sub-op gate refuses the park and the parent returns
+    that result as is. The gate records the refusal itself: exactly one
+    ``denied`` decision row on the step's path, linked to the parent
+    operation's audit id. Since #4275 the parent operation gets its own
+    ``denied`` execution row under that id too. No approval request and no
+    approval-request audit row are written.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+        }
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    sessionmaker = get_sessionmaker()
+    await _seed_gated_composite(stub_embedding_service.encode_one.return_value)
+    register_permission_preflight("vault.kv.gated_step", _preflight)
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.gated_write",
+            target=target,
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "denied"
+    assert result.op_id == "vault.kv.gated_step"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert result.extras["granted"] == ["read"]
+
+    async with sessionmaker() as fresh:
+        approval_count = await fresh.scalar(select(func.count()).select_from(ApprovalRequest))
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method == "DISPATCH")))
+            .scalars()
+            .all()
+        )
+        request_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
+            .scalars()
+            .all()
+        )
+    assert approval_count == 0
+    assert request_rows == []
+    # Two rows: the step's decision row and the parent operation's own row (#4275).
+    assert len(rows) == 2
+    (row,) = [r for r in rows if r.path == "vault.kv.gated_step"]
+    (parent,) = [r for r in rows if r.path == "vault.composite.gated_write"]
+    assert row.event_class == "policy_decision"
+    assert row.status_code == 403
+    assert row.payload["result_status"] == "denied"
+    assert row.payload["error"]["error_code"] == "write_capability_denied"
+    assert row.payload["error"]["required"] == ["create", "update"]
+    # The step's row points at the parent operation's row.
+    assert row.parent_audit_id == parent.id
+    assert parent.event_class == "operation_execution"
+    assert parent.status_code == 403
+    assert parent.payload["result_status"] == "denied"
+    assert parent.payload["error"]["error_code"] == "write_capability_denied"
+    assert result.audit_id == parent.id
 
 
 # ---------------------------------------------------------------------------
@@ -3632,7 +5082,6 @@ components:
 @pytest.mark.asyncio
 async def test_reingest_repairs_pre_fix_row_through_dispatch_validation(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#3102 end-to-end: flagged pre-fix row -> ``invalid_op_schema``; re-ingest -> repaired.
 

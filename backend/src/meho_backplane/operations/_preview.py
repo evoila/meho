@@ -43,7 +43,9 @@ Design contract
   unknown" from a genuinely small action. Only a *declined* preview
   (builder returns ``None``, credential-class suppression, or an empty
   params dict with no builder) yields ``None`` → the identifier-only
-  default.
+  default. The ``preview_error`` message is redacted with the packaged
+  default policy before it is truncated, because a builder fault can
+  echo an upstream error body (#3876).
 * **Redaction-safe.** The preview lands in a durable row surfaced over
   REST / MCP / CLI, so it must not carry secret material. The hook
   reuses the single-sourced sensitivity classification from
@@ -73,14 +75,14 @@ writes are the separate follow-up #1452).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
-from meho_backplane.broadcast.events import classify_op
-from meho_backplane.redaction import apply_connector_boundary_redaction
+from meho_backplane.broadcast.events import classify_op, is_secret_param_name
+from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -96,6 +98,7 @@ __all__ = [
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
+    "preview_failure_reason",
     "register_permission_preflight",
     "register_preview_builder",
 ]
@@ -131,83 +134,94 @@ PREVIEW_REASON_NOT_POPULATED = "connector_did_not_populate"
 #: scrub sentinel (:data:`~meho_backplane.connectors.keycloak.redaction.REDACTED`).
 _PARAM_REDACTED = "***REDACTED***"
 
-#: Param key names whose value is secret material regardless of its
-#: string shape, scrubbed by exact (case-insensitive) key match before the
-#: echo is stored. The connector-boundary redaction engine matches secret
-#: *value* shapes (JWTs, bearer tokens, labelled ``key=value`` strings in a
-#: single leaf) but walks Mappings key-by-key without inspecting the key
-#: itself -- so a structured ``{"password": "hunter2"}`` param slips
-#: through it. This set closes that gap for the generic echo: a
-#: secret-by-key-name param never lands verbatim in the durable approval
-#: row even when its value carries no recognisable secret signature. Kept
-#: deliberately narrow (the well-known credential param spellings); a
-#: connector whose params need richer scrubbing registers a bespoke
-#: builder (e.g. the keycloak write preview, #1857) that owns its own
-#: field discipline.
-_SECRET_PARAM_KEYS: frozenset[str] = frozenset(
-    {
-        "password",
-        "passwd",
-        "pwd",
-        "secret",
-        "client_secret",
-        "secret_id",
-        "token",
-        "api_key",
-        "apikey",
-        "access_token",
-        "refresh_token",
-        "auth_token",
-        "session_token",
-        "private_key",
-        "credentials",
-    }
-)
-
 #: Truncation bound for the reviewer-facing ``preview_error`` reason. A
 #: builder fault is normally a one-line message; the cap keeps a
 #: pathological exception repr (an HTTP error echoing a response body)
 #: from ballooning the durable approval row.
 _PREVIEW_ERROR_MAX_LEN: int = 500
 
+#: Fail-closed placeholder for the ``preview_error`` message when the
+#: redactor itself fails. The marker still says the preview is
+#: unavailable; only the message is withheld. Returning the raw text
+#: instead would be the leak this redaction exists to close.
+_PREVIEW_ERROR_WITHHELD: str = "<message withheld: redaction unavailable>"
 
-def _preview_failure_reason(exc: Exception) -> str:
+
+def preview_failure_reason(exc: Exception) -> str:
     """Render a builder fault as the short reviewer-facing reason string.
+
+    Public so a builder that keeps a failed read inside its preview (the VM
+    relocate copy-size preview, #4749) renders the reason the same way.
 
     Keeps the exception *message* front and centre (the type name alone
     is opaque -- the lesson of the ``connector_error`` flattening,
     sibling #1627) while staying robust for message-less exceptions.
+
+    The message is redacted **before** it is truncated, with the same
+    packaged default policy the ``connector_error`` envelope uses for
+    ``extras.upstream_message``. A builder fault can echo an upstream
+    body: a Kubernetes admission webhook that denies a dry-run may put a
+    password or token into its ``Status`` message (#3876), and the
+    marker is stored in the durable approval row. Redaction runs first
+    so the cap cannot cut a secret into a fragment the patterns no
+    longer match. If the redactor fails, the message is withheld.
     """
     message = str(exc)
+    if message:
+        message = _redact_preview_message(message)
     reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
     if len(reason) > _PREVIEW_ERROR_MAX_LEN:
         reason = reason[:_PREVIEW_ERROR_MAX_LEN] + " [truncated]"
     return reason
 
 
+def _redact_preview_message(message: str) -> str:
+    """Tier-1-redact one builder fault message; withhold it on any failure."""
+    try:
+        redacted = redact(message, get_default_policy()).redacted
+    except Exception:  # fail-closed: this path must never leak and never raise
+        return _PREVIEW_ERROR_WITHHELD
+    if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
+        return _PREVIEW_ERROR_WITHHELD
+    return redacted
+
+
 def _scrub_secret_param_keys(value: Any) -> Any:
     """Replace secret-by-name param values with :data:`_PARAM_REDACTED`.
 
-    Walks dicts + lists recursively. For every dict, a key matching
-    :data:`_SECRET_PARAM_KEYS` (case-insensitively) has its whole value
-    replaced -- scalar or subtree -- so a nested ``{"credentials": [...]}``
-    leaks no element. Every other value is walked so a secret keyed deep
-    inside the params tree is still caught. Scalars pass through. The input
+    Walks any mapping and any sequence (other than strings and bytes)
+    recursively, the same container types the broadcast params scrub
+    walks, so a tuple of dicts hides its secrets the same way a list
+    does. For every mapping, a key that
+    :func:`~meho_backplane.broadcast.events.is_secret_param_name` marks as
+    secret has its whole value replaced when that value is a string, a
+    mapping or a sequence -- so a nested ``{"credentials": [...]}`` leaks
+    no element. This is the same name check and the same value rule the
+    broadcast params scrub uses, so a param the broadcast path flags as
+    secret is always masked here too (``password``, ``admin_password``,
+    ``rootPassword``, ``client_secret``, ``api_key``, ...). Bare scalars
+    (bool / int / float / ``None``) under a secret-shaped name pass
+    through, like on the broadcast path: secret material is a string or a
+    blob, never ``bind_secret_id=true`` or ``secret_id_ttl=600``, and the
+    approver needs to see those settings. Every other value is walked so
+    a secret keyed deep inside the params tree is still caught. The input
     is never mutated; a new structure is returned.
 
     This is the key-name half of the generic echo's redaction; the
     value-shape half is :func:`apply_connector_boundary_redaction`.
     """
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {
             key: (
                 _PARAM_REDACTED
-                if isinstance(key, str) and key.lower() in _SECRET_PARAM_KEYS
+                if isinstance(key, str)
+                and is_secret_param_name(key)
+                and isinstance(item, (str, Mapping, Sequence))
                 else _scrub_secret_param_keys(item)
             )
             for key, item in value.items()
         }
-    if isinstance(value, list):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_scrub_secret_param_keys(item) for item in value]
     return value
 
@@ -224,7 +238,8 @@ def _redact_echoed_params(
     Two passes, both reusing the existing redaction discipline:
 
     1. **Key-name scrub** (:func:`_scrub_secret_param_keys`) -- masks
-       values keyed by a well-known credential name. The connector-boundary
+       values keyed by a secret-shaped name, using the same name check as
+       the broadcast params scrub. The connector-boundary
        engine walks Mappings key-by-key but matches secret *value* shapes
        only, so a structured ``{"password": "hunter2"}`` would otherwise
        echo verbatim.
@@ -448,23 +463,7 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     except Exception as exc:
         # Fail-soft: a preview is a convenience, the park is the
         # safety-relevant action. Never let a dry-run fault block it.
-        # But never silently (#1628): a registered builder that raised
-        # means the blast radius is UNKNOWN, and the reviewer must be
-        # able to distinguish that from a genuinely small action -- so
-        # the row carries an explicit marker + reason instead of the
-        # bare identifier-only default a server-side log line can't
-        # substitute for.
-        _log.warning(
-            "proposed_effect_preview_failed",
-            op_id=op_id,
-            operator_sub=getattr(ctx.operator, "sub", None),
-            exc_info=True,
-        )
-        return {
-            "op_class": op_class,
-            "preview_unavailable": True,
-            "preview_error": _preview_failure_reason(exc),
-        }
+        return _preview_unavailable_marker(ctx, exc, op_id=op_id, op_class=op_class)
 
     if preview is None:
         return None
@@ -472,6 +471,34 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "op_class": op_class,
         "preview": preview,
+    }
+
+
+def _preview_unavailable_marker(
+    ctx: PreviewContext, exc: Exception, *, op_id: str, op_class: str
+) -> dict[str, Any]:
+    """Log a builder fault and return the ``preview_unavailable`` marker.
+
+    Never silent (#1628): a registered builder that raised means the
+    blast radius is UNKNOWN, and the reviewer must be able to
+    distinguish that from a genuinely small action -- so the row carries
+    an explicit marker + reason instead of the bare identifier-only
+    default a server-side log line can't substitute for.
+
+    The log line carries the same redacted reason as the row, not the
+    raw exception: a builder fault can echo an upstream body (#3876).
+    """
+    reason = preview_failure_reason(exc)
+    _log.warning(
+        "proposed_effect_preview_failed",
+        op_id=op_id,
+        operator_sub=getattr(ctx.operator, "sub", None),
+        preview_error=reason,
+    )
+    return {
+        "op_class": op_class,
+        "preview_unavailable": True,
+        "preview_error": reason,
     }
 
 
@@ -547,11 +574,20 @@ def blast_radius_missing_reason(proposed_effect: Mapping[str, Any] | None) -> st
     Returns a human-readable reason naming the first missing / malformed
     field so the dispatcher's refuse-to-park result is actionable; ``None``
     means the block is well-formed and the park may proceed.
+
+    When the block is absent because the op's preview builder raised, the
+    reason also carries the builder's error (the ``preview_error`` marker,
+    #1628). A builder raises on purpose to refuse a delete before it waits
+    for approval (for example a protected object, #3944), so the caller must
+    be able to read why.
     """
     if not proposed_effect:
         return "proposed_effect is empty (no blast-radius statement)"
     block = proposed_effect.get(BLAST_RADIUS_KEY)
     if not isinstance(block, Mapping):
+        preview_error = proposed_effect.get("preview_error")
+        if isinstance(preview_error, str) and preview_error:
+            return f"the preview builder failed: {preview_error}"
         return f"proposed_effect.{BLAST_RADIUS_KEY} block is absent"
     if not block.get("object"):
         return f"{BLAST_RADIUS_KEY}.object (object identity) is missing"
@@ -618,6 +654,15 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     Returns ``None`` when no connector instance resolved (a k8s.apply
     without a target can't dry-run) so the caller falls back to the
     identifier-only default.
+
+    When the API server rejects the dry-run (an admission webhook denial,
+    an invalid object, a conflict), the handler raises
+    :class:`~meho_backplane.connectors.kubernetes.ops_write_dangerous.ApplyRejectedError`
+    and this builder lets it propagate. :func:`build_proposed_effect` then
+    stores the ``preview_unavailable`` marker with the server's message in
+    ``preview_error``, so the reviewer sees that the apply will be
+    rejected instead of a clean-looking preview with no
+    ``resourceVersion`` and no ``uid`` (#3876).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None
@@ -649,8 +694,9 @@ async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | Non
     use (#3274 — the dispatch ``target``'s ``extras["vault_role"]``, or
     the settings-global ``meho-mcp`` role when the target names none) and
     issues ``POST sys/capabilities-self`` on the op's authorization path
-    to learn whether that token holds the ``create`` / ``update``
-    capability the write needs. Threading ``ctx.target`` is what makes the
+    to learn whether that token holds the capabilities the write needs
+    (``create`` / ``update`` for ``put``; ``read`` / ``update`` for
+    ``patch``, which reads before it writes). Threading ``ctx.target`` is what makes the
     banner reflect the role that will actually execute. The response
     carries only capability names -- no secret value -- so it is
     redaction-safe and runs even though ``vault.kv.put`` /
@@ -666,6 +712,36 @@ async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | Non
     )
 
 
+async def _k8s_secret_read_to_ref_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Permission preflight for ``k8s.secret.read_to_ref`` (#3844).
+
+    The op reads a Kubernetes Secret and writes the value to Vault through
+    the ``vault.kv.put`` handler. Its preview is suppressed (it classifies
+    ``credential_read``), so without this check the approver could not see
+    that Vault will refuse the write. This computes the same destination
+    the handler writes to -- ``tenant_secret_ref(operator.tenant_id,
+    register_as)`` on the default KV mount -- and runs the ``vault.kv.put``
+    capability probe there. It passes ``target=None`` on purpose: the
+    handler writes with ``target=None`` (the global Vault role), and
+    ``ctx.target`` is the Kubernetes cluster, not a Vault target.
+    """
+    register_as = ctx.params.get("register_as")
+    if not isinstance(register_as, str):
+        return None
+
+    from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
+    from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
+    from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+
+    dest_ref = tenant_secret_ref(ctx.operator.tenant_id, register_as)
+    return await vault_kv_write_capability_preflight(
+        ctx.operator,
+        "vault.kv.put",
+        {"mount": DEFAULT_KV_MOUNT, "path": dest_ref},
+        target=None,
+    )
+
+
 def _register_builtin_builders() -> None:
     """Wire the in-tree preview builders + permission preflights.
 
@@ -674,10 +750,18 @@ def _register_builtin_builders() -> None:
     capability-only permission preflight (#1504) -- a different hook
     because a credential-class op's preview is suppressed but its
     permission check (capability names, no secret) is not.
+    ``k8s.secret.read_to_ref`` registers the same probe on the Vault path
+    it stages to (#3844).
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
-    for _write_op in ("vault.kv.put", "vault.kv.patch", "vault.kv.delete"):
+    for _write_op in (
+        "vault.kv.put",
+        "vault.kv.patch",
+        "vault.kv.delete",
+        "vault.kv.metadata.delete",
+    ):
         register_permission_preflight(_write_op, _vault_kv_write_preflight)
+    register_permission_preflight("k8s.secret.read_to_ref", _k8s_secret_read_to_ref_preflight)
 
 
 _register_builtin_builders()

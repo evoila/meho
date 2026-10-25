@@ -46,9 +46,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -97,18 +95,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -516,6 +502,86 @@ def test_write_forbidden_omits_clauses_when_path_and_identity_absent() -> None:
     assert out.extras["identity_hint"] is None
 
 
+def test_write_forbidden_names_target_role_retarget_before_policy_stanza() -> None:
+    """#3716: the retarget fix comes first, the §6.1 stanza second.
+
+    The write runs under the operator's token and the dispatch target's
+    ``vault_role``, so the cheapest fix is to run the same write on a vault
+    target whose role can already write the path. The policy stanza is the
+    fallback, and it still carries the do-NOT-widen warning.
+    """
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        identity_hint="op-x",
+    )
+    assert out.error is not None
+    retarget_at = out.error.index("(1) check the target's vault_role")
+    stanza_at = out.error.index("(2) Otherwise add the per-operator write-capability stanza (§6.1)")
+    assert retarget_at < stanza_at
+    assert "dispatch the same write there (no policy change)" in out.error
+    warning_at = out.error.index("Do NOT widen the backplane's shared Vault policy")
+    assert stanza_at < warning_at
+
+
+def test_write_forbidden_names_acting_target_and_role_when_passed() -> None:
+    """#3716: target name + vault_role appear in the summary when passed."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        identity_hint="op-x",
+        target_name="vault-main",
+        vault_role="meho-writer",
+    )
+    assert out.error is not None
+    assert "dispatched on target 'vault-main' under vault_role 'meho-writer'" in out.error
+
+
+def test_write_forbidden_names_target_without_role_override() -> None:
+    """#3716: a target with no vault_role is named; the note says no override was
+    set and does not claim which role was used (the login role resolver has a
+    check-runner and a per-tenant tier before the global default)."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        target_name="vault-main",
+    )
+    assert out.error is not None
+    assert "dispatched on target 'vault-main', which sets no vault_role override" in out.error
+    assert "fallback chain" in out.error
+    assert "or the global default when it is unset" in out.error
+    assert "under vault_role" not in out.error
+    assert "default role was used" not in out.error
+
+
+def test_write_forbidden_omits_target_clause_when_not_passed() -> None:
+    """#3716: no target name → no target/role clause (role alone is ignored)."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        vault_role="meho-writer",
+    )
+    assert out.error is not None
+    assert "dispatched on target" not in out.error
+    assert "'meho-writer'" not in out.error
+
+
 def test_write_forbidden_caps_oversized_message() -> None:
     """A pathological hvac message is capped like the read sibling."""
     from meho_backplane.operations._errors import result_connector_vault_write_forbidden
@@ -554,9 +620,8 @@ def test_write_forbidden_empty_message_has_no_dangling_tail() -> None:
 async def test_dispatch_converts_vault_forbidden_to_structured_cause(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """hvac Forbidden dispatch -> structured cause + audit row + event.
+    """hvac Forbidden dispatch -> structured cause + audit row.
 
     The dispatcher catches :exc:`hvac.exceptions.Forbidden` ahead of the
     generic ``except Exception`` and emits the structured shape naming
@@ -610,15 +675,11 @@ async def test_dispatch_converts_vault_forbidden_to_structured_cause(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_other_hvac_errors_fall_through_to_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """hvac InvalidPath is unchanged -- generic ``connector_error`` flatten.
 
@@ -657,6 +718,3 @@ async def test_dispatch_other_hvac_errors_fall_through_to_connector_error(
     # Did NOT get reclassified as the Forbidden shape.
     assert "connector_vault_forbidden" not in result.error
     assert "expected_secret_ref" not in result.extras
-
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"

@@ -5,11 +5,14 @@
 
 A recording stand-in for the connector's VI-JSON seam
 (``_post_vmomi_json``): a small managed-object store answers
-``RetrievePropertiesEx`` (incl. ``Task.info`` polls), a per-datastore file tree
+``RetrievePropertiesEx`` (incl. ``Task.info`` polls; a ``configurationEx.<member>``
+path fails the way vCenter 8.0.x fails it), a per-datastore file tree
 answers the ``HostDatastoreBrowser`` searches, and the mutating methods
 (``Destroy_Task``, ``RemovePortGroup``, ``DeleteDatastoreFile_Task``,
-``MakeDirectory``) change the store so the handlers' read-backs see the
-result. ``GateRecorder`` replaces the #2254 sub-op gate.
+``MakeDirectory``, and a rule removal through ``ReconfigureComputeResource_Task``)
+change the store so the handlers' read-backs see the result. A many-object
+answer is split into pages the way vCenter may (``tests._vim_pages.PagedVim``).
+``GateRecorder`` replaces the #2254 sub-op gate.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.operations._preview import PreviewContext
+from tests._vim_pages import PagedVim
+from tests._vmware_cluster_config_fake import reject_config_ex_member_paths
 
 #: (fault type, message) a method's task -- or a synchronous call -- fails with.
 Fault = tuple[str, str]
@@ -71,10 +76,11 @@ def parked(op_id: str) -> OperationResult:
     return OperationResult(status="awaiting_approval", op_id=op_id, result=None, duration_ms=1.0)
 
 
-class VimFake:
+class VimFake(PagedVim):
     """Recording double for the connector's VI-JSON seam."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.objects: dict[tuple[str, str], dict[str, Any]] = {}
         self.files: dict[str, dict[str, int | None]] = {}  # ds name -> {rel path: size|None(dir)}
         self.calls: list[tuple[str, Any]] = []
@@ -83,6 +89,7 @@ class VimFake:
         self.sync_fault: Exception | None = None
         self.apply_writes = True
         self.dv_ports: list[dict[str, Any]] | Exception = []
+        #: A VirtualMachine answer carries a token whose next page is empty.
         self.page_token: bool = False
         #: Answer a missing object with a JSON ``VimFault`` HTTP 500 body
         #: instead of the connector-promoted not-found error.
@@ -112,11 +119,16 @@ class VimFake:
         operator: Operator,
         json: Any = None,
         promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         self.calls.append((path, copy.deepcopy(json)))
+        self._record_session(session_used)
         mo_type, moid, method = path.strip("/").split("/")
         if method == "RetrievePropertiesEx":
             return self._retrieve(json, promote_managed_object_not_found)
+        if method == "ContinueRetrievePropertiesEx":
+            return self._continue(json["token"], session_token)
         if method == "Destroy_Task":
             return self._task(method, apply=lambda: self.objects.pop((mo_type, moid), None))
         if method == "FetchDVPorts":
@@ -131,10 +143,13 @@ class VimFake:
             return self._task(method, apply=lambda: self._delete_file(json["name"]))
         if method == "MakeDirectory":
             return self._sync(lambda: self._mkdir(json["name"], json["createParentDirectories"]))
+        if method == "ReconfigureComputeResource_Task":
+            return self._task(method, apply=lambda: self._remove_cluster_rules(moid, json))
         raise AssertionError(f"unexpected vim call {path}")
 
     # -- RetrievePropertiesEx ----------------------------------------------
     def _retrieve(self, body: Any, promote: bool) -> dict[str, Any]:
+        reject_config_ex_member_paths(body)
         spec = body["specSet"][0]
         mo_type = spec["propSet"][0]["type"]
         path_set = spec["propSet"][0]["pathSet"]
@@ -180,10 +195,9 @@ class VimFake:
                     {"path": p, "fault": {"_typeName": "NoPermission"}} for p in missing
                 ]
             objects.append(entry)
-        result: dict[str, Any] = {"objects": objects}
         if self.page_token and mo_type == "VirtualMachine":
-            result["token"] = "more"
-        return result
+            return self._serve([objects, []])
+        return self._serve_objects(objects)
 
     # -- tasks -------------------------------------------------------------
     def _task(self, method: str, *, apply: Any, result: Any = None) -> dict[str, str]:
@@ -218,6 +232,24 @@ class VimFake:
                 continue
             groups = props.get("config.network.portgroup") or []
             props["config.network.portgroup"] = [g for g in groups if g["spec"]["name"] != name]
+
+    # -- cluster DRS rules ----------------------------------------------------
+    def _remove_cluster_rules(self, cluster: str, body: dict[str, Any]) -> None:
+        """Apply the ``rulesSpec`` removals to the cluster's ``configurationEx``.
+
+        Like vCenter, an empty ``rule`` array is left out of the object.
+        """
+        config_ex = self.objects[("ClusterComputeResource", cluster)]["configurationEx"]
+        removed = {
+            spec["removeKey"]["_value"]
+            for spec in body["spec"]["rulesSpec"]
+            if spec["operation"] == "remove"
+        }
+        kept = [rule for rule in config_ex.get("rule", []) if rule.get("key") not in removed]
+        if kept:
+            config_ex["rule"] = kept
+        else:
+            config_ex.pop("rule", None)
 
     # -- datastore files -----------------------------------------------------
     @staticmethod

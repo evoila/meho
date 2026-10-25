@@ -181,3 +181,272 @@ def test_single_unambiguous_boolean_verdict_with_collection_requires_a_hint(
     descriptor.llm_instructions = {}
 
     assert _missing_verdict_scalar_hints([descriptor]) == {op_id: [verdict]}
+
+
+# ---------------------------------------------------------------------------
+# Scalar siblings of a reduced list survive reduction (#3549 / #3633)
+# ---------------------------------------------------------------------------
+
+_SAMPLE_SCALARS: dict[str, Any] = {
+    "string": "sample",
+    "integer": 7,
+    "number": 1.5,
+    "boolean": True,
+}
+
+
+#: Credential-class ops whose scalar siblings are deliberately NOT kept inline
+#: when their list spills. Each entry needs a reason. Keep this list short: a
+#: new op belongs here only if its scalars are secret-shaped.
+_SCALARS_HELD_BACK: dict[str, str] = {
+    "vault.token.create": "client_token and accessor are secret-shaped (credential_mint).",
+}
+
+
+def _first_scalar_type(definition: Any) -> str | None:
+    """The first JSON scalar type a property schema allows, or ``None``."""
+    if not isinstance(definition, dict):
+        return None
+    declared = definition.get("type")
+    types = declared if isinstance(declared, list) else [declared]
+    return next((kind for kind in types if kind in _SAMPLE_SCALARS), None)
+
+
+def _list_plus_scalars_payload(schema: Any) -> tuple[dict[str, Any], set[str]] | None:
+    """Build an over-threshold payload for a "one list + scalar siblings" schema.
+
+    Returns the payload and the scalar sibling names a caller must still see
+    inline after reduction, or ``None`` when the schema is not that shape:
+    no explicit properties, not exactly one array property, or no scalar
+    property. The reducer's own bookkeeping keys (``total`` and friends) are
+    left out of the expected set; the reducer owns those.
+    """
+    from meho_backplane.operations import jsonflux_reducer as reducer_module
+
+    if not isinstance(schema, dict) or not _schema_type_includes(schema, "object"):
+        return None
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    arrays = [
+        key
+        for key, definition in properties.items()
+        if isinstance(definition, dict) and _schema_type_includes(definition, "array")
+    ]
+    if len(arrays) != 1:
+        return None
+    payload: dict[str, Any] = {arrays[0]: [{"i": i} for i in range(60)]}
+    expected: set[str] = set()
+    for key, definition in properties.items():
+        kind = _first_scalar_type(definition)
+        if kind is None:
+            continue
+        payload[key] = _SAMPLE_SCALARS[kind]
+        if key not in reducer_module._RESERVED_SUMMARY_KEYS:
+            expected.add(key)
+    return (payload, expected) if expected else None
+
+
+async def _dropped_scalar_siblings(descriptors: list[Any]) -> dict[str, list[str]]:
+    """Reduce a synthetic payload per qualifying descriptor; list lost scalars.
+
+    The reducer context is built from the descriptor exactly as the
+    dispatcher builds it, so an op's ``result_scalars`` hint is honoured.
+    """
+    from meho_backplane.operations.dispatcher import (
+        _result_digest_from_descriptor,
+        _result_objects_from_descriptor,
+        _result_scalars_from_descriptor,
+    )
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    reducer = JsonFluxReducer()
+    dropped: dict[str, list[str]] = {}
+    for descriptor in descriptors:
+        built = _list_plus_scalars_payload(descriptor.response_schema)
+        if built is None:
+            continue
+        payload, expected = built
+        context: dict[str, Any] = {"op_id": descriptor.op_id}
+        for key, hint in (
+            ("result_scalars", _result_scalars_from_descriptor(descriptor)),
+            ("result_objects", _result_objects_from_descriptor(descriptor)),
+            ("result_digest", _result_digest_from_descriptor(descriptor)),
+        ):
+            if hint is not None:
+                context[key] = hint
+        summary, handle = await reducer.reduce(payload, descriptor.response_schema, context)
+        assert handle is not None, f"{descriptor.op_id}: the synthetic payload did not reduce"
+        missing = sorted(key for key in expected if summary.get(key) != payload[key])
+        if missing:
+            dropped[descriptor.op_id] = missing
+    return dropped
+
+
+@pytest.mark.asyncio
+async def test_typed_list_plus_scalar_ops_keep_their_scalars_on_reduction(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#3549: no registered typed list+scalars op loses a scalar when it spills.
+
+    Non-credential ops are covered by the reducer's default scalar rule.
+    A credential-class op must list its scalars in ``result_scalars`` — the
+    default rule never copies a credential-class op's values.
+    """
+    _eager_import_connectors()
+    await run_typed_op_registrars(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        descriptors = list(
+            (
+                await session.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.source_kind == "typed")
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    qualifying = [d for d in descriptors if _list_plus_scalars_payload(d.response_schema)]
+    assert qualifying, "no typed list+scalars descriptor found; the sweep is not checking anything"
+    assert any(d.op_id == "linux.script.run" for d in qualifying)
+    qualifying_ids = {d.op_id for d in qualifying}
+    stale = sorted(set(_SCALARS_HELD_BACK) - qualifying_ids)
+    assert not stale, f"remove stale _SCALARS_HELD_BACK entries: {stale}"
+    checked = [d for d in qualifying if d.op_id not in _SCALARS_HELD_BACK]
+    dropped = await _dropped_scalar_siblings(checked)
+    assert not dropped, (
+        "typed list+scalars ops drop scalar siblings when the list spills; a "
+        "credential-class op must declare llm_instructions.result_scalars.keys. "
+        f"Dropped: {dropped}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_plus_scalars_sweep_catches_an_unhinted_credential_op() -> None:
+    """The sweep fails for a credential-class op that relies on the default rule."""
+    descriptor = type("Descriptor", (), {})()
+    descriptor.op_id = "vault.kv.list"
+    descriptor.response_schema = {
+        "type": "object",
+        "properties": {"keys": {"type": "array"}, "mount": {"type": "string"}},
+    }
+    descriptor.llm_instructions = {}
+
+    assert await _dropped_scalar_siblings([descriptor]) == {"vault.kv.list": ["mount"]}
+
+
+# ---------------------------------------------------------------------------
+# Static pagination hints and source coverage (#3676)
+# ---------------------------------------------------------------------------
+
+
+class _ValkeyDouble:
+    """Minimal async Valkey double so the real result store can spill."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+async def _reduce_issue_page(context_extra: dict[str, Any]) -> tuple[Any, _ValkeyDouble]:
+    """Reduce one 60-row page of GitHub issues through the real store."""
+    from meho_backplane.connectors.github.pagination_hints import GH_ISSUE_LIST_OP_ID
+    from meho_backplane.connectors.result_handle_store import ResultHandleStore
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    valkey = _ValkeyDouble()
+    store = ResultHandleStore(valkey)  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    page = [{"number": i, "title": f"issue {i}", "state": "open"} for i in range(60)]
+    context: dict[str, Any] = {
+        "op_id": GH_ISSUE_LIST_OP_ID,
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        **context_extra,
+    }
+    _summary, handle = await reducer.reduce(page, None, context)
+    assert handle is not None, "a 60-row page must reduce to a handle"
+    return handle, valkey
+
+
+@pytest.mark.asyncio
+async def test_github_issue_list_hint_surfaces_native_pagination() -> None:
+    """With the curated hint, the agent is told how to fetch the next page."""
+    from meho_backplane.connectors.github.pagination_hints import GH_ISSUE_LIST_PAGINATION_HINT
+
+    handle, _valkey = await _reduce_issue_page({"pagination_hint": GH_ISSUE_LIST_PAGINATION_HINT})
+
+    native = handle.fetch_more.native_pagination
+    assert native.available is True
+    assert native.params is not None
+    assert {"per_page", "page"} <= set(native.params)
+    assert native.example_next_call is not None
+    assert native.example_next_call["args"]["params"]["page"] == 2
+
+
+def test_github_issue_list_hint_example_is_a_complete_next_call() -> None:
+    """The example names every required call_operation arg and says what it assumes."""
+    from meho_backplane.connectors.github.pagination_hints import (
+        GH_ISSUE_LIST_OP_ID,
+        GH_ISSUE_LIST_PAGINATION_HINT,
+    )
+    from meho_backplane.connectors.schemas import PaginationHint
+
+    hint = PaginationHint.model_validate(GH_ISSUE_LIST_PAGINATION_HINT)
+    example = hint.example_next_call
+    assert example["tool"] == "call_operation"
+    args = example["args"]
+    assert {"connector_id", "op_id", "params"} <= set(args)
+    assert args["connector_id"].startswith("<")
+    assert args["op_id"] == GH_ISSUE_LIST_OP_ID
+
+    # The example assumes per_page=100 and state=open. The text must say so,
+    # and must tell the caller to keep their own values and change only page.
+    params = args["params"]
+    assumes = example["assumes"]
+    assert f"per_page={params['per_page']}" in assumes
+    assert f"state={params['state']}" in assumes
+    assert "change only page" in assumes
+    assert "add 1 to page only" in hint.params["page"]
+    assert "same value on every page" in hint.params["per_page"]
+
+
+@pytest.mark.asyncio
+async def test_list_without_hint_reports_native_pagination_unavailable() -> None:
+    """Without a hint the envelope keeps the curated unavailable rationale."""
+    from meho_backplane.operations.jsonflux_reducer import (
+        _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE,
+    )
+
+    handle, _valkey = await _reduce_issue_page({})
+
+    native = handle.fetch_more.native_pagination
+    assert native.available is False
+    assert native.rationale == _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE
+
+
+@pytest.mark.asyncio
+async def test_reduced_page_is_never_labeled_source_complete() -> None:
+    """A hint says how to page; it does not make the stored page source-complete."""
+    import msgspec
+
+    from meho_backplane.connectors.github.pagination_hints import GH_ISSUE_LIST_PAGINATION_HINT
+    from meho_backplane.connectors.result_handle_store import _StoredPayload
+
+    handle, valkey = await _reduce_issue_page({"pagination_hint": GH_ISSUE_LIST_PAGINATION_HINT})
+
+    (raw,) = valkey.values.values()
+    stored = msgspec.json.decode(raw, type=_StoredPayload)
+    assert stored.storage_coverage == "complete"
+    assert stored.source_coverage == "unknown"
+    rationale = handle.fetch_more.drill_in.rationale
+    assert handle.fetch_more.drill_in.available is True
+    assert "full result set" not in rationale
+    assert "may hold more rows" in rationale

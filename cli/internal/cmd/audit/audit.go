@@ -27,6 +27,12 @@
 //   - `meho audit replay <session-id> [--json] [--max-depth N]` —
 //     parent/child audit tree via
 //     GET /api/v1/audit/sessions/{session_id}/replay.
+//   - `meho audit trace list [--op-id GLOB] [--target NAME] [--since DUR]
+//     [--until DUR] [--limit N] [--cursor C] [--json]` (#4855) — the
+//     operation runs that still have a stored flight-recorder trace,
+//     via POST /api/v1/audit/query with has_trace=true.
+//   - `meho audit trace show <audit-id> [--json]` (#4855) — one stored
+//     trace via GET /api/v1/audit/{audit_id}/trace.
 //
 // Each verb wraps one backplane route, renders the response either
 // as a human-readable table / key-value summary or as raw JSON when
@@ -73,7 +79,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "audit",
-		Short: "Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex)",
+		Short: "Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)",
 		Long: "Query the WORM-grade audit log written by the backplane on " +
 			"every authenticated request. Wraps the G8.1-T2 REST surface " +
 			"(/api/v1/audit/*). All verbs are tenant-scoped via the operator's " +
@@ -87,6 +93,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newMyRecentCmd())
 	cmd.AddCommand(newReplayCmd())
 	cmd.AddCommand(newReflexCmd())
+	cmd.AddCommand(newTraceCmd())
 	return cmd
 }
 
@@ -208,8 +215,7 @@ func renderTransportError(
 //     names the required role.
 //   - 400 → unexpected with the parser / substrate error message —
 //     `DurationParseError`, `InvalidCursorError`, and
-//     `UnsupportedFilterError` (v0.2's `parent_audit_id` /
-//     `agent_session_id` gap) all surface as 400 from the backend.
+//     `UnsupportedFilterError` all surface as 400 from the backend.
 //   - 404 → unexpected with "audit row not found" (only the
 //     show endpoint emits this; cross-tenant probes also surface
 //     here per the substrate's tenant-scoping discipline).

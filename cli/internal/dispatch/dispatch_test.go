@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/version"
 )
 
 // fakeOperationsClient is the dispatch-test double satisfying the
@@ -26,12 +28,15 @@ type fakeOperationsClient struct {
 	lastCallParams   *api.PostCallApiV1OperationsCallPostParams
 	lastCallBody     *api.CallOperationBody
 	lastSearchParams *api.GetSearchApiV1OperationsSearchGetParams
+	lastPreviewBody  *api.PreviewOperationBody
 
 	// Sequenced canned responses — pop one per call. Tests register
 	// two responses on the auth-refresh scenarios (first a 401, then
 	// the post-refresh outcome) and one on every other path.
 	callResponses   []*api.PostCallApiV1OperationsCallPostResponse
 	searchResponses []*api.GetSearchApiV1OperationsSearchGetResponse
+	// previewResponses — one per Preview call (two on the 401 path).
+	previewResponses []*api.PostPreviewApiV1OperationsPreviewPostResponse
 
 	// Per-verb transport-error queues. Drained in lockstep with the
 	// response queues so a refresh-then-transport-failure scenario
@@ -66,6 +71,22 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 ) (*api.GetSearchApiV1OperationsSearchGetResponse, error) {
 	f.lastSearchParams = params
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
+}
+
+func (f *fakeOperationsClient) PostPreviewApiV1OperationsPreviewPostWithResponse(
+	_ context.Context,
+	_ *api.PostPreviewApiV1OperationsPreviewPostParams,
+	body api.PostPreviewApiV1OperationsPreviewPostJSONRequestBody,
+	_ ...api.RequestEditorFn,
+) (*api.PostPreviewApiV1OperationsPreviewPostResponse, error) {
+	bodyCopy := body
+	f.lastPreviewBody = &bodyCopy
+	if len(f.previewResponses) == 0 {
+		return nil, nil
+	}
+	r := f.previewResponses[0]
+	f.previewResponses = f.previewResponses[1:]
+	return r, nil
 }
 
 func (f *fakeOperationsClient) Refresh(_ context.Context) error {
@@ -293,6 +314,116 @@ func TestCallRefreshFailurePropagates(t *testing.T) {
 	}
 }
 
+// ---- CallWithPreviewHash / Preview (destructive-tier ops, #3944) ----
+
+// TestCallWithPreviewHashSendsTheHash — the hash rides on the call body
+// next to the usual dict-shape target and params.
+func TestCallWithPreviewHashSendsTheHash(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "awaiting_approval"})
+	f := withFake(t, &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	})
+	c := New("keycloak-admin-26.x")
+	_, err := c.CallWithPreviewHash(context.Background(), "https://bp",
+		"keycloak.user.delete", "kc", map[string]any{"username": "u"}, "abc123")
+	if err != nil {
+		t.Fatalf("CallWithPreviewHash: %v", err)
+	}
+	if f.lastCallBody.PreviewHash == nil || *f.lastCallBody.PreviewHash != "abc123" {
+		t.Fatalf("preview_hash not sent: %+v", f.lastCallBody.PreviewHash)
+	}
+	got, err := f.lastCallBody.Target.AsCallOperationBodyTarget1()
+	if err != nil || got["name"] != "kc" {
+		t.Fatalf("target should be the dict shape {name: kc}; got %+v (%v)", got, err)
+	}
+	if (*f.lastCallBody.Params)["username"] != "u" {
+		t.Fatalf("params not threaded: %+v", f.lastCallBody.Params)
+	}
+}
+
+// TestCallLeavesPreviewHashUnset — a plain Call keeps the pre-#3197 wire
+// shape: no preview_hash value.
+func TestCallLeavesPreviewHashUnset(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok"})
+	f := withFake(t, &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	})
+	if _, err := New("c").Call(context.Background(), "https://bp", "op", "t", nil); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if f.lastCallBody.PreviewHash != nil {
+		t.Fatalf("plain Call must not send a preview_hash; got %q", *f.lastCallBody.PreviewHash)
+	}
+}
+
+// TestPreviewSendsBodyAndDecodesHash — Preview posts the same op, target
+// and params, decodes the hash, and keeps the raw envelope for --json.
+func TestPreviewSendsBodyAndDecodesHash(t *testing.T) {
+	raw := []byte(`{"status":"ok","op_id":"keycloak.user.delete","preview_hash":"h1","method":"COMPOSITE"}`)
+	f := withFake(t, &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: raw},
+		},
+	})
+	c := New("keycloak-admin-26.x")
+	r, err := c.Preview(context.Background(), "https://bp", "keycloak.user.delete", "kc",
+		map[string]any{"id": "x"})
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if r.Status != "ok" || r.PreviewHash != "h1" {
+		t.Fatalf("decoded preview wrong: %+v", r)
+	}
+	if !bytes.Equal(r.Raw, raw) {
+		t.Fatalf("Raw should keep the whole envelope; got %s", r.Raw)
+	}
+	if f.lastPreviewBody.ConnectorId != "keycloak-admin-26.x" || f.lastPreviewBody.OpId != "keycloak.user.delete" {
+		t.Fatalf("preview body identity wrong: %+v", f.lastPreviewBody)
+	}
+	got, err := f.lastPreviewBody.Target.AsPreviewOperationBodyTarget1()
+	if err != nil || got["name"] != "kc" {
+		t.Fatalf("preview target should be {name: kc}; got %+v (%v)", got, err)
+	}
+	if (*f.lastPreviewBody.Params)["id"] != "x" {
+		t.Fatalf("preview params not threaded: %+v", f.lastPreviewBody.Params)
+	}
+}
+
+// TestPreviewRefreshesOn401 — same one-shot refresh dance as Call.
+func TestPreviewRefreshesOn401(t *testing.T) {
+	f := withFake(t, &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(401), Body: []byte(`{"detail":"expired"}`)},
+			{HTTPResponse: makeHTTPResp(200), Body: []byte(`{"status":"ok","preview_hash":"h"}`)},
+		},
+	})
+	r, err := New("c").Preview(context.Background(), "https://bp", "op", "t", nil)
+	if err != nil {
+		t.Fatalf("Preview after refresh: %v", err)
+	}
+	if f.refreshCount != 1 || r.PreviewHash != "h" {
+		t.Fatalf("expected one refresh and the hash; got refresh=%d result=%+v", f.refreshCount, r)
+	}
+}
+
+// TestPreviewClassifiesNon2xx — a non-2xx wraps as *APIResponseError.
+func TestPreviewClassifiesNon2xx(t *testing.T) {
+	withFake(t, &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(403), Body: []byte(`{"detail":"forbidden"}`)},
+		},
+	})
+	_, err := New("c").Preview(context.Background(), "https://bp", "op", "t", nil)
+	var apiErr *APIResponseError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 403 {
+		t.Fatalf("expected *APIResponseError{403}; got %v", err)
+	}
+}
+
 // ---- Search ----
 
 // TestSearchPassesTypedParams — all four params (ConnectorId, Query,
@@ -418,6 +549,7 @@ func TestRenderStatusMapping(t *testing.T) {
 		{"ok", nil},
 		{"error", ErrOpError},
 		{"denied", ErrOpError},
+		{StatusRateLimited, ErrOpError},
 	}
 	for _, tc := range cases {
 		cmd := &cobra.Command{}
@@ -500,6 +632,52 @@ func TestRenderAwaitingApprovalJSON(t *testing.T) {
 	}
 }
 
+// TestRenderAwaitingApprovalRendersAuditReceipt — a multi-step operation
+// that stops for approval already has an audit row. The parked text
+// render shows its id after the parked hint and still exits 0 (#4833).
+func TestRenderAwaitingApprovalRendersAuditReceipt(t *testing.T) {
+	const auditID = "66666666-6666-6666-6666-666666666666"
+	id := auditID
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync", AuditID: &id,
+		Extras: json.RawMessage(`{"approval_request_id":"ar-render-2"}`),
+	}
+	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
+		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
+	}
+	if !strings.HasSuffix(out.String(), "audit receipt: "+auditID+"\n") {
+		t.Errorf("parked render must end with the audit receipt:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "meho approvals show ar-render-2") {
+		t.Errorf("parked hint must still be present:\n%s", out.String())
+	}
+}
+
+// TestRenderAwaitingApprovalNullReceiptPrintsNoLine — a parked call with
+// audit_id null prints no receipt line and still exits 0.
+func TestRenderAwaitingApprovalNullReceiptPrintsNoLine(t *testing.T) {
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync",
+		Extras: json.RawMessage(`{"approval_request_id":"ar-render-3"}`),
+	}
+	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
+		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
+	}
+	if strings.Contains(out.String(), "audit receipt:") {
+		t.Errorf("null audit_id must not render a receipt:\n%s", out.String())
+	}
+}
+
 func TestRenderInvalidStatusReturnsRenderError(t *testing.T) {
 	c := New("c")
 	cmd := &cobra.Command{}
@@ -508,6 +686,50 @@ func TestRenderInvalidStatusReturnsRenderError(t *testing.T) {
 	err := c.Render(cmd, "op", &CallResult{Status: "weird"}, false, nil)
 	if err == nil || errors.Is(err, ErrOpError) {
 		t.Fatalf("invalid status should yield a non-ErrOpError render error, got %v", err)
+	}
+}
+
+// TestRenderUnknownStatusNamesVersionSkew — a status this CLI does not
+// know (an old CLI talking to a newer backplane) must not be called
+// "invalid". The message names the CLI version and the likely version
+// gap, warns that the operation may have run, and points at
+// `meho status`. Nothing is written to stdout and the exit code stays
+// unexpected_response (4).
+func TestRenderUnknownStatusNamesVersionSkew(t *testing.T) {
+	prev := version.Version
+	version.Version = "v0.12.0"
+	t.Cleanup(func() { version.Version = prev })
+
+	for _, jsonOut := range []bool{false, true} {
+		c := New("c")
+		cmd := &cobra.Command{}
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		err := c.Render(cmd, "op", &CallResult{Status: "queued_for_window"}, jsonOut, nil)
+
+		var ec output.ExitCoder
+		if !errors.As(err, &ec) || ec.ExitCode() != output.ExitUnexpected {
+			t.Fatalf("json=%v: want exit %d, got %v", jsonOut, output.ExitUnexpected, err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("json=%v: stdout must stay empty; got %q", jsonOut, out.String())
+		}
+		msg := errBuf.String()
+		for _, want := range []string{
+			"queued_for_window",
+			"this CLI (v0.12.0) does not know",
+			"probably newer than this CLI",
+			"not necessarily a failure",
+			"meho status",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("json=%v: stderr missing %q; got %q", jsonOut, want, msg)
+			}
+		}
+		if strings.Contains(msg, "invalid") {
+			t.Errorf("json=%v: unknown status must not be called invalid; got %q", jsonOut, msg)
+		}
 	}
 }
 
@@ -533,5 +755,125 @@ func TestPrettyJSON(t *testing.T) {
 	}
 	if _, err := PrettyJSON(json.RawMessage(`{bad`)); err == nil {
 		t.Fatalf("expected error on malformed JSON")
+	}
+}
+
+// TestCallDecodesAuditID — the backplane sends audit_id on every
+// envelope it committed a row for (#4230, #4801). The shared CallResult
+// must keep it, so the vendor verbs can show it (#4833).
+func TestCallDecodesAuditID(t *testing.T) {
+	const auditID = "77777777-7777-7777-7777-777777777777"
+	withFake(t, &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: []byte(
+				`{"status":"error","op_id":"vault.kv.read","result":null,` +
+					`"error":"connection refused","audit_id":"` + auditID + `","duration_ms":3}`)},
+		},
+	})
+	c := New("vault-1.x")
+	r, err := c.Call(context.Background(), "https://bp", "vault.kv.read", "test-target", nil)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if r.AuditID == nil || *r.AuditID != auditID {
+		t.Fatalf("audit_id not decoded: %+v", r.AuditID)
+	}
+}
+
+// TestPrintGenericFailureRendersAuditReceipt — a failed, refused or
+// rate-limited call shows its audit id in the text output, so the
+// operator can read the row that says why it failed (#4833).
+func TestPrintGenericFailureRendersAuditReceipt(t *testing.T) {
+	const auditID = "88888888-8888-8888-8888-888888888888"
+	errMsg := "connection refused"
+	for _, status := range []string{"error", "denied", StatusRateLimited} {
+		t.Run(status, func(t *testing.T) {
+			c := New("vault-1.x")
+			var buf bytes.Buffer
+			id := auditID
+			c.PrintGeneric(&buf, "vault.kv.read", &CallResult{
+				Status: status, Error: &errMsg, AuditID: &id,
+				Extras: json.RawMessage(`{"error_code":"connector_error"}`), DurationMs: 3,
+			})
+			out := buf.String()
+			for _, want := range []string{
+				"status=" + status,
+				"meho: connector error: connection refused",
+				"extras:",
+				"audit receipt: " + auditID + "\n",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("status=%s render missing %q:\n%s", status, want, out)
+				}
+			}
+			if !strings.HasSuffix(out, "audit receipt: "+auditID+"\n") {
+				t.Errorf("audit receipt must be the last line:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestPrintGenericFailureNullReceiptPrintsNoLine — an old backplane, or a
+// call without a committed row, sends audit_id null. No line is invented.
+func TestPrintGenericFailureNullReceiptPrintsNoLine(t *testing.T) {
+	c := New("vault-1.x")
+	errMsg := "policy refused"
+	var buf bytes.Buffer
+	c.PrintGeneric(&buf, "vault.kv.read", &CallResult{Status: "denied", Error: &errMsg})
+	if strings.Contains(buf.String(), "audit receipt:") {
+		t.Fatalf("null audit_id must not render a receipt:\n%s", buf.String())
+	}
+}
+
+// TestWriteAuditReceiptSkipsEmpty — nil and "" both print nothing.
+func TestWriteAuditReceiptSkipsEmpty(t *testing.T) {
+	empty := ""
+	for name, id := range map[string]*string{"nil": nil, "empty": &empty} {
+		var buf bytes.Buffer
+		WriteAuditReceipt(&buf, id)
+		if buf.Len() != 0 {
+			t.Errorf("%s audit id must print nothing, got %q", name, buf.String())
+		}
+	}
+}
+
+// TestRenderJSONCarriesAuditID — --json on a vendor verb now carries the
+// audit_id key the backplane sent (null stays null), matching the
+// `meho operation call` envelope.
+func TestRenderJSONCarriesAuditID(t *testing.T) {
+	const auditID = "99999999-9999-9999-9999-999999999999"
+	c := New("vault-1.x")
+	for _, tc := range []struct {
+		name string
+		id   *string
+		want any
+	}{
+		{name: "present", id: func() *string { s := auditID; return &s }(), want: auditID},
+		{name: "null", id: nil, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&bytes.Buffer{})
+			errMsg := "connection refused"
+			err := c.Render(cmd, "vault.kv.read", &CallResult{
+				Status: "error", OpID: "vault.kv.read", Error: &errMsg, AuditID: tc.id,
+			}, true, nil)
+			if !errors.Is(err, ErrOpError) {
+				t.Fatalf("status=error must keep exit 1: %v", err)
+			}
+			var envelope map[string]any
+			if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode --json output: %v; output=%q", err, out.String())
+			}
+			got, ok := envelope["audit_id"]
+			if !ok {
+				t.Fatalf("--json dropped the audit_id key: %q", out.String())
+			}
+			if got != tc.want {
+				t.Errorf("audit_id: got %#v want %#v", got, tc.want)
+			}
+		})
 	}
 }

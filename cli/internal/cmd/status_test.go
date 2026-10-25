@@ -155,6 +155,154 @@ func TestStatus_HumanHappyPath(t *testing.T) {
 	}
 }
 
+// upgradeHealthBody is a response from a backplane that sends the
+// #4830 fields, with the DB line driven by the given db block.
+func upgradeHealthBody(db map[string]any) []byte {
+	return mustJSON(map[string]any{
+		"operator": map[string]any{"sub": "alice-sub", "email": "alice@example.com", "name": "Alice Example"},
+		"vault":    map[string]any{"reachable": true, "read_ok": true},
+		"db":       db,
+		"readiness": map[string]any{
+			"ready": true,
+			"checks": []map[string]any{
+				{"name": "keycloak", "ok": true, "detail": ""},
+				{"name": "vault", "ok": true, "detail": ""},
+				{"name": "db", "ok": true, "detail": "revision=0115"},
+			},
+		},
+		"approvals": map[string]any{
+			"custody":                    "configured",
+			"effective_posture":          "four_eyes_enforced",
+			"delegated_decision_posture": "production_own_hand_only",
+		},
+		"features": []map[string]any{
+			{"name": "agent_runtime", "configured": false, "missing_env": []string{"KEYCLOAK_ADMIN_CLIENT_ID"}},
+			{"name": "mcp", "configured": true, "missing_env": []string{}},
+		},
+	})
+}
+
+// TestStatus_HumanShowsUpgradeDetails pins the DB line for a database
+// at the expected revision, behind it and ahead of it, plus the
+// readiness, approvals and features lines (#4830).
+func TestStatus_HumanShowsUpgradeDetails(t *testing.T) {
+	cases := []struct {
+		name   string
+		db     map[string]any
+		dbLine string
+	}{
+		{
+			"at head",
+			map[string]any{"migrated": true, "revision": "0115", "head": "0115", "detail": "revision=0115"},
+			"DB:    migrated, revision 0115\n",
+		},
+		{
+			"behind",
+			map[string]any{"migrated": false, "revision": "0114", "head": "0115", "detail": "current=0114 head=0115"},
+			"DB:    not migrated (database at 0114, this version expects 0115)\n",
+		},
+		{
+			"ahead after rollback",
+			map[string]any{"migrated": true, "revision": "0116", "head": "0115", "detail": "current=0116 head=0115 db_ahead=true"},
+			"DB:    migrated, revision 0116 (newer than this version, which expects 0115; normal after a rollback)\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			xdg := withTempXDG(t)
+			url, _ := fakeBackplane(t, upgradeHealthBody(tc.db), http.StatusOK)
+			seedCreds(t, xdg, url, auth.StoredToken{
+				BackplaneURL: url,
+				AccessToken:  jwtMarker,
+				Expiry:       time.Now().Add(time.Hour),
+			})
+
+			stdout, stderr, err := runStatus(t)
+			if err != nil {
+				t.Fatalf("status returned error: %v\nstderr:\n%s", err, stderr.String())
+			}
+			out := stdout.String()
+			for _, want := range []string{
+				tc.dbLine,
+				"Readiness: ready (keycloak, vault, db ok)\n",
+				"Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured\n",
+				"Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)\n",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("missing %q in stdout:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestStatus_OldBackplaneBodyPrintsAsBefore: a response without the
+// #4830 fields prints the three lines it always printed and nothing
+// more.
+func TestStatus_OldBackplaneBodyPrintsAsBefore(t *testing.T) {
+	xdg := withTempXDG(t)
+	url, _ := fakeBackplane(t, healthBody(), http.StatusOK)
+	seedCreds(t, xdg, url, auth.StoredToken{
+		BackplaneURL: url,
+		AccessToken:  jwtMarker,
+		Expiry:       time.Now().Add(time.Hour),
+	})
+
+	stdout, stderr, err := runStatus(t)
+	if err != nil {
+		t.Fatalf("status returned error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "DB:    migrated\n") {
+		t.Errorf("expected the plain DB line, got:\n%s", out)
+	}
+	for _, label := range []string{"Readiness", "Approvals", "Features", "revision"} {
+		if strings.Contains(out, label) {
+			t.Errorf("an old response must not print %q:\n%s", label, out)
+		}
+	}
+	if strings.Count(out, "\n") != 3 {
+		t.Errorf("an old response prints exactly three lines:\n%s", out)
+	}
+}
+
+// TestStatus_JSONCarriesUpgradeDetails: --json passes the new fields
+// through untouched, so agents and scripts can read the revision.
+func TestStatus_JSONCarriesUpgradeDetails(t *testing.T) {
+	xdg := withTempXDG(t)
+	body := upgradeHealthBody(map[string]any{"migrated": true, "revision": "0115", "head": "0115", "detail": "revision=0115"})
+	url, _ := fakeBackplane(t, body, http.StatusOK)
+	seedCreds(t, xdg, url, auth.StoredToken{
+		BackplaneURL: url,
+		AccessToken:  jwtMarker,
+		Expiry:       time.Now().Add(time.Hour),
+	})
+
+	stdout, stderr, err := runStatus(t, "--json")
+	if err != nil {
+		t.Fatalf("status --json returned error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout.String())
+	}
+	db, _ := got["db"].(map[string]any)
+	if db["revision"] != "0115" || db["head"] != "0115" {
+		t.Errorf("db revision/head not passed through: %v", db)
+	}
+	readiness, _ := got["readiness"].(map[string]any)
+	if readiness["ready"] != true {
+		t.Errorf("readiness not passed through: %v", readiness)
+	}
+	approvals, _ := got["approvals"].(map[string]any)
+	if approvals["custody"] != "configured" {
+		t.Errorf("approvals not passed through: %v", approvals)
+	}
+	if features, _ := got["features"].([]any); len(features) != 2 {
+		t.Errorf("features not passed through: %v", got["features"])
+	}
+}
+
 func TestStatus_JSONHappyPath(t *testing.T) {
 	xdg := withTempXDG(t)
 	url, _ := fakeBackplane(t, healthBody(), http.StatusOK)

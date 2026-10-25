@@ -26,12 +26,20 @@
 #
 # The Claude Desktop MCPB bundle (clients/claude-desktop-mcpb/) is built
 # with the tag version and attached to the same Release as a fifth asset
-# by the build + attach steps below. It is not a CLI tarball and is not
-# cosign-signed; distribution is the GitHub Release asset channel only
-# (#3129). The steps run after GoReleaser has created the Release; the
+# by the build + attach steps below. It is not a CLI tarball, so it is not
+# in GoReleaser's SHA256SUMS. It gets its own checksum file,
+# SHA256SUMS-mcpb, which is cosign-signed like SHA256SUMS (#3859).
+# Distribution is the GitHub Release asset channel only (#3129).
+# The steps run after GoReleaser has created the Release; the
 # attach step uses softprops/action-gh-release (GitHub API, no `gh` CLI)
 # so it works on the self-hosted runner image, which ships without `gh`
 # (#3171).
+#
+# After the `release` job, the `linux-download` job calls
+# linux-download.yml (#4734). It builds the download of install form 2,
+# meho-linux-<version>-amd64.tar, from the `release` job's Linux CLI and
+# the tag's chart and image. It attaches the tar, SHA256SUMS-linux and
+# SHA256SUMS-linux.cosign.bundle to the same Release.
 #
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
@@ -41,6 +49,8 @@
 #     `packages: write`, no `security-events: write` — CLI tarballs
 #     land on GitHub Releases, not GHCR, and there is no SARIF scan
 #     in this Task's scope.
+#   * `linux-download` grants the same two to the called workflow, where
+#     only its `publish` job (sign + attach) uses them.
 
 name: cli-release
 
@@ -108,7 +118,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Matches `cli/go.mod`'s `go 1.26.9` directive. GoReleaser
+          # Matches `cli/go.mod`'s `go 1.26.10` directive. GoReleaser
           # builds with this toolchain; bumping requires an aligned
           # `cli/go.mod` edit so we hardcode the version explicitly
           # rather than reading it from go.mod via `go-version-file:`
@@ -116,8 +126,12 @@ jobs:
           # rebuild signal).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
           # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer.
+          # crypto/tls, net/textproto) need go1.26.9 or newer, and
+          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
           go-version: '1.26'
+          # Same reason as ci.yml's go-lint-test lane: do not use an
+          # older 1.26.x that the runner image has cached.
+          check-latest: true
           # Cache go modules across runs; speeds up the cold checkout
           # by 10-20s on the self-hosted runner pool's pre-warmed
           # filesystem. Keyed by cli/go.sum (the only Go module in
@@ -129,7 +143,7 @@ jobs:
         # packs the Claude Desktop bundle (see the build/attach step after
         # GoReleaser). Same pin as dependency-license-check.yml so one
         # supply-chain audit covers both Node setups.
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
 
@@ -228,7 +242,7 @@ jobs:
           echo "RELEASE_NOTES_FILE=${NOTES_FILE}" >> "${GITHUB_ENV}"
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de  # v7.3.0
         with:
           # Pinned to the exact patch so the GoReleaser build that
           # produces the signed (cosign) release artefacts is
@@ -278,6 +292,19 @@ jobs:
           # standard sigstore.dev CI guidance.
           COSIGN_YES: "true"
 
+      - name: Keep the Linux amd64 CLI for the form-2 download
+        # The `linux-download` job below packs this exact archive's `meho`
+        # binary into meho-linux-<version>-amd64.tar. GoReleaser's SHA256SUMS
+        # rides along, so that job checks the archive before it unpacks it.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: meho-cli-linux-amd64
+          path: |
+            cli/dist/meho_*_linux_amd64.tar.gz
+            cli/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Build Claude Desktop .mcpb bundle
         # `build.sh` runs the pinned `mcpb pack` (which validates the
         # manifest) with the tag version stripped of its leading `v` —
@@ -291,6 +318,26 @@ jobs:
           OUT_DIR="${RUNNER_TEMP}/mcpb"
           clients/claude-desktop-mcpb/build.sh "${VERSION}" "${OUT_DIR}"
           echo "MCPB_BUNDLE=${OUT_DIR}/meho-claude-desktop-${VERSION}.mcpb" >> "${GITHUB_ENV}"
+
+      - name: Checksum and sign the .mcpb bundle
+        # GoReleaser's SHA256SUMS lists only the CLI tarballs, because the
+        # bundle is built after GoReleaser ends. So the bundle gets its own
+        # checksum file, SHA256SUMS-mcpb (#3859). It uses the same two-space
+        # format as SHA256SUMS (`<hash>  <file name>`), which both
+        # `sha256sum -c` (Linux) and `shasum -a 256 -c` (macOS) read. The
+        # name has no `.mcpb` ending, so Claude Desktop does not try to open
+        # it as a bundle. cosign signs it with the same arguments as the
+        # `signs:` block in cli/.goreleaser.yaml, under the same workflow
+        # identity, so the CLI verify recipe works for it unchanged.
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          cd "$(dirname "${MCPB_BUNDLE}")"
+          sha256sum "$(basename "${MCPB_BUNDLE}")" > SHA256SUMS-mcpb
+          sha256sum -c SHA256SUMS-mcpb
+          cosign sign-blob --yes --bundle=SHA256SUMS-mcpb.cosign.bundle SHA256SUMS-mcpb
+          echo "MCPB_SUMS=${PWD}/SHA256SUMS-mcpb" >> "${GITHUB_ENV}"
 
       - name: Attach Claude Desktop .mcpb bundle to the Release
         # GoReleaser created the Release above — PUBLISHED, not draft:
@@ -311,11 +358,15 @@ jobs:
         # GoReleaser-set release notes. `overwrite_files` (default true)
         # lets a re-tag replace the asset, matching the previous
         # `--clobber`; `fail_on_unmatched_files` keeps the step fail-closed
-        # if the bundle glob matches nothing.
+        # if any of the three paths matches nothing. The bundle's checksum
+        # file and its cosign bundle ride along (#3859).
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
-          files: ${{ env.MCPB_BUNDLE }}
+          files: |
+            ${{ env.MCPB_BUNDLE }}
+            ${{ env.MCPB_SUMS }}
+            ${{ env.MCPB_SUMS }}.cosign.bundle
           fail_on_unmatched_files: true
 
       - name: Emit release summary
@@ -334,7 +385,7 @@ jobs:
             echo "### Artefacts"
             echo ""
             echo '```'
-            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS cli/dist/*.cosign.bundle "${RUNNER_TEMP}"/mcpb/*.mcpb 2>/dev/null || true
+            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS cli/dist/*.cosign.bundle "${RUNNER_TEMP}"/mcpb/*.mcpb "${RUNNER_TEMP}"/mcpb/SHA256SUMS-mcpb* 2>/dev/null || true
             echo '```'
             echo ""
             echo "Each \`.tar.gz\` and the \`SHA256SUMS\` file has a matching"
@@ -354,6 +405,9 @@ jobs:
             echo '```bash'
             echo "curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS"
             echo "sha256sum -c SHA256SUMS"
+            echo "# Claude Desktop bundle (own checksum file):"
+            echo "curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS-mcpb"
+            echo "sha256sum -c SHA256SUMS-mcpb"
             echo '```'
             echo ""
             echo "### Verify signatures (cosign keyless, ADR 0006)"
@@ -370,13 +424,37 @@ jobs:
             echo "  \${TARBALL}"
             echo '```'
             echo ""
-            echo "The same recipe works for \`SHA256SUMS.cosign.bundle\` —"
+            echo "The same recipe works for \`SHA256SUMS.cosign.bundle\` and"
+            echo "\`SHA256SUMS-mcpb.cosign.bundle\` —"
             echo "verify the checksums file's bundle first, then run"
             echo "\`sha256sum -c SHA256SUMS\` against the tarballs you"
             echo "actually downloaded (two-step trust chain)."
             echo ""
             echo "The release is **live** the moment this workflow ends"
             echo "(auto-published, #1127) — verify the four tarballs +"
-            echo "bundles and the .mcpb asset are present and that"
+            echo "bundles, the .mcpb asset and SHA256SUMS-mcpb are present and that"
             echo "\`meho version\` reports the expected tag."
+            echo ""
+            echo "The form-2 download \`meho-linux-${TAG#v}-amd64.tar\`, with"
+            echo "\`SHA256SUMS-linux\` and its \`.cosign.bundle\`, is attached later"
+            echo "by the \`linux-download\` job (see docs/RELEASING.md)."
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  linux-download:
+    name: Form-2 download (meho-linux-<version>-amd64.tar)
+    # Builds the one download of install form 2 from this tag's chart, image
+    # and CLI, signs its checksum file and attaches the three files to the
+    # release that the `release` job created (#4734). See
+    # .github/workflows/linux-download.yml.
+    needs: release
+    uses: ./.github/workflows/linux-download.yml
+    with:
+      tag: ${{ github.ref_name }}
+    # A called workflow can use at most the permissions its calling job
+    # grants. Inside linux-download.yml only the `publish` job, which signs
+    # and attaches, takes these two; its `build` job stays read-only.
+    # GitHub does not allow `timeout-minutes` on a job that calls a
+    # workflow; each job of linux-download.yml sets its own.
+    permissions:
+      contents: write
+      id-token: write

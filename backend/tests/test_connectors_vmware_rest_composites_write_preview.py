@@ -49,9 +49,7 @@ from uuid import UUID
 import httpx
 import pytest
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
@@ -77,6 +75,8 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.deploy_from_library",
         "vmware.composite.vm.clone_from_template",
         "vmware.composite.vm.snapshot.revert",
+        "vmware.composite.vm.snapshot.create",
+        "vmware.composite.vm.snapshot.delete",
         "vmware.composite.vm.destroy",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power",
@@ -125,6 +125,14 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.datastore.dir.create",
         "vmware.composite.content_library.delete",
         "vmware.composite.content_library.item.delete",
+        # The destructive DRS rule delete: blast_radius from its own plan.
+        "vmware.composite.cluster.drs_rule.delete",
+        # Licence assign: live-read of the asset's licence now and the new one.
+        "vmware.composite.license.assign",
+        # The two alarm changes (#4383): a live read of the alarm, or of the
+        # alarms the reset filter matches now.
+        "vmware.composite.alarm.acknowledge",
+        "vmware.composite.alarm.reset",
     }
 )
 
@@ -163,18 +171,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture(autouse=True)
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace the audit path's :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 def _make_operator(*, sub: str = "op-vmware-write-preview") -> Operator:
@@ -636,6 +632,7 @@ async def test_vm_deploy_from_library_preview_echoes_deploy_coordinates() -> Non
                 "network_mappings": {"nat": "dvportgroup-42"},
                 "storage_provisioning": "thin",
                 "ovf_properties": {"guestinfo.password": "s3cret", "guestinfo.hostname": "r1"},
+                "deployment_option": "medium",
                 "power_on": True,
             }
         )
@@ -653,6 +650,7 @@ async def test_vm_deploy_from_library_preview_echoes_deploy_coordinates() -> Non
         "storage_provisioning": "thin",
         # Only property IDs — never the (possibly secret) values (#1503).
         "ovf_property_keys": ["guestinfo.hostname", "guestinfo.password"],
+        "deployment_option": "medium",
         "power_on": True,
     }
 
@@ -674,6 +672,7 @@ async def test_vm_deploy_from_library_preview_defaults_optional_fields() -> None
         "network_mappings": {},
         "storage_provisioning": None,
         "ovf_property_keys": [],
+        "deployment_option": None,
         "power_on": False,
     }
 
@@ -1436,6 +1435,18 @@ async def test_folder_create_preview_echoes_parent_and_new_name() -> None:
         _make_preview_ctx({"parent_folder": "prod", "folder_name": "cluster-nodes"})
     )
     assert preview == {"parent_folder": "prod", "new_folder_name": "cluster-nodes"}
+
+
+async def test_folder_create_preview_echoes_datacenter_and_moid_pin() -> None:
+    """The #3588 parent shapes are echoed too: datacenter scope and the moid pin."""
+    scoped = await _write_preview._folder_create_preview(
+        _make_preview_ctx({"parent_folder": "vm", "datacenter": "datacenter-3", "folder_name": "x"})
+    )
+    assert scoped == {"parent_folder": "vm", "datacenter": "datacenter-3", "new_folder_name": "x"}
+    pinned = await _write_preview._folder_create_preview(
+        _make_preview_ctx({"parent_folder_id": "group-v4", "folder_name": "x"})
+    )
+    assert pinned == {"parent_folder_id": "group-v4", "new_folder_name": "x"}
 
 
 # ===========================================================================

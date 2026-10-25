@@ -85,12 +85,13 @@ read, a cluster/DRS read, an event/perf query) lets an
 branch wraps it into a ``connector_error`` :class:`OperationResult` for
 the composite parent, whose ``str(exc)`` already carries the upstream
 status code + offending URL. Optional enrichment legs (per-datastore
-VM placement, per-host property read, vSAN health) degrade best-effort
+VM placement, per-host property read) degrade best-effort
 instead -- they catch the transport error, null the enriched fields,
 and record an ``enrichment_note`` rather than sinking the whole
 aggregation. (The former per-host ``network_uplinks`` and per-cluster
 ``vsan_health`` best-effort reads were re-shipped as typed ops in #2258;
-see :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
+see :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`. Since #4441
+``vsan_health`` raises on a failed vSAN call instead of degrading.)
 
 Op_id contract for sub-ops
 --------------------------
@@ -128,11 +129,23 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vmware_rest.composites._write import (
+    _DVPG_MO_TYPE,
+    _DVS_MO_TYPE,
+    _PROP_DVPG_DEFAULT_PORT_CONFIG,
+    _PROP_DVPG_DVS,
+    _observed_vlan_identity,
+    _vlan_identity_view,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    VIM_TYPE_NAME_KEY,
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
+    vim_moref,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 
 from .schemas import DATASTORE_USAGE_MAX_VM_NAMES
 
@@ -161,10 +174,12 @@ _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 # ``GET:/vcenter/cluster/{cluster}/drs`` path #508 declared was unserved
 # (the #2970 adjacent finding, fixed in #2986). DRS state is a vim-only
 # surface, so the composite reads it through the PropertyCollector
-# singleton (``configurationEx.drsConfig`` + optional
-# ``drsRecommendation``) -- the same vim seam the vm.migrate DRS lookup
-# uses (#2970).
+# singleton (``configurationEx`` + optional ``drsRecommendation``) -- the
+# same vim seam the vm.migrate DRS lookup uses (#2970).
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# The datastore-usage placement read asks for every VM in one call and follows
+# the continuation pages vCenter may send (#4862).
+_OP_CONTINUE_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
 _OP_POST_QUERY_EVENTS = "POST:/EventManager/{moId}/QueryEvents"
 _OP_POST_QUERY_AVAILABLE_PERF_METRIC = "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric"
 _OP_POST_QUERY_PERF = "POST:/PerformanceManager/{moId}/QueryPerf"
@@ -184,16 +199,14 @@ _OP_LIST_VMS = "GET:/vcenter/vm"
 # all: the plural ``distributed-switches`` path #1602 repointed to exists
 # only under ``/vcenter/namespace-management/networks/nsx/`` (NSX-scoped)
 # in the canonical ``vcenter.yaml`` -- the #2970 real-spec reconcile
-# finding. The audit's DVS-list step is therefore dropped (see the
-# handler's degradation note); enumerating switches is a vim-only surface.
-# There is likewise NO dedicated ``distributed-portgroup(s)`` list
+# finding. There is likewise NO dedicated ``distributed-portgroup(s)`` list
 # resource: distributed portgroups are enumerated via the generic network
 # resource filtered to ``DISTRIBUTED_PORTGROUP`` (the singular
 # ``distributed-portgroup`` op_id #508 declared was absent from every
 # ingest -- #1602). The generic ``Network`` summary returns only
-# ``{network (id), name, type}`` -- it carries no parent-DVS field, so
-# the per-portgroup ``dvs``/``dvs_name`` enrichment is best-effort (see
-# the handler note).
+# ``{network (id), name, type}``, so the portgroup audit reads the parent
+# switch, the VLAN and the connected VMs from the portgroup managed object
+# through the PropertyCollector (#3802).
 _OP_LIST_NETWORK = "GET:/vcenter/network"
 _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 
@@ -202,12 +215,19 @@ _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 # concrete value the ``{moId}`` path template takes at call time (the
 # same convention the typed reads and write composites use).
 _PROPERTY_COLLECTOR_MOID = "propertyCollector"
+#: Objects per ``RetrievePropertiesEx`` in :func:`_retrieve_props_by_moid` --
+#: small enough that vCenter does not page the answer.
+_RETRIEVE_CHUNK = 50
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
-# Nested vim property path for the cluster's DRS configuration:
-# ``ClusterConfigInfoEx.drsConfig`` is a ``ClusterDrsConfigInfo``
+# The cluster's whole configuration (a ``ClusterConfigInfoEx`` on a
+# cluster). Its ``drsConfig`` member is the ``ClusterDrsConfigInfo``
 # (``enabled`` / ``defaultVmBehavior`` / ``vmotionRate`` / ...),
-# spec-verified against the pinned vi-json.yaml.
-_PROP_DRS_CONFIG = "configurationEx.drsConfig"
+# spec-verified against the pinned vi-json.yaml. The vim API declares the
+# property as the base type ``ComputeResourceConfigInfo``, which has no
+# ``drsConfig`` member, and vCenter 8.0.x rejects the path
+# ``configurationEx.drsConfig`` with an HTTP 500 ``InvalidProperty`` (#3617).
+# So the composite reads the whole object and picks ``drsConfig`` in code.
+_PROP_CONFIGURATION_EX = "configurationEx"
 # The cluster's current DRS recommendation list
 # (``ClusterDrsRecommendation[]``). Deprecated in the vim API since
 # VI 2.5 but served by the pinned spec and the only surface carrying the
@@ -230,6 +250,22 @@ _PROP_VM_DATASTORE = "datastore"
 # bounded PropertyCollector read after invoking RefreshDatastore.
 _DATASTORE_MO_TYPE = "Datastore"
 _PROP_DATASTORE_SUMMARY = "summary"
+
+# vim properties for the portgroup audit (#3802). ``vm`` is the inherited
+# ``Network.vm`` property: the VMs with a NIC on this portgroup. The
+# portgroup's switch + port config property names are shared with the
+# portgroup write composites. ``config.defaultPortConfig`` is read whole,
+# never the deep ``config.defaultPortConfig.vlan`` path (vCenter 8.0.x
+# answers that path with HTTP 500).
+_PROP_NAME = "name"
+_PROP_NETWORK_VM = "vm"
+_PROP_VM_POWER_STATE = "runtime.powerState"
+_VM_POWERED_ON = "poweredOn"
+_PORTGROUP_AUDIT_PATHS: tuple[str, ...] = (
+    _PROP_DVPG_DVS,
+    _PROP_DVPG_DEFAULT_PORT_CONFIG,
+    _PROP_NETWORK_VM,
+)
 
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
@@ -257,10 +293,11 @@ _SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
     _OP_GET_DATASTORE,
     _OP_LIST_VMS,
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
 )
 _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
     _OP_LIST_NETWORK,
-    _OP_LIST_VMS,
+    _OP_RETRIEVE_PROPERTIES,
 )
 _SUB_OPS_DATASTORE_REFRESH: tuple[str, ...] = (
     _OP_POST_REFRESH_DATASTORE,
@@ -427,8 +464,8 @@ async def cluster_drs_recommendations_composite(
     1. ``GET:/vcenter/cluster/{cluster}`` -- cluster summary (name,
        resource pool, HA/DRS-enabled flags).
     2. ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` (vi-json)
-       -- the cluster's DRS configuration
-       (``ClusterComputeResource.configurationEx.drsConfig``, a
+       -- the cluster's whole ``configurationEx``, from which the handler
+       picks the DRS configuration (``drsConfig``, a
        ``ClusterDrsConfigInfo``: ``enabled``, ``defaultVmBehavior``,
        ``vmotionRate``, ...) plus, when
        ``include_recommendations_history=True``, the cluster's current
@@ -457,7 +494,7 @@ async def cluster_drs_recommendations_composite(
     cluster_result = await _read_sub_op(
         connector, target, operator, _OP_GET_CLUSTER, path_params={"cluster": cluster_moid}
     )
-    path_set = [_PROP_DRS_CONFIG]
+    path_set = [_PROP_CONFIGURATION_EX]
     if include_history:
         path_set.append(_PROP_DRS_RECOMMENDATION)
     retrieve_result = await _read_sub_op(
@@ -469,7 +506,8 @@ async def cluster_drs_recommendations_composite(
         body=_build_cluster_props_retrieve_body(cluster_moid, path_set),
     )
     props = _extract_object_props(retrieve_result)
-    drs_config = props.get(_PROP_DRS_CONFIG)
+    config_ex = props.get(_PROP_CONFIGURATION_EX)
+    drs_config = config_ex.get("drsConfig") if isinstance(config_ex, dict) else None
     out: dict[str, Any] = {
         "cluster": _unwrap_value(cluster_result),
         "drs": drs_config if isinstance(drs_config, dict) else {},
@@ -482,6 +520,156 @@ async def cluster_drs_recommendations_composite(
     return out
 
 
+# vim types of the QueryEvents request body (spec-verified against the pinned
+# vi-json.yaml: ``QueryEventsRequestType.filter`` is an ``EventFilterSpec``;
+# its ``time`` / ``entity`` members are ``EventFilterSpecByTime`` /
+# ``EventFilterSpecByEntity``). vCenter 8.0.x rejects a QueryEvents call with
+# no body (HTTP 500 ``InvalidArgument``), and its deserialiser wants the
+# ``_typeName`` tag on every DataObject (#3103), so the filter is always sent
+# and always tagged. The body shape is the same on 8.0.x and 9.0: only the
+# ``/sdk/vim25/{release}`` path segment differs. 9.0 adds an optional
+# ``eventViewSpec`` argument, which this composite does not send.
+_EVENT_FILTER_SPEC_TYPE = "EventFilterSpec"
+_EVENT_FILTER_SPEC_BY_TIME_TYPE = "EventFilterSpecByTime"
+_EVENT_FILTER_SPEC_BY_ENTITY_TYPE = "EventFilterSpecByEntity"
+_EVENT_TAIL_DEFAULT_MAX_COUNT = 100
+_EVENT_TAIL_DEFAULT_RECURSION = "all"
+# Event argument fields that name the managed entity an event is about, most
+# specific first. Each is an ``EntityEventArgument`` subtype carrying ``name``
+# plus one MoRef member (``vm`` / ``datastore`` / ``host`` / ...).
+_EVENT_ENTITY_ARGUMENTS: tuple[str, ...] = (
+    "vm",
+    "ds",
+    "host",
+    "net",
+    "dvs",
+    "computeResource",
+    "datacenter",
+)
+
+
+def _build_query_events_body(params: dict[str, Any], max_count: int) -> dict[str, Any]:
+    """Build the ``QueryEvents`` method args: one tagged ``EventFilterSpec``.
+
+    Members are added in the order the vim schema declares them (``entity``,
+    ``time``, ``disableFullMessage``, ``eventTypeId``, ``maxCount``).
+    ``disableFullMessage`` is sent as ``false`` because the spec says an unset
+    flag leaves ``fullFormattedMessage`` out, and the reduced rows need it.
+    Time strings pass through as given; the parameter schema already checked
+    they are RFC 3339.
+    """
+    spec: dict[str, Any] = {VIM_TYPE_NAME_KEY: _EVENT_FILTER_SPEC_TYPE}
+    entity = params.get("entity")
+    if isinstance(entity, dict):
+        spec["entity"] = {
+            VIM_TYPE_NAME_KEY: _EVENT_FILTER_SPEC_BY_ENTITY_TYPE,
+            "entity": vim_moref(entity["type"], entity["moId"]),
+            "recursion": entity.get("recursion", _EVENT_TAIL_DEFAULT_RECURSION),
+        }
+    begin_time = params.get("begin_time")
+    end_time = params.get("end_time")
+    if begin_time is not None or end_time is not None:
+        window: dict[str, Any] = {VIM_TYPE_NAME_KEY: _EVENT_FILTER_SPEC_BY_TIME_TYPE}
+        if begin_time is not None:
+            window["beginTime"] = begin_time
+        if end_time is not None:
+            window["endTime"] = end_time
+        spec["time"] = window
+    spec["disableFullMessage"] = False
+    event_type_ids = params.get("event_type_ids")
+    if event_type_ids:
+        spec["eventTypeId"] = list(event_type_ids)
+    spec["maxCount"] = max_count
+    return {"filter": spec}
+
+
+def _event_explicit_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The object an ``EventEx`` / ``ExtendedEvent`` names itself, else ``None``.
+
+    ``EventEx`` carries ``objectId`` / ``objectType`` / ``objectName``;
+    ``ExtendedEvent`` carries ``managedObject``. Both event classes also
+    inherit the base ``Event`` context members, so these fields must be read
+    before them.
+    """
+    object_id = event.get("objectId")
+    if isinstance(object_id, str):
+        object_type = event.get("objectType")
+        object_name = event.get("objectName")
+        return {
+            "type": object_type if isinstance(object_type, str) else None,
+            "moId": object_id,
+            "name": object_name if isinstance(object_name, str) else None,
+        }
+    managed_object = event.get("managedObject")
+    if isinstance(managed_object, dict) and isinstance(managed_object.get("value"), str):
+        mo_type = managed_object.get("type")
+        return {
+            "type": mo_type if isinstance(mo_type, str) else None,
+            "moId": managed_object["value"],
+            "name": None,
+        }
+    return None
+
+
+def _event_argument_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The most specific ``EntityEventArgument`` member of an event, else ``None``."""
+    for field in _EVENT_ENTITY_ARGUMENTS:
+        argument = event.get(field)
+        if not isinstance(argument, dict):
+            continue
+        moref = next(
+            (
+                value
+                for value in argument.values()
+                if isinstance(value, dict)
+                and isinstance(value.get("type"), str)
+                and isinstance(value.get("value"), str)
+            ),
+            None,
+        )
+        name = argument.get("name")
+        return {
+            "type": moref["type"] if moref else None,
+            "moId": moref["value"] if moref else None,
+            "name": name if isinstance(name, str) else None,
+        }
+    return None
+
+
+def _event_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The entity an event is about, as ``{type, moId, name}``, else ``None``.
+
+    The event's own object (``EventEx`` ``objectId``, ``ExtendedEvent``
+    ``managedObject``) wins. Only when an event names no object of its own do
+    the base ``Event`` context members (``vm`` / ``ds`` / ``host`` / ...)
+    count, most specific first. Reading the context first would turn an
+    ``EventEx`` about a datastore into a row about its datacenter.
+    """
+    return _event_explicit_entity(event) or _event_argument_entity(event)
+
+
+def _reduce_event(event: Any) -> dict[str, Any]:
+    """Project one vim ``Event`` to ``{createdTime, eventTypeId, fullFormattedMessage, entity}``.
+
+    ``eventTypeId`` follows the vim matching rule for
+    ``EventFilterSpec.eventTypeId``: ``EventEx`` / ``ExtendedEvent`` carry an
+    ``eventTypeId`` member, every other event's type id is its class name
+    (the ``_typeName`` tag). So the value can be fed back as a filter.
+    """
+    raw = event if isinstance(event, dict) else {}
+    created = raw.get("createdTime")
+    type_id = raw.get("eventTypeId")
+    if not isinstance(type_id, str):
+        type_id = raw.get(VIM_TYPE_NAME_KEY)
+    message = raw.get("fullFormattedMessage")
+    return {
+        "createdTime": created if isinstance(created, str) else None,
+        "eventTypeId": type_id if isinstance(type_id, str) else None,
+        "fullFormattedMessage": message if isinstance(message, str) else None,
+        "entity": _event_entity(raw),
+    }
+
+
 async def event_tail_composite(
     *,
     operator: Operator,
@@ -489,29 +677,42 @@ async def event_tail_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any]:
-    """Tail recent events via EventManager.QueryEvents (vi-json).
+    """Read recent vCenter events via EventManager.QueryEvents (vi-json).
 
     Op-id: ``vmware.composite.event.tail``.
 
     Sub-op read directly on the connector session (single call):
 
-    1. ``POST:/EventManager/{moId}/QueryEvents`` -- recent events. The
-       vi-json call returns an array of event dicts; the handler caps
-       the array client-side to ``max_events`` (default 100).
+    1. ``POST:/EventManager/{moId}/QueryEvents`` -- always with a tagged
+       ``EventFilterSpec`` body (see :func:`_build_query_events_body`).
+       ``begin_time`` / ``end_time`` map to ``filter.time``,
+       ``event_type_ids`` to ``filter.eventTypeId``, ``entity`` to
+       ``filter.entity`` and ``max_count`` to ``filter.maxCount``. The
+       server-side ``maxCount`` is the bound; the handler also cuts the list
+       to ``max_count`` in case a server ignores it.
 
     Returns
     -------
     dict[str, Any]
-        ``{"events": <list[event dict]>, "count": <int>,
-        "moId": <str>, "max_events_applied": <int>}``. ``count`` is
-        the post-cap length so operators can detect truncation.
+        ``{"events": <list[reduced row]>, "count": <int>, "moId": <str>,
+        "max_count_applied": <int>}``. Each row is ``{createdTime,
+        eventTypeId, fullFormattedMessage, entity}``. The ``events`` list is
+        what the dispatcher turns into a result handle when it is large.
     """
     mo_id = params.get("moId", "EventManager")
-    max_events = int(params.get("max_events", 100))
+    max_count = int(params.get("max_count", _EVENT_TAIL_DEFAULT_MAX_COUNT))
     raw = await _read_sub_op(
-        connector, target, operator, _OP_POST_QUERY_EVENTS, path_params={"moId": mo_id}
+        connector,
+        target,
+        operator,
+        _OP_POST_QUERY_EVENTS,
+        path_params={"moId": mo_id},
+        body=_build_query_events_body(params, max_count),
     )
     events = _unwrap_value(raw)
+    if events is None:
+        # The pinned spec marks the QueryEvents response ``nullable``.
+        events = []
     if not isinstance(events, list):
         # vi-json QueryEvents always returns a list. A non-list payload
         # is a connector-side bug -- surface it to the caller rather
@@ -519,12 +720,12 @@ async def event_tail_composite(
         raise RuntimeError(
             f"event_tail: expected list from {_OP_POST_QUERY_EVENTS!r}, got {type(events).__name__}"
         )
-    capped = events[:max_events]
+    rows = [_reduce_event(event) for event in events[:max_count]]
     return {
-        "events": capped,
-        "count": len(capped),
+        "events": rows,
+        "count": len(rows),
         "moId": mo_id,
-        "max_events_applied": max_events,
+        "max_count_applied": max_count,
     }
 
 
@@ -632,6 +833,37 @@ async def datastore_refresh_composite(
     }
 
 
+# vim types for the performance-summary entity (#4038). VI-JSON wants the
+# ``entity`` argument of QueryAvailablePerfMetric / PerfQuerySpec as an
+# annotated ManagedObjectReference; vCenter 8.0.3 answers a bare moid string
+# with 500 ``InvalidArgument: Unexpected string value``. The type comes from
+# the caller's ``entity_type`` or, failing that, from the moid prefix.
+_PERF_ENTITY_TYPE_BY_MOID_PREFIX: tuple[tuple[str, str], ...] = (
+    ("host-", "HostSystem"),
+    ("vm-", _VIRTUAL_MACHINE_MO_TYPE),
+    ("domain-c", _CLUSTER_COMPUTE_RESOURCE_MO_TYPE),
+)
+_PERF_QUERY_SPEC_TYPE = "PerfQuerySpec"
+
+
+def _perf_entity_moref(entity_moid: str, entity_type: str | None) -> dict[str, str]:
+    """The annotated ``ManagedObjectReference`` for the perf *entity_moid*.
+
+    *entity_type* wins when given; otherwise the vim type comes from the
+    moid prefix. Raises :class:`ValueError` when neither yields a type.
+    """
+    if entity_type:
+        return vim_moref(entity_type, entity_moid)
+    for prefix, mo_type in _PERF_ENTITY_TYPE_BY_MOID_PREFIX:
+        if entity_moid.startswith(prefix):
+            return vim_moref(mo_type, entity_moid)
+    known = ", ".join(f"{prefix!r}" for prefix, _ in _PERF_ENTITY_TYPE_BY_MOID_PREFIX)
+    raise ValueError(
+        f"performance_summary: cannot tell the vim type of entity_moid "
+        f"{entity_moid!r} from its prefix (known: {known}); pass entity_type"
+    )
+
+
 async def performance_summary_composite(
     *,
     operator: Operator,
@@ -663,13 +895,18 @@ async def performance_summary_composite(
     ``counter_ids``) is an explicit v0.2.next concern per the issue
     body's *Out of scope* section.
 
-    The vi-json method arguments (``entity``, ``interval_seconds``)
-    become the flat JSON request body; the ``moId`` targets the
-    PerformanceManager singleton in the path -- the same method-args-as-
-    body shape the ``vmware.host.usage`` typed op sends for
-    RetrievePropertiesEx.
+    The vi-json method arguments become the flat JSON request body; the
+    ``moId`` targets the PerformanceManager singleton in the path -- the
+    same method-args-as-body shape the ``vmware.host.usage`` typed op
+    sends for RetrievePropertiesEx. Per the pinned ``vi-json.yaml``:
+    QueryAvailablePerfMetric takes ``entity`` + ``intervalId``; QueryPerf
+    takes ``querySpec`` (a ``PerfQuerySpec`` list carrying ``entity`` /
+    ``intervalId`` / ``maxSample``). ``entity`` is an annotated
+    ``ManagedObjectReference`` built by :func:`_perf_entity_moref` (#4038);
+    vCenter 8.0.3 rejects a bare moid string.
     """
     entity_moid = params["entity_moid"]
+    entity = _perf_entity_moref(entity_moid, params.get("entity_type"))
     perf_mgr_moid = params.get("perf_manager_moid", "PerfMgr")
     interval_s = int(params.get("interval_seconds", 20))
     max_samples = int(params.get("max_samples", 60))
@@ -680,7 +917,7 @@ async def performance_summary_composite(
         operator,
         _OP_POST_QUERY_AVAILABLE_PERF_METRIC,
         path_params={"moId": perf_mgr_moid},
-        body={"entity": entity_moid},
+        body={"entity": entity, "intervalId": interval_s},
     )
     available = _unwrap_value(available_raw)
     if not isinstance(available, list):
@@ -696,7 +933,16 @@ async def performance_summary_composite(
         operator,
         _OP_POST_QUERY_PERF,
         path_params={"moId": perf_mgr_moid},
-        body={"entity": entity_moid, "interval_seconds": interval_s},
+        body={
+            "querySpec": [
+                {
+                    VIM_TYPE_NAME_KEY: _PERF_QUERY_SPEC_TYPE,
+                    "entity": entity,
+                    "intervalId": interval_s,
+                    "maxSample": max_samples,
+                }
+            ]
+        },
     )
     samples = _unwrap_value(samples_raw)
     if not isinstance(samples, list):
@@ -730,15 +976,18 @@ async def _read_vm_placement(
 
     1. ``GET:/vcenter/vm`` (global, unfiltered) -- every VM's moid + name.
     2. one ``RetrievePropertiesEx`` over every VM moid reading
-       ``datastore`` (the union of datastores the VM's files sit on). A VM
-       with disks spanning two datastores therefore appears under both --
-       genuine placement, unlike the ignored-filter global list.
+       ``datastore`` (the union of datastores the VM's files sit on), with
+       every continuation page vCenter sends (#4862, through
+       :func:`~meho_backplane.connectors.vmware_rest.vim_retrieve.retrieve_all_pages`).
+       A VM with disks spanning two datastores therefore appears under
+       both -- genuine placement, unlike the ignored-filter global list.
 
     VM-listing order is preserved so the per-datastore ``vm_names`` sample
     is deterministic. Returns ``({}, None)`` when there are no VMs. The
-    read is **best-effort** (#1908): any transport error returns
-    ``(None, note)`` so the caller nulls enrichment on every row while
-    keeping the capacity data the storage-usage use case needs.
+    read is **best-effort** (#1908): any transport error, a failed page
+    or an answer that never ends returns ``(None, note)`` so the caller
+    nulls enrichment on every row while keeping the capacity data the
+    storage-usage use case needs.
     """
     try:
         vms_raw = await _read_sub_op(connector, target, operator, _OP_LIST_VMS)
@@ -755,17 +1004,15 @@ async def _read_vm_placement(
                 names_by_moid[moid] = name
         if not names_by_moid:
             return {}, None
-        retrieve = await _read_sub_op(
+        retrieve = await retrieve_all_pages(
             connector,
             target,
             operator,
-            _OP_RETRIEVE_PROPERTIES,
-            path_params={"moId": _PROPERTY_COLLECTOR_MOID},
-            body=retrieve_properties_body(
+            retrieve_properties_body(
                 _VIRTUAL_MACHINE_MO_TYPE, list(names_by_moid), [_PROP_VM_DATASTORE]
             ),
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, RuntimeError) as exc:
         return None, (
             f"vm-placement enrichment skipped: authoritative placement read "
             f"failed with {type(exc).__name__}: {exc}"
@@ -960,8 +1207,161 @@ async def datastore_usage_composite(
     return {"datastores": aggregated}
 
 
-# Pre-existing >100-line handler from G3.1-T5 #508.
-# code-quality-allow: pre-existing G3.1-T5 #508 handler
+async def _retrieve_props_by_moid(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    mo_type: str,
+    moids: list[str],
+    path_set: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Read *path_set* on every ``(mo_type, moid)`` object, in chunks of 50.
+
+    Returns ``{moid: {property: value}}``. No call is made when *moids* is
+    empty, so an empty inventory costs no round trip.
+
+    vCenter may page a ``RetrievePropertiesEx`` answer: it returns some
+    objects plus a ``token`` for the rest. Small chunks keep a normal
+    inventory from paging (same size as ``_teardown_reads.read_many``).
+    If an answer still carries a ``token``, this raises instead of
+    returning rows with missing objects.
+
+    A successful call can also carry a property vCenter could not read
+    (a ``missingSet`` entry with a fault, e.g. no permission). This raises
+    on that too, so a caller never counts an object as absent because its
+    data was unreadable. An unset property (no ``missingSet`` entry) is
+    fine: it is simply absent from the returned dict.
+    """
+    by_moid: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(moids), _RETRIEVE_CHUNK):
+        chunk = moids[start : start + _RETRIEVE_CHUNK]
+        result = await _read_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_RETRIEVE_PROPERTIES,
+            path_params={"moId": _PROPERTY_COLLECTOR_MOID},
+            body=retrieve_properties_body(mo_type, chunk, path_set),
+        )
+        payload = _unwrap_value(result)
+        if isinstance(payload, dict) and payload.get("token"):
+            raise RuntimeError(
+                f"vCenter paged the {_OP_RETRIEVE_PROPERTIES!r} answer for "
+                f"{len(chunk)} {mo_type} objects (it returned a token), so the "
+                "answer is incomplete; refusing to return partial results"
+            )
+        unreadable = _unreadable_properties(result)
+        if unreadable:
+            detail = ", ".join(sorted(set(unreadable)))
+            raise RuntimeError(
+                f"vCenter could not read {len(unreadable)} of the requested "
+                f"{mo_type} properties: {detail}; refusing to return partial results"
+            )
+        by_moid.update(_extract_props_by_moid(result))
+    return by_moid
+
+
+def _unreadable_properties(retrieve_result: Any) -> list[str]:
+    """``"<path> (<fault type>)"`` for every ``missingSet`` entry in the answer.
+
+    The HTTP call can succeed while vCenter still could not read a
+    property on one of the objects (no permission, a system error, an
+    object that vanished). Such a property is not in ``propSet``; it is
+    in the object's ``missingSet`` with a fault. A property that is simply
+    unset is left out of ``propSet`` with no ``missingSet`` entry, so this
+    returns nothing for it. Only the fault **type name** is kept, never
+    the fault text, which can echo a private identifier (#3708).
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    unreadable: list[str] = []
+    if not isinstance(objects, list):
+        return unreadable
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for entry in obj.get("missingSet", []) or []:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if not isinstance(path, str):
+                continue
+            fault_type = fault_type_name(entry.get("fault")) or "unknown fault"
+            unreadable.append(f"{path} ({fault_type})")
+    return unreadable
+
+
+def _moref_value(ref: Any) -> str | None:
+    """The moid (``value``) of a vim MoRef dict, or ``None``."""
+    value = ref.get("value") if isinstance(ref, dict) else None
+    return value if isinstance(value, str) else None
+
+
+async def _read_dvs_names(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    dvs_refs: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Resolve ``{dvs_moid: display name}`` for the parent switches.
+
+    The MoRef from ``config.distributedVirtualSwitch`` names the concrete
+    switch type (``VmwareDistributedVirtualSwitch`` on a vSphere switch),
+    so the read uses that type, one call per distinct type.
+    """
+    moids_by_type: dict[str, list[str]] = {}
+    for ref in dvs_refs:
+        moid = _moref_value(ref)
+        ref_type = ref.get("type")
+        mo_type = ref_type if isinstance(ref_type, str) else _DVS_MO_TYPE
+        if moid is not None and moid not in moids_by_type.setdefault(mo_type, []):
+            moids_by_type[mo_type].append(moid)
+    names: dict[str, str] = {}
+    for mo_type, moids in moids_by_type.items():
+        props = await _retrieve_props_by_moid(
+            connector, target, operator, mo_type, moids, [_PROP_NAME]
+        )
+        for moid, values in props.items():
+            name = values.get(_PROP_NAME)
+            if isinstance(name, str):
+                names[moid] = name
+    return names
+
+
+async def _read_vm_names(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moids: list[str],
+    *,
+    powered_on_only: bool,
+) -> dict[str, str]:
+    """Resolve ``{vm_moid: name}``, keeping only powered-on VMs unless told otherwise."""
+    props = await _retrieve_props_by_moid(
+        connector,
+        target,
+        operator,
+        _VIRTUAL_MACHINE_MO_TYPE,
+        vm_moids,
+        [_PROP_NAME, _PROP_VM_POWER_STATE],
+    )
+    names: dict[str, str] = {}
+    for moid, values in props.items():
+        name = values.get(_PROP_NAME)
+        if not isinstance(name, str):
+            continue
+        if powered_on_only and values.get(_PROP_VM_POWER_STATE) != _VM_POWERED_ON:
+            continue
+        names[moid] = name
+    return names
+
+
+def _portgroup_vm_moids(props: dict[str, Any]) -> list[str]:
+    """The moids in a portgroup's ``vm`` property (VMs with a NIC on it)."""
+    refs = props.get(_PROP_NETWORK_VM)
+    if not isinstance(refs, list):
+        return []
+    return [moid for moid in (_moref_value(ref) for ref in refs) if moid is not None]
+
+
 async def network_portgroup_audit_composite(
     *,
     operator: Operator,
@@ -969,7 +1369,7 @@ async def network_portgroup_audit_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any]:
-    """Audit distributed portgroups with connected-VM aggregation.
+    """Audit distributed portgroups: parent switch, VLAN and connected VMs.
 
     Op-id: ``vmware.composite.network.portgroup.audit``.
 
@@ -977,42 +1377,46 @@ async def network_portgroup_audit_composite(
 
     1. ``GET:/vcenter/network`` with ``filter.types=[DISTRIBUTED_PORTGROUP]``
        -- list distributed portgroups. The REST Automation API has no
-       dedicated distributed-portgroup resource; portgroups are
-       enumerated through the generic ``Network`` resource filtered to
-       the ``DISTRIBUTED_PORTGROUP`` type (#1602).
-    2. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
-       VMs connected to the portgroup. Drives the ``vm_count`` +
-       ``vm_names`` aggregation.
+       dedicated distributed-portgroup resource (#1602).
+    2. One ``RetrievePropertiesEx`` over every portgroup reading
+       ``config.distributedVirtualSwitch`` (parent switch),
+       ``config.defaultPortConfig`` (read whole; ``vlan`` is picked in code
+       because the deep ``config.defaultPortConfig.vlan`` path fails on
+       vCenter 8.0.x) and ``vm`` (the VMs with a NIC on that portgroup).
+    3. One ``RetrievePropertiesEx`` per switch type reading the parent
+       switches' ``name``.
+    4. One ``RetrievePropertiesEx`` over the union of connected VMs reading
+       ``name`` + ``runtime.powerState``.
+
+    Each vim read sends at most 50 objects per call. A paged answer (a
+    ``token``) or a property vCenter could not read (a ``missingSet``
+    fault, e.g. no permission on a VM's ``name``) fails the audit instead
+    of dropping objects and reporting a wrong count. An unset property
+    (no switch, VLAN or VMs reported) is fine.
+
+    #3802: the old per-portgroup ``GET:/vcenter/vm`` call, filtered by
+    network, is gone. The VM list resource has no network filter, so
+    vCenter ignored it and every row got the whole VM inventory. The
+    portgroup's own ``vm`` property scopes each row to its own VMs.
+
+    ``filter_dvs`` keeps only the portgroups whose parent switch moid or
+    name equals the value. Unless ``include_disconnected_vms`` is true,
+    only powered-on VMs are counted.
 
     Returns
     -------
     dict[str, Any]
-        ``{"portgroups": [{"id": ..., "name": ..., "dvs": <id|None>,
-        "dvs_name": <str|None>, "type": ..., "vm_count": ...,
-        "vm_names": [...]}, ...]}``.
-
-    Degradation note (#2970): the pre-#2970 step 1 listed distributed
-    switches via ``GET:/vcenter/network/distributed-switches`` to build a
-    moid->name index for ``dvs_name`` enrichment -- but the pinned
-    ``vcenter.yaml`` serves that path only under the NSX-scoped
-    ``/vcenter/namespace-management/`` tree, so the step 404s on a real
-    vCenter 9.0 and is dropped. ``dvs_name`` is therefore always ``None``
-    (it already was in practice: the generic ``Network`` summary carries
-    only ``{network (id), name, type}`` -- no parent-DVS reference to
-    join on -- so the index was never consulted with a hit). ``dvs``
-    stays best-effort: populated when the upstream payload happens to
-    expose a ``vds``/``distributed_switch`` field, ``None`` otherwise.
-    ``filter_dvs`` only ever scoped that index, so it is accepted but
-    inert -- see the parameter schema note.
+        ``{"portgroups": [{"id": ..., "name": ..., "dvs": <moid|None>,
+        "dvs_name": <str|None>, "type": ..., "vlan": <view|None>,
+        "vm_count": ..., "vm_names": [...]}, ...]}``. ``vlan`` is
+        ``{"mode": "access", "vlan_id": N}`` or ``{"mode": "trunk",
+        "ranges": [{"start", "end"}, ...]}``, and ``None`` for a private
+        VLAN or a shape the switch did not report.
     """
     include_disconnected = bool(params.get("include_disconnected_vms", False))
+    filter_dvs = params.get("filter_dvs")
 
-    # Distributed portgroups come from the generic network resource
-    # filtered to the DISTRIBUTED_PORTGROUP type -- there is no
-    # standalone distributed-portgroup list endpoint (and no DVS list
-    # resource at all; see the degradation note above).
     pg_query: dict[str, Any] = {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP]}
-
     pg_listing = await _read_sub_op(connector, target, operator, _OP_LIST_NETWORK, query=pg_query)
     pg_entries = _unwrap_value(pg_listing)
     if not isinstance(pg_entries, list):
@@ -1020,42 +1424,49 @@ async def network_portgroup_audit_composite(
             f"network_portgroup_audit: expected list from {_OP_LIST_NETWORK!r}, "
             f"got {type(pg_entries).__name__}"
         )
-
-    aggregated: list[dict[str, Any]] = []
+    listed: dict[str, dict[str, Any]] = {}
     for entry in pg_entries:
         if not isinstance(entry, dict):
             continue
         pg_id = entry.get("network") or entry.get("portgroup")
-        if not isinstance(pg_id, str):
+        if isinstance(pg_id, str):
+            listed[pg_id] = entry
+
+    pg_props = await _retrieve_props_by_moid(
+        connector, target, operator, _DVPG_MO_TYPE, list(listed), list(_PORTGROUP_AUDIT_PATHS)
+    )
+    dvs_refs = [
+        ref for props in pg_props.values() if isinstance(ref := props.get(_PROP_DVPG_DVS), dict)
+    ]
+    dvs_names = await _read_dvs_names(connector, target, operator, dvs_refs)
+
+    rows: list[tuple[dict[str, Any], list[str]]] = []
+    for pg_id, entry in listed.items():
+        props = pg_props.get(pg_id, {})
+        dvs_moid = _moref_value(props.get(_PROP_DVPG_DVS))
+        dvs_name = dvs_names.get(dvs_moid) if dvs_moid is not None else None
+        if filter_dvs and filter_dvs not in (dvs_moid, dvs_name):
             continue
-        vm_query: dict[str, Any] = {"filter.networks": [pg_id]}
-        if not include_disconnected:
-            # vSphere REST accepts a power-state filter; the
-            # ``include_disconnected`` flag toggles it. Default is
-            # active VMs only.
-            vm_query["filter.power_states"] = ["POWERED_ON"]
-        vms = await _read_sub_op(connector, target, operator, _OP_LIST_VMS, query=vm_query)
-        vm_entries = _unwrap_value(vms)
-        if not isinstance(vm_entries, list):
-            vm_entries = []
-        vm_names = [
-            v["name"] for v in vm_entries if isinstance(v, dict) and isinstance(v.get("name"), str)
-        ]
-        dvs_ref = entry.get("vds") or entry.get("distributed_switch")
-        dvs_ref_str = dvs_ref if isinstance(dvs_ref, str) else None
-        aggregated.append(
-            {
-                "id": pg_id,
-                "name": entry.get("name"),
-                "dvs": dvs_ref_str,
-                # Always None post-#2970: the DVS-list step that built the
-                # moid->name index is not served by the pinned spec (see
-                # the handler degradation note). Key retained for
-                # response-envelope stability.
-                "dvs_name": None,
-                "type": entry.get("type"),
-                "vm_count": len(vm_names),
-                "vm_names": vm_names,
-            }
-        )
+        port_setting = props.get(_PROP_DVPG_DEFAULT_PORT_CONFIG)
+        raw_vlan = port_setting.get("vlan") if isinstance(port_setting, dict) else None
+        row = {
+            "id": pg_id,
+            "name": entry.get("name"),
+            "dvs": dvs_moid,
+            "dvs_name": dvs_name,
+            "type": entry.get("type"),
+            "vlan": _vlan_identity_view(_observed_vlan_identity(raw_vlan)),
+        }
+        rows.append((row, _portgroup_vm_moids(props)))
+
+    all_vm_moids = list(dict.fromkeys(moid for _, moids in rows for moid in moids))
+    vm_names_by_moid = await _read_vm_names(
+        connector, target, operator, all_vm_moids, powered_on_only=not include_disconnected
+    )
+    aggregated: list[dict[str, Any]] = []
+    for row, vm_moids in rows:
+        vm_names = [vm_names_by_moid[moid] for moid in vm_moids if moid in vm_names_by_moid]
+        row["vm_count"] = len(vm_names)
+        row["vm_names"] = vm_names
+        aggregated.append(row)
     return {"portgroups": aggregated}

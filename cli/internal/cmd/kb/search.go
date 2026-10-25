@@ -23,7 +23,8 @@ import (
 //	meho kb search <query> [--limit N] [--json] [--backplane <url>]
 //
 // Role: operator. Pins `source="kb"` server-side so the retrieve
-// substrate scopes hits to kb-entry rows.
+// substrate scopes hits to kb rows (the passages of each entry's
+// current revision).
 //
 // Exit codes:
 //   - 0   search returned cleanly (incl. zero-hit result)
@@ -143,8 +144,8 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 }
 
 // buildSearchBody assembles the typed POST body for /api/v1/retrieve.
-// `Source` is pinned to "kb" so the substrate scopes hits to kb-entry
-// rows. `Limit` only flows onto the wire when the operator passed a
+// `Source` is pinned to "kb" so the substrate scopes hits to kb
+// passage rows. `Limit` only flows onto the wire when the operator passed a
 // positive `--limit` — the generated field tag is `omitempty`, so a
 // nil pointer keeps the JSON key absent and the backend's `Field(ge=1,
 // le=50, default=10)` applies. `Kind` and `MetadataFilters` stay nil
@@ -186,10 +187,10 @@ func searchKb(
 }
 
 // printSearchTable renders the ranked hits as a compact table.
-// Columns: RANK (1-based), SCORE (fused), SLUG (the kb identifier
-// — the substrate's `source_id`), SNIPPET (200-char excerpt of the
-// body). The hit's `kind` is always `kb-entry` (the substrate
-// scopes via source filter); rendering it would be noise.
+// Columns: RANK (1-based), SCORE (fused), SLUG (the kb identifier,
+// see hitSlug), SNIPPET (200-char excerpt of the matched text).
+// With source="kb" the server ranks kb passages, so one entry can
+// show up on several rows, one per matching passage.
 func printSearchTable(w io.Writer, r *api.RetrieveResponse) {
 	if r == nil || len(r.Hits) == 0 {
 		fmt.Fprintln(w, "no kb hits for this query")
@@ -200,13 +201,28 @@ func printSearchTable(w io.Writer, r *api.RetrieveResponse) {
 		fmt.Fprintf(w, "%-5d %-8.4f %-40s %s\n",
 			i+1,
 			hit.FusedScore,
-			truncate(hit.SourceId, 40),
+			truncate(hitSlug(hit), 40),
 			truncate(snippetOf(hit.Body), 80),
 		)
 	}
 	if r.QueryDurationMs > 0 {
 		fmt.Fprintf(w, "queried in %.2f ms\n", r.QueryDurationMs)
 	}
+}
+
+// hitSlug returns the kb slug of a retrieve hit. A kb passage row
+// (source "kb-passage") carries an opaque passage id as source_id and
+// its slug in doc_metadata.kb_passage.slug; an entry indexed before
+// passages existed is a head row whose source_id is the slug.
+func hitSlug(hit api.RetrievalHit) string {
+	if hit.Source == "kb-passage" {
+		if locator, ok := hit.DocMetadata["kb_passage"].(map[string]interface{}); ok {
+			if slug, ok := locator["slug"].(string); ok && slug != "" {
+				return slug
+			}
+		}
+	}
+	return hit.SourceId
 }
 
 // snippetOf returns the first ~200 chars of body so the table render

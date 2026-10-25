@@ -39,6 +39,7 @@ def test_filters_empty_construction_uses_defaults() -> None:
     assert f.cursor is None
     assert f.target is None
     assert f.principal is None
+    assert f.principal_sub is None
     assert f.op_id is None
     assert f.op_class is None
     assert f.result_status is None
@@ -113,6 +114,7 @@ def _make_entry(**overrides: object) -> AuditEntry:
         "agent_session_id": None,
         "work_ref": None,
         "policy_decision": None,
+        "event_class": "legacy_request",
         "broadcast_event_id": None,
     }
     defaults.update(overrides)

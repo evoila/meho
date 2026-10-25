@@ -15,9 +15,10 @@ the write surface on top of T1's (#1895) read pages:
 * ``PATCH /ui/conventions/{slug}`` -- submit; calls
   :meth:`ConventionsService.update_convention`.
 * ``POST /ui/conventions/preview`` -- debounced server-side token-cost
-  preview: takes ``body`` + ``kind``, renders the estimated tokens vs the
-  600 budget (red when an ``operational`` body is over) plus the
-  sanitised Markdown render.
+  preview: takes ``title`` + ``body`` + ``kind``, renders the estimated
+  tokens vs the 600 budget (red when an ``operational`` entry is over)
+  plus the sanitised Markdown render. The title and body fields and the
+  kind selector all trigger it, because the title counts too.
 * ``GET /ui/conventions/{slug}/delete`` -- the confirm ``<dialog>`` gate.
 * ``DELETE /ui/conventions/{slug}`` -- delete behind the confirm gate; a
   second DELETE on the already-gone slug renders a benign "already
@@ -31,10 +32,9 @@ Service reuse
 
 Every write goes through the shared
 :class:`~meho_backplane.conventions.service.ConventionsService` so the
-budget gate, the ``tenant_convention_history`` row, and the
-pre-allocated-audit-id soft-FK pairing
-(:func:`~meho_backplane.audit.bind_preallocated_audit_id`, called inside
-the service) are exercised identically to the REST surface. This module
+budget gate and the ``tenant_convention_history`` row (with its
+``change_kind`` and request correlation id, #3747) are exercised
+identically to the REST surface. This module
 never re-derives the budget arithmetic -- the token-cost preview calls
 :func:`~meho_backplane.conventions.schemas.estimate_tokens` directly (the
 single source of truth) rather than re-deriving the chars-per-token
@@ -47,10 +47,7 @@ The chassis :class:`~meho_backplane.audit.AuditMiddleware` writes one row
 per request iff ``operator_sub`` is bound to the structlog contextvars
 when the hook fires. The BFF session middleware does not bind them, so
 each write handler binds the same ``audit_op_id`` / ``audit_op_class`` /
-``audit_slug`` triple the REST handler uses before the service call --
-and because the service mints + binds the pre-allocated audit id in the
-same transaction as the history row, the history row's ``audit_id``
-joins the audit row rather than landing NULL.
+``audit_slug`` triple the REST handler uses before the service call.
 
 RBAC + CSRF
 -----------
@@ -73,6 +70,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.conventions.render import standalone_tokens
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
     ConventionCreate,
@@ -163,9 +161,7 @@ def _bind_write_audit(*, operator: Operator, op_id: str, slug: str) -> None:
     Same shape the REST conventions handlers use -- ``operator_sub`` +
     ``tenant_id`` so the chassis :class:`AuditMiddleware` commits a row
     at all, plus the canonical ``audit_op_id`` / ``audit_op_class`` /
-    ``audit_slug`` so the row carries the right op id. The service then
-    mints + binds the pre-allocated audit id in the same transaction as
-    the history row, so the history ``audit_id`` joins this audit row.
+    ``audit_slug`` so the row carries the right op id.
     """
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
@@ -249,21 +245,23 @@ async def render_edit_modal(
 async def render_token_preview(
     request: Request,
     *,
+    title: str,
     body: str,
     kind: str,
 ) -> HTMLResponse:
     """Render the debounced token-cost preview fragment.
 
-    Computes the estimated token cost via
-    :func:`~meho_backplane.conventions.schemas.estimate_tokens` (the
-    single source of truth -- no re-derived chars/token ratio). The
-    fragment marks an ``operational`` body that exceeds
-    :data:`DEFAULT_MAX_PREAMBLE_TOKENS` in red; the same body as
-    ``workflow`` / ``reference`` is not flagged (those kinds never enter
-    the preamble, so they are exempt from the budget gate). A sanitised
-    Markdown render of the body is shown alongside.
+    For an ``operational`` entry the cost is the rendered standalone
+    estimate from
+    :func:`~meho_backplane.conventions.render.standalone_tokens` --
+    the same number the server's write check uses, so the preview and
+    the 422 agree. The fragment marks an ``operational`` entry that
+    exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS` in red; ``workflow`` /
+    ``reference`` entries show the plain body estimate and are not
+    flagged (those kinds never enter the preamble, so they are exempt
+    from the budget gate). A sanitised Markdown render of the body is
+    shown alongside.
     """
-    estimated = estimate_tokens(body)
     # Resolve the kind defensively: an unknown token (a tampered form,
     # or the selector mid-change) falls back to REFERENCE -- the safe
     # direction (exempt from the budget gate), so a transient bad value
@@ -273,6 +271,7 @@ async def render_token_preview(
     except ValueError:
         kind_enum = ConventionKind.REFERENCE
     counts_against_budget = kind_enum is ConventionKind.OPERATIONAL
+    estimated = standalone_tokens(title, body) if counts_against_budget else estimate_tokens(body)
     over_budget = counts_against_budget and estimated > DEFAULT_MAX_PREAMBLE_TOKENS
     context: dict[str, object] = {
         "estimated_tokens": estimated,
@@ -381,9 +380,9 @@ async def submit_create(
         return _render_create_error(
             request,
             message=(
-                f"Body exceeds the preamble budget "
+                f"Title and body exceed the preamble budget when rendered "
                 f"(estimated {exc.estimated} tokens, budget {exc.budget}). "
-                f"Trim the body or set kind to workflow / reference."
+                f"Shorten them or set kind to workflow / reference."
             ),
         )
 
@@ -442,7 +441,7 @@ async def submit_update(
         return _render_create_error(
             request,
             message=(
-                f"Body exceeds the preamble budget "
+                f"Title and body exceed the preamble budget when rendered "
                 f"(estimated {exc.estimated} tokens, budget {exc.budget})."
             ),
         )

@@ -50,6 +50,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _DVPG_MO_TYPE,
     _HOST_SYSTEM_MO_TYPE,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RETRIEVE_PROPERTIES,
     _moref_value,
     _observed_vlan_identity,
@@ -90,11 +91,13 @@ _OP_REMOVE_PORT_GROUP: Final = "POST:/HostNetworkSystem/{moId}/RemovePortGroup"
 #: sweep skips them; the vi-json reconcile lane asserts every path exists).
 _VIM_SUB_OPS_NETWORK_PORTGROUP_DELETE: Final[tuple[str, ...]] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_FETCH_DV_PORTS,
     _OP_DESTROY_DVPORTGROUP_TASK,
 )
 _VIM_SUB_OPS_HOST_STANDARD_PORTGROUP_DELETE: Final[tuple[str, ...]] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_REMOVE_PORT_GROUP,
 )
 

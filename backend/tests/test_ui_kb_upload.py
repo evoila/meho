@@ -72,6 +72,7 @@ from meho_backplane.ui.csrf import (
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests._kb_embedding_stub import fake_embedding_service
 from tests.conftest import (
     DEFAULT_AUDIENCE,
     DEFAULT_ISSUER,
@@ -846,8 +847,6 @@ def test_upload_admin_gate_binds_audit_contextvars() -> None:
 
 def _fake_embedding_service() -> AsyncMock:
     """Return a mock embedding service that avoids ONNX/fastembed."""
-    svc = AsyncMock()
-    svc.encode_one.return_value = [0.1] * 384
-    svc.encode.return_value = [[0.1] * 384]
+    svc = fake_embedding_service()
     svc.dimension = 384
     return svc

@@ -371,6 +371,7 @@ class IngestJobRegistry:
         *,
         tenant_id: UUID | None,
         is_tenant_admin: bool,
+        is_platform_admin: bool = False,
     ) -> IngestJob:
         """Return the job for *job_id* scoped to *tenant_id*.
 
@@ -380,6 +381,9 @@ class IngestJobRegistry:
         failure surface uniform. Built-in scope (``tenant_id=None``)
         is readable only by ``tenant_admin``; non-admin operators
         asking about a built-in job see the same 404 as a missing id.
+        A ``platform_admin`` may read another tenant's job, so a
+        platform operator can poll the cross-tenant ingest it
+        started (#3800).
 
         Updates the LRU position on every read so an in-flight job
         the operator is actively polling doesn't get evicted out
@@ -391,7 +395,7 @@ class IngestJobRegistry:
                 raise IngestJobNotFoundError(str(job_id))
             if job.tenant_id is None and not is_tenant_admin:
                 raise IngestJobNotFoundError(str(job_id))
-            if job.tenant_id is not None and job.tenant_id != tenant_id:
+            if job.tenant_id is not None and job.tenant_id != tenant_id and not is_platform_admin:
                 raise IngestJobNotFoundError(str(job_id))
             self._jobs.move_to_end(job_id)
             return job

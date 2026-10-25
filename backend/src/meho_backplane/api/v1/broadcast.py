@@ -3,26 +3,31 @@
 
 """Operator REST parity for the broadcast working-surface tools (#3470).
 
-The routes are deliberately thin adapters.  They use the same strict history
-reader and announcement publisher as the MCP tools, so REST and CLI callers
-keep the broadcast subsystem's tenant isolation, durable-before-stream
-announcement order, rate limit, and fail-loud semantics.
+The routes are deliberately thin adapters.  They use the same archive reader
+and announcement publisher as the MCP tools (#3748), so REST and CLI callers
+keep the broadcast subsystem's tenant isolation, archive-first announcement
+order, rate limit, and error semantics.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.auth.agent_admission import (
+    AgentIdentityRequiredError,
+    resolve_agent_admission,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.broadcast import (
     ACTIVITY_MAX_CHARS,
+    IDEMPOTENCY_KEY_MAX_CHARS,
     MAX_TARGETS,
     OP_CLASS_ENUM,
     PLANNED_OP_CLASS_VALUES,
@@ -30,12 +35,15 @@ from meho_backplane.broadcast import (
     TTL_MAX_MINUTES,
     TTL_MIN_MINUTES,
     WORK_REF_MAX_CHARS,
-    AgentAnnouncementEvent,
+    AnnouncementClaimError,
+    AnnouncementFilter,
     AnnounceRateLimitError,
-    InvalidSinceError,
+    InvalidArchiveCursorError,
+    build_trusted_announcement,
+    encode_watch_checkpoint,
     enforce_announce_rate_limit,
-    list_recent_events_strict,
     publish_agent_announcement,
+    read_announcement_history,
 )
 
 __all__ = ["router"]
@@ -53,7 +61,7 @@ class BroadcastAnnounceRequest(BaseModel):
     activity: str = Field(min_length=1, max_length=ACTIVITY_MAX_CHARS)
     target: str | None = Field(default=None, max_length=TARGET_MAX_CHARS)
     scope: str | None = Field(default=None, max_length=TARGET_MAX_CHARS)
-    phase: Literal["start", "update", "completion"] = "update"
+    phase: Literal["start", "update", "completion"] = "start"
     targets: list[str] = Field(default_factory=list, max_length=MAX_TARGETS)
     planned_op_class: (
         Literal[
@@ -70,14 +78,34 @@ class BroadcastAnnounceRequest(BaseModel):
     ) = None
     ttl_minutes: int | None = Field(default=None, ge=TTL_MIN_MINUTES, le=TTL_MAX_MINUTES)
     work_ref: str | None = Field(default=None, min_length=1, max_length=WORK_REF_MAX_CHARS)
+    #: Deprecated: the server sets the run id. A value that is not the
+    #: checked run is refused.
     run_id: UUID | None = None
+    claim_id: UUID | None = None
+    idempotency_key: str | None = Field(
+        default=None, min_length=1, max_length=IDEMPOTENCY_KEY_MAX_CHARS
+    )
 
 
 class BroadcastAnnounceResponse(BaseModel):
-    """Acknowledgement with distinct durable event id and stream cursor."""
+    """Acknowledgement of a stored announcement.
+
+    ``replayed=true`` means the step was already stored and no new row was
+    written. ``watch_checkpoint`` is a watch cursor just after this
+    announcement in the archive order. ``delivery_pending=true`` means
+    the announcement is stored and readable, but the live wake-up for
+    watchers failed; a retry with the same ``idempotency_key`` finishes it.
+    """
 
     event_id: UUID
-    cursor: str
+    watch_checkpoint: str | None
+    delivery_pending: bool
+    claim_id: UUID
+    phase: str
+    owner_sub: str
+    admission: str
+    replayed: bool
+    actor_sub: str | None = None
     targets: list[str] | None = None
     planned_op_class: str | None = None
     ttl_minutes: int | None = None
@@ -102,26 +130,24 @@ async def recent_broadcast_events(
     active_only: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> dict[str, Any]:
-    """Read one tenant-scoped, LLM-safe broadcast history page."""
+    """Read one tenant-scoped, LLM-safe page of archived announcements."""
     if op_class is not None and op_class not in OP_CLASS_ENUM:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="invalid_op_class",
         )
     _bind_audit(op_id="meho_broadcast_recent", op_class="read")
+    flt = AnnouncementFilter(
+        op_class=op_class,
+        principal=principal,
+        target=target,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
+        active_only=active_only,
+    )
     try:
-        return await list_recent_events_strict(
-            operator,
-            since=cursor,
-            op_class=op_class,
-            principal=principal,
-            target=target,
-            actor_sub=actor_sub,
-            work_ref=work_ref,
-            active_only=active_only,
-            limit=limit,
-        )
-    except InvalidSinceError as exc:
+        return await read_announcement_history(operator, cursor=cursor, flt=flt, limit=limit)
+    except InvalidArchiveCursorError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
@@ -154,6 +180,14 @@ async def announce_broadcast(
             detail="invalid_planned_op_class",
         )
     _bind_audit(op_id="meho_broadcast_announce", op_class="write")
+    # Trusted admission (#3736): only a checked agent identity publishes.
+    try:
+        admission = await resolve_agent_admission(operator)
+    except AgentIdentityRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": exc.code, "reason": exc.reason, "remediation": exc.remediation},
+        ) from exc
     try:
         await enforce_announce_rate_limit(operator.tenant_id, operator.sub)
     except AnnounceRateLimitError as exc:
@@ -168,27 +202,45 @@ async def announce_broadcast(
             headers={"Retry-After": str(exc.retry_after_seconds)},
         ) from exc
 
-    event = AgentAnnouncementEvent(
-        tenant_id=operator.tenant_id,
-        principal_sub=operator.sub,
-        activity=payload.activity,
-        target=payload.target,
-        targets=payload.targets,
-        scope=payload.scope,
-        planned_op_class=payload.planned_op_class,
-        ttl_minutes=payload.ttl_minutes,
-        work_ref=payload.work_ref,
-        run_id=payload.run_id,
-        phase=payload.phase,
-        ts=datetime.now(UTC),
-    )
-    cursor = await publish_agent_announcement(event)
+    try:
+        event = build_trusted_announcement(
+            admission,
+            tenant_id=operator.tenant_id,
+            activity=payload.activity,
+            target=payload.target,
+            targets=payload.targets,
+            scope=payload.scope,
+            planned_op_class=payload.planned_op_class,
+            ttl_minutes=payload.ttl_minutes,
+            work_ref=payload.work_ref,
+            run_id=payload.run_id,
+            phase=payload.phase,
+            claim_id=payload.claim_id,
+            idempotency_key=payload.idempotency_key,
+            ts=datetime.now(UTC),
+        )
+        result = await publish_agent_announcement(event, idempotency_key=payload.idempotency_key)
+    except AnnouncementClaimError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    stored = result.event
     return BroadcastAnnounceResponse(
-        event_id=event.event_id,
-        cursor=cursor,
-        targets=payload.targets or None,
-        planned_op_class=payload.planned_op_class,
-        ttl_minutes=payload.ttl_minutes,
-        work_ref=payload.work_ref,
-        run_id=payload.run_id,
+        event_id=stored.event_id,
+        watch_checkpoint=(
+            None if result.seq is None else encode_watch_checkpoint(operator.tenant_id, result.seq)
+        ),
+        delivery_pending=result.delivery_pending,
+        claim_id=cast("UUID", stored.claim_id),
+        phase=stored.phase,
+        owner_sub=cast("str", stored.owner_sub),
+        admission=cast("str", stored.admission),
+        replayed=result.replayed,
+        actor_sub=stored.actor_sub,
+        targets=list(stored.targets) or None,
+        planned_op_class=stored.planned_op_class,
+        ttl_minutes=stored.ttl_minutes,
+        work_ref=stored.work_ref,
+        run_id=stored.run_id,
     )

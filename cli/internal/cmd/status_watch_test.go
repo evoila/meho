@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -71,6 +72,7 @@ func seedWatchCreds(t *testing.T, xdg, backplaneURL, accessToken string) {
 type fakeFeedRecord struct {
 	Authorization string
 	LastEventID   string
+	WorkRef       string
 	Query         string
 }
 
@@ -152,6 +154,7 @@ func newFakeFeed(t *testing.T, status int, frames [][]byte, dropMid bool) *fakeF
 		feed.record(fakeFeedRecord{
 			Authorization: r.Header.Get("Authorization"),
 			LastEventID:   r.Header.Get("Last-Event-Id"),
+			WorkRef:       r.Header.Get(api.WorkRefHeader),
 			Query:         r.URL.RawQuery,
 		})
 		if feed.status != http.StatusOK {
@@ -449,6 +452,9 @@ func TestRunWatch_AuthHeaderSent(t *testing.T) {
 	if records[0].Authorization != "Bearer "+jwtMarker {
 		t.Errorf("Authorization header = %q, want Bearer <marker>", records[0].Authorization)
 	}
+	if records[0].WorkRef != "" {
+		t.Errorf("%s = %q on a context without a work-ref; want no header", api.WorkRefHeader, records[0].WorkRef)
+	}
 	if strings.Contains(stdout.String(), jwtMarker) || strings.Contains(stderr.String(), jwtMarker) {
 		t.Errorf("JWT marker leaked into output")
 	}
@@ -500,6 +506,49 @@ func TestRunWatch_ReconnectsWithLastEventID(t *testing.T) {
 	}
 	if records[1].LastEventID != "1715600000000-0" {
 		t.Errorf("reconnect Last-Event-Id = %q, want 1715600000000-0", records[1].LastEventID)
+	}
+}
+
+// TestRunWatch_WorkRefHeaderOnConnectAndReconnect — a work-ref on the
+// command context reaches the feed as the Meho-Work-Ref header, on the
+// first connection and again on the reconnect after a drop (#3804).
+func TestRunWatch_WorkRefHeaderOnConnectAndReconnect(t *testing.T) {
+	xdg := withTempXDG(t)
+	target := "vcenter-a"
+	frames := [][]byte{
+		makeFrame("broadcast", canonicalEventJSON(t, "alice", "vsphere.vm.list", "read", "ok", &target), "1715600000000-0"),
+		makeFrame("broadcast", canonicalEventJSON(t, "alice", "vsphere.vm.create", "write", "ok", &target), "1715600000001-0"),
+	}
+	feed := newFakeFeed(t, http.StatusOK, frames, true) // drop after first frame
+	seedWatchCreds(t, xdg, feed.URL, jwtMarker)
+
+	const ref = "gh:evoila/meho#3804"
+	ctx, cancel := context.WithCancel(api.WithWorkRef(context.Background(), ref))
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runWatch(ctx, watchOptions{
+			BackplaneURL: feed.URL,
+			Stdout:       &bytes.Buffer{},
+			Stderr:       &bytes.Buffer{},
+			HTTPClient:   feed.client(),
+			Backoff:      fastBackoff,
+		})
+	}()
+
+	feed.waitForRequests(t, 2, 2*time.Second)
+	cancel()
+	<-done
+
+	records := feed.Records()
+	if len(records) < 2 {
+		t.Fatalf("expected at least 2 requests (initial + reconnect); got %d", len(records))
+	}
+	for i, rec := range records[:2] {
+		if rec.WorkRef != ref {
+			t.Errorf("request %d: %s = %q; want %q", i, api.WorkRefHeader, rec.WorkRef, ref)
+		}
 	}
 }
 

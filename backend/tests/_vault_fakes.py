@@ -52,6 +52,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+import hvac.exceptions
 import pytest
 
 from meho_backplane.auth import vault as vault_module
@@ -338,6 +339,15 @@ class _FakeKVv2:
     patch_exc: Exception | None = None
     versions_exc: Exception | None = None
     delete_exc: Exception | None = None
+    # #3424 permanent delete (``DELETE <mount>/metadata/<path>``). A path in
+    # ``absent_paths`` (``"<mount>/<path>"``) has no secret: the metadata
+    # read raises ``InvalidPath`` like Vault's 404. A successful metadata
+    # delete adds the path there, unless ``metadata_delete_keeps_path``
+    # models a delete that Vault accepted but did not apply.
+    absent_paths: set[str] = field(default_factory=set)
+    metadata_delete_calls: list[dict[str, Any]] = field(default_factory=list)
+    metadata_delete_exc: Exception | None = None
+    metadata_delete_keeps_path: bool = False
 
     def read_secret_version(
         self, path: str, mount_point: str = "secret", **_kwargs: Any
@@ -397,6 +407,8 @@ class _FakeKVv2:
         self.versions_calls.append({"path": path, "mount_point": mount_point})
         if self.versions_exc is not None:
             raise self.versions_exc
+        if f"{mount_point}/{path}" in self.absent_paths:
+            raise hvac.exceptions.InvalidPath(f"no secret at {mount_point}/{path}")
         return {
             "data": {
                 "current_version": self.version,
@@ -420,6 +432,16 @@ class _FakeKVv2:
         # underlying ``requests.Response``. The handler ignores the
         # return value (it echoes the requested versions), so a minimal
         # status-only stand-in is enough.
+        return _DeleteResponse()
+
+    def delete_metadata_and_all_versions(
+        self, path: str, mount_point: str = "secret", **_kwargs: Any
+    ) -> _DeleteResponse:
+        self.metadata_delete_calls.append({"path": path, "mount_point": mount_point})
+        if self.metadata_delete_exc is not None:
+            raise self.metadata_delete_exc
+        if not self.metadata_delete_keeps_path:
+            self.absent_paths.add(f"{mount_point}/{path}")
         return _DeleteResponse()
 
 

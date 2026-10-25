@@ -96,6 +96,7 @@ import structlog
 from pydantic_ai import ModelRetry, RunContext, Tool
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only imports
@@ -329,6 +330,8 @@ def _check_invoke_depth(child_agent_name: str) -> int:
     return attempted_depth
 
 
+# code-quality-allow: one closure holds the whole child-run frame (bounds,
+# lineage binds, heartbeat, finalize); splitting it is a separate change.
 def make_invoke_agent_tool(
     *,
     resolver: ChildAgentResolver,
@@ -420,15 +423,23 @@ def make_invoke_agent_tool(
                 parent_run_id=parent_run_id,
             )
 
-        # Bind depth + name-chain + the child run id for the duration of the
-        # child loop, so a nested invoke_agent sees the right depth and parent.
-        # Tokens make the resets exception-safe.
+        # Bind depth + name-chain + the child run id + the audit session id
+        # for the duration of the child loop, so a nested invoke_agent sees
+        # the right depth and parent. Tokens make the resets exception-safe.
         depth_token = agent_invoke_depth_var.set(attempted_depth)
         chain_token = _agent_name_chain_var.set(
             (*_agent_name_chain_var.get(), definition.name),
         )
         run_id_token = current_agent_run_id_var.set(
             child_run_id if child_run_id is not None else parent_run_id,
+        )
+        # The child's audit rows carry the child's run id as their session
+        # id (#4234), so a query by the child run id finds its calls. The
+        # parent's own ``invoke_agent`` row is written after the reset below,
+        # so it keeps the parent's id. With no recorded child row the
+        # parent's session stays in place.
+        session_token = agent_session_id_var.set(
+            child_run_id if child_run_id is not None else agent_session_id_var.get(),
         )
         _log.info(
             "agent_invoke_child_started",
@@ -501,6 +512,7 @@ def make_invoke_agent_tool(
             # never outlives the child loop. ``_stop_child_heartbeat`` is a
             # no-op when it was already stopped in the except branch.
             await _stop_child_heartbeat(child_heartbeat)
+            agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_id_token)
             _agent_name_chain_var.reset(chain_token)
             agent_invoke_depth_var.reset(depth_token)

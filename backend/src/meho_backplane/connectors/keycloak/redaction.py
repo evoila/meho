@@ -64,9 +64,10 @@ REDACTED = "***REDACTED***"
 #:
 #: * **Keycloak representation secret fields** — the camelCase keys the
 #:   Admin REST representations use for credential material.
-#: * **Generic credential param spellings** — the same well-known
-#:   credential key names the generic params-echo default scrubs
-#:   (:data:`~meho_backplane.operations._preview._SECRET_PARAM_KEYS`).
+#: * **Generic credential param spellings** — well-known credential key
+#:   names that the generic params-echo default also scrubs (it matches
+#:   them, and more, via
+#:   :func:`~meho_backplane.broadcast.events.is_secret_param_name`).
 #:   Notably ``password``: a ``RealmRepresentation.smtpServer`` is a
 #:   ``Map<String,String>`` that stores the SMTP relay password under the
 #:   ``password`` key, and a representation is ``additionalProperties: true``
@@ -82,8 +83,8 @@ _SECRET_FIELDS: frozenset[str] = frozenset(
         "value",  # CredentialRepresentation.value (raw credential value)
         "secretdata",  # CredentialRepresentation.secretData (hash + salt blob)
         "credentialdata",  # CredentialRepresentation.credentialData (algo metadata)
-        # Generic credential param spellings, mirroring the generic echo's
-        # _SECRET_PARAM_KEYS so the bespoke path scrubs at least as much.
+        # Generic credential param spellings the generic echo also masks,
+        # so the bespoke path scrubs at least these.
         # `password` closes the RealmRepresentation.smtpServer.password leak.
         "password",
         "passwd",

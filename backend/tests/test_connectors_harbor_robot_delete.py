@@ -20,6 +20,8 @@ pattern list:
   an honest ``irreversibility="recreatable_new_secret"`` class.
 * **The full governed flow**: preview → parked approval carrying the hash +
   blast radius → a *distinct human* approves → audited resume runs the DELETE.
+* **A service principal can propose it** (#3478): the add-on's call parks, a
+  human approves, and only the add-on reads the result back.
 * **The tier holds**: agent ``DENY``, no ``ServicePrincipalGrant``, no
   self-approval under break-glass, no satellite mint, dispatch refused without a
   matching preview hash.
@@ -48,14 +50,16 @@ from meho_backplane.connectors.harbor.ops_robot_delete_preview import (
     _harbor_robot_delete_preview,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations.approval_queue import (
+    ResultAccessForbiddenError,
     SelfApprovalForbiddenError,
     approve_request,
+    read_approval_result,
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.dispatcher import dispatch
@@ -371,6 +375,87 @@ async def test_full_governed_flow_preview_park_approve_resume(_stub_embedding: A
     assert resume.result["id"] == _ROBOT_ID
     assert len(recorder.delete_calls) == 1
     assert recorder.delete_calls[0][0] == "DELETE"
+
+
+# ===========================================================================
+# A service principal (paired add-on) can PROPOSE the destroy (#3478)
+# ===========================================================================
+
+
+async def test_service_principal_proposes_destroy_and_adopts_result(
+    _stub_embedding: AsyncMock,
+) -> None:
+    """An add-on proposes the delete; a human approves; the add-on reads the result.
+
+    The destructive tier is DENY only for agent principals. A service principal
+    previews, calls with the preview hash, and the call parks. A distinct human
+    approves, the DELETE runs under the approver, and the add-on that parked
+    the op reads the result back through ``read_approval_result`` (the service
+    behind ``GET /api/v1/approvals/{id}/result``). Nobody else can read it.
+    """
+    recorder = _RecordingHarborConnector()
+    await _bootstrap(recorder, _stub_embedding)
+    await _seed_target()
+
+    addon = _make_operator(sub="svc-addon", principal_kind=PrincipalKind.SERVICE)
+    args = _args()
+
+    # 1) The add-on previews and gets the hash.
+    preview = await preview_operation(addon, args)
+    assert preview["status"] == "ok", preview
+    bound_hash = preview["preview_hash"]
+
+    # 2) The add-on calls with the hash: it parks (not denied), nothing runs.
+    call = await call_operation(addon, {**args, "preview_hash": bound_hash})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+    assert recorder.delete_calls == []
+
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.principal_sub == "svc-addon"
+        assert row.preview_hash == bound_hash
+        assert row.proposed_effect["blast_radius"]["object"]["id"] == _ROBOT_ID
+
+    # 3) Before approval the add-on can poll, but there is no result yet.
+    async with get_sessionmaker()() as s:
+        pending = await read_approval_result(s, operator=addon, request_id=request_id)
+        await s.commit()
+    assert pending.status == "pending"
+    assert pending.resume_result is None
+
+    # 4) A distinct human approves; the DELETE runs under the approver.
+    approver = _make_operator(sub="op-approver")
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "ok", resume.error
+    assert len(recorder.delete_calls) == 1
+
+    async with get_sessionmaker()() as s:
+        executed = (
+            (await s.execute(select(AuditLog).where(AuditLog.path == _OP_ID))).scalars().all()
+        )
+    assert [a.operator_sub for a in executed] == ["op-approver"]
+
+    # 5) The add-on that parked the op adopts the result.
+    async with get_sessionmaker()() as s:
+        done = await read_approval_result(s, operator=addon, request_id=request_id)
+        await s.commit()
+    assert done.status == "approved"
+    assert done.resume_result is not None
+    assert done.resume_result["status"] == "ok"
+    assert done.resume_result["result"]["deleted"] is True
+
+    # 6) The result is the parker's alone — the approver cannot read it.
+    async with get_sessionmaker()() as s:
+        with pytest.raises(ResultAccessForbiddenError):
+            await read_approval_result(s, operator=approver, request_id=request_id)
 
 
 # ===========================================================================

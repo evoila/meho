@@ -1,0 +1,4 @@
+{{- /* Renders nothing: it only stops a render with values the built-in Keycloak cannot work with (see _core-keycloak.tpl). */ -}}
+{{- if .Values.coreKeycloak.enabled -}}
+{{- include "meho.coreKeycloakChecks" . -}}
+{{- end -}}

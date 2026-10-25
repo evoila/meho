@@ -28,6 +28,11 @@ on the ``redacted_body`` slot, a ``COMPOSITE`` sentinel ``method``, the
 param-sensitive, and layers on the reused park-time ``proposed_effect``. No
 handler runs, no connector is dialled, and nothing is sent — it is a pure,
 egress-free projection.
+
+Every synthetic preview says whether it shows the plan (#4028):
+``plan_shown=True`` when ``proposed_effect`` is present, otherwise
+``plan_shown=False`` plus a plain ``plan_note``. A builder that must read the
+target declines here, and its plan is built only at park time.
 """
 
 from __future__ import annotations
@@ -48,7 +53,7 @@ from meho_backplane.operations._request_preview import (
     compute_preview_hash,
 )
 
-__all__ = ["build_composite_preview"]
+__all__ = ["PLAN_NOT_SHOWN_NOTE", "build_composite_preview"]
 
 _log = structlog.get_logger(__name__)
 
@@ -57,6 +62,19 @@ _log = structlog.get_logger(__name__)
 #: constant keeps the hash stable while the params on ``redacted_body`` make
 #: it param-sensitive.
 _COMPOSITE_PREVIEW_METHOD: Final[str] = "COMPOSITE"
+
+#: Plain note set when the synthetic preview carries no ``proposed_effect``
+#: (#4028). The preview never contacts the target, so a plan builder that
+#: must read the target first (DRS rule create/delete, Keycloak deletes,
+#: ``windns.record.remove``) declines here. Without this note the caller saw
+#: ``status="ok"`` + a hash and could not tell that the plan was missing.
+PLAN_NOT_SHOWN_NOTE: Final[str] = (
+    "This preview does not show what the operation will change. "
+    "The preview never contacts the target, so it cannot build the plan "
+    "here. MEHO builds the plan when you send the "
+    "call. If the call waits for approval, the plan is shown on the "
+    "approval request before anyone approves it."
+)
 
 
 async def _synthetic_proposed_effect(
@@ -151,4 +169,8 @@ async def build_composite_preview(
     )
     if proposed_effect is not None:
         envelope["proposed_effect"] = proposed_effect
+        envelope["plan_shown"] = True
+    else:
+        envelope["plan_shown"] = False
+        envelope["plan_note"] = PLAN_NOT_SHOWN_NOTE
     return envelope

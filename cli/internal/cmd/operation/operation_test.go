@@ -14,6 +14,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // TestTruncateAsciiNoTrim — string within budget passes through.
@@ -105,12 +106,20 @@ func TestPrintSearchTableHumanFormat(t *testing.T) {
 		QueryDurationMs: 42.7,
 	}
 	var buf bytes.Buffer
-	printSearchTable(&buf, "vault-1.x", "kv read", r)
+	printSearchTable(&buf, "vault-1.x", "kv read", r, false)
 	out := buf.String()
-	for _, want := range []string{"vault.kv.read", "vault.kv.list", "Read a Vault KV secret", "2 hit(s)", "0.987"} {
+	for _, want := range []string{"vault.kv.read", "vault.kv.list", "Read a Vault KV secret", "2 hit(s)", "safety"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printSearchTable missing %q in output:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "0.987") || strings.Contains(out, "score") {
+		t.Errorf("printSearchTable without --scores should not show scores:\n%s", out)
+	}
+	buf.Reset()
+	printSearchTable(&buf, "vault-1.x", "kv read", r, true)
+	if out := buf.String(); !strings.Contains(out, "0.987") {
+		t.Errorf("printSearchTable with --scores should show the score:\n%s", out)
 	}
 }
 
@@ -119,7 +128,7 @@ func TestPrintSearchTableHumanFormat(t *testing.T) {
 func TestPrintSearchTableEmpty(t *testing.T) {
 	r := &SearchResponse{Hits: nil, QueryDurationMs: 12.0}
 	var buf bytes.Buffer
-	printSearchTable(&buf, "vault-1.x", "nonexistent", r)
+	printSearchTable(&buf, "vault-1.x", "nonexistent", r, false)
 	out := buf.String()
 	if !strings.Contains(out, "0 hit(s)") {
 		t.Errorf("empty search should announce 0 hits; got:\n%s", out)
@@ -256,6 +265,110 @@ func TestPrintPreviewResultOkRendersApprovalNeed(t *testing.T) {
 	printPreviewResult(&buf, "hetzner-rest-2026.04", "POST:/vswitch/{vswitch-id}/server", r)
 	if strings.Contains(buf.String(), "needs approval") {
 		t.Errorf("requires_approval=false must not print the approval line; got:\n%s", buf.String())
+	}
+}
+
+// previewEnvelopeWithPlan is a composite preview envelope as the backplane
+// sends it when the plan is built without the target (#4028).
+const previewEnvelopeWithPlan = `{
+  "status": "ok",
+  "op_id": "vault.kv.delete",
+  "connector_id": "vault-1.x",
+  "source_kind": "typed",
+  "method": "COMPOSITE",
+  "resolved_path": "vault.kv.delete",
+  "query": null,
+  "redacted_body": {"path": "app/db"},
+  "preview_hash": "abc123",
+  "proposed_effect": {"op_class": "write", "preview": {"resource": "kv_secret", "path": "app/db"}},
+  "plan_shown": true
+}`
+
+// TestPrintPreviewResultRendersProposedEffect — the summary prints the
+// plan when the backplane sends one (#4028).
+func TestPrintPreviewResultRendersProposedEffect(t *testing.T) {
+	var r PreviewResult
+	if err := json.Unmarshal([]byte(previewEnvelopeWithPlan), &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "vault-1.x", "vault.kv.delete", &r)
+	out := buf.String()
+	for _, want := range []string{"plan (proposed_effect):", `"kv_secret"`, "preview_hash: abc123"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not shown") {
+		t.Errorf("a preview with a plan must not say the plan is not shown; got:\n%s", out)
+	}
+}
+
+// TestPreviewResultJSONKeepsPlanFields — `--json` prints the decoded
+// PreviewResult, so the plan fields must survive the decode/encode round
+// trip (#4028).
+func TestPreviewResultJSONKeepsPlanFields(t *testing.T) {
+	var r PreviewResult
+	if err := json.Unmarshal([]byte(previewEnvelopeWithPlan), &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := output.PrintJSON(&buf, &r); err != nil {
+		t.Fatalf("PrintJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	effect, ok := got["proposed_effect"].(map[string]any)
+	if !ok || effect["op_class"] != "write" {
+		t.Errorf("--json dropped proposed_effect; got:\n%s", buf.String())
+	}
+	if got["plan_shown"] != true {
+		t.Errorf("--json dropped plan_shown; got:\n%s", buf.String())
+	}
+
+	// An ingested preview has no plan slot: nothing extra is emitted.
+	var ingested PreviewResult
+	if err := json.Unmarshal([]byte(`{"status":"ok","method":"GET","preview_hash":"h"}`), &ingested); err != nil {
+		t.Fatalf("decode ingested: %v", err)
+	}
+	buf.Reset()
+	if err := output.PrintJSON(&buf, &ingested); err != nil {
+		t.Fatalf("PrintJSON ingested: %v", err)
+	}
+	for _, key := range []string{"proposed_effect", "plan_shown", "plan_note"} {
+		if strings.Contains(buf.String(), key) {
+			t.Errorf("ingested preview must not emit %q; got:\n%s", key, buf.String())
+		}
+	}
+}
+
+// TestPrintPreviewResultSaysPlanNotShown — when the plan needs the target,
+// the summary says the plan is not shown and prints the note (#4028).
+func TestPrintPreviewResultSaysPlanNotShown(t *testing.T) {
+	shown := false
+	r := &PreviewResult{
+		Status:       "ok",
+		SourceKind:   "composite",
+		Method:       "COMPOSITE",
+		ResolvedPath: "vmware.composite.cluster.drs_rule.delete",
+		RedactedBody: json.RawMessage(`{"cluster":"domain-c8","rule_name":"r1"}`),
+		PreviewHash:  "def456",
+		PlanShown:    &shown,
+		PlanNote:     "The plan is shown on the approval request.",
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "vmware-rest-9.0", "vmware.composite.cluster.drs_rule.delete", r)
+	out := buf.String()
+	for _, want := range []string{
+		"plan: not shown in this preview",
+		"The plan is shown on the approval request.",
+		"preview_hash: def456",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult missing %q in output:\n%s", want, out)
+		}
 	}
 }
 
@@ -508,5 +621,21 @@ func TestPrintResultQueryResultTruncated(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "capped at 40 of 100") {
 		t.Errorf("truncated render should flag the spill cap; got:\n%s", out)
+	}
+}
+
+// TestSearchNeedsQueryOrOpID — with neither a query nor --op-id the
+// verb fails before it contacts the backplane (#3668).
+func TestSearchNeedsQueryOrOpID(t *testing.T) {
+	cmd := newSearchCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vault-1.x"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error when neither a query nor --op-id is given")
+	}
+	if !strings.Contains(stderr.String(), "--op-id") {
+		t.Errorf("error should name --op-id; got %q", stderr.String())
 	}
 }

@@ -122,16 +122,20 @@ func TestRunStatusHappyPath(t *testing.T) {
 	provider := "anthropic"
 	model := "claude-sonnet-4-6"
 	output := map[string]any{"text": "done"}
+	sub := "alice"
+	act := "agent:triage-bot"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/agents/runs/"+handle, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.AgentRunStatusResponse{
-			RunId:    uuid.MustParse(handle),
-			Status:   api.AgentRunStatusSucceeded,
-			Turns:    2,
-			Provider: &provider,
-			Model:    &model,
-			Output:   &output,
+			RunId:       uuid.MustParse(handle),
+			Status:      api.AgentRunStatusSucceeded,
+			Turns:       2,
+			Provider:    &provider,
+			Model:       &model,
+			Output:      &output,
+			IdentitySub: &sub,
+			IdentityAct: &act,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -142,7 +146,7 @@ func TestRunStatusHappyPath(t *testing.T) {
 	if err := runRunStatus(cmd, runStatusOptions{Handle: handle, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runRunStatus: %v; stderr=%s", err, stderr.String())
 	}
-	for _, want := range []string{"succeeded", "anthropic", "done"} {
+	for _, want := range []string{"succeeded", "anthropic", "done", "agent:triage-bot for alice"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q in %q", want, stdout.String())
 		}
@@ -460,5 +464,57 @@ func TestListRunsParamsOmitsEmptyFilters(t *testing.T) {
 	if params.WorkRef != nil || params.Status != nil || params.AgentName != nil ||
 		params.Limit != nil || params.Offset != nil {
 		t.Errorf("empty options must leave filters nil; got %+v", params)
+	}
+}
+
+func TestRunListShowsRunIdentity(t *testing.T) {
+	sub := "alice"
+	act := "agent:triage-bot"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]api.AgentRunSummaryResponse{
+			{
+				RunId:       uuid.MustParse("33333333-3333-3333-3333-333333333333"),
+				Status:      api.AgentRunStatusSucceeded,
+				Trigger:     "direct",
+				ModelTier:   "standard",
+				IdentitySub: &sub,
+				IdentityAct: &act,
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	if err := runRunList(cmd, runListOptions{BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"IDENTITY", "agent:triage-bot for alice"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunIdentity(t *testing.T) {
+	sub := "agent:nightly"
+	act := "agent:triage-bot"
+	person := "alice"
+	cases := []struct {
+		name     string
+		sub, act *string
+		want     string
+	}{
+		{"direct run", &person, &act, "agent:triage-bot for alice"},
+		{"scheduled run", &sub, nil, "agent:nightly"},
+		{"nothing sent", nil, nil, "-"},
+	}
+	for _, c := range cases {
+		if got := runIdentity(c.sub, c.act); got != c.want {
+			t.Errorf("%s: runIdentity = %q, want %q", c.name, got, c.want)
+		}
 	}
 }

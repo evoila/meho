@@ -25,7 +25,12 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.vmware_rest.vim_body import fault_message, unwrap_vim_value
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_message,
+    fault_type_name,
+    method_fault_type,
+    unwrap_vim_value,
+)
 
 # ---------------------------------------------------------------------------
 # Primitive boxes (the live 8.0.3 evidence shapes, #3106)
@@ -258,3 +263,68 @@ def test_fault_message_non_dict_and_empty_return_none() -> None:
     assert fault_message("boom") is None
     assert fault_message({}) is None
     assert fault_message({"fault": "not-a-dict"}) is None
+
+
+# ---------------------------------------------------------------------------
+# fault_type_name: never report the 9.x wrapper as the fault class
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        # Nested fault with no _typeName at all.
+        {"_typeName": "LocalizedMethodFault", "fault": {"faultstring": "boom"}},
+        # Nested fault whose _typeName is blank.
+        {"_typeName": "LocalizedMethodFault", "fault": {"_typeName": "  "}},
+        # Wrapper with no nested fault.
+        {"_typeName": "LocalizedMethodFault", "localizedMessage": "boom"},
+    ],
+)
+def test_fault_type_name_degenerate_9_x_wrapper_returns_none(fault: dict[str, Any]) -> None:
+    """A 9.x wrapper without a usable nested class name gives ``None``, not
+    ``LocalizedMethodFault`` -- the wrapper is not a fault class."""
+    assert fault_type_name(fault) is None
+
+
+def test_fault_type_name_reads_both_wire_shapes() -> None:
+    """The nested 9.x class and the flattened 8.0.x class are both returned."""
+    assert (
+        fault_type_name(
+            {"_typeName": "LocalizedMethodFault", "fault": {"_typeName": "NoPermission"}}
+        )
+        == "NoPermission"
+    )
+    assert fault_type_name({"_typeName": "InvalidProperty"}) == "InvalidProperty"
+    assert fault_type_name(None) is None
+
+
+# ---------------------------------------------------------------------------
+# method_fault_type: the VI-JSON 500 fault-body parser (#3566)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            '{"_typeName":"NotAuthenticated","object":{"type":"GuestProcessManager",'
+            '"value":"guestOperationsProcessManager"},"privilegeId":"",'
+            '"faultstring":"The session is not authenticated."}',
+            "NotAuthenticated",
+        ),
+        ('{"_typeName":"InvalidLogin","faultstring":"x"}', "InvalidLogin"),
+        ('{"_typeName":"NoPermission","privilegeId":"System.View"}', "NoPermission"),
+        ('{"_typeName":"InvalidArgument","faultstring":"bad"}', "InvalidArgument"),
+        # Not a fault body: empty, not JSON, not an object, no / blank _typeName.
+        ("", None),
+        ("<html>500 Internal Server Error</html>", None),
+        ('["NotAuthenticated"]', None),
+        ('"NotAuthenticated"', None),
+        ('{"faultstring":"no type"}', None),
+        ('{"_typeName":"  "}', None),
+        ('{"_typeName":7}', None),
+    ],
+)
+def test_method_fault_type_truth_table(body: str, expected: str | None) -> None:
+    assert method_fault_type(body) == expected

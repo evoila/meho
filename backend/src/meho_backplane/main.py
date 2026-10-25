@@ -74,6 +74,7 @@ from meho_backplane.api.v1.agents import router as api_v1_agents_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
 from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
+from meho_backplane.api.v1.audit_counts import router as api_v1_audit_counts_router
 from meho_backplane.api.v1.audit_reflex import router as api_v1_audit_reflex_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.automation import router as api_v1_automation_router
@@ -147,6 +148,7 @@ from meho_backplane.checks.evidence_retention import (
 from meho_backplane.checks.runner import start_sensor_runner, stop_sensor_runner
 from meho_backplane.checks.watchdog import start_checks_watchdog, stop_checks_watchdog
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
+from meho_backplane.connectors.result_handle_store import dispose_result_handle_store
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
@@ -193,7 +195,16 @@ from meho_backplane.operations.operation_run_reaper import (
     start_operation_run_reaper,
     stop_operation_run_reaper,
 )
+from meho_backplane.operations.result_read_admission import (
+    configure_result_read_admission,
+    shutdown_result_read_admission,
+)
+from meho_backplane.request_usage.retention import (
+    start_request_usage_retention_sweeper,
+    stop_request_usage_retention_sweeper,
+)
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
@@ -352,6 +363,11 @@ async def _run_lifespan_shutdown() -> None:
         await dispose_broadcast_blocking_client()
     except Exception:
         log.exception("dispose_broadcast_blocking_client_failed")
+    shutdown_result_read_admission()
+    try:
+        await dispose_result_handle_store()
+    except Exception:
+        log.exception("dispose_result_handle_store_failed")
 
 
 # code-quality-allow: linear boot-step sequence at the 100-line limit;
@@ -391,6 +407,13 @@ async def _run_lifespan_startup() -> None:
     # Eager engine construction (G2.3-T2 #258); validates ``DATABASE_URL``
     # at startup so first-request latency doesn't absorb the pool build.
     get_engine()
+    # Sandbox mode (#4622): check the two settings against the host name,
+    # then store or check the mode in the database, before MEHO serves a
+    # request or starts a background task. A wrong setting or a stored
+    # mode that differs from the setting refuses the start with a plain
+    # message. The first database step of the boot, so a mismatch is
+    # found before any other work writes to the database.
+    await assert_sandbox_mode_consistent(get_settings())
     # Eager broadcast client construction (G6.1-T1 #307); URL parse
     # failures surface here, not on first /ready.
     get_broadcast_client()
@@ -448,6 +471,8 @@ async def _run_lifespan_startup() -> None:
     # the raw list. Production-only: tests construct their own reducers
     # via :func:`set_default_reducer`.
     set_default_reducer(JsonFluxReducer())
+    # Result-read worker pool + admission limits from settings (#3640).
+    configure_result_read_admission(get_settings())
     # MCP tool / resource auto-discovery (G0.5-T3, #248). Same shape
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.
@@ -486,6 +511,7 @@ class _BackgroundTasks:
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
+    request_usage_retention: asyncio.Task[None] | None
     audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
@@ -546,6 +572,12 @@ def _start_background_tasks() -> _BackgroundTasks:
     evidence_retention: asyncio.Task[None] | None = None
     if settings.checks_evidence_prune_enabled:
         evidence_retention = start_evidence_retention_sweeper()
+    # #3734 — request usage event prune. Runs only when
+    # REQUEST_USAGE_RETENTION_DAYS is set; unset means collection is off,
+    # so there is nothing to prune.
+    request_usage_retention: asyncio.Task[None] | None = None
+    if settings.request_usage_retention_days is not None:
+        request_usage_retention = start_request_usage_retention_sweeper()
     # Security review S19 #307 — audit_log.raw_payload age-off. Gated on
     # RAW_PAYLOAD_PRUNE_ENABLED so operators with an external age-off can skip
     # the loop. ``RETENTION_DAYS=0`` keeps the loop running as a no-op
@@ -638,6 +670,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         topology_history=topology_history,
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
+        request_usage_retention=request_usage_retention,
         audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
@@ -685,6 +718,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.audit_raw_payload_retention is not None:
         await stop_audit_raw_payload_reaper(tasks.audit_raw_payload_retention)
+    if tasks.request_usage_retention is not None:
+        await stop_request_usage_retention_sweeper(tasks.request_usage_retention)
     if tasks.evidence_retention is not None:
         await stop_evidence_retention_sweeper(tasks.evidence_retention)
     if tasks.announcement_retention is not None:
@@ -822,7 +857,7 @@ app.include_router(api_v1_health_router)
 # privacy-preserving query_hash payload (the raw query is never
 # persisted -- per v0.2 sensitivity defaults).
 app.include_router(api_v1_retrieve_router)
-# G4.3-T5 (#444) -- audit-backed retrieval usage telemetry
+# G4.3-T5 (#444) -- retrieval usage telemetry (request usage events, #3747)
 # (`GET /api/v1/retrieve/usage`). Operator role minimum; the route uses
 # `require_role(TenantRole.OPERATOR)` and gates the `tenant_filter`
 # cross-tenant parameter behind tenant_admin. Broadcast publishes
@@ -1026,6 +1061,7 @@ app.include_router(api_v1_memory_router)
 # row this surface writes carries the canonical `meho.audit.query`
 # identity and broadcasts as aggregate-only per decision #3.
 app.include_router(api_v1_audit_router)
+app.include_router(api_v1_audit_counts_router)
 # #3134 (Initiative #3128) -- reflex-adoption KPIs at
 # `GET /api/v1/audit/reflex`. Read-only `audit_log` + announce-store
 # aggregation reusing the #444 usage-telemetry seam: read-before-act,

@@ -184,7 +184,10 @@ unrecorded.
 
 ## Versioning
 
-This plugin's version rides MEHO releases (see `.claude-plugin/plugin.json`).
-After a MEHO upgrade, re-install the plugin (`/plugin install meho@meho`) to
-pick up refreshed routing rules — this replaces the copy-and-merge template
-refresh for Claude Code consumers.
+This plugin has its own version, in `.claude-plugin/plugin.json`. It is not
+the MEHO release version. Every change to the plugin raises it; a CI check
+fails a pull request that changes the plugin and keeps the old version.
+Claude Code installs a new copy only when the version goes up. To get the
+latest routing rules, run `claude plugin update meho@meho` and restart Claude
+Code, or turn on auto-update for the `meho` marketplace in `/plugin`. This
+replaces the copy-and-merge template refresh for Claude Code consumers.

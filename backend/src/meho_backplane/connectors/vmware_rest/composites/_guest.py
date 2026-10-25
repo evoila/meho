@@ -17,13 +17,17 @@ SSH, no in-guest agent of MEHO's own.
 
 Design (see ``docs/codebase/connectors-vmware-rest-guest-ops.md``):
 
-* **Guest credentials via ``secret_ref`` only, never in params.** Guest
-  OS credentials are read from the target's Vault secret under the
+* **Guest credentials via a secret reference only, never in params.**
+  Guest OS credentials are read from the target's Vault secret under the
   operator's identity
   (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
   with the ``guest_username`` / ``guest_password`` fields) -- exactly as
   the connector already reads the vCenter service account from the same
-  secret. The credential lives only as the ephemeral
+  secret. A call may instead name another secret through the optional
+  ``guest_secret_ref`` parameter (#3364) -- a reference string read the
+  same way, under the operator's identity, and bounded to the target's
+  allowed prefix (:mod:`._guest_secret_ref`) so VMs behind one vCenter can
+  carry distinct guest logins. The credential lives only as the ephemeral
   ``NamePasswordAuthentication`` object the vim request body carries; it
   never enters params, a result, an audit row, a preview, or a log line.
 * **Structured sub-ops, not freeform shell.** Each op is a discrete
@@ -75,6 +79,10 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
+from meho_backplane.connectors.vmware_rest.composites._guest_secret_ref import (
+    load_guest_override_credentials,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
@@ -161,6 +169,15 @@ _KNOWN_CONTENT_ENCODINGS: frozenset[str] = frozenset(
 #: attacker-influenceable -- the allow-list leaves no room for control
 #: characters, escape sequences, or smuggled bytes in the audit line.
 _MEDIA_TYPE_RE = re.compile(r"[a-z0-9][a-z0-9.+_-]*/[a-z0-9][a-z0-9.+_-]*")
+#: A ``Content-Length`` value as RFC 9110 defines it: one or more ASCII digits.
+_DIGITS_RE = re.compile(r"[0-9]+")
+#: Longest header-derived values the transfer refusals echo. The media type and
+#: the declared length come from the transfer host's response headers, which only
+#: the HTTP parser's header-size limit bounds. Longer values are cut (see
+#: :func:`_clip_echo`) so the error message and the audit row stay short. 19
+#: digits holds every 64-bit byte count.
+_MAX_ECHOED_MEDIA_TYPE_CHARS = 127
+_MAX_ECHOED_LENGTH_DIGITS = 19
 #: Chunk width (base64 characters per ``content_lines`` row) for binary content.
 #: Wider than RFC 2045's 76-char MIME wrap so a large binary spilling to a
 #: result handle produces far fewer rows to page (an 8 MiB file is ~2.7k rows
@@ -211,19 +228,37 @@ def _name_password_auth(username: str, password: str) -> dict[str, Any]:
 
 
 async def _guest_auth(
-    connector: VmwareRestConnector, target: Any, operator: Operator
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    guest_secret_ref: str | None,
 ) -> dict[str, Any]:
-    """Resolve the guest OS credential from the target's ``secret_ref``.
+    """Resolve the guest OS credential for one call.
 
-    Reads the ``guest_username`` / ``guest_password`` fields off the same
-    KV-v2 secret the connector reads the vCenter session credential from,
-    under the operator's identity. Raises
+    Without ``guest_secret_ref`` this reads the ``guest_username`` /
+    ``guest_password`` fields off the same KV-v2 secret the connector reads
+    the vCenter session credential from, under the operator's identity,
+    and raises
     :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
     when the secret is unset or missing a guest field -- the dispatcher
     wraps it ``connector_error`` for the caller.
+
+    With ``guest_secret_ref`` (#3364) the same two fields are read from
+    that reference instead, through
+    :func:`~._guest_secret_ref.load_guest_override_credentials`: the
+    reference must fall under the target's allowed prefix (else
+    :class:`~._guest_secret_ref.GuestSecretRefScopeError`, no store read),
+    and a store denial raises ``SecretRefReadError``. There is never a
+    fallback to the target's own secret.
     """
     del connector  # credentials resolve off the target, not the session
-    creds = await load_basic_credentials(target, operator, fields=_GUEST_CRED_FIELDS)
+    if guest_secret_ref:
+        creds = await load_guest_override_credentials(
+            guest_secret_ref, target, operator, fields=_GUEST_CRED_FIELDS
+        )
+    else:
+        creds = await load_basic_credentials(target, operator, fields=_GUEST_CRED_FIELDS)
     return _name_password_auth(creds["guest_username"], creds["guest_password"])
 
 
@@ -315,7 +350,9 @@ async def guest_process_list_composite(
     vm_moid = params["vm"]
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
     max_processes = int(params.get("max_processes", _DEFAULT_MAX_PROCESSES))
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_PROCESS_MANAGER
     )
@@ -359,7 +396,9 @@ async def guest_env_read_composite(
     vm_moid = params["vm"]
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
     names = params.get("names")
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_PROCESS_MANAGER
     )
@@ -467,7 +506,9 @@ async def guest_file_read_composite(
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
     fetch_content = bool(params.get("fetch_content", False))
     max_inline_bytes = _bounded_max_inline_bytes(params.get("max_inline_bytes"))
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_FILE_MANAGER
     )
@@ -575,7 +616,9 @@ async def guest_file_write_composite(
     if gate is not None:
         return gate
 
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(
+        connector, target, operator, guest_secret_ref=params.get("guest_secret_ref")
+    )
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_FILE_MANAGER
     )
@@ -671,14 +714,25 @@ def _file_too_large(size_bytes: int, max_bytes: int) -> RuntimeError:
 
     The dispatcher maps a :class:`RuntimeError` to ``connector_error`` with the
     message intact (as the other guest-handler guards do), so the caller sees
-    an actionable size + remediation.
+    an actionable size + remediation. The size can come from the declared
+    ``Content-Length``, so it is cut to :data:`_MAX_ECHOED_LENGTH_DIGITS`.
     """
+    size = _clip_echo(str(size_bytes), _MAX_ECHOED_LENGTH_DIGITS)
     return RuntimeError(
-        f"guest.file.read: file is {size_bytes} bytes, over the "
+        f"guest.file.read: file is {size} bytes, over the "
         f"{max_bytes}-byte inline-fetch cap (max_inline_bytes; hard cap "
         f"{_FILE_READ_HARD_CAP_BYTES}). Re-read without fetch_content for the "
         f"transfer handle, or raise max_inline_bytes."
     )
+
+
+def _clip_echo(token: str, limit: int) -> str:
+    """Return ``token`` cut to at most ``limit`` characters.
+
+    A cut value ends in ``...`` (inside the limit), so the reader can see it was
+    shortened.
+    """
+    return token if len(token) <= limit else token[: limit - 3] + "..."
 
 
 def _media_type_token(raw: str | None) -> str:
@@ -690,12 +744,16 @@ def _media_type_token(raw: str | None) -> str:
     (drop any ``;``-separated parameters), lower-case it, and echo it **only if
     it matches a plain ``type/subtype`` token** (:data:`_MEDIA_TYPE_RE`) --
     otherwise ``"unknown"``. That allow-list shape leaves no room for control
-    characters, escape sequences, or smuggled bytes in the audit line.
+    characters, escape sequences, or smuggled bytes in the audit line. A
+    matching token is cut to :data:`_MAX_ECHOED_MEDIA_TYPE_CHARS` so a very
+    long header cannot make the message or the audit row long.
     """
     if not raw:
         return "unknown"
     token = raw.split(";", 1)[0].strip().lower()
-    return token if _MEDIA_TYPE_RE.fullmatch(token) else "unknown"
+    if not _MEDIA_TYPE_RE.fullmatch(token):
+        return "unknown"
+    return _clip_echo(token, _MAX_ECHOED_MEDIA_TYPE_CHARS)
 
 
 def _declared_length(raw: str | None) -> str:
@@ -703,16 +761,17 @@ def _declared_length(raw: str | None) -> str:
 
     Read from the header only -- the body is **never** read to measure it (a
     hostile transfer host could otherwise make the error path stream an
-    unbounded body). A missing, non-integer, or negative value yields
-    ``"unknown"``; a valid one is a bounded digit run, safe to echo verbatim.
+    unbounded body). A missing value, or one that is not plain ASCII digits,
+    yields ``"unknown"``. A valid value loses its leading zeros and is cut to
+    :data:`_MAX_ECHOED_LENGTH_DIGITS` digits, so a very long header cannot make
+    the message or the audit row long.
     """
     if raw is None:
         return "unknown"
-    try:
-        length = int(raw)
-    except ValueError:
+    digits = raw.strip()
+    if not _DIGITS_RE.fullmatch(digits):
         return "unknown"
-    return str(length) if length >= 0 else "unknown"
+    return _clip_echo(digits.lstrip("0") or "0", _MAX_ECHOED_LENGTH_DIGITS)
 
 
 def _transfer_get_failed(status_code: int, content_type: str, content_length: str) -> RuntimeError:
@@ -980,6 +1039,7 @@ async def guest_program_run_composite(
         working_directory=working_directory,
         env=env,
         top_moid=top_moid,
+        guest_secret_ref=params.get("guest_secret_ref"),
     )
     result: dict[str, Any] = {
         "status": "started",
@@ -1021,6 +1081,7 @@ async def _start_guest_program(
     working_directory: Any,
     env: Any,
     top_moid: str,
+    guest_secret_ref: str | None,
 ) -> tuple[str, dict[str, Any], int]:
     """Resolve guest creds + the GuestProcessManager, then ``StartProgramInGuest``.
 
@@ -1029,7 +1090,7 @@ async def _start_guest_program(
     the started process's PID. Raises :class:`RuntimeError` if the vim call
     returns no usable PID.
     """
-    auth = await _guest_auth(connector, target, operator)
+    auth = await _guest_auth(connector, target, operator, guest_secret_ref=guest_secret_ref)
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_PROCESS_MANAGER
     )
@@ -1150,13 +1211,33 @@ async def _poll_for_exit(
             # info aged out of the ~5-minute window (or Tools restarted).
             return _exit_unknown()
         if time.monotonic() >= deadline:
-            return {"status": "timeout", "exit_code": None} if seen_running else _exit_unknown()
+            if not seen_running:
+                return _exit_unknown()
+            return {
+                "status": "timeout",
+                "exit_code": None,
+                "issues": [
+                    issue(
+                        "connector",
+                        "error",
+                        f"process {pid} was still running after {timeout_seconds}s",
+                    )
+                ],
+            }
         await asyncio.sleep(_RUN_POLL_INTERVAL_SECONDS)
 
 
 def _exit_unknown() -> dict[str, Any]:
     """Completion fields for a process whose exit code could not be determined."""
-    return {"status": "exit_unknown", "exit_code": None, "start_time": None, "end_time": None}
+    return {
+        "status": "exit_unknown",
+        "exit_code": None,
+        "start_time": None,
+        "end_time": None,
+        "issues": [
+            issue("connector", "error", "the process exit code could not be read from the guest")
+        ],
+    }
 
 
 def _process_info_for_pid(payload: Any, pid: int) -> dict[str, Any] | None:

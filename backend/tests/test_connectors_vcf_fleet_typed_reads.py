@@ -42,6 +42,7 @@ from uuid import UUID
 
 import pytest
 import respx
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -290,7 +291,7 @@ async def test_typed_ops_registered_with_no_ingested_rows(
         .all()
     )
     op_ids = {r.op_id for r in rows}
-    assert op_ids == {"fleet.about", "fleet.environment.list"}
+    assert op_ids == {"fleet.about", "fleet.environment.list", "fleet.api_file.get"}
     assert all(r.source_kind == "typed" for r in rows)
 
 
@@ -300,15 +301,35 @@ async def test_typed_ops_registered_with_no_ingested_rows(
 
 
 def test_typed_ops_are_read_only_and_ungated() -> None:
-    """Both typed ops are safe, read-only, and require no approval."""
+    """Every typed op is safe, read-only, and requires no approval."""
     assert {op.op_id for op in FLEET_TYPED_OPS} == {
         "fleet.about",
         "fleet.environment.list",
+        "fleet.api_file.get",
     }
     for op in FLEET_TYPED_OPS:
         assert op.safety_level == "safe", op.op_id
         assert op.requires_approval is False, op.op_id
         assert "read-only" in op.tags, op.op_id
+
+
+@pytest.mark.parametrize("op", FLEET_TYPED_OPS, ids=lambda op: op.op_id)
+def test_each_op_example_validates_against_its_parameter_schema(op: Any) -> None:
+    """Every op ships one example call, and it is a valid call (Draft 2020-12)."""
+    examples = op.parameter_schema.get("examples")
+    assert isinstance(examples, list) and examples, op.op_id
+    Draft202012Validator.check_schema(op.parameter_schema)
+    validator = Draft202012Validator(op.parameter_schema)
+    for example in examples:
+        assert list(validator.iter_errors(example)) == [], (op.op_id, example)
+
+
+@pytest.mark.parametrize("op", FLEET_TYPED_OPS, ids=lambda op: op.op_id)
+def test_each_op_response_schema_names_its_fields(op: Any) -> None:
+    """No response schema is a bare "any object"."""
+    schema = op.response_schema
+    assert schema is not None, op.op_id
+    assert schema.get("properties"), op.op_id
 
 
 def test_about_llm_instructions_flag_the_9_0_regression() -> None:

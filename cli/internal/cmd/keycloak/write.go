@@ -33,6 +33,9 @@ import (
 //   - keycloak user create    -f F --password-secret-ref R→ keycloak.user.create
 //   - keycloak user reset-password (--id|--username) --password-secret-ref R → keycloak.user.reset_password
 //   - keycloak role-mapping assign (--id|--username) --role R [--role ...] → keycloak.role_mapping.assign
+//   - keycloak user|group|client delete (--id|--name flag) [--preview-hash H] → keycloak.{user,group,client}.delete
+//     (destructive; see delete.go for the two-step preview → approval flow)
+//   - keycloak user logout (--id|--username) → keycloak.user.logout
 //
 // The representation body is a JSON file (--representation-file / -f) so an
 // operator can feed the same JSON a bootstrap script POSTed to kcadm.sh.
@@ -91,6 +94,10 @@ var writeResultKeyOrder = []string{
 	// group-lifecycle write confirmations (#3280)
 	"parent_id", "path", "already_exists", "user_id", "group_id",
 	"added", "removed", "unchanged", "attribute_keys", "replaced",
+	// governed delete confirmations (#3944)
+	"deleted", "already_absent",
+	// user session logout confirmation (#3851)
+	"logged_out",
 }
 
 // decodeFlatObject decodes the write confirmation envelope — a flat JSON

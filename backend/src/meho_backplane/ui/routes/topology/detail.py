@@ -64,6 +64,7 @@ from sqlalchemy.orm import aliased
 
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
+from meho_backplane.topology.identity_mode import not_legacy_scope
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
@@ -161,7 +162,10 @@ async def _fetch_edges(
     (``from_node_id = node_id``) or ``"in"`` for edges arriving at
     it (``to_node_id = node_id``). Soft-deleted edges
     (``last_seen IS NULL``) are excluded -- the drawer should show
-    a live snapshot, not stale relationships.
+    a live snapshot, not stale relationships. Edges with a
+    ``legacy:`` scoped end are excluded too (#3749): the scope
+    cut-over set that row aside, so the edge is not a live
+    relationship, whichever end the drawer is opened on.
 
     The query joins both endpoint nodes explicitly via aliases so the
     result carries the human-readable ``(kind, name)`` for each
@@ -200,6 +204,8 @@ async def _fetch_edges(
             GraphEdge.tenant_id == tenant_id,
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
+            not_legacy_scope(from_alias.source_scope),
+            not_legacy_scope(to_alias.source_scope),
             GraphEdge.last_seen.is_not(None),
         )
         .order_by(GraphEdge.last_seen.desc(), GraphEdge.id)

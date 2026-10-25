@@ -148,10 +148,9 @@ def test_vcf_fleet_connector_subclasses_http_connector() -> None:
     assert VcfFleetConnector.product == "fleet"
     assert VcfFleetConnector.version == "9.0"
     assert VcfFleetConnector.impl_id == "fleet-rest"
-    # Re-banded to >=8.0,<10.0 in #3037 (Aria Suite Lifecycle 8.x + VCF
-    # Fleet 9.0 /lcm/* back-compat); the modern fleet-lcm impl takes 9.0 by
-    # most-specific-version. See test_connectors_fleet_dual_impl_resolution.py.
-    assert VcfFleetConnector.supported_version_range == ">=8.0,<10.0"
+    # Aria Suite Lifecycle 8.x + VCF Fleet 9.0 (the /lcm/* API); the modern
+    # fleet-lcm impl starts at 9.1. See test_connectors_fleet_dual_impl_resolution.py.
+    assert VcfFleetConnector.supported_version_range == ">=8.0,<9.1"
     assert VcfFleetConnector.priority == 1
 
 

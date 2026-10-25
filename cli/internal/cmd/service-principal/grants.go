@@ -164,7 +164,7 @@ func newCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&principal, "principal", "", "JWT sub of the service principal (required)")
-	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs and delete-shaped ops are refused (required)")
+	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)")
 	cmd.Flags().StringVar(&connectorID, "connector-id", "", "exact connector id; globs are refused (required)")
 	cmd.Flags().StringVar(&target, "target", "", "target UUID (optional; targetless is not a wildcard)")
 	cmd.Flags().StringVar(&targetProduct, "target-product", "", "exact target-product selector (optional)")
@@ -187,7 +187,7 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, t
 		return api.ServiceGrantCreate{}, fmt.Errorf("--target is mutually exclusive with --target-product and --target-name-pattern")
 	}
 	if isDeleteShaped(opID) {
-		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is delete-shaped and can never be granted", opID)
+		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a delete operation. A delete grant is made in the web console, by a tenant admin, and only on an instance in sandbox mode; the CLI cannot create one", opID)
 	}
 	if strings.Contains(opID, ".composite.") {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a composite; create one grant for each governed child operation instead", opID)
@@ -242,7 +242,7 @@ func createGrant(ctx context.Context, url string, body api.ServiceGrantCreate) (
 
 func newRevokeCmd() *cobra.Command {
 	var confirm, jsonOut bool
-	var backplaneOverride string
+	var reason, backplaneOverride string
 	cmd := &cobra.Command{Use: "revoke <grant-id>", Short: "Revoke a service-principal grant (operator)", Args: cobra.ExactArgs(1), SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, err := uuid.Parse(args[0])
@@ -264,7 +264,7 @@ func newRevokeCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			resp, err := revokeGrant(cmd.Context(), url, id)
+			resp, err := revokeGrant(cmd.Context(), url, id, reason)
 			if err != nil {
 				return renderRequestError(cmd, url, err, jsonOut)
 			}
@@ -279,19 +279,29 @@ func newRevokeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm revocation")
+	cmd.Flags().StringVar(&reason, "reason", "", "optional reason for the revoke, stored on the grant and the audit row")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a machine-readable result JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "", "backplane URL (defaults to the URL from `meho login`)")
 	return cmd
 }
 
-func revokeGrant(ctx context.Context, url string, id uuid.UUID) (*api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse, error) {
+func revokeGrant(ctx context.Context, url string, id uuid.UUID, reason string) (*api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse, error) {
 	authed, err := newAuthedClient(ctx, url)
 	if err != nil {
 		return nil, err
 	}
 	return retryOn401(ctx, authed, func(ctx context.Context) (*api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse, error) {
-		return authed.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteWithResponse(ctx, id, nil)
+		return authed.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteWithResponse(ctx, id, revokeGrantParams(reason))
 	}, func(r *api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse) int { return r.StatusCode() })
+}
+
+// revokeGrantParams sends the reason only when the operator gave one, so a
+// revoke without --reason keeps the plain DELETE with no query string.
+func revokeGrantParams(reason string) *api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams {
+	if reason == "" {
+		return nil
+	}
+	return &api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams{Reason: &reason}
 }
 
 func printGrantList(w io.Writer, grants []api.ServiceGrantRead) {
@@ -299,14 +309,29 @@ func printGrantList(w io.Writer, grants []api.ServiceGrantRead) {
 		fmt.Fprintln(w, "no service-principal grants in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %s\n", "ID", "PRINCIPAL", "OP_ID", "CONNECTOR", "EXPIRES_AT")
+	fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %-25s %s\n", "ID", "PRINCIPAL", "OP_ID", "CONNECTOR", "EXPIRES_AT", "ORPHANED")
+	orphans := 0
 	for _, grant := range grants {
 		exp := "-"
 		if grant.ExpiresAt != nil {
 			exp = grant.ExpiresAt.UTC().Format(time.RFC3339)
 		}
-		fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %s\n", grant.Id.String(), grant.PrincipalSub, grant.OpId, grant.ConnectorId, exp)
+		orphaned := "-"
+		if isOrphaned(grant) {
+			orphaned = "yes"
+			orphans++
+		}
+		fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %-25s %s\n", grant.Id.String(), grant.PrincipalSub, grant.OpId, grant.ConnectorId, exp, orphaned)
 	}
+	if orphans > 0 {
+		fmt.Fprintf(w, "\n%d grant(s) are orphaned: their target was deleted or registered again under a new id, so they never match.\nRun `meho service-principals grants show <grant-id>` to see how to fix each one.\n", orphans)
+	}
+}
+
+// isOrphaned reports the server's read-time orphan flag: the grant's concrete
+// target no longer exists, so the grant can never match a dispatch.
+func isOrphaned(grant api.ServiceGrantRead) bool {
+	return grant.Orphaned != nil && *grant.Orphaned
 }
 
 func printGrantDetail(w io.Writer, grant *api.ServiceGrantRead) {
@@ -324,6 +349,12 @@ func printGrantDetail(w io.Writer, grant *api.ServiceGrantRead) {
 		exp = grant.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	fmt.Fprintf(w, "id:                  %s\nprincipal_sub:       %s\nop_id:               %s\nconnector_id:        %s\ntarget:              %s\nreason:              %s\nexpires_at:          %s\ncreated_by:          %s\n", grant.Id.String(), grant.PrincipalSub, grant.OpId, grant.ConnectorId, target, grant.Reason, exp, grant.CreatedBySub)
+	if isOrphaned(*grant) {
+		fmt.Fprintln(w, "orphaned:            yes")
+		if grant.OrphanRemediation != nil {
+			fmt.Fprintf(w, "remediation:         %s\n", *grant.OrphanRemediation)
+		}
+	}
 }
 
 func renderGrantEntry(w io.Writer, grant *api.ServiceGrantRead, jsonOut bool, verb string) error {

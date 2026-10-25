@@ -134,6 +134,7 @@ async def test_unreported_remote_write_past_expiry_alarms_once() -> None:
     assert row.method == "INTERNAL"
     assert row.path == GATEWAY_UNREPORTED_MINT_PATH
     assert row.payload["event_class"] == "security"
+    assert row.event_class == "security_event"
     assert row.payload["runner"] == _RUNNER
     assert row.payload["op_id"] == "vmware.vm.tag.set"
     assert row.payload["lapse_seconds"] >= 0

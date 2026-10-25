@@ -119,6 +119,59 @@ not a bigger limit — 14Gi is this node size's ceiling. The job stays
 non-blocking and the fail-visible annotation above surfaces every skipped
 upload instead of letting it rot silently.
 
+## When coverage reads about 36% with every check green — the missing worker file
+
+**Symptom.** SonarCloud shows backend coverage far below the real number (36%
+on `main` in October 2026, against about 87-93% with the same tests), and the
+number jumps between pushes for no code reason. Unlike the ~24% case above,
+the `python-coverage` artifact **is** there, every shard job is green, and the
+Quality Gate run shows no error annotation.
+
+**What it means.** One or more coverage shards uploaded data without the
+file of their test worker. Each shard's pytest runs with `-n 1`: the pytest
+main process only starts a worker and prints results; the worker runs the
+tests. Coverage measures every process through `COVERAGE_PROCESS_START` and
+writes a process's data file when that process exits. If the worker never
+exits normally, its file is never written, and the shard only contributes
+the code that runs at start-up (about 400 source files instead of about
+1,000). The combine job merges whatever is there and reports a low number.
+Nothing turns red because the coverage jobs are non-blocking by design.
+
+**Why the worker does not exit normally.** Two causes, seen in October 2026
+(#4758):
+
+1. **The controller kills the worker too early.** When the worker reports
+   "finished", the controller asks it to stop, execnet interrupts it after
+   5 seconds (the `KeyboardInterrupt` traceback at the end of a shard log,
+   usually inside weakref or `__del__` clean-up code), and pytest-xdist kills
+   it 10 seconds after the request. Freeing a whole session's objects with
+   coverage switched on can take longer than that. A killed worker writes
+   nothing. **Fix:** the `pytest_sessionfinish` hook in `backend/tests/conftest.py`
+   saves the worker's coverage data (and stops the tracer) before the worker
+   reports "finished". Pinned by `backend/tests/test_ci_coverage_shards.py`.
+2. **The shard hits its 30-minute step limit.** Then all of its processes are
+   killed and every data file of that shard is lost (the shard uploads an
+   empty or missing artifact). With 5 shards on the 7 GiB heavy runner, a
+   shard with about 4,500 tests ran up to 29 minutes. **Fix:** the sweep runs
+   as 8 shards (about 2,700 tests each). Raise the shard count again before
+   any shard gets near the limit; the matrix, `TOTAL`, and the combine job's
+   download steps must move together, and the same test pins that lockstep.
+
+**Where to look.**
+
+1. Download `python-coverage-data-shard-N` from the CI run (kept 1 day). The
+   shard must hold one file of about 250 KB for the worker; the pytest main
+   process file is about 230 KB, and helper processes leave files of about
+   50 KB. To check one file, run in `backend/`:
+   `uv run coverage report --rcfile=.coveragerc.ci --data-file=<file>`.
+   The worker file alone reports about 60% for its shard; the main process
+   file reports under 20%.
+2. The shard's `coverage-pytest-log-shard-N` artifact (kept 7 days): a
+   `KeyboardInterrupt` after the last test, or a step that stopped at the
+   30-minute limit, means the shard lost its worker data.
+3. The `Print peak memory` step of each shard: a peak at the memory limit
+   or a pytest step near 30 minutes means the shard count must go up.
+
 ## New-code period + scan trigger — how they're configured
 
 SonarCloud's "Clean as You Code" model gates only **changed** code, relative to a

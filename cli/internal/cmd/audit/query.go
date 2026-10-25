@@ -24,16 +24,16 @@ import (
 //
 //	meho audit query \
 //	  [--target T]                 # name or alias (server resolves)
-//	  [--principal P]              # operator sub or partial match
+//	  [--principal P]              # part of the user id or the name
 //	  [--op-id PATTERN]            # glob: vsphere.vm.*
 //	  [--op-class C]               # read | write | credential_read | audit_query | other
-//	  [--result-status S]          # ok | error | denied
+//	  [--result-status S]          # ok | error | denied | pending
 //	  [--since DUR]                # 24h | 7d | ISO-8601
 //	  [--until DUR]
 //	  [--limit N]                  # 1..1000, default 100 (server-side)
 //	  [--cursor C]                 # opaque forward-pagination cursor
 //	  [--audit-id ID]              # exact-id lookup
-//	  [--parent-audit-id ID]       # v0.2 substrate rejects (400)
+//	  [--parent-audit-id ID]       # rows whose parent is this audit-id
 //	  [--session-id ID]            # narrow to one agent session (UUID)
 //	  [--work-ref REF]             # exact change-ticket ref: gh:evoila/meho#1
 //	  [--json]                     # raw AuditQueryResult JSON
@@ -101,13 +101,15 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&target, "target", "",
 		"narrow to one target (name or alias; server-side resolution)")
 	cmd.Flags().StringVar(&principal, "principal", "",
-		"narrow to one operator (JWT subject; partial-match supported)")
+		"narrow to one operator (part of the user id or the name; case does not matter)")
 	cmd.Flags().StringVar(&opID, "op-id", "",
 		"narrow to one op-id (glob with * wildcards)")
 	cmd.Flags().StringVar(&opClass, "op-class", "",
 		"narrow to one op-class (read|write|credential_read|audit_query|other)")
 	cmd.Flags().StringVar(&resultStatus, "result-status", "",
-		"narrow to one result-status (ok|error|denied)")
+		"narrow to one result-status (ok|error|denied|pending); pending is history: "+
+			"the run stopped to wait for approval and the row stays pending after the "+
+			"decision; use 'meho approvals list' to see what waits now")
 	cmd.Flags().StringVar(&since, "since", "",
 		"earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601")
 	cmd.Flags().StringVar(&until, "until", "",
@@ -119,8 +121,8 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&auditID, "audit-id", "",
 		"exact audit-id lookup (UUID)")
 	cmd.Flags().StringVar(&parentAuditID, "parent-audit-id", "",
-		"narrow to the composite-op subtree under this audit-id "+
-			"(v0.2 substrate rejects with 400; column lands with G0.6-T7 #398)")
+		"narrow to the rows whose parent is this audit-id (UUID); "+
+			"e.g. the decision and run rows of one approval request")
 	cmd.Flags().StringVar(&sessionID, "session-id", "",
 		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",
@@ -316,16 +318,18 @@ func postQuery(
 }
 
 // printQueryTable renders the audit page as a compact, scannable
-// table. Columns: TIME, PRINCIPAL, TARGET, OP_ID, CLASS, STATUS per
-// the issue body's spec. When `next_cursor` is set, a final NEXT
+// table. Columns: AUDIT_ID, TIME, PRINCIPAL, TARGET, OP_ID, CLASS,
+// STATUS. The audit id comes first and is printed whole (#4858), so
+// an operator can paste it into `meho audit show` without re-running
+// the query with --json. When `next_cursor` is set, a final NEXT
 // line tells the operator how to paste-paginate.
 func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no audit rows matched the filter")
 		return
 	}
-	fmt.Fprintf(w, "%-22s %-32s %-18s %-26s %-16s %s\n",
-		"TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
+	fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
+		"AUDIT_ID", "TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
 	for _, row := range r.Rows {
 		principal := row.PrincipalSub
 		if name := strDeref(row.PrincipalName); name != "" {
@@ -335,7 +339,8 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		if target == "" {
 			target = "-"
 		}
-		fmt.Fprintf(w, "%-22s %-32s %-18s %-26s %-16s %s\n",
+		fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
+			row.Id.String(),
 			truncate(formatTS(row.Ts), 22),
 			principal,
 			truncate(target, 18),

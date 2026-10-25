@@ -44,6 +44,7 @@ from meho_backplane.connectors._shared.pwsh import (
     PWSH_DEFAULT_DEPTH,
     PwshRunError,
     encode_pwsh_command,
+    ps_single_quote,
     pwsh_run,
     strip_clixml,
 )
@@ -374,3 +375,106 @@ async def test_pwsh_run_error_does_not_carry_script_text() -> None:
     # any field of the structured error.
     assert "HOLODECK-CANARY-IN-SCRIPT" not in str(err)
     assert "HOLODECK-CANARY-IN-SCRIPT" not in err.stderr
+
+
+# ---------------------------------------------------------------------------
+# ps_single_quote -- every PowerShell single-quote character is escaped
+# ---------------------------------------------------------------------------
+
+#: The five characters PowerShell reads as a single quote: the ASCII
+#: apostrophe and four typographic quotes (PowerShell language spec, section
+#: 2.3.5.2, ``single-quote-character``).
+_PS_SINGLE_QUOTE_CHARS: tuple[str, ...] = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+def _read_ps_single_quoted(text: str) -> tuple[str, int]:
+    """Read one single-quoted PowerShell string at the start of *text*.
+
+    A small model of the spec grammar: the string opens and closes on any
+    single-quote character, and two single-quote characters in a row stand
+    for one quote in the value. Returns the value and the index just past
+    the closing quote.
+    """
+    assert text[0] in _PS_SINGLE_QUOTE_CHARS
+    value: list[str] = []
+    i = 1
+    while i < len(text):
+        c = text[i]
+        if c in _PS_SINGLE_QUOTE_CHARS:
+            if i + 1 < len(text) and text[i + 1] in _PS_SINGLE_QUOTE_CHARS:
+                value.append(text[i + 1])
+                i += 2
+                continue
+            return "".join(value), i + 1
+        value.append(c)
+        i += 1
+    raise AssertionError("single-quoted string is not closed")
+
+
+@pytest.mark.parametrize("quote", _PS_SINGLE_QUOTE_CHARS)
+def test_ps_single_quote_doubles_every_single_quote_character(quote: str) -> None:
+    assert ps_single_quote(f"o{quote}brien") == f"'o{quote}{quote}brien'"
+
+
+def test_ps_single_quote_plain_value_is_only_wrapped() -> None:
+    assert ps_single_quote("svc-sql") == "'svc-sql'"
+    assert ps_single_quote("") == "''"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        ["a\u2019b"],
+        ("a'b",),
+        {"k'y": 1},
+        42,
+        1.5,
+        True,
+        b"a'b",
+        None,
+    ],
+)
+def test_ps_single_quote_rejects_non_string(value: Any) -> None:
+    """Only a ``str`` is quoted; anything else fails closed instead of passing through."""
+    with pytest.raises(TypeError, match="expects a str"):
+        ps_single_quote(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "$env:PATH",
+        "$(Get-Date)",
+        "back`tick",
+        'say "hi"',
+        "\u201cleft\u201d and \u201elow\u201d",
+        "a; b | c & d",
+        "line1\nline2",
+        "en\u2013dash",
+    ],
+)
+def test_ps_single_quote_leaves_other_characters_unchanged(value: str) -> None:
+    """Only single-quote characters are special inside a single-quoted string."""
+    assert ps_single_quote(value) == f"'{value}'"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "o'brien",
+        "o\u2019brien",
+        "\u2018quoted\u2019",
+        "a\u201ab\u201bc",
+        "'",
+        "''",
+        "\u2019\u2019\u2019",
+        "x'\u2019\u2018\u201a\u201by",
+        "ends with \u201b",
+    ],
+)
+def test_ps_single_quote_reads_back_as_one_whole_string(value: str) -> None:
+    """The quoted literal reads back as exactly *value*, and ends at its last character."""
+    literal = ps_single_quote(value)
+    read_value, end = _read_ps_single_quoted(literal + " -Next")
+    assert read_value == value
+    assert end == len(literal)

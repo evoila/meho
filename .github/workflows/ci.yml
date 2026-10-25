@@ -9,7 +9,8 @@
 #
 #   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
 #     python-lint       : ruff check + ruff format --check + mypy (once)
-#     python-unit-shard : the pytest unit sweep as a 3-way file-stride matrix
+#     python-unit-shard : the pytest unit sweep as a 4-way matrix; test files
+#                         are split by measured time (#4809)
 #     python-unit-lane  : fan-in carrying the branch-protection required
 #                         context `Python (ruff + mypy + pytest)`
 #   go-lint-test      : golangci-lint + go build + go test on cli/
@@ -21,9 +22,24 @@
 # ~6-8-min parallel shards, cutting the dominant PR-wall contributor. Per-job
 # `timeout-minutes` caps a runaway gate at roughly twice its observed cost.
 #
+# Runner placement (#4626, step 1): the six small jobs — `changes`,
+# `python-lint`, `python-unit-lane`, `go-lint-test`,
+# `cli-api-snapshot-freshness` and `helm-lint-template` — run on GitHub-
+# hosted `ubuntu-latest` runners. They need only public toolchains and
+# public-registry egress. Before the move they queued on the internal
+# `meho-runners-ci` pool (8 slots) behind the big test jobs: a median wait of
+# about 14 minutes for jobs that run for seconds to two minutes, and the
+# detect job at the start plus the fan-in at the end put that wait on the
+# critical path of every run twice. The jobs that pull test images from the
+# internal mirror or read the private spec shelf stay on the internal pools:
+# `python-unit-shard` (heavy pool), `python-integration`,
+# `python-migration-tests` and the push-only coverage jobs. Every moved job
+# keeps its name, `if:` guard and triggers, so the required checks are
+# unchanged.
+#
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the three
+# `.md`). On such a PR the heavy Python lanes — `python-lint`, the four
 # `python-unit-shard` legs, and `python-integration` — skip via their own
 # job-level `if:` (skipped-by-`if:` == Success per #2140), so a changelog
 # roll / guide edit / README fix finishes CI in minutes instead of paying the
@@ -48,6 +64,10 @@
 #   * Alembic backward-compat guard -> .github/workflows/migration-compat.yml
 #     (path-scoped to backend/alembic/versions/**, runs only when
 #     migrations change).
+#   * Alembic single-head guard     -> .github/workflows/migration-heads.yml
+#     (every PR + merge_group, seconds, no database; posts a fresh
+#     check run on open migration PRs when a migration lands on
+#     main — #4204).
 #   * Chart publish / sign          -> .github/workflows/chart.yml
 #     (publish runs only on main + tag pushes; chart.yml's `validate`
 #     job runs on PRs too as a path-scoped gate. This workflow's
@@ -96,6 +116,17 @@
 # the merge attempt and defeats the queue's purpose. cancel-in-progress
 # is scoped to pull_request / push refs only so PR force-pushes and rapid
 # main pushes still cancel their predecessors cleanly.
+#
+# Merge-queue watchdog (#4732): the queue drops a group as soon as one of
+# its required checks fails, or when it rebuilds the group behind a pull
+# request it took out, and then deletes the group's branch. GitHub does not
+# stop the group's CI run, so the run's jobs kept waiting for and using
+# runners for up to three hours after the drop. The `merge-queue-watchdog`
+# job (last in this file) runs only on `merge_group` events. It cancels its
+# own run when a job that carries or feeds a required check has not passed,
+# or when the queue branch is gone. It ends quietly once every job that
+# carries or feeds a required check has finished, so a run that passed and
+# merged is never cancelled.
 
 name: CI
 
@@ -167,19 +198,19 @@ jobs:
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       migrations: ${{ steps.detect.outputs.migrations }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
       - name: Checkout
-        # fetch-depth: 0 so the PR base commit is present for the
-        # three-dot diff below (the default shallow fetch would not
-        # reach the merge-base).
+        # On a PR, HEAD is the test merge: the PR on top of the newest
+        # `main`. Its first parent (HEAD^1) is that `main` commit, so
+        # depth 2 is enough for the diff below.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 2
       - name: Detect migration-related + docs-only changes
         id: detect
         run: |
@@ -191,19 +222,24 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             # push / merge_group: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only} (full run)"
-          elif ! changed="$(git diff --name-only --no-renames "${{ github.event.pull_request.base.sha }}...HEAD")"; then
+          # HEAD^1, not `github.event.pull_request.base.sha`: the event's
+          # base sha is `main` as of when the PR was opened. Once `main`
+          # moves, a diff against it also lists other PRs' files and a
+          # docs-only PR loses the fast path (#4657).
+          elif ! changed="$(git diff --name-only --no-renames HEAD^1 HEAD)"; then
             # Diff unavailable -> keep fail-safe defaults (full run + migration gate on).
             echo "git diff failed -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           elif [ -z "${changed}" ]; then
             # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
             echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           else
+            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
             # --- migration classification (#2140, unchanged) ---
             # Files that make the migration suite meaningful to run: the
             # alembic tree, the relocated migration test suite, the db
             # migrate/migrations modules under test, the compat script, and
             # the workflows that define this gate.
-            if printf '%s\n' "${changed}" | grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/check_migration_compat\.py$|\.github/workflows/(ci|migration-compat)\.yml$)'; then
+            if printf '%s\n' "${changed}" | grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)'; then
               migrations=true
               echo "migration-related change detected -> migrations=true"
             else
@@ -235,14 +271,15 @@ jobs:
   # `python-lint-test` job (ruff + ruff format + mypy + the whole ~13k-test
   # unit sweep, serial, ~19-min wall) was the single biggest contributor to
   # PR wall-time. It is now three cooperating jobs, mirroring the #3172/#3177
-  # coverage-sweep shape (deterministic file-stride matrix + fan-in):
+  # coverage-sweep shape (deterministic file-level matrix + fan-in):
   #
   #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
   #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
   #                       pool. Non-required check.
-  #   python-unit-shard — the pytest unit sweep as a 3-way stride matrix over
-  #                       the sorted test-file list (heavy pool, in parallel).
-  #                       Non-required checks (`Python unit shard N/3`).
+  #   python-unit-shard — the pytest unit sweep as a 4-way matrix; the test
+  #                       files are split by measured time so every shard
+  #                       takes about as long (heavy pool, in parallel).
+  #                       Non-required checks (`Python unit shard N/4`).
   #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
   #                       context `Python (ruff + mypy + pytest)`; fails iff
   #                       python-lint or ANY shard did not pass. Branch
@@ -261,8 +298,9 @@ jobs:
     # python-unit-lane fan-in below. Whole-tree ruff + ruff format + mypy: none
     # of it is shardable by test file, none of it needs testcontainers / the
     # vendor spec-shelf / the embedding or spaCy models, and it is CPU-cheap
-    # (~1-2 min), so it runs ONCE here on the dense light pool rather than N
-    # times inside every pytest shard. Same fork-PR guard as every other job,
+    # (~1-2 min), so it runs ONCE here on a GitHub-hosted runner rather than N
+    # times inside every pytest shard. Nothing in it needs the internal network
+    # (#4626). Same fork-PR guard as every other job,
     # plus the #3252 docs-only skip: a proven docs-only PR skips this job (and
     # the shards) so the required unit-lane fan-in reports success-by-skip.
     # `needs: changes` makes `docs_only` readable here; if the detect job
@@ -273,7 +311,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
     timeout-minutes: 10
     defaults:
@@ -299,7 +337,7 @@ jobs:
         # The Python version comes from backend/.python-version (3.14, the
         # same as the image's python:3.14-slim). uv reads that file for every
         # uv command in CI: they all run in backend/ or pass --project backend.
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           version: "0.13.0"
           enable-cache: true
@@ -327,19 +365,21 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: Python unit shard ${{ matrix.shard }}/3
-    # Non-required checks (one per matrix leg: `Python unit shard 1/3`,
-    # `.../2/3`, `.../3/3`) — the required context is carried by the
-    # python-unit-lane fan-in below. This is the pytest half of the old
-    # required lane, split into a deterministic 3-way file-stride matrix
-    # (#3251) so its ~15-18-min serial wall runs as ~6-min parallel shards.
+    name: Python unit shard ${{ matrix.shard }}/4
+    # Non-required checks (one per matrix leg: `Python unit shard 1/4`,
+    # `.../2/4`, `.../3/4`, `.../4/4`) — the required context is carried by
+    # the python-unit-lane fan-in below. This is the pytest half of the old
+    # required lane, split into a deterministic 4-way file-level matrix
+    # (#3251, 3 shards; #4655 raised it to 4 when the 3 shards reached the
+    # 660 s budget; #4809 split by measured file time instead of every
+    # 4th file) so its serial wall runs as parallel shards.
     #
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
-    # starts on a fork PR. On a fork PR all three legs skip (→ reported
+    # starts on a fork PR. On a fork PR all four legs skip (→ reported
     # Success), which the fan-in's own fork guard mirrors. Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
-    # skips all three legs → the fan-in reports success-by-skip. `needs:
+    # skips all four legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
     # these legs and the fan-in fails the required context CLOSED.
     needs: changes
@@ -347,21 +387,22 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods) — #761.
-    # Three shards fit inside the 5-pod ceiling. Only the pytest sweep is
-    # CPU/memory-bound enough to want the extra cores; ruff/mypy stayed on the
-    # light pool in python-lint.
+    # The heavy runner pool (#761); its sizes live outside this repo. Only the
+    # pytest sweep is CPU/memory-bound enough to want the extra cores;
+    # ruff/mypy run once in python-lint on a GitHub-hosted runner.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 3 stride shards (#3251), sized off the pre-shard ~19-min lane so each
-      # shard lands ~6-8 min. fail-fast: false — one shard's red tests must NOT
+      # 4 shards (#3251 started with 3; #4655 raised it to 4 after the
+      # slowest shard reached the 660 s budget — measure, then rebalance, do
+      # not raise the budget). fail-fast: false — one shard's red tests must NOT
       # cancel the others, so a broad breakage surfaces every failing shard in
-      # one run (the fan-in still fails if ANY leg fails). To rebalance, change
-      # the shard count in BOTH the matrix and the `TOTAL` in the pytest step,
-      # in lockstep.
+      # one run (the fan-in still fails if ANY leg fails). To change the shard
+      # count, edit BOTH the matrix and the `TOTAL` in the pytest step, in
+      # lockstep. To rebalance the shards, refresh the measured file times
+      # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -387,7 +428,7 @@ jobs:
       # so the env-only swap requires no source-code changes.
       # `docker/login-action` below stays load-bearing until #78's Half
       # B sees a green cache-hit week and retires it.
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim pinned to an explicit release tag (same rule as the
       # pgvector/valkey/Vault rows — never `:latest`) so the
@@ -439,6 +480,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Start memory sampling
+        # Feeds the "Print peak memory" step at the end of this job. A small
+        # background loop reads this container's cgroup v2 memory files once a
+        # second and keeps the highest values until that step stops it. It
+        # never fails the job.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
+            echo "No cgroup v2 memory files here, so no sampling."
+            exit 0
+          fi
+          sample() {
+            total_max=0; ws_max=0; anon_max=0; n=0
+            while :; do
+              read -r total < "${cg}/memory.current"
+              anon=0; inactive_file=0
+              while read -r key value; do
+                case "${key}" in
+                  anon) anon=${value} ;;
+                  inactive_file) inactive_file=${value} ;;
+                esac
+              done < "${cg}/memory.stat"
+              total=${total:-0}
+              ws=$(( total - inactive_file ))
+              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
+              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
+              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
+              n=$(( n + 1 ))
+              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
+              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
+              sleep 1
+            done
+          }
+          sample </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second."
+
       - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
         # The vendor OpenAPI specs (vSphere: vcenter.yaml ~961 paths +
         # vi-json.yaml ~2,195 paths; NSX: the manager-served
@@ -465,7 +547,7 @@ jobs:
         # too.
         #
         # Sharded (#3251): every shard runs this checkout, because each
-        # shard's stride slice may include the spec-backed reconcile
+        # shard's file set may include the spec-backed reconcile
         # lanes; the cone-mode sparse + blob:none filter keeps it cheap
         # (~0.4 MB argocd-3.3 + … a few tens of MB total), and the
         # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
@@ -478,10 +560,15 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~0.4 MB argocd-3.3 + ~0.2 MB
+          # spec files (~0.4 MB argocd-3.3 + ~13 MB esxi-9.0 + ~0.2 MB
           # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
-          # ~2 MB sddc-manager-9.0 + ~18 MB vcenter-9.0 + ~3 MB
-          # vcf-automation-9.0 + ~5 MB vcf-operations-9.0), not the
+          # ~2 MB sddc-manager-9.0 + ~38 MB vcenter-8.0 + ~18 MB
+          # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB each
+          # vcf-automation-9.0-reference / -9.1 / -9.1.1 + ~0.4 MB
+          # vcf-installer-9.0 + ~0.4 MB vcf-installer-9.1 + ~5 MB
+          # vcf-operations-9.0 + ~0.1 MB vcf-operations-orchestrator-9.0
+          # / -9.1 + ~1.3 MB vcf-protection-and-recovery-9.1
+          # + ~0.4 MB vks-9.0), not the
           # whole consumer repo. No
           # `ref:` pin — the shelf's default branch IS the
           # operator-curated pin (the directories are version-named),
@@ -490,6 +577,7 @@ jobs:
           # Keep the list sorted.
           sparse-checkout: |
             docs/argocd-3.3
+            docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
             docs/hetzner-robot-2026-04
@@ -500,9 +588,19 @@ jobs:
             docs/rabbitmq-4.3
             docs/sddc-manager-9.0
             docs/sddc-manager-9.1
+            docs/vcenter-8.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
+            docs/vcf-automation-9.0-reference
+            docs/vcf-automation-9.1
+            docs/vcf-automation-9.1.1
+            docs/vcf-installer-9.0
+            docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vcf-operations-orchestrator-9.0
+            docs/vcf-operations-orchestrator-9.1
+            docs/vcf-protection-and-recovery-9.1
+            docs/vks-9.0
           filter: blob:none
           # Read-only consumer; never pushes. Don't leave the token in
           # the shelf clone's local git config after checkout.
@@ -522,6 +620,7 @@ jobs:
           set -euo pipefail
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
+            spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
             spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
@@ -534,17 +633,33 @@ jobs:
             spec-shelf/docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl \
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/sddc-manager-9.1/sddc-manager-openapi.json \
+            spec-shelf/docs/vcenter-8.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
+            spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json; do
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
+            spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
+            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -597,10 +712,10 @@ jobs:
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
-        # same lockfile are near-instant, so the three shards share one
+        # same lockfile are near-instant, so the four shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           version: "0.13.0"
           enable-cache: true
@@ -621,7 +736,7 @@ jobs:
         # pinned there, so a fastembed bump (which can remap the HF
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
-        # lock change still reuse the prior model blob. All three shards
+        # lock change still reuse the prior model blob. All four shards
         # share this one cache entry (same key), so steady-state only the
         # first cold run pays the download.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -665,7 +780,7 @@ jobs:
         # accepting either model -- so this step suffices for the
         # unit lane's correctness signal without paying the ``lg``
         # download wall every run. Each shard provisions the sm model
-        # (its stride slice may include the Tier-2 lanes); the ~12 MB
+        # (its file set may include the Tier-2 lanes); the ~12 MB
         # download is cheap enough to not warrant caching.
         #
         # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
@@ -680,13 +795,61 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/3)
+      - name: Install Helm
+        # The chart render tests (tests/test_chart_*.py) call `helm
+        # template`. Without helm they skip, so a broken chart test could
+        # stay hidden on main. Same pinned action and Helm version as
+        # chart.yml and the helm-lint-template job below. Every shard
+        # needs it: the file split can put a chart test file in any shard.
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Install PHP CLI
+        # The pfSense user-write tests
+        # (tests/test_connectors_pfsense_user_write_ops.py) run the
+        # `pfSsh.php playback` fragment with the php command-line
+        # interpreter against a synthetic config. Without php they skip,
+        # so a fragment that changes the wrong user could stay hidden on
+        # main. Same `sudo -n apt-get` pattern as the Go lane's C-toolchain
+        # step below. Every shard needs it: the file split can put the
+        # test file in any shard.
+        #
+        # `apt-get update` exits 100 when any one package index fails to
+        # download, even one that php-cli does not need. The runner image
+        # carries the git-core PPA (it installs a newer git from there), and
+        # that mirror answered 503 in a merge-queue run (#4759), which
+        # dropped the pull request from the queue. apt had already retried
+        # the file three times in that run, so more retries alone do not
+        # help. So a failed update is a warning, not the end of the step:
+        # apt keeps the indexes it did download, and the install below
+        # fails on its own when the Ubuntu indexes are missing.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v php >/dev/null 2>&1; then
+            echo "php ready: $(php --version | head -1)"
+            exit 0
+          fi
+          if ! sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+            echo "::warning::apt-get update could not refresh every package index; installing php-cli from the indexes that did download"
+          fi
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
+          php --version | head -1
+
+      - name: Pytest (unit shard ${{ matrix.shard }}/4)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
         # perf-budget check below can never mask a red suite.
         shell: bash
         env:
+          # The chart render tests FAIL (not skip) when helm is missing,
+          # so losing the Install Helm step above cannot hide them again.
+          MEHO_REQUIRE_HELM: "1"
+          # Same for the pfSense fragment tests and the Install PHP CLI
+          # step above: FAIL (not skip) when php is missing.
+          MEHO_REQUIRE_PHP: "1"
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
           # tier2 path in test_redaction_middleware.py exercise the
@@ -712,10 +875,10 @@ jobs:
           # test_g07_vsphere_canary.py (fixture-level backstop in
           # vcenter_spec_path); rule of record in
           # docs/decisions/spec-reconcile-guards-standard.md. The
-          # canary module lands in exactly one shard's stride slice, so
-          # this opt-out must stay on every shard.
+          # canary module lands in exactly one shard, so this opt-out
+          # must stay on every shard.
           MEHO_SKIP_SPEC_INGEST_TESTS: "1"
-        # PARALLELIZED two ways now (#3251): file-STRIDE across shards
+        # PARALLELIZED two ways now (#3251): by test FILE across shards
         # (this matrix) AND pytest-xdist WITHIN each shard. #585 unblocked
         # xdist by adding process-wide global-registry snapshot/restore +
         # deterministic MCP-module import in tests/conftest.py, eliminating
@@ -724,23 +887,22 @@ jobs:
         # --dist loadscope already does across workers (whole modules stay
         # together, conftest semantics are identical to a full run), so a
         # suite that is xdist-safe is shard-safe — proven live by the
-        # #3172/#3177 python-coverage sweep, which runs the identical
-        # file-stride split (over a superset of these files) green.
+        # #3172/#3177 python-coverage sweep, which runs a file-level
+        # split (over a superset of these files) green.
         # Worker count is -n 3 (lowered -n 6 → -n 4 per #1901 for CPU starvation,
         # then -n 4 → -n 3 for MEMORY headroom when the whole-suite lane OOM-killed
-        # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/3 the
+        # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/4 the
         # tests so its base memory is well under the pod limit even without --cov,
         # and -n 3 stays inside the #1983 heartbeat-safe worker count on the
-        # 6-core cap. History: -n auto was inconsistent on the shared 4-core pool
-        # (cgroup detection drift), so #726 pinned -n 3.
+        # heavy runner's core cap. History: -n auto was inconsistent on the
+        # shared 4-core pool (cgroup detection drift), so #726 pinned -n 3.
         # RULE — pytest-xdist -n vs runner CPU (#1983): -n must stay BELOW
         # the runner container's usable cores, leaving at least one core for
         # the GHA agent + xdist coordinator. The fix for "runner lost
         # communication" / heartbeat starvation is burst headroom on the
-        # pod's CPU *limit* (rke2-ci heavy pool target: request 4000m /
-        # limit 7000m, pending evoila-bosnia/rdc-gitops#70 — currently
-        # 6000m requests=limits), not a smaller -n. Do not raise -n above
-        # the current value to chase wall-clock; raise the CPU *limit* instead.
+        # runner's CPU *limit* (the heavy pool's sizes live outside this
+        # repo), not a smaller -n. Do not raise -n above the current value
+        # to chase wall-clock; raise the CPU *limit* instead.
         # --dist loadscope: a module's tests stay on one worker so
         # module-/session-scoped fixtures (testcontainers PG, embedding
         # service) instantiate per worker, not per test. --maxfail=1
@@ -754,28 +916,34 @@ jobs:
         # non-blocking, sharded `python-coverage` + `python-coverage-combine`
         # jobs below (#1982/#1987/#3172).
         run: |
-          # Deterministic stride shard (#3251, mirrors the #3172/#3177
-          # python-coverage split): the sorted test-file list, every
-          # TOTAL-th file to this shard. File-level split keeps conftest /
-          # loadscope semantics identical to a full run; stride (vs
-          # contiguous blocks) spreads the heavyweight suites across shards.
-          # The three shards partition the full set exactly (NR mod 3 hits
-          # each residue once). tests/integration stays out (→ python-
-          # integration) and tests/migrations stays out (→ python-migration-
-          # tests), matching the pre-shard lane's `--ignore` of both.
-          TOTAL=3
+          # Deterministic split by measured file time (#4809; #3251 used
+          # every TOTAL-th file of the sorted list, which put the slow
+          # files unevenly: shard 4 ran 613 s against 465 s for shard 2).
+          # tests/_unit_shard_split.py sorts the files slowest first and
+          # gives each file to the shard with the least time so far, using
+          # the seconds in tests/_unit_shard_durations.json; a file without
+          # a measurement counts as the median. File-level split keeps
+          # conftest / loadscope semantics identical to a full run, and the
+          # four shards partition the full set exactly (every file lands in
+          # one shard; tests/test_unit_shard_split.py pins that).
+          # tests/integration stays out (→ python-integration) and
+          # tests/migrations stays out (→ python-migration-tests), matching
+          # the pre-shard lane's `--ignore` of both. The splitter prints
+          # the file count and the predicted seconds per shard on stderr.
+          TOTAL=4
           SHARD="${{ matrix.shard }}"
-          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
+          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_shard_split.py --shard "${SHARD}" --total "${TOTAL}")
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
           if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
-            echo "::error::shard ${SHARD} selected 0 test files — stride selection broken"
+            echo "::error::shard ${SHARD} selected 0 test files — shard split broken"
             exit 1
           fi
           # Per-shard perf-budget guard — early warning for CI-perf creep (the
           # #898 / G3.6 timeout class), scaled from the pre-shard 1320 s
-          # whole-suite budget to a per-shard wall (~1/3 the suite). 660 s
-          # leaves generous headroom over the expected ~6-min (~360 s) shard
-          # wall + the heaviest stride slice, while still firing well below the
+          # whole-suite budget to a per-shard wall (then ~1/3 the suite). #4655
+          # kept 660 s when the shard count went 3 → 4: the 3 shards had
+          # reached 580-660 s; the #4655 measurement put the slowest of 4
+          # shards at ~470 s with the same budget. The budget still fires below the
           # 20-min job `timeout-minutes` hang backstop. This step measures the
           # pytest wall, always prints it (trend visibility), and FAILS at the
           # budget so a regression is caught at the PR that causes it.
@@ -783,17 +951,111 @@ jobs:
           #   MEHO_FIXTURE_TIMING_FILE=/tmp/fixt MEHO_LIFESPAN_TIMING=/tmp/lifespan
           # then `uv run python tests/_perf_timing_report.py` to attribute the wall.
           # If ONE shard consistently trips while the others are comfortable, the
-          # stride is unbalanced by a heavy module — rebalance (raise the shard
-          # count in the matrix + TOTAL) rather than bumping only this budget.
-          budget_s=660
+          # measured file times are stale — refresh tests/_unit_shard_durations.json
+          # (see tests/_unit_shard_split.py) rather than bumping only this budget.
+          # Add a shard (matrix + TOTAL) only when all shards are near the budget.
+          # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
+          # node), shards that pass every test can take 674-710 s, and 660 s
+          # dropped good pull requests from the merge queue.
+          budget_s=900
           start=$(date +%s)
-          uv run pytest -n 3 --dist loadscope --maxfail=1 "${SHARD_FILES[@]}"
+          # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
+          # in each xdist worker, so a test that stops making progress fails
+          # on its own after 180 s with its name and a stack dump of every
+          # thread, instead of sitting silent (one dot per test, no names)
+          # until the 20-min job cap. The shard then still lands inside the
+          # 900 s budget below. Mirrors the python-coverage job's guard;
+          # --timeout-method=signal (NOT thread) is load-bearing under xdist:
+          # thread calls os._exit(), which xdist reads as a worker crash and
+          # whose stack dump it swallows. 180 s is ~3x the slowest honest
+          # unit tests (the Alembic upgrade/downgrade round-trips, ~55 s on
+          # a loaded 3-worker box); raise it only with a --durations
+          # measurement showing a legitimate test near it.
+          # --junitxml (#4809): the per-test times of this shard, uploaded
+          # by the step below. They are the input for refreshing
+          # tests/_unit_shard_durations.json (see tests/_unit_shard_split.py).
+          # xunit1, not the default xunit2, because only xunit1 writes the
+          # test file name on every test case.
+          uv run pytest -n 3 --dist loadscope --maxfail=1 \
+            --timeout=180 --timeout-method=signal \
+            -o junit_family=xunit1 --junitxml=pytest-unit-shard.xml "${SHARD_FILES[@]}"
           dur=$(( $(date +%s) - start ))
           echo "::notice title=Unit pytest wall (shard ${SHARD}/${TOTAL})::${dur}s (budget ${budget_s}s per shard; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then
             echo "::error title=Unit perf budget exceeded (shard ${SHARD}/${TOTAL})::shard pytest ${dur}s > per-shard budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s (MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py — #793/#827). Amortize the cost or rebalance the shards; do not just bump the budget."
             exit 1
           fi
+
+      - name: Upload per-test times (input for the shard split)
+        # #4809: tests/_unit_shard_split.py balances the shards with the
+        # seconds in tests/_unit_shard_durations.json. Refresh that file
+        # from these artifacts (one per shard) of a green run; the module
+        # docstring has the commands. Uploaded whenever the file exists, so
+        # a shard that ran over the budget still shows where the time went.
+        # continue-on-error + timeout-minutes: a failed or hung upload must
+        # never fail or hold the shard.
+        if: always() && hashFiles('backend/pytest-unit-shard.xml') != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: python-unit-shard-junit-${{ matrix.shard }}
+          path: backend/pytest-unit-shard.xml
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Print peak memory
+        # Prints how much memory this job's runner container used and how many
+        # CPUs it had, so a change to the heavy runner pool can be checked
+        # against real numbers. Reads the cgroup files (v2 first, else v1) and
+        # the samples from "Start memory sampling". The kernel's peak also
+        # counts file cache: copies of files that the kernel keeps in memory
+        # and frees when memory runs short. So the sampled working set and
+        # program memory show better what the job really needs. A missing
+        # file is skipped; this step never fails the job.
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          mib() { case "$1" in max) echo "none" ;; ''|*[!0-9]*) echo "${1:-unknown}" ;; *) echo "$(( $1 / 1048576 )) MiB" ;; esac; }
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null
+          fi
+          if [ -r "${RUNNER_TEMP}/memory-samples.txt" ]; then
+            read -r total_max ws_max anon_max samples < "${RUNNER_TEMP}/memory-samples.txt"
+          fi
+          if [ -r "${cg}/memory.peak" ]; then
+            peak="$(mib "$(cat "${cg}/memory.peak")") (kernel count)"
+          elif [ -r "${cg}/memory/memory.max_usage_in_bytes" ]; then
+            peak="$(mib "$(cat "${cg}/memory/memory.max_usage_in_bytes")") (kernel count, cgroup v1)"
+          elif [ -n "${total_max}" ]; then
+            peak="$(mib "${total_max}") (highest sample; no kernel peak file here)"
+          else
+            peak="not available"
+          fi
+          echo "Memory and CPU of this job's runner container (1 MiB = 1,048,576 bytes):"
+          echo "- Peak memory: ${peak}. The most the container held at one time, file cache included."
+          echo "- Highest working set: $(mib "${ws_max}"). Memory in use without the file cache that the kernel frees first (kubectl top shows this)."
+          echo "- Highest program memory: $(mib "${anon_max}"). Memory the programs asked for; the kernel cannot free it."
+          echo "- Samples: ${samples:-none} (one per second)."
+          if [ -r "${cg}/memory.current" ]; then
+            echo "- Memory now: $(mib "$(cat "${cg}/memory.current")")."
+          fi
+          if [ -r "${cg}/memory.max" ]; then
+            echo "- Memory limit: $(mib "$(cat "${cg}/memory.max")")."
+          fi
+          if [ -r "${cg}/memory.events" ]; then
+            echo "- Out-of-memory kills: $(awk '$1 == "oom_kill" { print $2 }' "${cg}/memory.events")."
+          fi
+          echo "- CPUs this job can see (nproc): $(nproc)."
+          if [ -r "${cg}/cpu.max" ]; then
+            echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
+          fi
+          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/4)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          exit 0
 
   python-unit-lane:
     name: Python (ruff + mypy + pytest)
@@ -846,13 +1108,15 @@ jobs:
     # workflow-level concurrency group, so a PR force-push cancels the whole
     # in-flight run as a SET and a fresh run supersedes it — there is no
     # partial-cancel path that could leave this gate green on stale shards.
-    # Light pool: this job does no setup and runs one bash step.
+    # GitHub-hosted runner (#4626): this job does no setup and runs one bash
+    # step, and it is the last job of every CI run — it must never wait for a
+    # slot on the internal pool.
     needs: [changes, python-lint, python-unit-shard]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
@@ -866,7 +1130,7 @@ jobs:
           shards='${{ needs.python-unit-shard.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 3 stride legs): ${shards}"
+          echo "python-unit-shard (aggregate of all 4 shard legs): ${shards}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -905,18 +1169,18 @@ jobs:
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest stride shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/3' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 3 pytest stride shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 3 pytest stride shards passed."
+            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest shards passed."
           fi
 
   python-coverage:
-    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/3)
+    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/8)
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
@@ -982,17 +1246,29 @@ jobs:
     # serial wall at ~57 min — past the 45-min step cap, the 55-min job cap,
     # and brushing the ~60-min external pod reap, so a monolithic sweep was
     # structurally out of road (proven by run 33149016521: healthy 14Gi pod,
-    # steady progress, killed at 93%). The sweep now runs as 3 stride shards
-    # of the sorted test-file list (~240 files / ~19 min each), fanned into
-    # the python-coverage-combine job below which merges all shards' parallel
-    # data and uploads the single `python-coverage` artifact — the
-    # quality-gate.yml contract is unchanged. Per-shard memory sits well
-    # under the 14Gi pod (session-state accumulation scales with
-    # tests-per-process; 14Gi is the ceiling the 15.62-GiB-allocatable nodes
-    # support). If a shard's wall approaches its 30-min step cap, raise the
-    # shard count — bump BOTH the matrix and TOTAL in the pytest step, in
-    # lockstep. This job stays non-blocking; a shard OOM merely thins one
-    # shard's coverage.
+    # steady progress, killed at 93%). The sweep now runs as 8 stride shards
+    # of the sorted test-file list (~125 files each; #3172 started with 3,
+    # #4748 went to 5, #4758 to 8), fanned into the python-coverage-combine
+    # job below which merges all shards' parallel data and uploads the
+    # single `python-coverage` artifact — the quality-gate.yml contract is
+    # unchanged. A shard's memory grows with the number of tests in its one
+    # pytest process, so more shards means less memory per shard. The
+    # "Print peak memory" step at the end of each shard shows the real
+    # numbers. 8 shards (#4758): 3 shards hit the 30-min step cap and lost
+    # all their data; on the 7 GiB heavy runner, 5 shards of ~4,000-4,700
+    # tests still ran 19-29 min of pytest and peaked at the memory limit.
+    # ~2,700 tests per shard keeps each one near 15-20 min and ~4 GiB.
+    # If a shard's wall approaches its 30-min step cap, or its memory nears
+    # the runner's limit, raise the shard count — bump the matrix, TOTAL in
+    # the pytest step AND the combine job's download steps, in lockstep
+    # (tests/test_ci_coverage_shards.py pins the lockstep). This job stays
+    # non-blocking; a shard OOM merely thins one shard's coverage.
+    # A SHARD'S WORKER DATA FILE (#4758): the worker writes its coverage
+    # data at interpreter exit, which the xdist controller can cut short
+    # (it kills a worker 10 s after the worker reports finished). The
+    # tests/conftest.py session-finish hook saves the worker's data before
+    # that report, so a slow worker clean-up no longer loses a whole
+    # shard's test coverage with every check green.
     # Runs on push to main, OR on a PR explicitly opted in via the
     # `ci-coverage-validate` label (the on-runner validation escape hatch
     # described above). The fork-PR guard still applies on the PR path so
@@ -1004,12 +1280,12 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 3 stride shards (#3172) — see the SHARDED paragraph in the header
-      # comment. fail-fast off: one shard's red tests must not cancel the
-      # other shards' coverage data (partial coverage beats none).
+      # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in
+      # the header comment. fail-fast off: one shard's red tests must not
+      # cancel the other shards' coverage data (partial coverage beats none).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
     # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
     # runner-loss on this pool — which silently killed coverage on every main
@@ -1039,10 +1315,11 @@ jobs:
     #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
     #      step (checkout / uv sync / model warm — never observed). Every
     #      post-pytest step in this shard job is step-capped too (#3172:
-    #      shard-data upload 2, log upload 2 — the v0.31.0 cut proved a hang
-    #      CAN escape into a post-pytest step via the pytest step's debris),
-    #      so the bounded-step worst case is 30 + 2 + 2 = 34 min + pre-pytest
-    #      setup (35–75 s observed) ≈ 35 — the step caps always fire before
+    #      shard-data upload 2, log upload 2, memory print 1 — the v0.31.0
+    #      cut proved a hang CAN escape into a post-pytest step via the
+    #      pytest step's debris), so the bounded-step worst case is
+    #      30 + 2 + 2 + 1 = 35 min + pre-pytest setup (35–75 s observed)
+    #      ≈ 36 — the step caps always fire before
     #      this job cap for any hang under a bounded step, and a job-level
     #      expiry (which CANCELS the job; `cancelled` leaks past
     #      continue-on-error into the run conclusion — the exact
@@ -1062,7 +1339,7 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
       # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
@@ -1075,6 +1352,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Start memory sampling
+        # Feeds the "Print peak memory" step at the end of this job. A small
+        # background loop reads this container's cgroup v2 memory files once a
+        # second and keeps the highest values until that step stops it. It
+        # never fails the job.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
+            echo "No cgroup v2 memory files here, so no sampling."
+            exit 0
+          fi
+          sample() {
+            total_max=0; ws_max=0; anon_max=0; n=0
+            while :; do
+              read -r total < "${cg}/memory.current"
+              anon=0; inactive_file=0
+              while read -r key value; do
+                case "${key}" in
+                  anon) anon=${value} ;;
+                  inactive_file) inactive_file=${value} ;;
+                esac
+              done < "${cg}/memory.stat"
+              total=${total:-0}
+              ws=$(( total - inactive_file ))
+              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
+              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
+              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
+              n=$(( n + 1 ))
+              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
+              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
+              sleep 1
+            done
+          }
+          sample </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second."
+
       - name: Docker Hub login (for testcontainers pulls)
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
@@ -1085,7 +1403,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1126,10 +1444,13 @@ jobs:
         # never a cancellation. But #2865 proved a pytest hang can outlive it
         # when the runner is wedged, so the PRIMARY guard is the in-process
         # `--timeout` on the run below, not this cap.
-        # 30 per shard (#3172): the honest per-shard wall is ~19 min (57-min
-        # serial total / 3 shards at 13,311 tests), so 30 gives ~50% suite-
-        # growth headroom while keeping shard+combine far inside the 55-min
-        # job cap.
+        # 30 per shard (#3172): set when 3 shards ran ~19 min each (57-min
+        # serial total / 3 shards at 13,311 tests). With 8 shards (#4758)
+        # a shard runs ~15-20 min on the 7 GiB heavy runner, so 30 leaves
+        # suite-growth headroom while keeping shard+combine far inside the
+        # 55-min job cap. A shard that hits this cap loses ALL its coverage
+        # data (its processes are killed before they write), so raise the
+        # shard count before any shard gets near it.
         timeout-minutes: 30
         # Force bash so the run below gets pipefail + PIPESTATUS: the
         # self-hosted pool's default shell does NOT enable `pipefail`, which
@@ -1187,13 +1508,13 @@ jobs:
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
           # Deterministic stride shard (#3172): the sorted test-file list,
-          # every 3rd file to this shard. File-level split keeps conftest
+          # every 8th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
           # blocks) spreads the heavyweight suites across shards. The
-          # three shards partition the full set exactly (NR mod 3 hits
+          # eight shards partition the full set exactly (NR mod 8 hits
           # each residue once); integration stays excluded by the find,
           # matching the old --ignore.
-          TOTAL=3
+          TOTAL=8
           SHARD="${{ matrix.shard }}"
           mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
@@ -1211,7 +1532,7 @@ jobs:
         # for THIS shard — the python-coverage-combine job below merges every
         # shard's set and writes the single coverage.xml quality-gate.yml
         # consumes (#3172). `.coveragerc.ci` sets relative_files=true, so
-        # data from three different runners combines cleanly.
+        # data from eight different runners combines cleanly.
         # include-hidden-files: upload-artifact v4+ excludes dotfiles by
         # default, and every coverage data file is a dotfile.
         # timeout-minutes (#3172): same job-cap-cancel hole as every
@@ -1220,7 +1541,7 @@ jobs:
         if: always()
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage-data-shard-${{ matrix.shard }}
           path: backend/.coverage.*
@@ -1239,12 +1560,65 @@ jobs:
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage-pytest-log-shard-${{ matrix.shard }}
           path: backend/pytest-coverage.log
           retention-days: 7
           if-no-files-found: warn
+
+      - name: Print peak memory
+        # Prints how much memory this job's runner container used and how many
+        # CPUs it had, so a change to the heavy runner pool can be checked
+        # against real numbers. Reads the cgroup files (v2 first, else v1) and
+        # the samples from "Start memory sampling". The kernel's peak also
+        # counts file cache: copies of files that the kernel keeps in memory
+        # and frees when memory runs short. So the sampled working set and
+        # program memory show better what the job really needs. A missing
+        # file is skipped; this step never fails the job.
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          cg=/sys/fs/cgroup
+          mib() { case "$1" in max) echo "none" ;; ''|*[!0-9]*) echo "${1:-unknown}" ;; *) echo "$(( $1 / 1048576 )) MiB" ;; esac; }
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null
+          fi
+          if [ -r "${RUNNER_TEMP}/memory-samples.txt" ]; then
+            read -r total_max ws_max anon_max samples < "${RUNNER_TEMP}/memory-samples.txt"
+          fi
+          if [ -r "${cg}/memory.peak" ]; then
+            peak="$(mib "$(cat "${cg}/memory.peak")") (kernel count)"
+          elif [ -r "${cg}/memory/memory.max_usage_in_bytes" ]; then
+            peak="$(mib "$(cat "${cg}/memory/memory.max_usage_in_bytes")") (kernel count, cgroup v1)"
+          elif [ -n "${total_max}" ]; then
+            peak="$(mib "${total_max}") (highest sample; no kernel peak file here)"
+          else
+            peak="not available"
+          fi
+          echo "Memory and CPU of this job's runner container (1 MiB = 1,048,576 bytes):"
+          echo "- Peak memory: ${peak}. The most the container held at one time, file cache included."
+          echo "- Highest working set: $(mib "${ws_max}"). Memory in use without the file cache that the kernel frees first (kubectl top shows this)."
+          echo "- Highest program memory: $(mib "${anon_max}"). Memory the programs asked for; the kernel cannot free it."
+          echo "- Samples: ${samples:-none} (one per second)."
+          if [ -r "${cg}/memory.current" ]; then
+            echo "- Memory now: $(mib "$(cat "${cg}/memory.current")")."
+          fi
+          if [ -r "${cg}/memory.max" ]; then
+            echo "- Memory limit: $(mib "$(cat "${cg}/memory.max")")."
+          fi
+          if [ -r "${cg}/memory.events" ]; then
+            echo "- Out-of-memory kills: $(awk '$1 == "oom_kill" { print $2 }' "${cg}/memory.events")."
+          fi
+          echo "- CPUs this job can see (nproc): $(nproc)."
+          if [ -r "${cg}/cpu.max" ]; then
+            echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
+          fi
+          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/8)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          exit 0
 
   python-coverage-combine:
     name: Python coverage combine (SonarCloud artifact)
@@ -1268,11 +1642,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
     runs-on: meho-runners-ci
-    # 15 > the 12 min of bounded step caps below + ~1-2 min of honest
+    # 26 > the 22 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
     # cancellation (the #2800/#3172 leak).
-    timeout-minutes: 15
+    timeout-minutes: 26
     continue-on-error: true
     defaults:
       run:
@@ -1282,7 +1656,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1294,13 +1668,13 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Download shard 1 coverage data
-        # Same pinned download-artifact as quality-gate.yml. Three explicit
+        # Same pinned download-artifact as quality-gate.yml. Eight explicit
         # name-addressed downloads (not a pattern match) keep the step free
         # of newer-action feature dependencies; continue-on-error tolerates
         # a shard that produced no artifact (see the job header).
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-1
           path: backend
@@ -1308,7 +1682,7 @@ jobs:
       - name: Download shard 2 coverage data
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-2
           path: backend
@@ -1316,16 +1690,56 @@ jobs:
       - name: Download shard 3 coverage data
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-3
+          path: backend
+
+      - name: Download shard 4 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-4
+          path: backend
+
+      - name: Download shard 5 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-5
+          path: backend
+
+      - name: Download shard 6 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-6
+          path: backend
+
+      - name: Download shard 7 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-7
+          path: backend
+
+      - name: Download shard 8 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-8
           path: backend
 
       - name: Combine coverage + write XML (offline, all shards)
         # Runs in this fan-in job with every shard's pytest long gone, so
         # `coverage combine` merges the downloaded per-worker parallel data
         # files standalone (cheap). Uses .coveragerc.ci (relative_files=true)
-        # so paths are repo-relative across the three shard runners and for
+        # so paths are repo-relative across the eight shard runners and for
         # SonarCloud cross-job mapping (#1987 AC6).
         #
         # `if: always()` + the ls guard: combine whatever shards delivered —
@@ -1346,9 +1760,9 @@ jobs:
         # RELEASING.md tag gate. A step cap converts that hang into an
         # absorbed step FAILURE — run stays `success`, coverage degrades to
         # "none for this push", the documented lossy contract. This fan-in
-        # job's budget: downloads 2+2+2 + this step 4 + upload 2 = 12 min of
-        # bounded steps + checkout/uv/sync (~1-2 min honest) under the
-        # 15-min job cap, so step caps always fire first.
+        # job's budget: downloads 8 x 2 + this step 4 + upload 2 = 22 min
+        # of bounded steps + checkout/uv/sync (~1-2 min honest) under the
+        # 26-min job cap, so step caps always fire first.
         if: always()
         timeout-minutes: 4
         run: |
@@ -1375,7 +1789,7 @@ jobs:
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage
           path: backend/coverage.xml
@@ -1429,7 +1843,7 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
       # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
@@ -1486,6 +1900,7 @@ jobs:
           path: spec-shelf
           sparse-checkout: |
             docs/argocd-3.3
+            docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
             docs/hetzner-robot-2026-04
@@ -1496,9 +1911,19 @@ jobs:
             docs/rabbitmq-4.3
             docs/sddc-manager-9.0
             docs/sddc-manager-9.1
+            docs/vcenter-8.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
+            docs/vcf-automation-9.0-reference
+            docs/vcf-automation-9.1
+            docs/vcf-automation-9.1.1
+            docs/vcf-installer-9.0
+            docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vcf-operations-orchestrator-9.0
+            docs/vcf-operations-orchestrator-9.1
+            docs/vcf-protection-and-recovery-9.1
+            docs/vks-9.0
           filter: blob:none
           persist-credentials: false
 
@@ -1511,6 +1936,7 @@ jobs:
           set -euo pipefail
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
+            spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
             spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
@@ -1523,17 +1949,33 @@ jobs:
             spec-shelf/docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl \
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/sddc-manager-9.1/sddc-manager-openapi.json \
+            spec-shelf/docs/vcenter-8.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
+            spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
+            spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json; do
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
+            spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
+            spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
+            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the
@@ -1551,8 +1993,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set up Go
+        # test_keycloak_bootstrap_mcp_login.py (#4002) builds the meho CLI
+        # and runs `meho admin keycloak bootstrap-clients` against the
+        # Keycloak container. Same version + cache shape as the
+        # go-lint-test lane.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache-dependency-path: cli/go.sum
+
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1586,14 +2039,17 @@ jobs:
         # self-checks also run (again) here — seconds, harmless. Lane
         # placement rule + amortisation pattern:
         # docs/decisions/spec-reconcile-guards-standard.md.
-        run: uv run pytest -x tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
+        # -rs prints the reason of every skipped test. The k3s tests skip
+        # when the cluster cannot pull an image; without the reason a green
+        # lane hides that nothing ran on the cluster.
+        run: uv run pytest -x -rs tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
 
   python-migration-tests:
     name: Python (database migrations)
     # Runs the relocated backend/tests/migrations/ suite: per-migration
     # data-transform assertions, the alembic upgrade/downgrade round-trip,
     # and the 3 pgvector-container forward-compat rollback tests. The
-    # required unit lane (the python-unit-shard stride matrix) excludes
+    # required unit lane (the python-unit-shard matrix) excludes
     # tests/migrations from its find, so this job carries the deep
     # per-migration coverage — but only on
     # migration-touching PRs, gated by the `changes` job.
@@ -1627,7 +2083,7 @@ jobs:
       # The 3 forward-compat rollback tests spin up pgvector via
       # testcontainers; route the pull through the Harbor proxy cache like
       # the sibling jobs (never `:latest`).
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
     defaults:
       run:
@@ -1648,7 +2104,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1662,9 +2118,11 @@ jobs:
 
   go-lint-test:
     name: Go (golangci-lint + go test)
-    # Fork-PR guard mirrors the Python job — same rationale.
+    # Fork-PR guard mirrors the Python job — same rationale. Runs on a
+    # GitHub-hosted runner since #4626: it needs only the Go toolchain and
+    # public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1677,17 +2135,22 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.26.9` directive. golangci-lint
+          # Tracks `cli/go.mod`'s `go 1.26.10` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
           # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer.
-          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.9
+          # crypto/tls, net/textproto) need go1.26.9 or newer, and
+          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
+          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
           # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
           # an older 1.26.x fail the build instead of shipping the CVEs.
+          # check-latest: the runner image can cache an older 1.26.x
+          # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
+          # uses a cached match unless asked to check for a newer one.
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
@@ -1760,7 +2223,10 @@ jobs:
         # editors/manpages/etc. The proper long-term fix is to bake
         # the C toolchain into the meho-runners-ci base image; until
         # then this step keeps PR CI green without expanding the
-        # workflow's blast radius.
+        # workflow's blast radius. On the GitHub-hosted runner this job
+        # uses since #4626, gcc and libc6-dev are preinstalled, so the
+        # probe passes and apt never runs; the step stays so the job can
+        # move back to the internal pool without edits.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -1809,7 +2275,7 @@ jobs:
         # ONLY for this step.
         if: always() && hashFiles('cli/coverage.out') != ''
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: go-coverage
           path: cli/coverage.out
@@ -1817,9 +2283,10 @@ jobs:
 
   cli-api-snapshot-freshness:
     name: CLI API snapshot freshness
-    # Fork-PR guard mirrors the other jobs — needs the internal runner pool.
+    # Fork-PR guard mirrors the other jobs (kept unchanged by #4626). Runs on
+    # a GitHub-hosted runner: it needs only Go, uv and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1837,6 +2304,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Ensure make is available
@@ -1846,6 +2314,8 @@ jobs:
         # duplicating their commands (which would drift from the Makefile).
         # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
         # step; baking make into the base image is the long-term fix.
+        # The GitHub-hosted runner this job uses since #4626 ships make,
+        # so the step is a no-op there and stays for a possible move back.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -1862,7 +2332,7 @@ jobs:
         # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
         # and calls app.openapi()), so the backend env must resolve. Same
         # action + cache shape as the Python lanes.
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1903,9 +2373,10 @@ jobs:
 
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
-    # Fork-PR guard mirrors the other jobs.
+    # Fork-PR guard mirrors the other jobs. Runs on a GitHub-hosted runner
+    # since #4626: helm + kubeconform need only public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1929,7 +2400,8 @@ jobs:
         # cannot write to /usr/local/bin (regression caught in PR #173
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install
-        # step's frozen PATH.
+        # step's frozen PATH. $HOME/.local/bin works the same on the
+        # GitHub-hosted runner this job uses since #4626.
         run: |
           set -euo pipefail
           KC_VER=v0.6.7
@@ -1994,3 +2466,188 @@ jobs:
             -ignore-missing-schemas \
             -summary \
             /tmp/rendered.yaml
+
+  # ---------------------------------------------------------------------------
+  # Merge-queue watchdog (#4732). Stops a merge-queue CI run as soon as its
+  # result no longer counts, so its runners go back to live runs.
+  #
+  # Why: the queue drops a group when a required check of the group fails,
+  # or when it takes out a pull request ahead of the group and builds the
+  # group again. It then deletes the group's branch. GitHub does not stop
+  # the group's CI run. On 2026-10-21 a broken Go vulnerability scan failed
+  # 31 queue runs in their first minute; the queue dropped every group
+  # within about a minute, but the runs went on for a median of 131 more
+  # minutes and held 73 percent of the heavy runner pool for most of the
+  # morning. Almost half of that day's merge-queue runner time was spent on
+  # runs whose result nobody could use.
+  #
+  # Why not `cancel-in-progress` for merge_group: each group has its own
+  # branch, so a new group never replaces the run of an old group, and a
+  # cancelled live check drops its group (see the `concurrency:` comment).
+  #
+  # What the job does, about once a minute, with 2 API calls per poll (3
+  # on the one poll that finds the branch gone):
+  #   1. Lists this run's jobs. If every job other than this one and the
+  #      `CLI API snapshot freshness` job has finished, it ends with
+  #      success — checked on two polls in a row, because a job that still
+  #      waits on `needs` (the `Python (ruff + mypy + pytest)` fan-in) is
+  #      not listed until its dependencies finish. This check runs BEFORE
+  #      the branch check, so a run that passed and merged (which also
+  #      deletes the queue branch) is never cancelled. The snapshot job is
+  #      left out because the group can merge while it still runs: it is
+  #      not required, so a run that merged with it still open must not be
+  #      cancelled either.
+  #   2. If a job other than `CLI API snapshot freshness` ended in failure,
+  #      cancelled or timed_out, it cancels the run (rule a). Every other
+  #      job of a merge-queue run either carries a required check or feeds
+  #      the required fan-in, so its failure drops the group anyway. The
+  #      snapshot job is not required: its failure alone keeps the group,
+  #      so it must not cancel the run.
+  #   3. Asks GitHub whether this run's queue branch (`github.ref_name`)
+  #      still exists. Only a `404` can cancel the run (rule b). Any other
+  #      answer or error (timeout, 403, 429, 5xx) keeps the run alive.
+  #      Before it cancels, it lists the jobs once more: the last required
+  #      job can pass, and the group can merge, between step 1 and step 3,
+  #      and a merged run has lost its branch too. It cancels only when
+  #      that second look still shows required work open (or a red job).
+  #      If the second look fails, or shows every required job finished,
+  #      the run stays alive.
+  #
+  # It never fails (the runner starts the step with `bash -e`, so every
+  # call is checked; a failed or unreadable call only means "look again
+  # next minute", and no branch check runs while the jobs' state is
+  # unknown), it is not a required check, and
+  # it runs on a GitHub-hosted runner so it never takes a slot from the
+  # jobs it watches. The queue builds at most 4 groups at once, so at most
+  # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
+  # hour that the job token may make per repository, worst case.
+  # ---------------------------------------------------------------------------
+  merge-queue-watchdog:
+    name: Merge queue watchdog
+    # Only merge-queue runs. A pull-request run must still show every failing
+    # job, and a push to `main` has no queue group that can be dropped.
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    # Backstop only: the loop below stops itself, with success, after 170
+    # minutes. A green merge-queue run took at most 78 minutes (#4732), and
+    # the queue itself gives up on a group long before this cap.
+    timeout-minutes: 180
+    # `actions: write` is what cancelling a run needs. Only this job gets it;
+    # the workflow-wide default stays `contents: read`. `contents: read` is
+    # listed again because a job-level block replaces the workflow-wide one.
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Cancel this run once the queue has dropped its group
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_BRANCH: ${{ github.ref_name }}
+          # Must match this job's `name:` above — the jobs API lists display
+          # names, and the loop has to leave itself out of "all other jobs".
+          SELF_NAME: Merge queue watchdog
+          # The one job that is not required and feeds no required fan-in.
+          # Its failure does not drop the group, and the group can merge
+          # while it still runs. Keep in sync with that job's `name:`.
+          HARMLESS_JOB: CLI API snapshot freshness
+        run: |
+          set -uo pipefail
+          api="repos/${GITHUB_REPOSITORY}"
+          interval=60
+          stop_after=$((170 * 60))
+          quiet_polls=0
+
+          cancel_run() {
+            echo "::notice title=Merge queue watchdog::${1} Cancelling run ${GITHUB_RUN_ID}."
+            if timeout 30 gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"; then
+              echo "cancel request accepted; GitHub stops the other jobs and then this one"
+              return 0
+            fi
+            echo "cancel request failed; the run keeps going and the next poll tries again"
+            return 1
+          }
+
+          # Reads this run's jobs into `open` (jobs that carry or feed a
+          # required check and are still queued or running) and `red` (such
+          # jobs that did not pass). Returns 1 when the jobs cannot be listed
+          # or read. The caller must then not cancel: a run that passed and
+          # merged has lost its branch too, so the branch alone proves nothing.
+          read_jobs() {
+            local jobs
+            if ! jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
+              echo "jobs API did not answer (${jobs})"
+              return 1
+            fi
+            # The runner starts this step with `bash -e`, so every jq call is
+            # guarded: an unreadable answer must not end the watchdog.
+            if ! open="$(jq --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
+                  '[.jobs[] | select(.name != $me and .name != $ok and .status != "completed")] | length' <<<"${jobs}")" \
+               || ! red="$(jq -r --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
+                  '[.jobs[] | select(.name != $me and .name != $ok
+                     and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
+                   | .name] | join(", ")' <<<"${jobs}")"; then
+              echo "jobs API answer could not be read"
+              return 1
+            fi
+          }
+
+          echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
+          while [ "${SECONDS}" -lt "${stop_after}" ]; do
+            # 1 + 2: this run's own jobs. Required ones done -> leave. One red -> cancel.
+            # When the jobs cannot be listed or read, this poll ends here: the
+            # branch check below must not run while the jobs' state is unknown.
+            if ! read_jobs; then
+              quiet_polls=0
+              echo "keeping the run alive and looking again next minute"
+              sleep "${interval}"
+              continue
+            fi
+            if [ -n "${red}" ]; then
+              cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
+            elif [ "${open}" -eq 0 ]; then
+              quiet_polls=$((quiet_polls + 1))
+              if [ "${quiet_polls}" -ge 2 ]; then
+                echo "every job that carries or feeds a required check has finished; nothing left to watch"
+                exit 0
+              fi
+              # Do not look at the branch on this poll: with no required job
+              # running there is nothing worth freeing, and a run that just
+              # merged has lost its branch for a good reason.
+              echo "all listed required jobs have finished; one more poll in case a job was still waiting on 'needs'"
+              sleep "${interval}"
+              continue
+            else
+              quiet_polls=0
+              echo "${open} required job(s) still queued or running"
+            fi
+
+            # 3: the queue branch. Only a clear 404 means the group is gone.
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/${api}/branches/${QUEUE_BRANCH}" 2>/dev/null)" || code="000"
+            case "${code}" in
+              200) echo "queue branch still exists" ;;
+              404)
+                # The last required job can pass, and the queue can merge the
+                # group, between the jobs lookup above and this branch lookup.
+                # A merged run has lost its branch too, so read the jobs once
+                # more: only required work that is still open proves a drop.
+                if ! read_jobs; then
+                  quiet_polls=0
+                  echo "the queue branch is gone, but the jobs could not be read again; keeping the run alive and looking again next minute"
+                elif [ -n "${red}" ]; then
+                  cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
+                elif [ "${open}" -eq 0 ]; then
+                  quiet_polls=1
+                  echo "the queue branch is gone, but every required job has finished since the last look, so the group may have merged; not cancelling"
+                else
+                  cancel_run "The queue branch '${QUEUE_BRANCH}' is gone while ${open} required job(s) still run: the queue has dropped this group and this run's result no longer counts." && exit 0
+                fi ;;
+              *)   echo "branch lookup answered '${code}', which is not conclusive; keeping the run alive" ;;
+            esac
+            sleep "${interval}"
+          done
+          echo "stopped watching after $((stop_after / 60)) minutes; the run goes on without a watchdog"
+          exit 0

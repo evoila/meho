@@ -19,6 +19,46 @@ Resources deployed:
 {{- if .Values.prometheusRule.enabled }}
   - PrometheusRule / {{ include "meho.fullname" . }} (starter alerts)
 {{- end }}
+{{- if .Values.coreKeycloak.enabled }}
+  - StatefulSet / {{ include "coreKeycloak.fullname" . }} (built-in Keycloak; realm meho at https://{{ .Values.coreKeycloak.hostname }}/auth/realms/meho)
+{{- end }}
+{{- if .Values.corePostgres.enabled }}
+
+Built-in PostgreSQL (corePostgres):
+  - StatefulSet / {{ include "corePostgres.statefulSetName" . }} and Service {{ include "corePostgres.fullname" . }}:5432
+  - Databases meho and keycloak, each owned by a role of the same name; neither role is a superuser.
+  - It reads these Secrets (key `password`); the install's secrets Job makes them:
+      {{ .Values.corePostgres.existingSecrets.superuser | default (printf "%s-core-postgres-superuser" .Release.Name) }} (mounted by the PostgreSQL pod alone)
+      {{ printf "%s-core-postgres-meho" .Release.Name }}
+      {{ .Values.corePostgres.existingSecrets.keycloak | default (printf "%s-core-postgres-keycloak" .Release.Name) }}
+  - The disk (PVC data-{{ include "corePostgres.statefulSetName" . }}-0) stays after helm uninstall.
+    Delete the PVC and these Secrets together, or neither.
+{{- end }}
+{{- if .Values.coreVault.enabled }}
+{{- $unseal := printf "%s-core-vault-unseal" .Release.Name }}
+
+Built-in OpenBao (coreVault), the password safe:
+  - StatefulSet / {{ include "coreVault.fullname" . }}; pods reach it at http://{{ include "coreVault.fullname" . }}:{{ .Values.coreVault.service.port }}.
+  - It unseals itself after every restart while the Secret {{ $unseal }} exists.
+    Print the unseal key:
+      kubectl -n {{ .Release.Namespace }} get secret {{ $unseal }} -o jsonpath='{.data.key}' | base64 -d
+    Copy this to your key store now; for a keyholder at every restart, delete the Secret and restart OpenBao:
+      kubectl -n {{ .Release.Namespace }} delete secret {{ $unseal }}
+      kubectl -n {{ .Release.Namespace }} rollout restart statefulset {{ include "coreVault.fullname" . }}
+    In keyholder mode, unseal by hand with:
+      kubectl -n {{ .Release.Namespace }} exec -it {{ include "coreVault.fullname" . }}-0 -c {{ .Values.coreVault.binary }} -- {{ .Values.coreVault.binary }} operator unseal
+    Never create the Secret again just to unseal once: that switches back to self-unseal.
+{{- end }}
+
+{{- if .Values.sandboxMode.enabled }}
+
+WARNING: sandbox mode is ON (sandboxMode.enabled=true, confirmed for host {{ .Values.sandboxMode.confirmHost }}).
+  On this instance a tenant admin may give a service principal a standing grant that
+  also covers deletes, made in the web console and expiring within 30 days. Agents
+  may then delete systems here without a person's approval. Keep only disposable
+  test systems on this instance, with no network route to any other system.
+  The mode is fixed for the life of the database.
+{{- end }}
 
 Next steps:
   1. Watch the rollout:
@@ -29,6 +69,26 @@ Next steps:
 {{- end }}
   3. Tail backplane logs:
        kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "meho.name" . }} -f
+{{- if .Values.coreKeycloak.enabled }}
+  4. Watch the built-in Keycloak start (the first start imports the realm):
+       kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "coreKeycloak.fullname" . }}
+     Pods reach it at http://{{ include "coreKeycloak.fullname" . }}:{{ .Values.coreKeycloak.service.port | default 8080 }}/auth.
+{{- if not .Values.coreKeycloak.ingress.exposeAdmin }}
+     The admin console is not on the ingress (coreKeycloak.ingress.exposeAdmin=false).
+{{- end }}
+{{- end }}
+{{- if .Values.coreKeycloak.enabled }}
+
+First login (built-in Keycloak):
+  The install made two people with temporary passwords:
+    - {{ .Values.coreKeycloak.firstLogin.adminUsername }}: the first admin (group MEHO-Admins, with platform_admin)
+    - {{ .Values.coreKeycloak.firstLogin.approverUsername }}: a second person who can approve (group MEHO-SA-Operators)
+  Their passwords are in the Secret {{ printf "%s-core-first-login" .Release.Name }}. Read one with:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d
+  (keys: admin_username, admin_password, approver_username, approver_password)
+  Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
+  Keycloak asks for a new password, a name and an email at the first login.
+{{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 
 WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).
@@ -54,4 +114,22 @@ WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).
   Confirm what the role actually accepts -- an error, not a token, means
   the binding is in force:
        vault write auth/jwt/login role={{ .Values.config.vaultOidcRole }} jwt="$RUNNER_TOKEN"
+{{- end }}
+{{- if not .Values.approvalHandoff.enabled }}
+
+WARNING: approvalHandoff.enabled=false, so APPROVAL_HANDOFF_ENCRYPTION_KEY is not set (#3712).
+
+  MEHO will deny every credential-write operation that must wait for
+  approval (for example a Vault KV write). It needs this key to store the
+  operation's input encrypted while it waits.
+
+  To fix it:
+    1. Create a Fernet key:
+         python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    2. Store it in a Kubernetes Secret in namespace {{ .Release.Namespace }}.
+    3. Set approvalHandoff.enabled=true and approvalHandoff.secretName=<that Secret>,
+       then run helm upgrade.
+
+  Check the state any time on GET /ready under features.approval_custody.
+  Steps and key rotation: docs/codebase/approvals.md.
 {{- end }}

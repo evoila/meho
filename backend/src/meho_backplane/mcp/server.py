@@ -108,6 +108,11 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
+from meho_backplane.operations.caller_gone import watch_caller
+from meho_backplane.request_usage.collector import (
+    note_request_fallback_status,
+    note_request_route,
+)
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.version import deployed_version_label
 
@@ -118,6 +123,7 @@ __all__ = [
     "McpRateLimitedError",
     "mcp_session_id_capture_mode",
     "register_method",
+    "registered_methods",
     "router",
 ]
 
@@ -197,6 +203,11 @@ def register_method(name: str, handler: _McpHandler) -> None:
     _DISPATCH[name] = handler
 
 
+def registered_methods() -> frozenset[str]:
+    """Return every registered JSON-RPC method (request usage route catalog, #3734)."""
+    return frozenset(_DISPATCH)
+
+
 class McpInvalidParamsError(Exception):
     """Handler-side sentinel mapped to JSON-RPC ``INVALID_PARAMS``.
 
@@ -229,6 +240,29 @@ class McpInvalidParamsError(Exception):
     ) -> None:
         super().__init__(message)
         self.data = data
+
+
+class McpPermissionDeniedError(McpInvalidParamsError):
+    """An :class:`McpInvalidParamsError` that is a permission refusal (#3757).
+
+    Same ``-32602`` wire error as its parent, so callers and clients see no
+    change. It tells the audit path that a handler refused the call because
+    the caller lacks permission (the MCP form of an HTTP 403), not because
+    the params were wrong. With ``AUDIT_WRAPPER_ROWS_RETIRED`` on, such a
+    refusal still writes a ``policy_decision`` row, as REST does for a 403.
+    """
+
+
+class McpExecutionFailedError(McpInvalidParamsError):
+    """An :class:`McpInvalidParamsError` raised because a MEHO change failed (#3757).
+
+    Same ``-32602`` wire error as its parent, so callers and clients see no
+    change. It tells the audit path that the handler tried to make a change
+    and the write failed (Keycloak or Vault unreachable, not configured, or
+    refused the write): the MCP form of an HTTP 502 / 503, not a bad
+    argument. With ``AUDIT_WRAPPER_ROWS_RETIRED`` on, the failed attempt
+    still writes an ``operation_execution`` row, as REST does for a 5xx.
+    """
 
 
 class McpInternalError(Exception):
@@ -288,8 +322,8 @@ class McpRateLimitedError(Exception):
     into this sentinel, passing ``data={limit, window_seconds,
     retry_after_seconds}`` so the calling agent can back off precisely.
     Keeping the broadcast layer's domain error separate from this MCP
-    sentinel mirrors the ``InvalidSinceError`` seam -- the broadcast
-    package never imports the MCP error vocabulary.
+    sentinel keeps the broadcast package free of the MCP error
+    vocabulary.
     """
 
     def __init__(
@@ -363,19 +397,31 @@ async def _session_instructions(operator: Operator) -> str | None:
     consumers of the assembler must not see it. Both bands use the
     empty-drops-cleanly join convention, so an all-GA registry
     degrades to the preamble alone.
+
+    #3746: every call logs an ``mcp_preamble_receipt`` record computed
+    from this assembly (not from the write-path feedback): which
+    convention slugs were included or dropped, the conventions band
+    estimate against its budget, and the estimate for the whole
+    ``instructions`` text, reported separately. It records what MEHO
+    sent; the MCP client may ignore ``instructions``, so it is not
+    proof that an agent applied them.
     """
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
     # function-local import per ``initialize`` call is negligible (the
     # module is already loaded by the time any handshake arrives).
-    from meho_backplane.conventions.preamble import assemble_preamble
+    from meho_backplane.conventions.preamble import assemble_preamble_detailed
+    from meho_backplane.conventions.schemas import (
+        DEFAULT_MAX_PREAMBLE_TOKENS,
+        estimate_tokens,
+    )
 
     # ``sub`` (G12.4-T2 #1316) drives the per-run priming band;
     # ``capabilities`` (G4.6-T4 #1553) drives the doc-collection catalogue
     # band. An operator with no in-progress runs and no entitled collections
     # sees a byte-identical preamble to the pre-band shape (each band helper
     # returns ``text=""`` and the assembler omits that section).
-    preamble = await assemble_preamble(
+    preamble = await assemble_preamble_detailed(
         operator.tenant_id, operator.sub, capabilities=operator.capabilities
     )
     if preamble.dropped_slugs:
@@ -391,6 +437,16 @@ async def _session_instructions(operator: Operator) -> str | None:
             dropped_slugs=preamble.dropped_slugs,
         )
     joined = "\n\n".join(band for band in (preamble.text, FEATURE_MATURITY_BAND) if band)
+    _log.info(
+        "mcp_preamble_receipt",
+        tenant_id=str(operator.tenant_id),
+        included_slugs=preamble.kept_slugs,
+        dropped_slugs=preamble.dropped_slugs,
+        oversize_slugs=preamble.oversize_slugs,
+        conventions_tokens=preamble.conventions_tokens,
+        conventions_max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
+        instructions_tokens=estimate_tokens(joined),
+    )
     # Since G6.5-T6 (#2546) every preamble carries the static
     # broadcast-discipline band, so the payload is always non-empty;
     # the ``or None`` stays as a defensive belt for the theoretical
@@ -1103,6 +1159,55 @@ async def _dispatch_to_handler(
     return _build_success_response(jrpc.id, result)
 
 
+#: Audit projection of each JSON-RPC error code onto an HTTP status. Used
+#: for the request usage outcome (#3734) when the error never reached a
+#: handler's audit writer; see :func:`_note_request_usage_outcome`.
+_JSONRPC_ERROR_STATUS: Final[dict[int, int]] = {
+    PARSE_ERROR: 400,
+    INVALID_REQUEST: 400,
+    METHOD_NOT_FOUND: 404,
+    INVALID_PARAMS: 400,
+    RATE_LIMITED: 429,
+    INTERNAL_ERROR: 500,
+}
+
+
+def _jsonrpc_error_code(response: Response) -> int | None:
+    """Return the ``error.code`` of a JSON-RPC error envelope, else ``None``.
+
+    Reads the rendered body like :func:`_response_is_jsonrpc_error`. A bare
+    :class:`Response` (the HTTP 202 notification arm) has no envelope.
+    """
+    body = getattr(response, "body", None)
+    if not body:
+        return None
+    try:
+        envelope = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    error = envelope.get("error") if isinstance(envelope, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, int) else None
+
+
+def _note_request_usage_outcome(response: Response) -> None:
+    """Give the request usage boundary the status a JSON-RPC error stands for.
+
+    MCP answers HTTP 200 for a parse error, an unknown method, invalid
+    params, a rate-limited ``initialize`` and an internal error. Only
+    ``tools/call`` and ``resources/read`` record a projected status through
+    the audit writer, so without this step every other failure would be
+    counted as ``ok`` (#3734). A status a handler already recorded wins;
+    an HTTP error status is recorded by the middleware's ``send`` wrapper.
+    """
+    if not (200 <= response.status_code < 300):
+        return
+    code = _jsonrpc_error_code(response)
+    if code is None:
+        return
+    note_request_fallback_status(_JSONRPC_ERROR_STATUS.get(code, 500))
+
+
 @router.post("")
 async def mcp_dispatch(
     request: Request,
@@ -1143,12 +1248,22 @@ async def mcp_dispatch(
       Version Header" enforcement.
     * :func:`_dispatch_to_handler` — handler lookup + execution + error
       mapping.
+    * :func:`_note_request_usage_outcome` — records the outcome of a
+      JSON-RPC error envelope for request usage (#3734), after every
+      arm above has produced its response.
 
     GET requests on this path automatically return HTTP 405 (FastAPI's
     default for an unmatched method) which satisfies the spec's
     fallback when the server does not implement the GET-opens-SSE
     branch of the Streamable HTTP transport.
     """
+    response = await _dispatch_mcp_request(request, operator)
+    _note_request_usage_outcome(response)
+    return response
+
+
+async def _dispatch_mcp_request(request: Request, operator: Operator) -> Response:
+    """Run the dispatch pipeline described on :func:`mcp_dispatch`."""
     # ``operator`` flows through to handlers — T3 registry handlers
     # use it for RBAC filtering on tools/list / resources/templates/list
     # and for the call-time role re-check on tools/call / resources/read.
@@ -1194,7 +1309,15 @@ async def mcp_dispatch(
     # are spec-defined as notification-only, so the server treats it
     # as such regardless of the envelope's id field.
     is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
-    response = await _dispatch_to_handler(jrpc, is_notification, operator)
+    # Request usage (#3734): label this request with its JSON-RPC method.
+    # ``tools/call`` / ``resources/read`` narrow it to the tool or the
+    # resource template once the handler has matched one. An unregistered
+    # method is not in the route catalog, so it is stored as unmatched.
+    note_request_route(f"method:{jrpc.method}")
+    # #3696: the body is fully read here, so the watcher can notice a
+    # caller that disconnects while a long tool call runs.
+    async with watch_caller(request.receive):
+        response = await _dispatch_to_handler(jrpc, is_notification, operator)
     _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return response
 

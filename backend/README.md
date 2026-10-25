@@ -5,8 +5,8 @@ minimum-viable chassis only — health, version, readiness, metrics, and
 authn/authz federation are layered on by Tasks #19, #20 and the G2.2 /
 G2.3 Initiatives.
 
-Stack choices are locked in [ADR
-0004](https://github.com/evoila-bosnia/meho-internal/issues/13)
+Stack choices are locked in ADR
+0004
 (Python / FastAPI / Pydantic v2 / SQLAlchemy 2.x async / Alembic).
 
 ## Layout
@@ -164,7 +164,7 @@ exit status is `0`. Verification failure (wrong identity, unsigned image,
 tampered registry) exits non-zero with a structured error.
 
 These are the same identity-regex + issuer values
-[`claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)'s
+`claude-rdc-hetzner-dc`'s
 `install.sh` uses as a **gating** check before pulling the image (per Goal #11
 cross-repo coordination).
 
@@ -202,7 +202,7 @@ SPDX document; `jq '.predicate.packages | length'` returns the package count
 `uv.lock`).
 
 The downstream `install.sh` from
-[`claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+`claude-rdc-hetzner-dc`
 can run this exact command to confirm the SBOM is intact and the bill of
 materials matches the image being pulled.
 
@@ -314,12 +314,33 @@ no upstream fix). Because the promote / sign / attest steps carry the implicit
 `success()` guard, a failing scan skips all three: the scanned digest is never
 tagged with a release alias, never signed, and never attested — a failed gate
 cannot leave an artifact advertised as an approved release (#284 / F15b). The
-scan is skipped on `pull_request` (which never pushes an image), so it is not
-a PR merge gate. Because the two SARIF uploads are guarded on the scan step's
+image scan is skipped on `pull_request` (which never pushes an image), so it is
+not a PR merge gate. Because the two SARIF uploads are guarded on the scan step's
 outcome rather than the default `success()` gate, a failing scan still
 publishes its findings to the Security tab and the 30-day artefact — so a red
 run's CVE list is one click away. Treat a red run as "bump the base-image
 digest and re-run"; the build ships nothing until the scan is clean.
+
+**Pull requests get a scan of the Python packages.** The `lock-scan` job in
+the same workflow runs trivy on `backend/uv.lock` alone, with the same rules
+as the image scan: the same action version, the same `.trivyignore`
+exceptions, CRITICAL/HIGH only, only findings that have a fix, and it fails
+on a finding. It runs on every pull request that changes `backend/`,
+`image.yml` or `.trivyignore`, on a GitHub-hosted runner, without waiting
+for the image build. The findings are in the job log. It is not a required
+check. So a dependency fix or a new exception is proven on its own pull
+request, not by the next run on main. Run the same check locally with:
+
+```bash
+trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+  --ignorefile .trivyignore --exit-code 1 backend/uv.lock
+```
+
+What the lock scan does not see: the Debian packages of the base image, and
+anything else in the image that is not in the lock file. Only the image scan
+on main and tags checks those. It does check the few Windows-only packages in
+the lock file that the image never installs, so a finding in one of them
+fails the pull-request job while main passes.
 
 ## What this skeleton intentionally omits
 

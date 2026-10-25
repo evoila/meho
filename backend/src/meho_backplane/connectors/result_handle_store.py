@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Valkey-backed spill store for materialized JSONFlux result handles.
+"""Valkey-backed spill store for materialized result handles.
 
 G0.20-T7 (#1507). The default reducer
 (:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`)
@@ -24,14 +24,44 @@ a spilled handle expires server-side without any sweeper, so the store
 cannot become an unbounded-growth / memory-leak vector even if a process
 crashes mid-flight.
 
+Dedicated store + reader-first move (#3639)
+===========================================
+
+Result handles used to share one Valkey with the governance keys
+(broadcast, rate limits, approval waits). A burst of large handles could
+fill that Valkey and take governance down with it. Handles now move to a
+dedicated result-cache Valkey (``RESULT_CACHE_REDIS_URL``, chart subchart
+``result-cache``, ``maxmemory`` + ``noeviction``). The move is reader-first:
+
+* Reads check the ``v2`` key on the dedicated client first, then the old key
+  on the shared broadcast client. Both keys carry the same tenant id, so the
+  fallback never crosses tenants. Old keys drain by their own TTL.
+* Writes go to the old key on the shared client until the writer gate
+  (``RESULT_CACHE_WRITER_ENABLED``) is on; then to the ``v2`` key on the
+  dedicated client. There is no dual write.
+* With ``RESULT_CACHE_REDIS_URL`` unset both clients are the broadcast
+  client, so nothing changes before the pod ships.
+
+Metrics are aggregate only (counts and memory bytes); no row content, key,
+or vendor total is ever a label or a log field.
+
 Key shape + isolation
 =====================
 
 ::
 
-    KEY:   meho:reshandle:{tenant_id}:{handle_id}
-    VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at}
+    KEY:   meho:reshandle:v2:{tenant_id}:{handle_id}   (dedicated client)
+           meho:reshandle:{tenant_id}:{handle_id}      (legacy, shared client)
+    VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at,
+                 ..., record_kind, document}
     TTL:   the handle's ttl_seconds (server-enforced)
+
+``record_kind`` is ``"rows"`` (a reduced collection, paged and queried) or
+``"document"`` (one whole payload with no single collection, read with a
+JSON Pointer ``path``, #3633). Records written before the field existed
+decode as ``"rows"``. A rows record may also carry a ``document``: the
+top-level fields the reducer left out of the inline summary because they
+did not fit its byte budget. They are read with the same ``path`` read.
 
 JSON (not msgpack) so the value is ``str``-compatible with the shared
 broadcast client's ``decode_responses=True`` posture; the rows are
@@ -51,7 +81,9 @@ would blow the per-key value size. :meth:`spill` caps the persisted record by
 row count and encoded bytes, using the configured limits.
 It records both the cap-applied ``stored_rows`` and the true
 ``total_rows`` so a reader can tell when the tail was truncated. Combined
-with the TTL, the store's footprint is bounded on both axes.
+with the TTL, the store's footprint is bounded on both axes. A read checks
+the record's byte length against the same cap before it decodes, so a
+larger record written before the cap existed is a miss, never a decode.
 
 Fail-open
 =========
@@ -73,15 +105,22 @@ from uuid import UUID
 import msgspec
 import redis.asyncio as redis
 import structlog
+from prometheus_client import Counter, Gauge
 
-from meho_backplane.settings import get_settings
+from meho_backplane.jsonflux.query.contract import QueryContractError
+from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "ResultHandleStore",
+    "ResultRecordKindError",
+    "SpillResult",
+    "SpilledDocument",
     "SpilledRowSet",
     "SpilledWindow",
+    "dispose_result_handle_store",
     "get_result_handle_store",
     "reset_result_handle_store_for_testing",
+    "rows_record_bytes",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -90,10 +129,55 @@ _log = structlog.get_logger(__name__)
 #: broadcast stream keys so the two never collide on a shared Valkey.
 _KEY_PREFIX = "meho:reshandle"
 
+#: The two record kinds a handle key can hold. A rows record keeps a reduced
+#: collection (paged and queried); a document record keeps one whole payload
+#: that has no single collection (read with a JSON Pointer ``path``).
+_ROWS_RECORD = "rows"
+_DOCUMENT_RECORD = "document"
+
+#: Namespace for handles written to the dedicated result-cache store.
+_V2_KEY_PREFIX = f"{_KEY_PREFIX}:v2"
+
+#: Same short timeouts as the broadcast fast client: a hung store fails
+#: fast and the reduce path keeps its inline sample.
+_SOCKET_TIMEOUT_SECONDS = 5.0
+_CONNECT_TIMEOUT_SECONDS = 3.0
+
+#: Result records the store tried to write, by outcome (``admitted`` /
+#: ``rejected``) and namespace (``v2`` / ``legacy``). ``rejected`` covers a
+#: record over the byte cap and a write the store refused or failed (for
+#: example ``noeviction`` at ``maxmemory``).
+RESULT_CACHE_RECORDS_TOTAL: Counter = Counter(
+    "result_cache_records_total",
+    "Result-handle records the store tried to write, by outcome and namespace.",
+    labelnames=("outcome", "namespace"),
+)
+
+#: Result-handle reads, by where the record was found: ``v2`` (dedicated
+#: store), ``legacy`` (fallback to the shared store), or ``miss``.
+RESULT_CACHE_READS_TOTAL: Counter = Counter(
+    "result_cache_reads_total",
+    "Result-handle reads, by where the record was found (v2, legacy, miss).",
+    labelnames=("source",),
+)
+
+#: Memory use of the dedicated result-cache store, sampled from
+#: ``INFO memory`` after each ``v2`` write. ``kind`` is ``used`` or ``max``.
+RESULT_CACHE_MEMORY_BYTES: Gauge = Gauge(
+    "result_cache_memory_bytes",
+    "Dedicated result-cache store memory in bytes (used, max), sampled after v2 writes.",
+    labelnames=("kind",),
+)
+
 
 def _key(tenant_id: UUID, handle_id: UUID) -> str:
-    """Tenant-scoped Valkey key for a spilled handle."""
+    """Tenant-scoped legacy Valkey key for a spilled handle (shared client)."""
     return f"{_KEY_PREFIX}:{tenant_id}:{handle_id}"
+
+
+def _v2_key(tenant_id: UUID, handle_id: UUID) -> str:
+    """Tenant-scoped Valkey key for a handle on the dedicated store."""
+    return f"{_V2_KEY_PREFIX}:{tenant_id}:{handle_id}"
 
 
 def _to_bytes(raw: str | bytes) -> bytes:
@@ -141,8 +225,66 @@ class SpilledRowSet(msgspec.Struct, frozen=True):
     stored_rows: int
 
 
+class SpilledDocument(msgspec.Struct, frozen=True):
+    """What a ``path`` read resolves against, served by :meth:`ResultHandleStore.fetch_document`.
+
+    For a document record this is the whole retained payload: one payload
+    that had no single paginable collection (a detail object with several
+    lists, a dict of scalars, or a scalar root), stored whole or not at all.
+    For a rows record it is the dict of top-level fields the reducer left
+    out of the inline summary (#3633).
+    """
+
+    document: Any
+
+
+class SpillResult(msgspec.Struct, frozen=True):
+    """What :meth:`ResultHandleStore.spill` kept.
+
+    ``stored_rows`` is the number of rows retrievable via
+    :meth:`ResultHandleStore.fetch_window`; ``0`` means nothing was stored.
+    ``document_stored`` is ``True`` only when the omitted fields passed as
+    *document* were kept beside the rows, so a ``path`` read on the handle
+    works. The reducer uses it to advertise that read only when it works
+    (#3633).
+    """
+
+    stored_rows: int
+    document_stored: bool = False
+
+
+class ResultRecordKindError(QueryContractError):
+    """The handle holds the other record kind than the read asked for.
+
+    A ``path`` read needs a document record; paging and relational queries
+    need a rows record. Recoverable: the message names the read that works.
+    """
+
+    def __init__(self, handle_id: UUID, record_kind: str) -> None:
+        self.handle_id = handle_id
+        self.record_kind = record_kind
+        if record_kind == _DOCUMENT_RECORD:
+            hint = (
+                "it holds one document, not rows. Read it with "
+                '`query={"path": "<JSON Pointer>"}`, for example `"/name"`.'
+            )
+        else:
+            hint = (
+                "it holds rows and no fields left out of the inline summary. "
+                "Page it with `offset` / `limit` or query it."
+            )
+        super().__init__(f"handle {handle_id} cannot be read this way: {hint}")
+
+
 class _StoredPayload(msgspec.Struct):
-    """Wire shape persisted under a spilled-handle key."""
+    """Wire shape persisted under a spilled-handle key.
+
+    ``record_kind`` and ``document`` are additive: a record written before
+    they existed decodes as a rows record with no document, because msgspec
+    fills missing fields from their defaults. On a rows record ``document``
+    is ``None`` or the dict of top-level fields the reducer left out of the
+    inline summary (#3633); on a document record it is the whole payload.
+    """
 
     operator_sub: str
     op_id: str | None
@@ -154,19 +296,200 @@ class _StoredPayload(msgspec.Struct):
     storage_coverage: str = "unknown"
     source_coverage: str = "unknown"
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+    record_kind: str = _ROWS_RECORD
+    document: Any = None
+
+
+#: A ``created_at`` stamp of the longest form :meth:`ResultHandleStore.spill`
+#: writes (microseconds and offset). :func:`rows_record_bytes` uses it so the
+#: size it reports never depends on the clock.
+_LONGEST_CREATED_AT = "2000-01-01T00:00:00.000000+00:00"
+
+
+def rows_record_bytes(
+    rows: list[dict[str, Any]],
+    *,
+    operator_sub: str,
+    op_id: str | None,
+    document: Any = None,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    """Encoded size of the complete rows record :meth:`ResultHandleStore.spill` would write.
+
+    A handler that must not lose a row (the HCX API file read, whose parts
+    rebuild one exact file) compares this against
+    ``result_handle_max_record_bytes`` before it returns. The size counts the
+    record's own fields next to *rows*, so a payload that passes here is
+    stored whole; the row-only size the handler could compute itself misses
+    those fields and lets the store cut the last row. *document* is the dict
+    of top-level fields the reducer stores beside the rows (#3633); pass the
+    payload's scalars to count the largest record the reducer can write.
+    """
+    record = _StoredPayload(
+        operator_sub=operator_sub,
+        op_id=op_id,
+        rows=rows,
+        total_rows=len(rows),
+        stored_rows=len(rows),
+        created_at=_LONGEST_CREATED_AT,
+        captured_rows=len(rows),
+        storage_coverage="complete",
+        metadata=metadata or {},
+        document=document,
+    )
+    return len(msgspec.json.encode(record))
+
+
+def _without_document(
+    baseline: _StoredPayload, *, handle_id: UUID, tenant_id: UUID, max_record_bytes: int
+) -> tuple[_StoredPayload, int]:
+    """Return *baseline* without its document, and the new encoded size (logged)."""
+    _log.warning(
+        "result_handle_omitted_fields_dropped",
+        handle_id=str(handle_id),
+        tenant_id=str(tenant_id),
+        op_id=baseline.op_id,
+        record_bytes=len(msgspec.json.encode(baseline)),
+        max_record_bytes=max_record_bytes,
+    )
+    baseline = msgspec.structs.replace(baseline, document=None)
+    return baseline, len(msgspec.json.encode(baseline))
+
+
+def _select_record(
+    baseline: _StoredPayload,
+    candidates: list[dict[str, Any]],
+    captured_rows: int,
+    max_record_bytes: int,
+    *,
+    handle_id: UUID,
+    tenant_id: UUID,
+) -> tuple[_StoredPayload, list[dict[str, Any]]]:
+    """Return the record base and the longest row prefix that fit the cap together.
+
+    The omitted fields a rows record carries (#3633) must never cost the
+    caller its rows. When they leave no room for even the first row --
+    because they alone break the cap, or because they fit but the first row
+    no longer does beside them -- they are dropped with a warning and the
+    rows are selected again without them.
+    """
+    size = len(msgspec.json.encode(baseline))
+    selected = _rows_within_cap(candidates, captured_rows, size, max_record_bytes)
+    if not selected and baseline.document is not None:
+        baseline, size = _without_document(
+            baseline, handle_id=handle_id, tenant_id=tenant_id, max_record_bytes=max_record_bytes
+        )
+        selected = _rows_within_cap(candidates, captured_rows, size, max_record_bytes)
+    return baseline, selected
+
+
+def _rows_within_cap(
+    candidates: list[dict[str, Any]], captured_rows: int, baseline_size: int, max_record_bytes: int
+) -> list[dict[str, Any]]:
+    """Return the longest prefix of *candidates* whose record stays under the cap.
+
+    *baseline_size* is the encoded record with no rows. Each row adds its
+    own bytes plus a separator; the running ``stored_rows`` digit count and
+    the ``complete`` coverage label are charged as they grow, so the final
+    encoded record is never a surprise.
+    """
+    selected: list[dict[str, Any]] = []
+    size = baseline_size
+    for row in candidates:
+        row_size = len(msgspec.json.encode(row))
+        candidate_size = size + row_size + (1 if selected else 0)
+        count = len(selected) + 1
+        complete = count == captured_rows
+        candidate_size += len(str(count)) - 1 + (1 if complete else 0)
+        if candidate_size > max_record_bytes:
+            break
+        selected.append(row)
+        size += row_size + (1 if len(selected) > 1 else 0)
+    return selected
 
 
 class ResultHandleStore:
     """Persist + read back the full materialized rows of a reduced dispatch.
 
-    A thin wrapper over an async Valkey client. One instance is shared
-    process-wide via :func:`get_result_handle_store`; the reducer spills
-    into it at materialize time and the ``result_query`` MCP tool reads
-    windows back out of it.
+    A thin wrapper over two async Valkey clients: ``client`` is the shared
+    broadcast client (legacy keys) and ``dedicated_client`` the result-cache
+    client (``v2`` keys; defaults to ``client``). ``writer_enabled`` picks
+    where :meth:`spill` and :meth:`spill_document` write. ``read_max_record_bytes``
+    is the byte cap :meth:`fetch_record` checks before decode. One instance is
+    shared process-wide via :func:`get_result_handle_store`; the reducer
+    spills into it at materialize time and the ``result_query`` MCP tool
+    reads windows back out of it.
     """
 
-    def __init__(self, client: redis.Redis) -> None:
+    def __init__(
+        self,
+        client: redis.Redis,
+        *,
+        dedicated_client: redis.Redis | None = None,
+        writer_enabled: bool = False,
+        read_max_record_bytes: int | None = None,
+    ) -> None:
         self._client = client
+        self._dedicated = dedicated_client if dedicated_client is not None else client
+        self._writer_enabled = writer_enabled
+        # The read-side record cap. ``None`` uses the setting's default, so a
+        # store built directly (tests, scripts) needs no loaded settings.
+        self._read_max_record_bytes = (
+            read_max_record_bytes
+            if read_max_record_bytes is not None
+            else Settings.model_fields["result_handle_max_record_bytes"].default
+        )
+
+    def _write_target(self, tenant_id: UUID, handle_id: UUID) -> tuple[str, redis.Redis, str]:
+        """Return ``(namespace, client, key)`` for a write, per the writer gate."""
+        if self._writer_enabled:
+            return "v2", self._dedicated, _v2_key(tenant_id, handle_id)
+        return "legacy", self._client, _key(tenant_id, handle_id)
+
+    async def _sample_memory(self) -> None:
+        """Record the dedicated store's memory use. Fail-open, best effort."""
+        try:
+            info = await self._dedicated.info("memory")
+            RESULT_CACHE_MEMORY_BYTES.labels(kind="used").set(int(info.get("used_memory", 0)))
+            RESULT_CACHE_MEMORY_BYTES.labels(kind="max").set(int(info.get("maxmemory", 0)))
+        except (redis.RedisError, OSError, TypeError, ValueError, AttributeError):
+            return
+
+    async def _after_write(self, namespace: str, *, admitted: bool) -> None:
+        """Count a write attempt; sample store memory after a ``v2`` attempt."""
+        outcome = "admitted" if admitted else "rejected"
+        RESULT_CACHE_RECORDS_TOTAL.labels(outcome=outcome, namespace=namespace).inc()
+        if namespace == "v2":
+            await self._sample_memory()
+
+    async def _get_record(self, tenant_id: UUID, handle_id: UUID) -> str | bytes | None:
+        """Reader-first lookup: ``v2`` key on the dedicated client, then legacy.
+
+        Both lookups use the caller's tenant, so the fallback never reads
+        another tenant's record. A failing client counts as a miss for that
+        namespace; ``None`` is returned only when both miss.
+        """
+        lookups = (
+            ("v2", self._dedicated, _v2_key(tenant_id, handle_id)),
+            ("legacy", self._client, _key(tenant_id, handle_id)),
+        )
+        for source, client, key in lookups:
+            try:
+                raw: str | bytes | None = await client.get(key)
+            except (redis.RedisError, OSError) as exc:
+                _log.warning(
+                    "result_handle_fetch_failed",
+                    handle_id=str(handle_id),
+                    tenant_id=str(tenant_id),
+                    namespace=source,
+                    error=str(exc),
+                )
+                continue
+            if raw is not None:
+                RESULT_CACHE_READS_TOTAL.labels(source=source).inc()
+                return raw
+        RESULT_CACHE_READS_TOTAL.labels(source="miss").inc()
+        return None
 
     async def spill(
         self,
@@ -181,25 +504,36 @@ class ResultHandleStore:
         max_rows: int,
         max_record_bytes: int | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> int:
+        document: dict[str, Any] | None = None,
+    ) -> SpillResult:
         """Persist a row-capped, byte-capped prefix of *rows* under the handle key.
 
-        Returns the positive stored-row count when rows were stored and are retrievable via
-        :meth:`fetch_window`, ``0`` when the spill was skipped or
-        failed (Valkey unreachable, serialization error, empty input). A
-        zero return is non-fatal: the caller keeps the inline sample
-        and leaves the handle's drill-in surface marked unavailable.
+        Returns a :class:`SpillResult` whose ``stored_rows`` is the positive
+        count of rows retrievable via :meth:`fetch_window`, or ``0`` when the
+        spill was skipped or failed (Valkey unreachable, serialization
+        error, empty input). A zero count is non-fatal: the caller keeps the
+        inline sample and leaves the handle's drill-in surface marked
+        unavailable.
+
+        *document* (#3633) carries the payload's top-level fields that did
+        not fit the inline summary, so :meth:`fetch_document` can serve them
+        back. It counts against the same record cap as the rows. When it
+        leaves no room for even the first row it is dropped with a warning
+        and the rows are stored as before, so a large sibling can never cost
+        the caller its rows; ``document_stored`` tells the caller which
+        happened.
 
         The TTL is enforced server-side by Valkey (``SET ... EX``); no
         sweeper is needed and a crashed process leaves no orphaned key
         past the TTL.
         """
         if not rows or ttl_seconds <= 0 or max_rows <= 0:
-            return 0
+            return SpillResult(stored_rows=0)
         if max_record_bytes is None:
             max_record_bytes = get_settings().result_handle_max_record_bytes
         if max_record_bytes <= 0:
-            return 0
+            return SpillResult(stored_rows=0)
+        namespace, target, key = self._write_target(tenant_id, handle_id)
         created_at = datetime.now(UTC).isoformat()
         metadata = metadata or {}
         candidates = rows[:max_rows]
@@ -215,48 +549,42 @@ class ResultHandleStore:
                 captured_rows=captured_rows,
                 storage_coverage="partial",
                 metadata=metadata,
+                document=document,
             )
-            size = len(msgspec.json.encode(baseline))
-            selected: list[dict[str, Any]] = []
-            for row in candidates:
-                row_size = len(msgspec.json.encode(row))
-                candidate_size = size + row_size + (1 if selected else 0)
-                count = len(selected) + 1
-                complete = count == captured_rows
-                candidate_size += len(str(count)) - 1 + (1 if complete else 0)
-                if candidate_size > max_record_bytes:
-                    break
-                selected.append(row)
-                size += row_size + (1 if len(selected) > 1 else 0)
+            baseline, selected = _select_record(
+                baseline,
+                candidates,
+                captured_rows,
+                max_record_bytes,
+                handle_id=handle_id,
+                tenant_id=tenant_id,
+            )
             if not selected:
-                return 0
+                await self._after_write(namespace, admitted=False)
+                return SpillResult(stored_rows=0)
             coverage = "complete" if len(selected) == captured_rows else "partial"
-            payload = _StoredPayload(
-                operator_sub=operator_sub,
-                op_id=op_id,
-                rows=selected,
-                total_rows=total_rows,
-                stored_rows=len(selected),
-                created_at=created_at,
-                captured_rows=captured_rows,
-                storage_coverage=coverage,
-                metadata=metadata,
+            payload = msgspec.structs.replace(
+                baseline, rows=selected, stored_rows=len(selected), storage_coverage=coverage
             )
             encoded = msgspec.json.encode(payload)
             if len(encoded) > max_record_bytes:
-                return 0
-            await self._client.set(_key(tenant_id, handle_id), encoded, ex=ttl_seconds)
+                await self._after_write(namespace, admitted=False)
+                return SpillResult(stored_rows=0)
+            await target.set(key, encoded, ex=ttl_seconds)
         except (redis.RedisError, msgspec.EncodeError, TypeError, OSError) as exc:
             # Fail-open: a reduce must never fail because the spill
-            # backend is unreachable. The inline sample still ships.
+            # backend is unreachable or full. The inline sample still ships.
             _log.warning(
                 "result_handle_spill_failed",
                 handle_id=str(handle_id),
                 tenant_id=str(tenant_id),
                 op_id=op_id,
+                namespace=namespace,
                 error=str(exc),
             )
-            return 0
+            await self._after_write(namespace, admitted=False)
+            return SpillResult(stored_rows=0)
+        await self._after_write(namespace, admitted=True)
         _log.info(
             "result_handle_spilled",
             handle_id=str(handle_id),
@@ -265,8 +593,201 @@ class ResultHandleStore:
             stored_rows=len(selected),
             total_rows=total_rows,
             ttl_seconds=ttl_seconds,
+            document_stored=payload.document is not None,
+            namespace=namespace,
         )
-        return len(selected)
+        return SpillResult(stored_rows=len(selected), document_stored=payload.document is not None)
+
+    async def spill_document(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+        op_id: str | None,
+        document: Any,
+        ttl_seconds: int,
+        max_record_bytes: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist *document* whole under the handle key, as a document record.
+
+        Returns ``True`` when the record was written. Returns ``False`` when
+        the encoded record is over the per-record byte cap (a document is
+        never cut, so it is kept whole or not at all), the TTL is not
+        positive, or the store failed. Fail-open like :meth:`spill`.
+        """
+        if ttl_seconds <= 0:
+            return False
+        if max_record_bytes is None:
+            max_record_bytes = get_settings().result_handle_max_record_bytes
+        namespace, target, key = self._write_target(tenant_id, handle_id)
+        record = _StoredPayload(
+            operator_sub=operator_sub,
+            op_id=op_id,
+            rows=[],
+            total_rows=0,
+            stored_rows=0,
+            created_at=datetime.now(UTC).isoformat(),
+            storage_coverage="complete",
+            source_coverage="complete",
+            metadata=metadata or {},
+            record_kind=_DOCUMENT_RECORD,
+            document=document,
+        )
+        try:
+            encoded = msgspec.json.encode(record)
+            if len(encoded) > max_record_bytes:
+                _log.warning(
+                    "result_handle_document_over_record_cap",
+                    handle_id=str(handle_id),
+                    tenant_id=str(tenant_id),
+                    op_id=op_id,
+                    record_bytes=len(encoded),
+                    max_record_bytes=max_record_bytes,
+                )
+                await self._after_write(namespace, admitted=False)
+                return False
+            await target.set(key, encoded, ex=ttl_seconds)
+        except (redis.RedisError, msgspec.EncodeError, TypeError, OSError) as exc:
+            _log.warning(
+                "result_handle_spill_failed",
+                handle_id=str(handle_id),
+                tenant_id=str(tenant_id),
+                op_id=op_id,
+                namespace=namespace,
+                error=str(exc),
+            )
+            await self._after_write(namespace, admitted=False)
+            return False
+        await self._after_write(namespace, admitted=True)
+        _log.info(
+            "result_handle_document_spilled",
+            handle_id=str(handle_id),
+            tenant_id=str(tenant_id),
+            op_id=op_id,
+            record_bytes=len(encoded),
+            ttl_seconds=ttl_seconds,
+            namespace=namespace,
+        )
+        return True
+
+    async def fetch_record(self, *, tenant_id: UUID, handle_id: UUID) -> bytes | None:
+        """Read the raw record under the handle key, or ``None`` on a miss.
+
+        Only the Valkey ``GET`` runs here, on the event loop. Decoding the
+        record and checking the operator are the sync ``decode_*`` methods,
+        so the read core can run them on its worker pool under its deadline
+        (#3640) instead of on the loop. A miss covers an unknown or expired
+        key and an unreachable store; the decoders fold another operator's
+        record and an undecodable value into the same ``None`` so the store
+        leaks no existence signal across the operator boundary (the #304
+        isolation contract).
+
+        A record over the read cap (``result_handle_max_record_bytes``) is
+        also a miss. The
+        byte length is checked here, before any decode, so an oversized
+        record (written before the per-record cap existed) never reaches the
+        decoder or the worker pool.
+        """
+        raw = await self._get_record(tenant_id, handle_id)
+        if raw is None:
+            return None
+        data = _to_bytes(raw)
+        max_record_bytes = self._read_max_record_bytes
+        if len(data) > max_record_bytes:
+            _log.warning(
+                "result_handle_record_over_cap",
+                handle_id=str(handle_id),
+                tenant_id=str(tenant_id),
+                record_bytes=len(data),
+                max_record_bytes=max_record_bytes,
+            )
+            return None
+        return data
+
+    @staticmethod
+    def _decode(raw: bytes, *, operator_sub: str, handle_id: UUID) -> _StoredPayload | None:
+        """Decode a raw record for *operator_sub*; ``None`` on a miss (sync)."""
+        try:
+            payload = msgspec.json.decode(raw, type=_StoredPayload)
+        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            _log.warning("result_handle_decode_failed", handle_id=str(handle_id), error=str(exc))
+            return None
+        if payload.operator_sub != operator_sub:
+            return None
+        return payload
+
+    def decode_window(
+        self,
+        raw: bytes,
+        *,
+        operator_sub: str,
+        handle_id: UUID,
+        offset: int,
+        limit: int,
+    ) -> SpilledWindow | None:
+        """The ``[offset : offset+limit]`` slice of a raw record (sync).
+
+        ``None`` when the record belongs to another operator or does not
+        decode. ``offset`` past ``stored_rows`` yields an empty ``rows`` list
+        with the metadata still populated, so a paging caller learns it has
+        reached the end without a separate count call. Raises
+        :class:`ResultRecordKindError` for a document record, which has no
+        rows to page.
+        """
+        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
+        if payload is None:
+            return None
+        if payload.record_kind == _DOCUMENT_RECORD:
+            raise ResultRecordKindError(handle_id, _DOCUMENT_RECORD)
+        start = max(offset, 0)
+        window = payload.rows[start : start + limit] if limit > 0 else []
+        return SpilledWindow(
+            rows=window,
+            total_rows=payload.total_rows,
+            stored_rows=payload.stored_rows,
+            truncated=payload.stored_rows < payload.total_rows,
+        )
+
+    def decode_rows(
+        self, raw: bytes, *, operator_sub: str, handle_id: UUID
+    ) -> SpilledRowSet | None:
+        """The full authorized row set of a raw record (sync).
+
+        Every stored row, so the query core can register them in a hardened
+        DuckDB engine and run one bounded ``SELECT``. Same ``None``-on-miss
+        rule as :meth:`decode_window`. Raises :class:`ResultRecordKindError`
+        for a document record: a relational query needs rows.
+        """
+        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
+        if payload is None:
+            return None
+        if payload.record_kind == _DOCUMENT_RECORD:
+            raise ResultRecordKindError(handle_id, _DOCUMENT_RECORD)
+        return SpilledRowSet(
+            rows=payload.rows,
+            total_rows=payload.total_rows,
+            stored_rows=payload.stored_rows,
+        )
+
+    def decode_document(
+        self, raw: bytes, *, operator_sub: str, handle_id: UUID
+    ) -> SpilledDocument | None:
+        """The document a ``path`` read resolves against (sync).
+
+        For a document record that is the whole retained payload. For a rows
+        record it is the dict of top-level fields the reducer left out of the
+        inline summary (#3633), when the spill kept one. Same ``None``-on-miss
+        rule as :meth:`decode_window`. Raises :class:`ResultRecordKindError`
+        when the handle holds rows and nothing beside them.
+        """
+        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
+        if payload is None:
+            return None
+        if payload.record_kind != _DOCUMENT_RECORD and payload.document is None:
+            raise ResultRecordKindError(handle_id, _ROWS_RECORD)
+        return SpilledDocument(document=payload.document)
 
     async def fetch_window(
         self,
@@ -277,52 +798,20 @@ class ResultHandleStore:
         offset: int,
         limit: int,
     ) -> SpilledWindow | None:
-        """Return the ``[offset : offset+limit]`` slice of a spilled handle.
+        """:meth:`fetch_record` then :meth:`decode_window`, both on the loop.
 
-        Returns ``None`` when the handle is unknown, expired, belongs to
-        a different operator, or the store is unreachable — the four
-        cases the MCP tool surfaces to the agent as the same typed
-        "handle not found or expired" miss (cross-operator access is
-        deliberately indistinguishable from "not found" so the store
-        leaks no existence signal across the operator boundary).
-
-        ``offset`` past ``stored_rows`` yields an empty ``rows`` list with
-        the metadata still populated, so a paging caller learns it has
-        reached the end without a separate count call.
+        Returns ``None`` when the handle is unknown, expired, belongs to a
+        different operator, or the store is unreachable — the four cases the
+        read tools surface as the same typed "handle not found or expired"
+        miss. The admitted read core uses the two steps separately so the
+        decode runs on its worker pool; this one-call form serves the other
+        callers.
         """
-        try:
-            raw = await self._client.get(_key(tenant_id, handle_id))
-        except (redis.RedisError, OSError) as exc:
-            _log.warning(
-                "result_handle_fetch_failed",
-                handle_id=str(handle_id),
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
-            return None
+        raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
         if raw is None:
             return None
-        try:
-            payload = msgspec.json.decode(_to_bytes(raw), type=_StoredPayload)
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            _log.warning(
-                "result_handle_decode_failed",
-                handle_id=str(handle_id),
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
-            return None
-        if payload.operator_sub != operator_sub:
-            # Cross-operator access within the same tenant: a miss, not
-            # another operator's rows. Mirrors #304's isolation contract.
-            return None
-        start = max(offset, 0)
-        window = payload.rows[start : start + limit] if limit > 0 else []
-        return SpilledWindow(
-            rows=window,
-            total_rows=payload.total_rows,
-            stored_rows=payload.stored_rows,
-            truncated=payload.stored_rows < payload.total_rows,
+        return self.decode_window(
+            raw, operator_sub=operator_sub, handle_id=handle_id, offset=offset, limit=limit
         )
 
     async def fetch_rows(
@@ -332,72 +821,48 @@ class ResultHandleStore:
         operator_sub: str,
         handle_id: UUID,
     ) -> SpilledRowSet | None:
-        """Return the **full** authorized row set of a spilled handle.
+        """:meth:`fetch_record` then :meth:`decode_rows`, both on the loop.
 
         The sibling of :meth:`fetch_window` for the ``result_query`` query
-        surface (#3366): where ``fetch_window`` serves an
-        ``[offset:offset+limit]`` slice for paging, this returns every stored
-        row so the core can register them in a hardened DuckDB engine and run
-        one bounded, compiled ``SELECT`` over the set.
-
-        Reuses ``fetch_window``'s isolation and non-disclosure model exactly:
-        the tenant scopes the key, the stored ``operator_sub`` is checked so
-        another operator in the same tenant gets the same miss (``None``) as a
-        stranger, and an unknown / expired / cross-operator handle or an
-        unreachable store all return ``None`` — the four cases the read tools
-        surface as one typed "handle not found or expired", leaking no
-        existence signal across the operator boundary.
+        surface (#3366), with the same isolation and ``None``-on-miss rules.
         """
-        try:
-            raw = await self._client.get(_key(tenant_id, handle_id))
-        except (redis.RedisError, OSError) as exc:
-            _log.warning(
-                "result_handle_fetch_failed",
-                handle_id=str(handle_id),
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
-            return None
+        raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
         if raw is None:
             return None
-        try:
-            payload = msgspec.json.decode(_to_bytes(raw), type=_StoredPayload)
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            _log.warning(
-                "result_handle_decode_failed",
-                handle_id=str(handle_id),
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
+        return self.decode_rows(raw, operator_sub=operator_sub, handle_id=handle_id)
+
+    async def fetch_document(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+    ) -> SpilledDocument | None:
+        """:meth:`fetch_record` then :meth:`decode_document`, both on the loop.
+
+        Same isolation and ``None``-on-miss rules as :meth:`fetch_rows`.
+        """
+        raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
+        if raw is None:
             return None
-        if payload.operator_sub != operator_sub:
-            # Cross-operator access within the same tenant: a miss, not
-            # another operator's rows. Mirrors #304's isolation contract.
-            return None
-        return SpilledRowSet(
-            rows=payload.rows,
-            total_rows=payload.total_rows,
-            stored_rows=payload.stored_rows,
-        )
+        return self.decode_document(raw, operator_sub=operator_sub, handle_id=handle_id)
 
 
-#: Process-wide singleton. Lazily built from the broadcast Valkey client
-#: the first time the reducer spills or the read tool fetches.
+#: Process-wide singleton. Lazily built from the broadcast and result-cache
+#: Valkey clients the first time the reducer spills or the read tool fetches.
 _STORE: ResultHandleStore | None = None
 
 
 def get_result_handle_store() -> ResultHandleStore:
     """Return the process-wide :class:`ResultHandleStore`.
 
-    Reuses the broadcast fast client's connection pool
-    (:func:`~meho_backplane.broadcast.client.get_broadcast_client`) rather
-    than opening a second pool: spilled-handle reads/writes are small,
-    non-blocking ``SET`` / ``GET`` calls that fit the fast client's
-    bounded-latency posture (a hung Valkey fails fast instead of stranding
-    the reduce path). The store encodes its payload as JSON so the value
-    is ``str``-compatible with that client's ``decode_responses=True``
-    posture; :func:`_to_bytes` normalizes the read side regardless of the
-    client's decode mode.
+    Keeps the broadcast fast client
+    (:func:`~meho_backplane.broadcast.client.get_broadcast_client`) for
+    legacy reads (and legacy writes while the writer gate is off) and builds
+    a dedicated client from ``result_cache_redis_url`` with the same
+    fail-fast timeouts and ``decode_responses=True`` posture. When that URL
+    and password equal the broadcast ones (the unset-env fallback), the
+    broadcast client is reused instead of opening a second pool.
     """
     global _STORE
     if _STORE is None:
@@ -405,8 +870,44 @@ def get_result_handle_store() -> ResultHandleStore:
         # broadcast client (and its settings read) at import time.
         from meho_backplane.broadcast.client import get_broadcast_client
 
-        _STORE = ResultHandleStore(get_broadcast_client())
+        settings = get_settings()
+        shared = get_broadcast_client()
+        same_store = (
+            settings.result_cache_redis_url == settings.broadcast_redis_url
+            and settings.result_cache_redis_password == settings.broadcast_redis_password
+        )
+        dedicated = (
+            shared
+            if same_store
+            else redis.from_url(
+                settings.result_cache_redis_url,
+                password=settings.result_cache_redis_password,
+                decode_responses=True,
+                socket_timeout=_SOCKET_TIMEOUT_SECONDS,
+                socket_connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+            )
+        )
+        _STORE = ResultHandleStore(
+            shared,
+            dedicated_client=dedicated,
+            writer_enabled=settings.result_cache_writer_enabled,
+            read_max_record_bytes=settings.result_handle_max_record_bytes,
+        )
     return _STORE
+
+
+async def dispose_result_handle_store() -> None:
+    """Close the dedicated result-cache client at shutdown.
+
+    Only a client the store opened itself is closed; the shared broadcast
+    client is closed by its own dispose helper. Idempotent.
+    """
+    global _STORE
+    store = _STORE
+    _STORE = None
+    if store is None or store._dedicated is store._client:
+        return
+    await store._dedicated.aclose()
 
 
 def reset_result_handle_store_for_testing() -> None:

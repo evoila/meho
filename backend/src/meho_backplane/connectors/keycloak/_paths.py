@@ -56,9 +56,11 @@ _CLIENT_PROTOCOL_MAPPERS_PATH = (
 )
 _CLIENT_SCOPES_PATH = "/admin/realms/{realm}/client-scopes"
 _USERS_PATH = "/admin/realms/{realm}/users"
+_USER_PATH = "/admin/realms/{realm}/users/{user-id}"
 _USER_ROLE_MAPPINGS_PATH = "/admin/realms/{realm}/users/{user-id}/role-mappings"
 _USER_ROLE_MAPPINGS_REALM_PATH = "/admin/realms/{realm}/users/{user-id}/role-mappings/realm"
 _USER_RESET_PASSWORD_PATH = "/admin/realms/{realm}/users/{user-id}/reset-password"
+_USER_LOGOUT_PATH = "/admin/realms/{realm}/users/{user-id}/logout"
 _ROLES_PATH = "/admin/realms/{realm}/roles"
 _ROLE_PATH = "/admin/realms/{realm}/roles/{role-name}"
 _ROLE_USERS_PATH = "/admin/realms/{realm}/roles/{role-name}/users"
@@ -72,6 +74,9 @@ _USER_GROUPS_PATH = "/admin/realms/{realm}/users/{user-id}/groups"
 # the hyphenated ``{group-id}``); the placeholder is byte-for-byte the pinned
 # spec's own name so the #2988 reconcile lane resolves it.
 _USER_GROUP_PATH = "/admin/realms/{realm}/users/{user-id}/groups/{groupId}"
+# Realm delete preview (#3886): how many users and groups go with the realm.
+_USERS_COUNT_PATH = "/admin/realms/{realm}/users/count"
+_GROUPS_COUNT_PATH = "/admin/realms/{realm}/groups/count"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 

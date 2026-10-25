@@ -161,7 +161,7 @@ meho targets probe rdc-fleet --json | jq '{product, version, reachable, extras}'
 #            "extras": {"lcm_api_version": "8.0", "datacenter_count": N, ...}}
 # Note: `version` carries the LCM API version (the only working version source
 # in 9.0), not the product version. The connector's class-level
-# `supported_version_range=">=9.0,<10.0"` is matched against the persisted
+# `supported_version_range=">=8.0,<9.1"` is matched against the persisted
 # `Target.fingerprint.version` written by the canary fixture; in production
 # the fingerprint is what `probe` writes back.
 ```
@@ -309,7 +309,7 @@ history; see [`audit-query.md`](./audit-query.md) for filter syntax.
 ## Migrating off `scripts/vcf-fleet.sh`
 
 The consumer's
-[`scripts/vcf-fleet.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-fleet.sh)
+`scripts/vcf-fleet.sh`
 drives the vRSLCM REST API via a `curl` + HTTP Basic wrapper. The
 `meho vcf-fleet` verbs replace it for the read-only workflows; write
 workflows (environment create, product patch, lifecycle workflow start)
@@ -469,6 +469,6 @@ the canary-fixture vs recorded-fixture distinction.
 - CLI verbs: [`cli/internal/cmd/vcf-fleet/`](../../cli/internal/cmd/vcf-fleet/).
 - E2E integration test: [`backend/tests/test_connectors_vcf_fleet_e2e.py`](../../backend/tests/test_connectors_vcf_fleet_e2e.py).
 - Recorded-fixture tooling: [`backend/tests/fixtures/vcf/refresh.py`](../../backend/tests/fixtures/vcf/refresh.py) and [`docs/cross-repo/vcf-fixture-refresh.md`](./vcf-fixture-refresh.md).
-- Consumer wrapper retiring: [`scripts/vcf-fleet.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-fleet.sh).
+- Consumer wrapper retiring: `scripts/vcf-fleet.sh`.
 - vRSLCM REST API reference: <https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager/latest/>.
 - Related onboarding docs: [`nsx-onboarding.md`](./nsx-onboarding.md), [`sddc-manager-onboarding.md`](./sddc-manager-onboarding.md), [`vault-onboarding.md`](./vault-onboarding.md), [`audit-query.md`](./audit-query.md).

@@ -13,17 +13,19 @@ import (
 )
 
 // newRealmCmd returns the `meho keycloak realm` parent with the read verb
-// `get` (keycloak.realm.get) and the approval-gated write verbs `create`
-// (keycloak.realm.create) and `update` (keycloak.realm.update).
+// `get` (keycloak.realm.get), the approval-gated write verbs `create`
+// (keycloak.realm.create) and `update` (keycloak.realm.update), and the
+// destructive `delete` (keycloak.realm.delete, #3886).
 func newRealmCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "realm",
-		Short:        "Keycloak realm sub-verbs (get, create, update)",
+		Short:        "Keycloak realm sub-verbs (get, create, update, delete)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newRealmGetCmd())
 	cmd.AddCommand(newRealmCreateCmd())
 	cmd.AddCommand(newRealmUpdateCmd())
+	cmd.AddCommand(newRealmDeleteCmd())
 	return cmd
 }
 

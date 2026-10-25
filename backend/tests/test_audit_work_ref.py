@@ -38,7 +38,7 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.operations import (
     dispatch,
@@ -108,6 +108,7 @@ def _chassis_kwargs(audit_id: uuid.UUID) -> dict[str, object]:
     """Minimal kwargs for the chassis writer :func:`_write_audit_row`."""
     return {
         "audit_id": audit_id,
+        "event_class": AuditEventClass.LEGACY_REQUEST,
         "operator_sub": "alice@example.com",
         "tenant_id": _TENANT_A,
         "target_id": None,
@@ -210,6 +211,7 @@ async def test_work_ref_var_stamped(
 
         # 3. MCP writer (returns the audit id it used).
         mcp_id = await write_mcp_audit_row(
+            event_class=AuditEventClass.LEGACY_REQUEST,
             operator=operator,
             method="MCP",
             path="/mcp/tools/call/stub.op_call",
@@ -265,6 +267,7 @@ async def test_work_ref_null_when_unset(
     )
 
     mcp_id = await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=operator,
         method="MCP",
         path="/mcp/tools/call/stub.op_call",

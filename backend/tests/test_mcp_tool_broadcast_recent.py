@@ -1,93 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``meho_broadcast_recent`` (G6.4-T1, #1091).
+"""Behavioural tests for ``meho_broadcast_recent`` (G6.4-T1 #1091, #3748).
 
-Acceptance-criteria coverage:
+Since #3748 the tool reads the ``agent_announcement`` archive by its
+commit-order sequence number, not the Valkey stream. Coverage:
 
-* ``meho_broadcast_recent`` is registered and visible on ``tools/list``
-  for an ``operator`` JWT; hidden from ``read_only``.
-* Default 30m window when ``since`` is omitted; explicit ``since``
-  honoured for both ISO-8601 and Valkey-cursor shapes.
-* ``filter.op_class`` / ``filter.principal`` / ``filter.target``
-  narrow the result (one test per sub-key).
-* ``limit`` is enforced at the input-schema level: out-of-range
-  values rejected with ``-32602`` Invalid Params; the in-range
-  ``count`` is propagated to ``xrange``.
-* Tenant boundary is structural -- the stream key passed to
-  ``xrange`` is always ``meho:feed:{operator.tenant_id}``, regardless
-  of arguments. The integration test seeds two tenants' streams and
-  asserts each operator reads only their own.
-* ``next_cursor`` round-trip: feeding the response's ``next_cursor``
-  back as ``since`` reaches the next page with no overlap, no gaps
-  (validated against a real Valkey container).
-* Credential_read + audit_query events surface aggregate-only -- the
-  publisher already redacts at write time, so the tool surfaces what's
-  on the stream verbatim (no re-redaction, no leakage).
+* Registration, role visibility, and input-schema rejections.
+* Default 30-minute window; an ISO-8601 ``cursor`` starts the window
+  earlier; an old Valkey stream cursor or garbage is ``-32602``.
+* ``filter`` narrowing (principal / target / work_ref); the ``op_class``
+  enum still reaches the handler, and no announcement matches it.
+* ``limit`` bounds and the history page cursor: pages walk forward with
+  no overlap, and the separate ``watch_checkpoint`` stays fixed.
+* Tenant isolation: rows and cursors of another tenant are never served.
+* Row shape: the durable ``event_id``, agent prose wrapped as untrusted
+  text, no Valkey ``cursor`` / ``id`` keys.
 
-The mocked-client tests cover the wire surface (registration, schema,
-validation, handler glue). The Docker-gated ``TestBroadcastRecentIntegration``
-suite spins up ``valkey/valkey:8`` via testcontainers and drives the
-full publisher -> xrange -> tool-handler seam, including the cursor
-round-trip and the two-tenant isolation guarantee.
+The archive cursor edge cases (concurrency, gaps, filtered-empty scans)
+live in ``tests/test_broadcast_archive_cursor.py``.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import (
-    BroadcastEvent,
-    dispose_broadcast_client,
-    get_broadcast_client,
-    publish_event,
-    reset_broadcast_client_for_testing,
-)
-from meho_backplane.broadcast.history import (
-    InvalidSinceError,
-    default_since_ms,
-    parse_since,
-)
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.broadcast import reset_broadcast_client_for_testing
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.broadcast import _handler_recent
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import wrap_untrusted_text
+from tests.broadcast_admission_helpers import seed_announcement
 from tests.mcp_test_fixtures import (
-    OPERATOR_TENANT_ID,
-    build_operator,
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 -- pytest-discovered autouse fixture
 )
 
-_AUDIT_ID: UUID = UUID("44444444-4444-4444-4444-444444444444")
-
-
-# ---------------------------------------------------------------------------
-# Per-test broadcast-client isolation (mirrors test_mcp_resource_tenant_feed)
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture(autouse=True)
 def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Clear the cached client + pin a stub URL around every test.
-
-    Pinning ``BROADCAST_REDIS_URL`` keeps the construction path free of
-    "URL not set" failures; per-test patches replace ``xrange`` so no
-    socket ever opens.
-    """
+    """Pin a stub broadcast URL; the recent tool must never open a socket."""
     monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
@@ -96,52 +59,14 @@ def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     get_settings.cache_clear()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_event(
-    *,
-    tenant_id: UUID = OPERATOR_TENANT_ID,
-    op_id: str = "vsphere.vm.list",
-    op_class: str = "read",
-    principal_sub: str = "op-test",
-    target_name: str | None = None,
-    result_status: str = "ok",
-    payload: dict[str, Any] | None = None,
-) -> BroadcastEvent:
-    """Build a :class:`BroadcastEvent` shaped like one the publisher emits.
-
-    The ``payload`` defaults to the FULL shape the publisher emits for
-    non-sensitive ops; sensitive-class tests pass the aggregate shape
-    explicitly so the assertion targets the on-stream contract.
-    """
-    return BroadcastEvent(
-        event_id=uuid4(),
-        ts=datetime(2026, 5, 25, 10, 0, tzinfo=UTC),
+def _operator(tenant_id: Any) -> Operator:
+    return Operator(
+        sub="reader-1",
+        raw_jwt="x",
         tenant_id=tenant_id,
-        principal_sub=principal_sub,
-        target_name=target_name,
-        op_id=op_id,
-        op_class=op_class,
-        result_status=result_status,
-        audit_id=_AUDIT_ID,
-        payload=payload or {"op_class": op_class, "params": {}, "result_status": result_status},
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
     )
-
-
-def _xrange_entry(event: BroadcastEvent, entry_id: str) -> tuple[str, dict[str, str]]:
-    """Build one ``XRANGE``-shaped entry tuple from a :class:`BroadcastEvent`."""
-    return entry_id, {"event": event.model_dump_json()}
-
-
-def _result_dict(response: Any) -> dict[str, Any]:
-    """Extract the JSON-decoded tool result from a JSON-RPC response."""
-    body = response.json()
-    assert "error" not in body, body
-    content = body["result"]["content"]
-    return json.loads(content[0]["text"])
 
 
 def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[str, Any]:
@@ -152,6 +77,17 @@ def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[
         "method": "tools/call",
         "params": {"name": name, "arguments": arguments},
     }
+
+
+def _result_dict(response: Any) -> dict[str, Any]:
+    """Extract the JSON-decoded tool result from a JSON-RPC response."""
+    body = response.json()
+    assert "error" not in body, body
+    return json.loads(body["result"]["content"][0]["text"])
+
+
+def _ids(result: dict[str, Any]) -> list[str]:
+    return [event["event_id"] for event in result["events"]]
 
 
 # ---------------------------------------------------------------------------
@@ -222,94 +158,48 @@ def test_read_only_tools_call_recent_is_rejected(
 
 
 # ---------------------------------------------------------------------------
-# Default 30m window + explicit `since`
+# Window and cursor parsing
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_default_since_uses_30_minute_window(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """No ``since`` -> xrange ``min`` is now - 30 min (bare-ms cursor)."""
-    client, op = client_with_operator
-    before_ms = int(time.time() * 1000)
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(client, _tools_call("meho_broadcast_recent", {}))
-    after_ms = int(time.time() * 1000)
+async def test_default_window_is_the_last_30_minutes() -> None:
+    """No ``cursor`` returns rows from the last 30 minutes, oldest first."""
+    tenant_id = uuid4()
+    now = datetime.now(UTC)
+    await seed_announcement(tenant_id, activity="old", ts=now - timedelta(hours=2))
+    first, _ = await seed_announcement(tenant_id, activity="a", ts=now - timedelta(minutes=5))
+    second, _ = await seed_announcement(tenant_id, activity="b", ts=now)
 
-    xr.assert_awaited_once()
-    args, kwargs = xr.await_args.args, xr.await_args.kwargs
-    assert args[0] == f"meho:feed:{op.tenant_id}"
-    assert kwargs["max"] == "+"
-    assert kwargs["count"] == 100  # default limit
-    min_cursor_ms = int(kwargs["min"])
-    # The min cursor must fall in the [before - 30m, after - 30m] window.
-    assert before_ms - 30 * 60_000 <= min_cursor_ms <= after_ms - 30 * 60_000
+    result = await _handler_recent(_operator(tenant_id), {})
+
+    assert _ids(result) == [str(first.event_id), str(second.event_id)]
+    assert result["next_cursor"] is None
+    assert result["watch_checkpoint"].startswith("w1.")
+    assert result["gap"] is None
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_since_iso8601_normalised_to_bare_ms(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """An ISO-8601 ``since`` is converted to bare-ms (inclusive)."""
-    client, _op = client_with_operator
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {"since": "2026-05-25T10:00:00Z"}),
+async def test_iso8601_cursor_starts_the_window() -> None:
+    """An ISO-8601 ``cursor`` (or the ``since`` alias) starts the window there."""
+    tenant_id = uuid4()
+    old, _ = await seed_announcement(tenant_id, ts=datetime(2026, 5, 25, 10, 0, tzinfo=UTC))
+    await seed_announcement(tenant_id, ts=datetime(2026, 5, 25, 9, 0, tzinfo=UTC))
+
+    for arg in ("cursor", "since"):
+        result = await _handler_recent(_operator(tenant_id), {arg: "2026-05-25T09:30:00Z"})
+        assert _ids(result) == [str(old.event_id)]
+
+
+async def test_cursor_and_since_together_are_refused() -> None:
+    with pytest.raises(McpInvalidParamsError, match="not both"):
+        await _handler_recent(
+            _operator(uuid4()), {"cursor": "2026-05-25T09:30:00Z", "since": "2026-05-25T09:30:00Z"}
         )
-    kwargs = xr.await_args.kwargs
-    expected_ms = int(datetime(2026, 5, 25, 10, 0, tzinfo=UTC).timestamp() * 1000)
-    assert kwargs["min"] == str(expected_ms)
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_since_cursor_form_becomes_exclusive_lower_bound(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """A Valkey-cursor ``since`` is wrapped in ``(`` for exclusive-min.
-
-    This is the load-bearing pagination contract: without the
-    exclusive prefix, a next-page call would re-fetch the entry the
-    previous page's ``next_cursor`` pointed at.
-    """
-    client, _op = client_with_operator
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {"since": "1747800000000-0"}),
-        )
-    kwargs = xr.await_args.kwargs
-    assert kwargs["min"] == "(1747800000000-0"
-
-
-def test_since_invalid_iso_rejects_with_domain_error() -> None:
-    """A garbled ``since`` raises :class:`InvalidSinceError` at parse time.
-
-    The shared helper raises a domain error rather than the MCP-specific
-    :class:`McpInvalidParamsError` (the MCP handler maps the domain
-    error to ``-32602`` upstream). The end-to-end MCP wire test for the
-    same condition lives at
-    :func:`test_invalid_cursor_returns_invalid_params_labelled_cursor`
-    below.
-    """
-    with pytest.raises(InvalidSinceError, match="not a valid ISO-8601"):
-        parse_since("not-a-real-timestamp")
+async def test_old_stream_cursor_is_refused_with_a_hint() -> None:
+    """A Valkey stream id is not a reading position any more."""
+    with pytest.raises(McpInvalidParamsError, match="no longer accepted"):
+        await _handler_recent(_operator(uuid4()), {"cursor": "1747800000000-0"})
 
 
 @pytest.mark.parametrize(
@@ -322,56 +212,21 @@ def test_invalid_cursor_returns_invalid_params_labelled_cursor(
 ) -> None:
     """A garbled cursor surfaces as -32602 labelled with the canonical arg.
 
-    The shared helper raises :class:`InvalidSinceError`; the MCP handler
-    catches that domain error and re-raises it as
-    :class:`McpInvalidParamsError`, which the dispatcher renders as
-    ``-32602``. Locks two contracts: the helper's split from MCP error
-    vocabulary doesn't leak Python exception names to wire clients, and
-    the wire label names the canonical ``cursor`` inputSchema property
-    (#1358, #2480) -- not the internal ``since`` arg -- whichever alias
-    the caller passed. A bare UUID is neither a Valkey stream id nor an
-    ISO-8601 timestamp, so it exercises the parse-failure branch.
+    The wire label names the canonical ``cursor`` inputSchema property
+    (#1358, #2480), whichever alias the caller passed.
     """
     client, _op = client_with_operator
     bad = "550e8400-e29b-41d4-a716-446655440000"
 
     def message_for(arg: str) -> str:
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {arg: bad}),
-        )
-        body = resp.json()
+        body = post_mcp(client, _tools_call("meho_broadcast_recent", {arg: bad})).json()
         assert "error" in body
         assert body["error"]["code"] == INVALID_PARAMS
         return str(body["error"]["message"])
 
     canonical = message_for("cursor")
     assert canonical.lower().startswith("cursor:")
-
-    # The deprecated ``since`` alias normalises to the same value and so
-    # yields the identical ``cursor:``-labelled message.
     assert message_for("since") == canonical
-
-
-def test_parse_since_default_is_now_minus_30m() -> None:
-    """``parse_since(None)`` returns a bare-ms ~30 minutes in the past."""
-    before_ms = int(time.time() * 1000)
-    cursor = parse_since(None)
-    after_ms = int(time.time() * 1000)
-    assert cursor.isdigit()
-    cursor_ms = int(cursor)
-    assert before_ms - 30 * 60_000 <= cursor_ms <= after_ms - 30 * 60_000
-
-
-def test_default_since_ms_handles_clock_underflow(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A clock skew producing a negative bare-ms clamps to 0.
-
-    Documented contract; without the clamp, a misconfigured clock
-    would send a negative ``min`` to Valkey and the server would
-    reject the command, breaking every call until the clock recovers.
-    """
-    monkeypatch.setattr(time, "time", lambda: 60.0)  # ts*1000 = 60_000 ms; minus 30m = -ve
-    assert default_since_ms() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -379,36 +234,20 @@ def test_default_since_ms_handles_clock_underflow(monkeypatch: pytest.MonkeyPatc
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_filter_op_class_narrows_result(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``filter.op_class`` keeps only matching events."""
-    client, _op = client_with_operator
-    read_event = _make_event(op_id="vsphere.vm.list", op_class="read")
-    write_event = _make_event(op_id="vsphere.vm.create", op_class="write")
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(
-            return_value=[
-                _xrange_entry(read_event, "1747800000000-0"),
-                _xrange_entry(write_event, "1747800001000-0"),
-            ],
-        ),
-    ):
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {"filter": {"op_class": "write"}}),
-        )
-    result = _result_dict(resp)
-    op_ids = [e["op_id"] for e in result["events"]]
-    assert op_ids == ["vsphere.vm.create"]
+async def test_filter_principal_narrows_result() -> None:
+    tenant_id = uuid4()
+    alice, _ = await seed_announcement(tenant_id, principal_sub="op-alice")
+    await seed_announcement(tenant_id, principal_sub="op-bob")
+    result = await _handler_recent(_operator(tenant_id), {"filter": {"principal": "op-alice"}})
+    assert _ids(result) == [str(alice.event_id)]
+
+
+async def test_filter_target_matches_targets_list() -> None:
+    tenant_id = uuid4()
+    hit, _ = await seed_announcement(tenant_id, targets=["vc-a", "vc-b"])
+    await seed_announcement(tenant_id, targets=["vc-c"])
+    result = await _handler_recent(_operator(tenant_id), {"filter": {"target": "vc-b"}})
+    assert _ids(result) == [str(hit.event_id)]
 
 
 @pytest.mark.parametrize(
@@ -416,200 +255,46 @@ def test_filter_op_class_narrows_result(
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_filter_op_class_checks_reaches_the_handler(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``filter.op_class="checks"`` narrows to ``checks.transition`` (#2720).
-
-    Posted as a full ``tools/call`` on purpose. The dispatcher validates
-    arguments against the advertised ``inputSchema`` with ``jsonschema``,
-    and ``filter.op_class`` carries an ``enum`` sourced from
-    :data:`~meho_backplane.broadcast.history.OP_CLASS_ENUM` -- so this
-    round-trip is what proves the class is reachable from the agent
-    surface at all, not merely that :func:`event_matches` compares
-    strings. A handler-level call would pass even with the class missing
-    from the enum.
-    """
-    client, _op = client_with_operator
-    transition = _make_event(
-        op_id="checks.transition",
-        op_class="checks",
-        principal_sub="__checks__",
-        payload={
-            "op_class": "checks",
-            "result_status": "ok",
-            "dashboard_id": "11111111-1111-1111-1111-111111111111",
-            "dashboard_name": "prod-health",
-            "previous_state": "ok",
-            "new_state": "critical",
-        },
-    )
-    unrelated = _make_event(op_id="vsphere.vm.list", op_class="read")
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(
-            return_value=[
-                _xrange_entry(unrelated, "1747800000000-0"),
-                _xrange_entry(transition, "1747800001000-0"),
-            ],
-        ),
-    ):
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {"filter": {"op_class": "checks"}}),
-        )
-    result = _result_dict(resp)
-    assert [e["op_id"] for e in result["events"]] == ["checks.transition"]
-    assert result["events"][0]["payload"]["new_state"] == "critical"
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-@pytest.mark.parametrize(
-    ("op_class", "op_id"),
-    [
-        ("approval", "approval.pending"),
-        ("credential_write", "vault.kv.put"),
-    ],
-)
-def test_filter_op_class_approval_and_credential_write_reach_the_handler(
+@pytest.mark.parametrize("op_class", ["checks", "approval", "credential_write", "write"])
+def test_filter_op_class_enum_reaches_the_handler(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     op_class: str,
-    op_id: str,
 ) -> None:
-    """The two classes #2731 added to the enum narrow via full ``tools/call``.
+    """Every ``OP_CLASS_ENUM`` value passes the wire schema (#2720, #2731).
 
-    ``approval.*`` events have been on the feed since the approvals work
-    and ``credential_write`` since G11.7-T1, but both were rejected with
-    ``-32602`` at the wire because ``OP_CLASS_ENUM`` omitted them — the
-    dispatcher validates arguments against the advertised ``inputSchema``
-    before the handler runs. Posted as a full ``tools/call`` for the same
-    reason as the ``checks`` test above: the enum is what is under test,
-    and a handler-level call would pass even with the class missing.
+    Posted as a full ``tools/call`` because the dispatcher validates the
+    advertised ``enum``. Announcements carry no op class, so the archive
+    read returns no events for it.
     """
     client, _op = client_with_operator
-    wanted = _make_event(
-        op_id=op_id,
-        op_class=op_class,
-        payload={"op_class": op_class, "result_status": "ok"},
+    resp = post_mcp(
+        client, _tools_call("meho_broadcast_recent", {"filter": {"op_class": op_class}})
     )
-    unrelated = _make_event(op_id="vsphere.vm.list", op_class="read")
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(
-            return_value=[
-                _xrange_entry(unrelated, "1747800000000-0"),
-                _xrange_entry(wanted, "1747800001000-0"),
-            ],
-        ),
-    ):
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {"filter": {"op_class": op_class}}),
-        )
-    result = _result_dict(resp)
-    assert [e["op_id"] for e in result["events"]] == [op_id]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_filter_principal_narrows_result(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``filter.principal`` keeps only events from the named JWT 'sub'."""
-    client, _op = client_with_operator
-    alice = _make_event(op_id="vsphere.vm.list", principal_sub="op-alice")
-    bob = _make_event(op_id="vsphere.vm.list", principal_sub="op-bob")
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(
-            return_value=[
-                _xrange_entry(alice, "1747800000000-0"),
-                _xrange_entry(bob, "1747800001000-0"),
-            ],
-        ),
-    ):
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {"filter": {"principal": "op-alice"}}),
-        )
-    result = _result_dict(resp)
-    principals = [e["principal_sub"] for e in result["events"]]
-    assert principals == ["op-alice"]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_filter_target_narrows_result(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``filter.target`` keeps only events with matching ``target_name``.
-
-    Asserts both:
-
-    1. The matching event survives.
-    2. Events with ``target_name=None`` are dropped (the caller asked
-       for a specific target; an untagged event doesn't qualify).
-    """
-    client, _op = client_with_operator
-    prod = _make_event(target_name="prod-vc-1")
-    staging = _make_event(target_name="staging-vc-1")
-    untagged = _make_event(target_name=None)
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(
-            return_value=[
-                _xrange_entry(prod, "1747800000000-0"),
-                _xrange_entry(staging, "1747800001000-0"),
-                _xrange_entry(untagged, "1747800002000-0"),
-            ],
-        ),
-    ):
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_recent", {"filter": {"target": "prod-vc-1"}}),
-        )
-    result = _result_dict(resp)
-    targets = [e["target_name"] for e in result["events"]]
-    assert targets == ["prod-vc-1"]
+    assert _result_dict(resp)["events"] == []
 
 
 # ---------------------------------------------------------------------------
-# limit cap + invalid limit
+# Limit + paging
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_explicit_limit_propagates_to_xrange_count(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """An in-range ``limit`` is passed through to ``xrange(count=...)``."""
-    client, _op = client_with_operator
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": 250}))
-    assert xr.await_args.kwargs["count"] == 250
+async def test_pages_walk_forward_without_overlap_under_one_checkpoint() -> None:
+    """``next_cursor`` pages a fixed view; rows stored later are not mixed in."""
+    tenant_id = uuid4()
+    seeded = [await seed_announcement(tenant_id, activity=f"n{i}") for i in range(5)]
+    op = _operator(tenant_id)
+
+    first = await _handler_recent(op, {"limit": 2})
+    assert first["next_cursor"] is not None
+    assert first["next_cursor"].startswith("h1.")
+    await seed_announcement(tenant_id, activity="after the view")
+    second = await _handler_recent(op, {"cursor": first["next_cursor"], "limit": 2})
+    third = await _handler_recent(op, {"cursor": second["next_cursor"], "limit": 2})
+
+    walked = _ids(first) + _ids(second) + _ids(third)
+    assert walked == [str(event.event_id) for event, _seq in seeded]
+    assert third["next_cursor"] is None
+    assert first["watch_checkpoint"] == second["watch_checkpoint"] == third["watch_checkpoint"]
 
 
 @pytest.mark.parametrize(
@@ -657,281 +342,46 @@ def test_non_integer_limit_returns_invalid_params(
 
 
 # ---------------------------------------------------------------------------
-# Tenant boundary (structural -- no input that could ask for another tenant)
+# Tenant boundary
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_stream_key_derived_from_operator_tenant_id(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """The handler ALWAYS reads ``meho:feed:{operator.tenant_id}``.
-
-    Tenant isolation here is structural: the input schema has no
-    ``tenant_id`` field, so a malicious caller has no way to ask for
-    another tenant's stream. Asserting the read key is the right
-    shape proves the structural property holds.
-    """
-    client, op = client_with_operator
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(client, _tools_call("meho_broadcast_recent", {}))
-    assert xr.await_args.args[0] == f"meho:feed:{op.tenant_id}"
+async def test_reads_only_the_operators_tenant() -> None:
+    tenant_a, tenant_b = uuid4(), uuid4()
+    mine, _ = await seed_announcement(tenant_a)
+    await seed_announcement(tenant_b)
+    result = await _handler_recent(_operator(tenant_a), {})
+    assert _ids(result) == [str(mine.event_id)]
 
 
-async def test_handler_with_distinct_operator_reads_distinct_stream() -> None:
-    """Two operators on different tenants read their own streams only.
-
-    Directly exercises the handler (bypassing the FastAPI dispatcher)
-    with two operators bound to two different tenant ids; asserts each
-    call resolves to its own stream key. The mocked client always
-    returns ``[]`` -- the assertion is on the key passed to xrange,
-    not on what came back.
-    """
-    tenant_a = UUID("aaaa0000-0000-0000-0000-000000000001")
-    tenant_b = UUID("bbbb0000-0000-0000-0000-000000000002")
-    op_a = Operator(
-        sub="op-a",
-        raw_jwt="x",
-        tenant_id=tenant_a,
-        tenant_role=TenantRole.OPERATOR,
-    )
-    op_b = Operator(
-        sub="op-b",
-        raw_jwt="x",
-        tenant_id=tenant_b,
-        tenant_role=TenantRole.OPERATOR,
-    )
-
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        await _handler_recent(op_a, {})
-        await _handler_recent(op_b, {})
-
-    keys_read = [call.args[0] for call in xr.await_args_list]
-    assert keys_read == [f"meho:feed:{tenant_a}", f"meho:feed:{tenant_b}"]
+async def test_cursor_from_another_tenant_is_refused() -> None:
+    tenant_a, tenant_b = uuid4(), uuid4()
+    for _ in range(3):
+        await seed_announcement(tenant_a)
+    page = await _handler_recent(_operator(tenant_a), {"limit": 1})
+    with pytest.raises(McpInvalidParamsError, match="another tenant"):
+        await _handler_recent(_operator(tenant_b), {"cursor": page["next_cursor"]})
 
 
 # ---------------------------------------------------------------------------
-# next_cursor shape
+# Row shape
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_next_cursor_is_last_fetched_entry_id_when_page_full(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """A full page returns the last *fetched* entry id as ``next_cursor``.
-
-    The cursor is the last entry id from the xrange response (NOT the
-    last matched-after-filter id), so a page where every entry was
-    filtered out still produces a non-null cursor and the caller can
-    keep walking without an infinite-loop risk.
-    """
-    client, _op = client_with_operator
-    entries = [
-        _xrange_entry(_make_event(op_id="vsphere.vm.list"), f"17478{i:08d}-0") for i in range(3)
-    ]
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=entries)):
-        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": 3}))
-    result = _result_dict(resp)
-    assert result["next_cursor"] == "1747800000002-0"
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_next_cursor_is_null_when_short_page(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """A page shorter than ``limit`` returns ``next_cursor=null``.
-
-    Signals "you've reached the live tail"; the caller can stop
-    paginating until new events arrive.
-    """
-    client, _op = client_with_operator
-    entries = [_xrange_entry(_make_event(), "1747800000000-0")]
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=entries)):
-        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": 10}))
-    result = _result_dict(resp)
-    assert result["next_cursor"] is None
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_empty_stream_returns_empty_events_null_cursor(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """Empty stream returns ``events=[]`` + ``next_cursor=null``."""
-    client, _op = client_with_operator
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
-        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
-    result = _result_dict(resp)
-    assert result == {"events": [], "next_cursor": None}
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_event_dict_carries_stream_entry_id_and_event_fields(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """Each event surfaces ``cursor`` + ``id`` (stream cursor) and BroadcastEvent fields.
-
-    ``cursor`` is the Valkey stream entry id self-labelled to match
-    the tool-input arg it round-trips through (#2479); ``id`` is the
-    legacy alias of the same value; ``event_id`` / ``ts`` /
-    ``audit_id`` / ``payload`` are the durable fields from
-    :class:`BroadcastEvent`.
-    """
-    client, op = client_with_operator
-    event = _make_event(op_id="vsphere.vm.list")
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(return_value=[_xrange_entry(event, "1747800000000-0")]),
-    ):
-        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
-    result = _result_dict(resp)
-    assert len(result["events"]) == 1
-    e = result["events"][0]
-    assert e["id"] == "1747800000000-0"
-    assert e["cursor"] == "1747800000000-0"
-    assert e["event_id"] == str(event.event_id)
-    assert e["tenant_id"] == str(op.tenant_id)
-    assert e["op_id"] == "vsphere.vm.list"
-    assert e["audit_id"] == str(_AUDIT_ID)
-    assert "ts" in e
-    assert "payload" in e
+async def test_row_carries_event_id_and_wrapped_prose_without_stream_ids() -> None:
+    tenant_id = uuid4()
+    event, _ = await seed_announcement(tenant_id, activity="draining host-7", ttl_minutes=30)
+    (row,) = (await _handler_recent(_operator(tenant_id), {}))["events"]
+    assert row["event_id"] == str(event.event_id)
+    assert row["kind"] == "agent_announcement"
+    assert row["activity"] == wrap_untrusted_text("draining host-7")
+    assert row["ttl_minutes"] == 30
+    assert "cursor" not in row
+    assert "id" not in row
 
 
 # ---------------------------------------------------------------------------
-# PII inheritance: aggregate-only payloads pass through verbatim
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_credential_read_payload_surfaces_aggregate_only(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``credential_read`` events return whatever the publisher redacted to.
-
-    The tool MUST NOT re-derive or mutate ``payload``; it surfaces the
-    on-stream view verbatim. Feeding an aggregate-shaped payload
-    asserts the tool doesn't accidentally expand it back to full.
-    """
-    client, _op = client_with_operator
-    aggregate_payload = {"op_class": "credential_read", "result_status": "ok"}
-    event = _make_event(
-        op_id="vault.kv.read",
-        op_class="credential_read",
-        payload=aggregate_payload,
-    )
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(return_value=[_xrange_entry(event, "1747800000000-0")]),
-    ):
-        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
-    result = _result_dict(resp)
-    assert result["events"][0]["payload"] == aggregate_payload
-    # And no path / key / value leak from any earlier-rendered shape.
-    assert "params" not in result["events"][0]["payload"]
-    assert "path" not in result["events"][0]["payload"]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_audit_query_payload_surfaces_aggregate_with_row_count(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``audit_query`` events surface the ``row_count`` aggregate verbatim."""
-    client, _op = client_with_operator
-    aggregate_payload = {
-        "op_class": "audit_query",
-        "result_status": "ok",
-        "row_count": 17,
-    }
-    event = _make_event(
-        op_id="meho_audit_replay",
-        op_class="audit_query",
-        payload=aggregate_payload,
-    )
-    bc = get_broadcast_client()
-    with patch.object(
-        bc,
-        "xrange",
-        new=AsyncMock(return_value=[_xrange_entry(event, "1747800000000-0")]),
-    ):
-        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
-    result = _result_dict(resp)
-    assert result["events"][0]["payload"] == aggregate_payload
-
-
-# ---------------------------------------------------------------------------
-# Deserialisation safety net (skip malformed entries, don't raise)
-# ---------------------------------------------------------------------------
-
-
-async def test_handler_skips_unknown_field_shape() -> None:
-    """An entry without an ``event`` field is logged + skipped, not raised."""
-    op = build_operator(TenantRole.OPERATOR)
-    good = _make_event()
-    raw_entries = [
-        ("1747800000000-0", {"unexpected_key": "nothing-useful"}),
-        _xrange_entry(good, "1747800001000-0"),
-    ]
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=raw_entries)):
-        result = await _handler_recent(op, {})
-    assert len(result["events"]) == 1
-    assert result["events"][0]["event_id"] == str(good.event_id)
-
-
-async def test_handler_skips_malformed_event_json() -> None:
-    """An entry whose ``event`` field doesn't parse as BroadcastEvent is skipped."""
-    op = build_operator(TenantRole.OPERATOR)
-    good = _make_event()
-    raw_entries = [
-        ("1747800000000-0", {"event": '{"not": "a BroadcastEvent"}'}),
-        _xrange_entry(good, "1747800001000-0"),
-    ]
-    bc = get_broadcast_client()
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=raw_entries)):
-        result = await _handler_recent(op, {})
-    assert len(result["events"]) == 1
-    assert result["events"][0]["event_id"] == str(good.event_id)
-
-
-# ---------------------------------------------------------------------------
-# Filter input-shape validation
+# Schema rejections
 # ---------------------------------------------------------------------------
 
 
@@ -971,163 +421,3 @@ def test_filter_op_class_outside_enum_rejected(
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
-
-
-# ---------------------------------------------------------------------------
-# Optional testcontainers integration suite
-# ---------------------------------------------------------------------------
-
-
-def _docker_socket_present() -> bool:
-    return Path("/var/run/docker.sock").exists() or os.environ.get("DOCKER_HOST") is not None
-
-
-_DOCKER_AVAILABLE = _docker_socket_present()
-_SKIP_REASON = (
-    "Docker socket unavailable in this sandbox; runs in CI where containers are provisioned."
-)
-
-
-@pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_SKIP_REASON)
-class TestBroadcastRecentIntegration:
-    """End-to-end suite against a real Valkey container.
-
-    Drives the same publisher (``publish_event``) the production
-    publish-on-write hook uses so the integration covers the full
-    XADD -> XRANGE -> handler seam, the cursor round-trip, and the
-    two-tenant isolation contract.
-    """
-
-    @pytest.fixture
-    async def valkey_url(self, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
-        from testcontainers.redis import RedisContainer
-
-        image = os.environ.get("MEHO_TEST_VALKEY_IMAGE", "valkey/valkey:8")
-        with RedisContainer(image) as container:
-            host = container.get_container_host_ip()
-            port = container.get_exposed_port(6379)
-            url = f"redis://{host}:{port}"
-            monkeypatch.setenv("BROADCAST_REDIS_URL", url)
-            get_settings.cache_clear()
-            reset_broadcast_client_for_testing()
-            try:
-                yield url
-            finally:
-                await dispose_broadcast_client()
-                get_settings.cache_clear()
-
-    async def test_publish_then_recent_round_trip(self, valkey_url: str) -> None:
-        """Publish two events; the handler reads them back oldest-first."""
-        op = build_operator(TenantRole.OPERATOR)
-        e_old = _make_event(op_id="vsphere.vm.list")
-        e_new = _make_event(op_id="vsphere.vm.create")
-        await publish_event(e_old)
-        await publish_event(e_new)
-
-        result = await _handler_recent(op, {})
-        op_ids = [e["op_id"] for e in result["events"]]
-        assert op_ids == ["vsphere.vm.list", "vsphere.vm.create"]
-
-    async def test_cursor_round_trip_walks_forward_without_overlap(
-        self,
-        valkey_url: str,
-    ) -> None:
-        """``next_cursor`` from page 1, passed as ``since`` to page 2, yields page 2.
-
-        Three events published; ``limit=2`` slices into two pages. The
-        cursor returned by page 1 MUST land page 2 starting strictly
-        after the page-1 boundary (no overlap, no gap). This is the
-        load-bearing pagination invariant the issue's "round-trip"
-        criterion gates on.
-        """
-        op = build_operator(TenantRole.OPERATOR)
-        events = [_make_event(op_id=f"vsphere.vm.op{i}") for i in range(3)]
-        for event in events:
-            await publish_event(event)
-
-        page1 = await _handler_recent(op, {"limit": 2})
-        assert [e["op_id"] for e in page1["events"]] == ["vsphere.vm.op0", "vsphere.vm.op1"]
-        assert page1["next_cursor"] is not None
-
-        page2 = await _handler_recent(op, {"limit": 2, "since": page1["next_cursor"]})
-        assert [e["op_id"] for e in page2["events"]] == ["vsphere.vm.op2"]
-        assert page2["next_cursor"] is None  # reached the tail
-
-        # Page1's last event id must NOT recur in page2.
-        page1_ids = {e["id"] for e in page1["events"]}
-        page2_ids = {e["id"] for e in page2["events"]}
-        assert not (page1_ids & page2_ids), "cursor pagination must not double-deliver"
-
-    async def test_two_tenants_see_only_their_own_events(
-        self,
-        valkey_url: str,
-    ) -> None:
-        """Two operators on two tenants each read only their own stream.
-
-        The structural tenant guarantee verified end-to-end: tenant-A's
-        operator never sees tenant-B's events even when both streams
-        sit on the same Valkey instance.
-        """
-        tenant_a = UUID("aaaa0000-0000-0000-0000-000000000001")
-        tenant_b = UUID("bbbb0000-0000-0000-0000-000000000002")
-        op_a = Operator(
-            sub="op-a",
-            raw_jwt="x",
-            tenant_id=tenant_a,
-            tenant_role=TenantRole.OPERATOR,
-        )
-        op_b = Operator(
-            sub="op-b",
-            raw_jwt="x",
-            tenant_id=tenant_b,
-            tenant_role=TenantRole.OPERATOR,
-        )
-
-        await publish_event(_make_event(tenant_id=tenant_a, op_id="tenant-a.op"))
-        await publish_event(_make_event(tenant_id=tenant_b, op_id="tenant-b.op"))
-
-        result_a = await _handler_recent(op_a, {})
-        result_b = await _handler_recent(op_b, {})
-
-        a_op_ids = [e["op_id"] for e in result_a["events"]]
-        b_op_ids = [e["op_id"] for e in result_b["events"]]
-        assert a_op_ids == ["tenant-a.op"]
-        assert b_op_ids == ["tenant-b.op"]
-
-    async def test_iso8601_since_filters_to_window(
-        self,
-        valkey_url: str,
-    ) -> None:
-        """An ISO-8601 ``since`` slices the stream at the wall-clock cutoff."""
-        op = build_operator(TenantRole.OPERATOR)
-        # Publish three events; sleep between to ensure distinct ms timestamps.
-        await publish_event(_make_event(op_id="vsphere.vm.op_before"))
-        await _aio_sleep(0.05)
-        cutoff = datetime.now(UTC) - timedelta(milliseconds=10)
-        await _aio_sleep(0.05)
-        await publish_event(_make_event(op_id="vsphere.vm.op_after_1"))
-        await publish_event(_make_event(op_id="vsphere.vm.op_after_2"))
-
-        result = await _handler_recent(
-            op,
-            {"since": cutoff.isoformat().replace("+00:00", "Z")},
-        )
-        op_ids = [e["op_id"] for e in result["events"]]
-        # Cutoff-relative: only the two "after" events surface.
-        assert "vsphere.vm.op_before" not in op_ids
-        assert "vsphere.vm.op_after_1" in op_ids
-        assert "vsphere.vm.op_after_2" in op_ids
-
-
-async def _aio_sleep(seconds: float) -> None:
-    """Async sleep used by the integration suite (kept local for clarity).
-
-    Single-underscore prefix is deliberate: a dunder prefix triggers Python's
-    class-level name mangling (``__foo`` → ``_ClassName__foo``) at the call
-    site, which made this module-level helper unreachable from
-    ``TestBroadcastRecentIntegration`` and raised ``NameError`` in CI before
-    the rename. See: https://docs.python.org/3/reference/expressions.html#atom-identifiers
-    """
-    import asyncio
-
-    await asyncio.sleep(seconds)

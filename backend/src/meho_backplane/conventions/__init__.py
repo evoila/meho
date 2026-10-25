@@ -14,6 +14,9 @@ package collects the helpers shared across the convention surfaces:
   budget, drops lowest-priority entries whole, wraps the result in
   the lower-trust delimited block with the
   :data:`~meho_backplane.conventions.preamble.GUARD_PREFIX` prefix.
+* :mod:`.render` -- the pure render-and-estimate primitive (#3746)
+  that write admission and the preamble packer share, so a write is
+  checked against the same rendered text MEHO sends.
 
 T1 (#313) shipped the schema; T2 (#314) shipped the API surface; T3
 (#315) layers CLI verbs; T4 (this module) layers the session-

@@ -21,8 +21,9 @@ indefinitely and were present in every DB backup: a rotated secret
 outlived its rotation forever in ``raw_payload`` and old backups.
 
 This module ships the bounded age-off: an ``asyncio`` task the FastAPI
-lifespan owns that ticks on a fixed cadence (default 7 days / weekly)
-and **NULLs** ``raw_payload`` on rows whose ``occurred_at`` is older than
+lifespan owns that runs once per interval (default 7 days / weekly,
+counted from its last recorded run -- see "When it runs" below) and
+**NULLs** ``raw_payload`` on rows whose ``occurred_at`` is older than
 ``now() - raw_payload_retention_days``. It is deliberately narrow:
 
 * Only ``raw_payload`` is nulled. The redacted ``payload`` (which carries
@@ -71,6 +72,46 @@ with ``audit_raw_payload_retention_tick_failed``. The Postgres tests in
 ``tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py``
 pin this.
 
+When it runs
+------------
+
+The interval counts from the **last recorded run**, not from process
+start. Every run writes one audit row (see "Audit-row shape" below), so
+the newest row this job wrote is the last real run. A row counts only if
+it has the system tenant id, ``method='INTERNAL'``, this job's
+``operator_sub`` and the ``audit.raw_payload.prune`` path. Every
+``INTERNAL`` writer uses a fixed path that no request can choose, so a
+dispatch audit row with the same tenant id and path never counts. After
+the process starts, the loop:
+
+1. waits :data:`_FIRST_RUN_DELAY_SECONDS` (one minute), so the first run
+   does not race the rest of startup;
+2. reads the time of the newest run within the last interval
+   (:func:`_last_recorded_run`);
+3. runs at once if there is no such run (none within the last interval, a
+   fresh install, or a database that has no such row yet); otherwise it
+   waits only for the rest of the interval (:func:`_seconds_until_due`);
+4. then runs once per interval, as before.
+
+So a pod restart (an update, a crash, a node drain) never starts the
+interval again. Before this, the loop slept a full interval after every
+start, so a deployment that restarted more often than once a week never
+ran the age-off at all.
+
+A last-run time in the future (a pod with a fast clock wrote it) counts
+as "due now", so it can never push the schedule back. If the read fails,
+the loop logs ``audit_raw_payload_retention_last_run_read_failed`` and
+runs at once. In both cases this is safe: a run is safe to run twice, and
+running early is better than running late. The wait in step 3 is never
+longer than one interval.
+
+The read is cheap in every case. It looks only at rows from the last
+interval (``occurred_at`` newer than now minus the interval): an older
+run means "due now" anyway, so the answer is the same. PostgreSQL then
+either uses the ``audit_log_tenant_id_idx`` btree (only this job writes
+the system tenant id, so there are few such rows) or reads the
+``occurred_at`` index over the last interval only.
+
 Why ``asyncio.create_task`` and not APScheduler 4.x
 ---------------------------------------------------
 
@@ -91,10 +132,10 @@ entirely in the lifespan). Because ``0`` keeps un-redacted secrets in
 ``raw_payload`` forever, the security tradeoff is flagged in the setting
 docstring, the Helm values comment, and the audit-channel doc.
 
-Audit-row shape (one row per **non-no-op** tick)
-------------------------------------------------
+Audit-row shape (one row per run)
+---------------------------------
 
-A tick that NULLs N rows writes exactly one
+Every run writes exactly one
 :class:`~meho_backplane.db.models.AuditLog` row via
 :func:`~meho_backplane.memory.audit.write_internal_audit_row`:
 ``operator_sub='system:audit-raw-payload-retention'``,
@@ -106,12 +147,13 @@ soft-FK-exploiting per-deploy sentinel the topology / flight-recorder
 prunes use so operators querying by their own tenant do not see prune
 rows in their timeline.
 
-A **no-op** tick -- the ``0`` sentinel, *or* a run that nulled zero rows
-(nothing past the cutoff) -- writes **no** audit row. This mirrors the
-flight-recorder reaper's "empty sweep writes no row" choice rather than
-topology's "always write a zero-count row": the age-off event is the
-security signal worth recording; weekly ``nulled=0`` rows are noise, and
-distinguishing them from a real "swept clean" outcome adds nothing.
+A run that nulled **zero** rows (nothing past the cutoff) also writes its
+row, with ``nulled_raw_payload_rows: 0``. The row is the record of the
+run: the next process start reads it to know when the age-off last ran
+(see "When it runs"), and an auditor can see that the age-off ran even
+when nothing was due. At the default weekly interval that is about 52
+rows a year. Only the ``0`` sentinel (age-off turned off) writes **no**
+row: nothing ran, so there is nothing to record.
 
 Fail-closed contract: the audit writer raises on commit failure; the
 per-tick ``try`` / ``except`` in :func:`_prune_loop` logs and continues to
@@ -123,7 +165,8 @@ Per-pod leader election is deferred (Initiative-level, same as the sibling
 sweepers): under N replicas the worst case is N identical bounded UPDATEs
 in the same second re-nulling rows the previous winner already nulled --
 idempotent (``raw_payload IS NOT NULL`` matches nothing) and below the
-noise floor of normal DB load.
+noise floor of normal DB load. Each replica writes its own run row; the
+next start of any replica reads the newest one.
 """
 
 from __future__ import annotations
@@ -135,10 +178,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import null, update
+from sqlalchemy import null, select, update
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
@@ -174,6 +217,13 @@ AUDIT_RAW_PAYLOAD_PRUNE_PATH: str = "audit.raw_payload.prune"
 #: (no matching ``tenant`` row required), same as the sibling sentinels.
 AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID: uuid.UUID = uuid.UUID("00000000-0000-0000-0000-000000000307")
 
+#: How long the loop waits after the process starts before it reads the last
+#: recorded run. A run that is due then happens about one minute after start:
+#: soon, but not in the middle of the rest of startup (engine init,
+#: registrars, other loops). Settings allow no interval below 60 seconds, so
+#: this never exceeds the interval.
+_FIRST_RUN_DELAY_SECONDS: float = 60.0
+
 
 def _resolve_system_tenant_id() -> uuid.UUID:
     """Return the sentinel tenant id for the age-off audit row.
@@ -183,6 +233,82 @@ def _resolve_system_tenant_id() -> uuid.UUID:
     the task; v0.2 returns the fixed sentinel.
     """
     return AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID
+
+
+async def _last_recorded_run(*, since: datetime) -> datetime | None:
+    """Return the newest run of this job after *since*, or ``None`` if none.
+
+    Every run writes one audit row, so the newest such row is the last real
+    run. The filter matches only rows this job writes: the system tenant id,
+    ``method='INTERNAL'``, :data:`SYSTEM_OPERATOR_SUB` and
+    :data:`AUDIT_RAW_PAYLOAD_PRUNE_PATH`. A dispatch audit row with the same
+    tenant id and path (``method='DISPATCH'``) never counts.
+
+    The caller passes ``since = now - interval``. A run older than that means
+    "due now" anyway, and the bound keeps the read cheap in every query plan
+    (see "When it runs" in the module docstring).
+
+    SQLite gives back a datetime without a time zone; the writer stores UTC,
+    so such a value is read as UTC. PostgreSQL gives back an aware value.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        last_run = await session.scalar(
+            select(AuditLog.occurred_at)
+            .where(
+                AuditLog.tenant_id == _resolve_system_tenant_id(),
+                AuditLog.method == INTERNAL_METHOD,
+                AuditLog.operator_sub == SYSTEM_OPERATOR_SUB,
+                AuditLog.path == AUDIT_RAW_PAYLOAD_PRUNE_PATH,
+                AuditLog.occurred_at > since,
+            )
+            .order_by(AuditLog.occurred_at.desc())
+            .limit(1)
+        )
+    if last_run is None:
+        return None
+    if last_run.tzinfo is None:
+        last_run = last_run.replace(tzinfo=UTC)
+    return last_run
+
+
+def _seconds_until_due(
+    last_run: datetime | None,
+    *,
+    now: datetime,
+    interval_seconds: float,
+) -> float:
+    """Return how many seconds are left until the next run is due.
+
+    * No recorded run: ``0`` (run now).
+    * *last_run* is in the future (a pod with a fast clock wrote it): ``0``
+      (run now), so a wrong clock can never push the schedule back.
+    * A full interval has passed since *last_run*: ``0`` (run now).
+    * Otherwise: what is left of the interval.
+
+    So the result is always between ``0`` and one interval.
+    """
+    if last_run is None or last_run > now:
+        return 0.0
+    remaining = interval_seconds - (now - last_run).total_seconds()
+    return max(0.0, remaining)
+
+
+async def _read_last_run_or_none(*, since: datetime) -> datetime | None:
+    """Read the last recorded run; on a read error, log it and return ``None``.
+
+    ``None`` makes the loop run at once. That is the safe choice: a run is
+    safe to run twice, and running early is better than running late.
+    """
+    try:
+        return await _last_recorded_run(since=since)
+    except Exception as exc:
+        _log.warning(
+            "audit_raw_payload_retention_last_run_read_failed",
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        return None
 
 
 async def _null_raw_payload_older_than(cutoff: datetime) -> int:
@@ -237,9 +363,12 @@ async def _write_prune_audit_row(
     The UPDATE has already committed before this helper runs; an audit-write
     failure must not stall the loop. Surface it loud-but-non-fatal so a
     flapping audit substrate is visible without leaving secrets un-aged.
+    Without the row, the next process start finds no record of this run and
+    runs the age-off again soon after start, which is safe.
     """
     try:
         await write_internal_audit_row(
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator_sub=SYSTEM_OPERATOR_SUB,
             tenant_id=_resolve_system_tenant_id(),
             method=INTERNAL_METHOD,
@@ -261,14 +390,14 @@ async def _write_prune_audit_row(
 
 
 async def _run_one_prune_tick() -> None:
-    """One age-off sweep: NULL past-cutoff ``raw_payload``, audit if non-empty.
+    """One age-off sweep: NULL past-cutoff ``raw_payload``, then record the run.
 
     Reads ``raw_payload_retention_days`` and computes a cutoff of
     ``now(UTC) - retention_days``. ``0`` is the keep-forever sentinel: log a
-    heartbeat and return without any UPDATE or audit row. A non-sentinel tick
-    that nulls zero rows also writes no audit row (empty sweep is a no-op);
-    only a tick that actually aged off ≥1 row records a security-relevant
-    audit row.
+    heartbeat and return without any UPDATE or audit row. Every other run
+    writes one audit row, also when it nulled zero rows: the row is the
+    record of the run that :func:`_last_recorded_run` reads at the next
+    process start.
 
     Raises nothing to the loop by contract -- the per-tick ``try`` / ``except``
     in :func:`_prune_loop` catches any exception so one bad tick cannot kill
@@ -296,11 +425,6 @@ async def _run_one_prune_tick() -> None:
         cutoff=cutoff.isoformat(),
         duration_ms=duration_ms,
     )
-    if nulled_rows == 0:
-        # Empty sweep: nothing aged off, so no security event to record.
-        # Weekly ``nulled=0`` audit rows would be pure noise (mirrors the
-        # flight-recorder reaper's "empty sweep writes no row" choice).
-        return
     await _write_prune_audit_row(
         nulled_rows=nulled_rows,
         retention_days=retention_days,
@@ -310,23 +434,41 @@ async def _run_one_prune_tick() -> None:
 
 
 async def _prune_loop() -> None:
-    """The forever loop: sleep one cadence, age off, repeat.
+    """The forever loop: wait until a run is due, age off, repeat.
 
-    Order is sleep-then-prune so the first tick after process start does not
-    race the rest of startup (engine init, registrars, other schedulers) --
-    mirroring the sibling sweepers for the same reason. Per-tick ``try`` /
-    ``except`` guards mean a transient DB blip is logged and the loop
-    continues; ``asyncio.CancelledError`` propagates so lifespan shutdown can
-    stop the task cleanly.
+    The first run is timed from the last recorded run, not from process
+    start (see "When it runs" in the module docstring): wait one minute so
+    startup can finish, read the last run, then run at once if it is due or
+    wait only for the rest of the interval. After that, the loop runs once
+    per interval. Per-tick ``try`` / ``except`` guards mean a transient DB
+    blip is logged and the loop continues; ``asyncio.CancelledError``
+    propagates so lifespan shutdown can stop the task cleanly.
     """
-    interval = get_settings().raw_payload_prune_interval_seconds
     _log.info(
         "audit_raw_payload_retention_started",
-        interval_seconds=interval,
+        interval_seconds=get_settings().raw_payload_prune_interval_seconds,
         retention_days=get_settings().raw_payload_retention_days,
+        first_check_in_seconds=_FIRST_RUN_DELAY_SECONDS,
     )
+    await asyncio.sleep(_FIRST_RUN_DELAY_SECONDS)
+
+    interval = get_settings().raw_payload_prune_interval_seconds
+    now = datetime.now(UTC)
+    last_run = await _read_last_run_or_none(since=now - timedelta(seconds=interval))
+    wait_seconds = _seconds_until_due(last_run, now=now, interval_seconds=interval)
+    # One line per start that says when the age-off last ran (within the
+    # last interval; ``None`` if not) and when it runs next, so an operator
+    # can check the schedule after a restart.
+    _log.info(
+        "audit_raw_payload_retention_scheduled",
+        last_run_at=last_run.isoformat() if last_run is not None else None,
+        next_run_in_seconds=wait_seconds,
+        interval_seconds=interval,
+    )
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+
     while True:
-        await asyncio.sleep(get_settings().raw_payload_prune_interval_seconds)
         try:
             await _run_one_prune_tick()
         except asyncio.CancelledError:
@@ -343,6 +485,7 @@ async def _prune_loop() -> None:
             "audit_raw_payload_retention",
             get_settings().raw_payload_prune_interval_seconds,
         )
+        await asyncio.sleep(get_settings().raw_payload_prune_interval_seconds)
 
 
 def start_audit_raw_payload_reaper() -> asyncio.Task[None]:

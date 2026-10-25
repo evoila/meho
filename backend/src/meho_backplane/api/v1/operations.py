@@ -41,7 +41,7 @@ import uuid
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi import status as http_status
 from fastapi.openapi.models import Example
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,6 +52,7 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.operations.governed_subops import GovernedSubopsResponse
 from meho_backplane.operations.meta_tools import (
     CallOperationBody,
@@ -59,6 +60,7 @@ from meho_backplane.operations.meta_tools import (
     OperationDescriptor,
     PreviewOperationBody,
     UnknownConnectorError,
+    UnknownOperationError,
     call_operation,
     describe_descriptor,
     list_operation_groups,
@@ -73,6 +75,7 @@ from meho_backplane.operations.result_query import (
     ResultQueryOutputTooLargeError,
     ResultQuerySpec,
     ResultQueryTimeoutError,
+    ResultReadRejectedError,
     read_result_window,
     run_result_query,
 )
@@ -224,6 +227,25 @@ async def get_search(
     ),
     group: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
+    op_id: str | None = Query(
+        default=None,
+        min_length=1,
+        description=(
+            "Exact-op mode. Look up this one operation and return its call "
+            "contract (`{operation: {...}}`: the parameter schema, examples, "
+            "target rule, result shape and retry guidance) instead of ranked "
+            "hits. `q`, `group` and `limit` are ignored when it is set. An "
+            "unknown op_id is a 404 with `detail.reason=unknown_op`."
+        ),
+    ),
+    include_scores: bool = Query(
+        default=False,
+        description=(
+            "Add the ranking scores (`fused_score`, `bm25_score`, "
+            "`cosine_score`) to each ranked hit. Only honoured for a "
+            "tenant_admin caller; ignored for everyone else."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.
@@ -233,7 +255,8 @@ async def get_search(
     a registered-but-not-ingested connector → ``404`` with the typed
     ``connector_not_ingested`` ``detail`` (same contract as ``/groups``,
     #1482); a known connector with no matching ops returns ``200`` with
-    an empty list.
+    an empty list. Every ``200`` body carries the ``outcome`` /
+    ``advisory`` / ``narrowing`` fields that say why (#3670).
 
     ``q`` is the canonical free-text query param across the kb / memory /
     operations-search list surfaces (#1854); ``query`` is its deprecated
@@ -241,12 +264,18 @@ async def get_search(
     required: supplying neither is a ``422`` (the search has nothing to
     match), and supplying both with different values is a ``422`` rather
     than a silent pick.
+
+    With ``op_id`` (#3668) the route skips ranking and returns one
+    operation's call contract; a known connector with no such op is a
+    ``404`` whose ``detail`` carries ``reason="unknown_op"``.
     """
     search_query = resolve_free_text_filter(
         q=q,
         legacy_value=query,
         legacy_name="query",
     )
+    if op_id is not None:
+        return await _exact_op_search(operator, connector_id, op_id)
     if search_query is None:
         raise HTTPException(
             status_code=422,
@@ -263,6 +292,7 @@ async def get_search(
                 "query": search_query,
                 "group": group,
                 "limit": limit,
+                "include_scores": include_scores,
             },
         )
     except ConnectorNotIngestedError as exc:
@@ -271,9 +301,25 @@ async def get_search(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+async def _exact_op_search(operator: Operator, connector_id: str, op_id: str) -> dict[str, Any]:
+    """Run ``search_operations`` in exact-op mode and map its errors to ``404``."""
+    try:
+        return await search_operations(operator, {"connector_id": connector_id, "op_id": op_id})
+    except ConnectorNotIngestedError as exc:
+        raise connector_not_ingested_404(exc) from exc
+    except UnknownConnectorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except UnknownOperationError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"message": str(exc), **exc.as_error_data()},
+        ) from exc
+
+
 @router.post("/call")
 async def post_call(
     body: CallOperationBody,
+    request: Request,
     response: Response,
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
@@ -308,6 +354,10 @@ async def post_call(
     ``extras.error_code="ambiguous_target"`` — the resolution codes carry
     the candidate ``matches``. No target-failure mode returns a 4xx: a
     consumer's error handling is a single switch on ``extras.error_code``.
+
+    Caller gone (#3696): on the synchronous path a client that disconnects
+    does not stop the operation. It runs to the end, and its audit row
+    carries ``payload.caller_gone_at``. Use ``async: true`` for long work.
     """
     # Drop the transport-only ``async_`` control before it reaches the
     # dispatch arguments (``call_operation`` reads connector_id / op_id /
@@ -318,7 +368,8 @@ async def post_call(
         run_id = await get_operation_run_service().submit_call(operator, arguments)
         response.status_code = http_status.HTTP_202_ACCEPTED
         return {"run_id": str(run_id), "status": "pending", "async": True}
-    return await call_operation(operator, arguments)
+    async with watch_caller(request.receive):
+        return await call_operation(operator, arguments)
 
 
 class ResultQueryBody(BaseModel):
@@ -374,7 +425,10 @@ class ResultQueryBody(BaseModel):
             "server-side (filter / select / group_by / aggregate / order_by / "
             "limit) as one bounded read-only SELECT and `offset` / `limit` are "
             "ignored. Every referenced field must be a column on the handle; "
-            "there is no raw-SQL argument."
+            "there is no raw-SQL argument. For a document handle, or for the "
+            "fields a rows handle left out of its inline summary, send only "
+            "`path` (an RFC 6901 JSON Pointer); an array value then pages with "
+            "`offset` / `limit`."
         ),
     )
 
@@ -406,46 +460,15 @@ async def post_result_query(
     indistinguishable from "not found" so the store leaks no existence
     signal across the operator boundary. A malformed ``handle_id`` (not a
     UUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the
-    Pydantic layer before the handler runs.
+    Pydantic layer before the handler runs. A read refused by the result-read
+    rate or capacity check (#3640) is a ``429`` with ``Retry-After``; a page
+    that runs past the time budget is a ``422`` with
+    ``reason="query_timeout"``, the same as a query.
     """
     if body.query is not None:
         return await _run_result_query_body(operator, body)
     try:
         return await read_result_window(operator, body.handle_id, body.offset, body.limit)
-    except ResultHandleNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": str(exc),
-                "reason": "handle_not_found",
-                "handle_id": str(body.handle_id),
-            },
-        ) from exc
-    except ResultQueryOutputTooLargeError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"message": str(exc), "reason": "output_too_large"},
-        ) from exc
-
-
-async def _run_result_query_body(
-    operator: Operator,
-    body: ResultQueryBody,
-) -> dict[str, Any]:
-    """Run the structured-query branch of ``POST /result-query`` (#3366).
-
-    The Pydantic layer already validated ``body.query`` shape (caps,
-    operator/aggregate allow-lists, unknown sub-keys → 422). Field-vs-schema,
-    time-budget, and output-byte violations surface from the core here: a
-    contract violation is a ``422`` (``reason=invalid_query``), a timeout a
-    ``422`` (``reason=query_timeout``), an over-budget result a ``422``
-    (``reason=output_too_large``), and a missing handle the same ``404`` as
-    the paging branch. Each carries a structured ``detail`` so the caller can
-    narrow and retry.
-    """
-    assert body.query is not None  # guarded by the caller's branch (mypy narrowing)
-    try:
-        return await run_result_query(operator, body.handle_id, body.query)
     except ResultHandleNotFoundError as exc:
         raise HTTPException(
             status_code=404,
@@ -468,8 +491,79 @@ async def _run_result_query_body(
     except ResultQueryOutputTooLargeError as exc:
         raise HTTPException(
             status_code=422,
-            detail={"message": str(exc), "reason": "output_too_large"},
+            detail={
+                "message": str(exc),
+                "reason": "output_too_large",
+                "delivery": "unavailable",
+            },
         ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
+
+
+def _read_rejected(exc: ResultReadRejectedError) -> HTTPException:
+    """Map a refused read (rate or capacity, #3640) to a ``429``."""
+    return HTTPException(
+        status_code=429,
+        detail={
+            "message": str(exc),
+            "reason": exc.reason,
+            "retry_after_seconds": exc.retry_after_seconds,
+        },
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+    )
+
+
+async def _run_result_query_body(
+    operator: Operator,
+    body: ResultQueryBody,
+) -> dict[str, Any]:
+    """Run the structured-query branch of ``POST /result-query`` (#3366).
+
+    The Pydantic layer already validated ``body.query`` shape (caps,
+    operator/aggregate allow-lists, unknown sub-keys → 422). Field-vs-schema,
+    time-budget, and output-byte violations surface from the core here: a
+    contract violation is a ``422`` (``reason=invalid_query``), a timeout a
+    ``422`` (``reason=query_timeout``), an over-budget result a ``422``
+    (``reason=output_too_large``), and a missing handle the same ``404`` as
+    the paging branch. Each carries a structured ``detail`` so the caller can
+    narrow and retry.
+    """
+    assert body.query is not None  # guarded by the caller's branch (mypy narrowing)
+    try:
+        return await run_result_query(
+            operator, body.handle_id, body.query, offset=body.offset, limit=body.limit
+        )
+    except ResultHandleNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": str(exc),
+                "reason": "handle_not_found",
+                "handle_id": str(body.handle_id),
+            },
+        ) from exc
+    except QueryContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "invalid_query"},
+        ) from exc
+    except ResultQueryTimeoutError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "query_timeout"},
+        ) from exc
+    except ResultQueryOutputTooLargeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "reason": "output_too_large",
+                "delivery": "unavailable",
+            },
+        ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
 
 
 @router.post("/preview")

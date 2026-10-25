@@ -196,7 +196,9 @@ expected:
   resolver matches rows for `principal_sub IN {operator.sub,
   operator.client_id}`. `operator.client_id` is the `agent:<name>` clientId,
   surfaced onto `Operator` from the token's `azp` / RFC 9068 `client_id` claim
-  for the agent kind (`auth/jwt.py::_extract_client_id`). Create still requires
+  for the agent kind (`auth/jwt.py::_extract_client_id`; the service kind
+  shares that fallback since #3446, but only agent rows are matched here).
+  Create still requires
   the sub to name a registered, non-revoked principal (#2489).
 - **User-agent principal (`principal_kind=user-agent`).** A human user can
   authenticate with `principal_kind=agent` through a public client; their

@@ -21,9 +21,9 @@ G0.26-T5 (#1804) acceptance criteria:
   ``ConnectError`` -> ``connector_tls_verify_failed`` (#1782) arm are
   unchanged (regression test): a ``403`` still maps to
   ``connector_http_403``.
-* The new arm calls :func:`audit_and_broadcast_safe` with
+* The new arm calls :func:`audit_safe` with
   ``result_status='error'`` before returning (always-audit + never-raises
-  contract): an audit row + broadcast event land.
+  contract): an audit row lands.
 
 The cause is kept **connector-agnostic** -- any upstream auth-class
 status, vRLI or not, yields the structured cause. The builder-shape tests
@@ -49,9 +49,7 @@ import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors._shared.vcf_auth import (
     ConnectorAuthError,
     session_establish_auth_error,
@@ -73,6 +71,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
+    _UPSTREAM_MESSAGE_CAP,
     is_auth_failed_status,
     result_connector_auth_failed,
 )
@@ -116,18 +115,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -706,13 +693,13 @@ def test_result_connector_auth_failed_non_json_body_falls_back_to_text() -> None
 
 
 def test_result_connector_auth_failed_caps_oversized_message() -> None:
-    """A pathological upstream message is capped like the sibling builders."""
-    exc = _make_http_status_error(status_code=401, json_body={"message": "x" * 400})
+    """A pathological upstream message is capped at the 2 KB upstream cap (#3567)."""
+    exc = _make_http_status_error(status_code=401, json_body={"message": "x" * 3000})
     out = result_connector_auth_failed("GET:/x", exc, _FakeTarget(), duration_ms=0.5)
     message = out.extras["upstream_message"]
     assert isinstance(message, str)
     assert message.endswith("...<truncated>")
-    assert len(message) == 256 + len("...<truncated>")
+    assert len(message) == _UPSTREAM_MESSAGE_CAP + len("...<truncated>")
 
 
 def test_result_connector_auth_failed_missing_host_degrades_gracefully() -> None:
@@ -828,6 +815,53 @@ def test_connector_auth_error_is_session_login_error() -> None:
     assert isinstance(err, RuntimeError)
 
 
+def test_result_connector_auth_failed_call_stage_uses_connector_remediation() -> None:
+    """#3566: a ``call``-stage error says the call was rejected, not the login."""
+    err = ConnectorAuthError(
+        "vmware vi-json POST /X/x/M on target 'vc-a' was rejected with vim fault NoPermission",
+        status_code=500,
+        cause="vim_fault_NoPermission",
+        remediation="Grant the missing privilege, then retry.",
+        stage="call",
+    )
+    out = result_connector_auth_failed("vmware.x", err, _FakeTarget(name="vc-a"), 1.0)
+    assert out.error is not None
+    assert "rejected this call with an auth/permission fault (HTTP 500)" in out.error
+    assert "login itself was rejected" not in out.error
+    assert "already re-logged-in" not in out.error
+    assert "Grant the missing privilege" in out.error
+    assert out.extras["cause"] == "vim_fault_NoPermission"
+    assert out.extras["http_status"] == 500
+    assert out.extras["remediation"] == "Grant the missing privilege, then retry."
+
+
+def test_result_connector_auth_failed_after_relogin_stage_prefers_connector_remediation() -> None:
+    """#3566: a connector ``after_relogin`` error keeps the re-login story + its own fix."""
+    err = ConnectorAuthError(
+        "vmware vi-json POST /X/x/M on target 'vc-a' was rejected with vim fault NotAuthenticated",
+        status_code=500,
+        cause="vim_fault_NotAuthenticated_after_relogin",
+        remediation="Check the host connection, then retry.",
+        stage="after_relogin",
+    )
+    out = result_connector_auth_failed("vmware.x", err, _FakeTarget(name="vc-a"), 1.0)
+    assert out.error is not None
+    assert "already re-logged-in and retried once" in out.error
+    assert "login itself was rejected" not in out.error
+    assert "Check the host connection" in out.error
+    assert out.extras["cause"] == "vim_fault_NotAuthenticated_after_relogin"
+    assert out.extras["http_status"] == 500
+
+
+def test_connector_auth_error_defaults_to_establish_stage() -> None:
+    """#3566: existing raise sites that pass no ``stage`` keep the establish story."""
+    err = ConnectorAuthError("m", status_code=401, cause="session_establish_401")
+    assert err.stage == "establish"
+    out = result_connector_auth_failed("x", err, _FakeTarget(), 1.0)
+    assert out.error is not None
+    assert "login itself was rejected" in out.error
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher conversion (the #1804 acceptance-criterion unit tests)
 # ---------------------------------------------------------------------------
@@ -837,9 +871,8 @@ def test_connector_auth_error_is_session_login_error() -> None:
 async def test_dispatch_converts_401_to_connector_auth_failed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """401 dispatch -> structured ``connector_auth_failed`` + audit row + event.
+    """401 dispatch -> structured ``connector_auth_failed`` + audit row.
 
     The dispatcher catches the connector's :exc:`httpx.HTTPStatusError`
     (401) ahead of the generic ``except Exception`` and emits the
@@ -899,15 +932,11 @@ async def test_dispatch_converts_401_to_connector_auth_failed(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_converts_establish_auth_error_to_connector_auth_failed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#2329: an establish-time ``ConnectorAuthError`` -> ``connector_auth_failed``.
 
@@ -915,8 +944,8 @@ async def test_dispatch_converts_establish_auth_error_to_connector_auth_failed(
     ``ConnectorAuthError`` (a rotated/stale password rejected at the login
     POST) is caught by the dispatcher's new ``except ConnectorAuthError`` arm
     ahead of the generic ``except Exception`` -- NOT flattened to the bare
-    ``connector_error: RuntimeError`` the filing observed. The audit row +
-    broadcast event still land (always-audit contract).
+    ``connector_error: RuntimeError`` the filing observed. The audit row
+    still lands (always-audit contract).
     """
     register_connector_v2(
         product="vcfops",
@@ -963,15 +992,12 @@ async def test_dispatch_converts_establish_auth_error_to_connector_auth_failed(
         )
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_converts_440_to_connector_auth_failed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """vRLI's 440 dispatch -> structured ``connector_auth_failed`` (the #1798 status).
 
@@ -1010,15 +1036,11 @@ async def test_dispatch_converts_440_to_connector_auth_failed(
     # NOT the pre-#1804 flattened shape the operator saw on #1798.
     assert "connector_error" not in result.error
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_404_falls_through_to_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A 404 ``HTTPStatusError`` stays ``connector_error`` -- not the auth shape.
 
@@ -1065,15 +1087,11 @@ async def test_dispatch_404_falls_through_to_connector_error(
     assert result.extras["upstream_message"] == "Not Found"
     assert "host" not in result.extras
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_500_falls_through_to_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A 5xx ``HTTPStatusError`` stays ``connector_error`` -- not the auth shape.
 
@@ -1113,15 +1131,11 @@ async def test_dispatch_500_falls_through_to_connector_error(
     assert result.extras["upstream_message"] == "Server Error"
     assert "host" not in result.extras
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 @pytest.mark.asyncio
 async def test_dispatch_403_still_maps_to_connector_http_403(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#1649 regression: a 403 still -> ``connector_http_403``, not the auth shape.
 
@@ -1160,9 +1174,6 @@ async def test_dispatch_403_still_maps_to_connector_http_403(
     # Did NOT get reclassified as the auth shape.
     assert "connector_auth_failed" not in result.error
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
-
 
 # ---------------------------------------------------------------------------
 # Profile-declared expiry-status set (#1973): one source feeds the arm
@@ -1185,7 +1196,6 @@ def test_profile_expiry_statuses_none_for_typed_connector() -> None:
 async def test_dispatch_440_with_default_profile_falls_through(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#1973: a profiled connector with the default {401} set does NOT siphon 440.
 
@@ -1229,7 +1239,6 @@ async def test_dispatch_440_with_default_profile_falls_through(
 async def test_dispatch_440_with_vrli_profile_maps_to_auth_failed(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#1973: a profiled connector declaring {401, 440} siphons 440 from one source.
 
@@ -1272,7 +1281,6 @@ async def test_dispatch_440_with_vrli_profile_maps_to_auth_failed(
 async def test_dispatch_profiled_login_post_401_is_establish_not_after_relogin(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#2414: a profiled login-POST 401 stamps establish stage, not after_relogin.
 
@@ -1334,8 +1342,6 @@ async def test_dispatch_profiled_login_post_401_is_establish_not_after_relogin(
     # The login POST was attempted; the establish failed fast (no wasteful
     # re-dispatch loop -- the ConnectorAuthError arm does not retry).
     assert login.call_count == 1
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -1474,7 +1480,6 @@ async def _seed(
 async def test_dispatch_recovers_401_via_invalidate_and_retry_once(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A typed-vCenter-shape 401 on an expired session recovers via one re-login.
 
@@ -1525,15 +1530,12 @@ async def test_dispatch_recovers_401_via_invalidate_and_retry_once(
         )
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "ok"
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "ok"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_recovers_440_via_invalidate_and_retry_once(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A generic-ingested vRLI GET that 440s after idle-expiry recovers once.
 
@@ -1567,15 +1569,12 @@ async def test_dispatch_recovers_440_via_invalidate_and_retry_once(
     assert isinstance(connector, _Recovering440Connector)
     assert connector.attempts[("", str(target.id))] == 2
     assert len(connector.invalidations) == 1
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "ok"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_recovers_non_idempotent_post_on_401(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A non-idempotent POST on an expired session also recovers via one retry.
 
@@ -1618,7 +1617,6 @@ async def test_dispatch_recovers_non_idempotent_post_on_401(
 async def test_dispatch_second_auth_failure_resolves_to_auth_failed_no_loop(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Re-login also fails -> ``connector_auth_failed`` with no retry loop.
 
@@ -1674,15 +1672,12 @@ async def test_dispatch_second_auth_failure_resolves_to_auth_failed_no_loop(
         )
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_5xx_with_hook_is_not_retried(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A 5xx is never retried, even when the connector has the hook.
 
@@ -1726,7 +1721,6 @@ async def test_dispatch_5xx_with_hook_is_not_retried(
 async def test_dispatch_stateless_connector_without_hook_is_not_retried(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A connector with no ``invalidate_session`` hook is unaffected (no retry).
 
@@ -1765,7 +1759,6 @@ async def test_dispatch_stateless_connector_without_hook_is_not_retried(
 async def test_dispatch_recovery_preserves_per_tenant_cache_isolation(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Two same-named targets in different tenants recover independently.
 
@@ -1931,7 +1924,6 @@ class _RetryThenEstablishAuthConnector(_Http401Connector):
 async def test_dispatch_establish_auth_failure_evicts_cached_credentials(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#2396: the first-establish ``ConnectorAuthError`` arm calls ``invalidate_credentials``.
 
@@ -1975,7 +1967,6 @@ async def test_dispatch_establish_auth_failure_evicts_cached_credentials(
 async def test_dispatch_establish_auth_failure_without_hook_is_harmless(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A connector advertising no ``invalidate_credentials`` hook still resolves cleanly.
 
@@ -2012,7 +2003,6 @@ async def test_dispatch_establish_auth_failure_without_hook_is_harmless(
 async def test_dispatch_post_invalidation_establish_auth_failure_evicts_credentials(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """#2396: the post-invalidation ``ConnectorAuthError`` arm also evicts credentials.
 

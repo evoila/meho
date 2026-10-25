@@ -133,7 +133,8 @@ import re
 import shlex
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
+from meho_backplane.connectors._shared.pwsh import PwshRunError, ps_single_quote, pwsh_run
+from meho_backplane.connectors.holodeck._response_schemas import HOLODECK_RESPONSE_SCHEMAS
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
@@ -983,14 +984,11 @@ async def holodeck_pod_info(
     pod_id = params.get("pod_id")
     if not isinstance(pod_id, str) or not pod_id.strip():
         return {"pod": None, "error": "pod_id is required and must be a non-empty string"}
-    # PowerShell single-quoting: the only escape inside single quotes
-    # is doubling the single quote itself. asyncssh's argv path runs
-    # the cmd through a shell on the appliance, so the operator-supplied
-    # pod_id is also subject to shell quoting -- but the encoded-command
-    # contract means the shell never sees the value as a discrete token;
-    # the entire pwsh script body is base64'd before transport.
-    quoted_id = pod_id.replace("'", "''")
-    script = f"Get-HoloDeckPod -Id '{quoted_id}' | ConvertTo-Json -Depth 4"
+    # PowerShell single-quoting via the shared helper (it escapes every
+    # character PowerShell reads as a single quote). The encoded-command
+    # contract means the appliance shell never sees the value as a discrete
+    # token; the entire pwsh script body is base64'd before transport.
+    script = f"Get-HoloDeckPod -Id {ps_single_quote(pod_id)} | ConvertTo-Json -Depth 4"
     try:
         payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:
@@ -1402,6 +1400,7 @@ _EMPTY_PARAMS: dict[str, Any] = {
     "type": "object",
     "properties": {},
     "additionalProperties": False,
+    "examples": [{}],
 }
 
 
@@ -1413,110 +1412,79 @@ _EMPTY_PARAMS: dict[str, Any] = {
 _SSH_TRANSPORT_NOTE: str = SSH_TRANSPORT_NOTE
 
 
+_R = HOLODECK_RESPONSE_SCHEMAS
+
 READ_OPS: tuple[HolodeckOp, ...] = (
     HolodeckOp(
         op_id="holodeck.config.show",
         handler_attr="config_show",
-        summary="Return the Holodeck appliance configuration dict.",
+        summary="Show the Holodeck appliance configuration.",
         description=(
-            "Runs ``Get-HoloDeckConfig | ConvertTo-Json -Depth 4 "
-            "-Compress`` over the pwsh-over-SSH transport and returns "
-            "the parsed configuration dict. The dict carries vendor / "
-            "product / version / pod ID and a `services` block summarising "
-            "the bundled Holodeck Photon services. Use when the operator "
-            "needs the full appliance configuration snapshot; for just "
-            "the identifying fields prefer ``holodeck.about`` (faster, "
-            "fewer fields). No params; safe to call on any healthy "
-            "HoloRouter target."
+            "Runs Get-HoloDeckConfig on the HoloRouter and returns its answer as "
+            "'config'. Read-only. For just the version and pod id, holodeck.about "
+            "is smaller."
         ),
         parameter_schema=_EMPTY_PARAMS,
-        response_schema={
-            "type": "object",
-            "properties": {
-                "config": {"type": ["object", "null"]},
-                "error": {"type": ["string", "null"]},
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.config.show"],
         group_key="config",
         tags=("read-only", "config", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants the full Holodeck "
-                "appliance configuration snapshot (vendor / product / "
-                "pod ID + services block). For just the identifying "
-                "fields, ``holodeck.about`` is a faster, narrower "
-                "alternative. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need the full Holodeck configuration of the "
+                "appliance. For just the version and pod id, call "
+                "holodeck.about. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {},
             "output_shape": (
-                "``{config: {...}}``. ``config`` is the parsed cmdlet "
-                "output -- a flat dict with the appliance's identifying "
-                "fields and a nested `services` block. ``error`` is set "
-                "when the pwsh cmdlet failed."
+                "{config, error}. 'config' is the cmdlet answer as the appliance "
+                "returns it (MEHO reads 'Version' and 'PodId' from it). 'config' "
+                "is null and 'error' is set when the cmdlet failed."
+            ),
+            "next_step": (
+                "To see the pods, call holodeck.pod.list. To see a deploy, call "
+                "holodeck.instance.status."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.pod.list",
         handler_attr="pod_list",
-        summary="List the active Holodeck nested pods.",
+        summary="List the Holodeck pods on the appliance.",
         description=(
-            "Runs ``Get-HoloDeckPod | ConvertTo-Json -Depth 4`` over "
-            "the pwsh-over-SSH transport and returns one row per active "
-            "nested pod. Each row carries the pod ID, name, state, "
-            "primary network, and embedded VM count. Returns a "
-            "``{rows, total}`` envelope; the dispatcher's JSONFlux reducer "
-            "wraps a large pod list in a ResultHandle carrying a bounded "
-            "inline sample plus a ``fetch_more`` envelope (no handle "
-            "read-back tool exists in this version). No params; "
-            "safe to call on any healthy HoloRouter target."
+            "Runs Get-HoloDeckPod on the HoloRouter and returns one row per pod "
+            "as {rows, total}. Read-only. A long list comes back as a link to the "
+            "stored result."
         ),
         parameter_schema=_EMPTY_PARAMS,
-        response_schema={
-            "type": "object",
-            "properties": {
-                "rows": {"type": "array", "items": {"type": "object"}},
-                "total": {"type": "integer"},
-                "error": {"type": ["string", "null"]},
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.pod.list"],
         group_key="pod",
         tags=("read-only", "pod", "list", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants the active nested-pod "
-                "inventory on a HoloRouter. Each row carries the pod ID "
-                "and its primary networking + VM count. Pair with "
-                "``holodeck.pod.info <pod_id>`` for per-pod details. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need the list of Holodeck pods on a HoloRouter, "
+                "for example to find a pod id. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {},
             "output_shape": (
-                "``{rows: [{...pod fields...}], total: N}``. Rows are "
-                "returned inline; a large pod list is reduced to a "
-                "JSONFlux ResultHandle carrying a bounded inline sample "
-                "plus a ``fetch_more`` envelope (no handle read-back tool "
-                "exists in this version). ``error`` is set when the cmdlet "
-                "failed."
+                "{rows, total, error}. Each row is a pod object as Get-HoloDeckPod "
+                "returns it; MEHO does not rename its keys. 'error' is set (rows "
+                "empty) when the cmdlet failed. A long list is returned as a link "
+                "to the stored result; read it with result_query."
             ),
+            "next_step": "For one pod in detail, call holodeck.pod.info with its id.",
         },
     ),
     HolodeckOp(
         op_id="holodeck.pod.info",
         handler_attr="pod_info",
-        summary="Return per-pod detail (state, networking, VMs) for a Holodeck pod.",
+        summary="Show the details of one Holodeck pod.",
         description=(
-            "Runs ``Get-HoloDeckPod -Id <id> | ConvertTo-Json -Depth 4`` "
-            "over the pwsh-over-SSH transport and returns the single-pod "
-            "detail dict: state, networking (FRR/BGP attachment), and "
-            "the embedded VM list with their power state. *pod_id* is "
-            "required; use ``holodeck.pod.list`` to enumerate available "
-            "IDs first."
+            "Runs Get-HoloDeckPod -Id <pod_id> on the HoloRouter and returns the "
+            "pod as 'pod'. Read-only. Get the id from holodeck.pod.list."
         ),
         parameter_schema={
             "type": "object",
@@ -1524,123 +1492,75 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                 "pod_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": (
-                        "Holodeck pod identifier (e.g. ``HoloPod-001``). "
-                        "Enumerate via ``holodeck.pod.list``."
-                    ),
+                    "description": "The Holodeck pod id. Get it from holodeck.pod.list.",
                 },
             },
             "required": ["pod_id"],
             "additionalProperties": False,
+            "examples": [{"pod_id": "<pod-id>"}],
         },
-        response_schema={
-            "type": "object",
-            "properties": {
-                "pod": {"type": ["object", "null"]},
-                "error": {"type": ["string", "null"]},
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.pod.info"],
         group_key="pod",
         tags=("read-only", "pod", "info", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants the detailed state of a "
-                "specific Holodeck nested pod -- VM list, power state, "
-                "networking. Use ``holodeck.pod.list`` first to "
-                "discover available pod IDs. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need the state of one Holodeck pod, for example "
+                "its VMs and network. Call holodeck.pod.list first to get the "
+                "id. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
-                "pod_id": (
-                    "Holodeck pod identifier (e.g. ``HoloPod-001``). "
-                    "Enumerate via ``holodeck.pod.list``."
-                ),
+                "pod_id": "The pod id from holodeck.pod.list.",
             },
             "output_shape": (
-                "``{pod: {id, state, networking, vms: [...]}}``. ``error`` "
-                "is set when the cmdlet failed (e.g. unknown pod ID)."
+                "{pod, error}. 'pod' is the cmdlet answer as the appliance returns "
+                "it. 'pod' is null and 'error' is set when the cmdlet failed, for "
+                "example for an unknown id."
             ),
+            "next_step": ("For the network view of the appliance, call holodeck.networking.show."),
         },
     ),
     HolodeckOp(
         op_id="holodeck.service.list",
         handler_attr="service_list",
-        summary="List Photon services with the Holo* prefix and their status.",
+        summary="List the Holodeck services on the appliance and their state.",
         description=(
-            "Runs ``Get-Service | Where-Object { $_.Name -like 'Holo*' "
-            "} | Select-Object Name,Status,DisplayName | "
-            "ConvertTo-Json -Depth 4`` over the pwsh-over-SSH "
-            "transport. Returns ``{rows, total}`` where each row "
-            "carries ``Name``, ``Status``, ``DisplayName``. Mirrors "
-            "the cmdlet shape ``probe`` uses for "
-            "``holodeck_services_down`` but exposes the raw list. "
-            "No params; safe to call on any healthy HoloRouter target."
+            "Runs Get-Service on the HoloRouter for services whose name starts "
+            "with 'Holo' and returns {rows, total} with Name, Status and "
+            "DisplayName. Read-only."
         ),
         parameter_schema=_EMPTY_PARAMS,
-        response_schema={
-            "type": "object",
-            "properties": {
-                "rows": {"type": "array", "items": {"type": "object"}},
-                "total": {"type": "integer"},
-                "error": {"type": ["string", "null"]},
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.service.list"],
         group_key="service",
         tags=("read-only", "service", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants the per-service health of "
-                "the bundled Holodeck Photon services (DHCP, DNS, NTP, "
-                "FRR-BGP, Webtop, K8s-in-appliance). ``holodeck.about`` "
-                "and ``holodeck.config.show`` answer 'what version', "
-                "this op answers 'which services are running'. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need to know which Holodeck services run on the "
+                "appliance. holodeck.about tells you the version; this op tells "
+                "you what is running. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {},
             "output_shape": (
-                "``{rows: [{Name, Status, DisplayName}], total: N}``. "
-                "``Status`` is the PowerShell ServiceControllerStatus "
-                "enum, typically rendered as ``Running`` / ``Stopped`` "
-                "via ``Select-Object``."
+                "{rows: [{Name, Status, DisplayName}], total, error}. 'Status' is "
+                "'Running' or 'Stopped', or the matching number (4 is running)."
+            ),
+            "next_step": (
+                "For a service that is not running, read its log with holodeck.logs.tail."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.k8s.exec",
         handler_attr="k8s_exec",
-        summary="Run a read-only kubectl command on the in-appliance Kubernetes cluster.",
+        summary="Run a read-only kubectl command on the appliance's Kubernetes cluster.",
         description=(
-            "Forwards a **read-only** ``kubectl`` command to the K8s "
-            "cluster bundled on the HoloRouter appliance. The handler "
-            "fails closed when the supplied command's verb is not on "
-            "the read-only safelist. Allowed single-word verbs: "
-            "``get``, ``describe``, ``logs``, ``top``, ``explain``, "
-            "``api-resources``, ``api-versions``, ``cluster-info``, "
-            "``version``. Allowed multi-word verbs: ``config view``, "
-            "``config get-contexts``, ``config get-clusters``, "
-            "``config get-users``, ``config current-context``, "
-            "``auth can-i``, ``auth whoami``. Use to inspect cluster "
-            "state without mutating it. Flags are constrained to a "
-            "positive read-only allowlist (namespace / selector / "
-            "output-format / logs-scoping options): endpoint "
-            "(``--server``), TLS-trust (``--insecure-skip-tls-verify``), "
-            "credential (``--token``, ``--kubeconfig``), "
-            "context/cluster/user, raw-credential (``--raw``) and "
-            "file-writing (``--output-directory``) flags are rejected, "
-            "so the caller cannot redirect the appliance's credentials, "
-            "disable TLS verification, dump the raw kubeconfig or write "
-            "files -- those are owned by the appliance's own kubeconfig. "
-            "The schema pattern enforces the ``kubectl <read-verb> ...`` "
-            "shape at the validator layer; the handler is the "
-            "authoritative gate that re-checks the verb and the flag "
-            "allowlist. Because the command line is operator-supplied, "
-            "this op is approval-gated: a dispatch parks for human "
-            "approval before the command runs, rather than executing "
-            "unattended."
+            "Runs one read-only kubectl command (get, describe, logs, ...) on the "
+            "HoloRouter and returns its output. Commands that change the cluster "
+            "are refused. A person must approve each call, because the command "
+            "line comes from the caller."
         ),
         parameter_schema={
             "type": "object",
@@ -1697,114 +1617,71 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                         r"[ \t]*\Z"
                     ),
                     "description": (
-                        "Full kubectl command line starting with "
-                        "``kubectl`` and a read-only verb. Allowed "
-                        "single-word verbs: get, describe, logs, top, "
-                        "explain, api-resources, api-versions, "
-                        "cluster-info, version. Allowed multi-word "
-                        "verbs: config view, config get-contexts, "
-                        "config get-clusters, config get-users, "
-                        "config current-context, auth can-i, "
-                        "auth whoami. Mutating verbs (create, apply, "
-                        "delete, edit, replace, patch, scale, "
-                        "rollout, label, annotate, cp, exec, "
-                        "port-forward, proxy, drain, cordon) and "
-                        "mutating sub-verbs (config set-context, "
-                        "config unset, auth reconcile, ...) are "
-                        "rejected at the schema layer. Arguments are "
-                        "restricted to ``[A-Za-z0-9._/=:,@-]`` -- shell "
-                        "metacharacters (``;``, ``&``, ``|``, ``$``, "
-                        "backticks, ``>``, ``<``, parens, ``\\``) are "
-                        "rejected before the handler is reached. Flags "
-                        "are limited to a positive read-only allowlist "
-                        "(``-n``/``--namespace``, ``-o``/``--output``, "
-                        "``-l``/``--selector``, logs-scoping options, "
-                        "...); endpoint/TLS/credential/context overrides "
-                        "(``--server``, ``--insecure-skip-tls-verify``, "
-                        "``--token``, ``--kubeconfig``, ``--context``), "
-                        "the raw credential view (``--raw``) and "
-                        "file-writing options (``--output-directory``) "
-                        "are rejected by the handler."
+                        "One kubectl command line that starts with 'kubectl' and a "
+                        "read-only verb: get, describe, logs, top, explain, "
+                        "api-resources, api-versions, cluster-info, version, "
+                        "config view|get-contexts|get-clusters|get-users|"
+                        "current-context, auth can-i|whoami. Arguments may use "
+                        "only letters, digits and . _ / = : , @ -"
                     ),
                 },
             },
             "required": ["command"],
             "additionalProperties": False,
+            "examples": [{"command": "kubectl get pods -n kube-system -o wide"}],
         },
-        response_schema={
-            "type": "object",
-            "properties": {
-                "stdout": {"type": "string"},
-                "stderr": {"type": "string"},
-                "exit_status": {"type": ["integer", "null"]},
-                "error": {"type": ["string", "null"]},
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.k8s.exec"],
         group_key="k8s",
         tags=("k8s", "kubectl", "holodeck", "approval-gated"),
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants to inspect the K8s "
-                "cluster bundled on the HoloRouter appliance via "
-                "``kubectl``. Only read-only verbs are allowed. "
-                "Single-word: ``get``, ``describe``, ``logs``, "
-                "``top``, ``explain``, ``api-resources``, "
-                "``api-versions``, ``cluster-info``, ``version``. "
-                "Multi-word inspection: ``kubectl config view`` / "
-                "``config get-contexts`` / ``config get-clusters`` / "
-                "``config get-users`` / ``config current-context`` "
-                "for kubeconfig inspection; ``kubectl auth can-i "
-                "<verb> <resource>`` / ``kubectl auth whoami`` for "
-                "authorization inspection. Mutating verbs and "
-                "mutating sub-verbs (``config set-context``, "
-                "``auth reconcile``, etc.) fail closed. Flags are "
-                "limited to read-only scoping/formatting options "
-                "(``-n``, ``-o``, ``-l``, ``--field-selector``, "
-                "logs-scoping options, ...); endpoint/TLS/credential/"
-                "context overrides (``--server``, "
-                "``--insecure-skip-tls-verify``, ``--token``, "
-                "``--kubeconfig``, ``--context``), the raw credential "
-                "view (``--raw``) and file-writing options "
-                "(``--output-directory``) are rejected -- endpoint, "
-                "context, credential and TLS trust are owned by the "
-                "appliance's own kubeconfig. This op is "
-                "approval-gated: a dispatch parks for human approval "
-                "before the command runs, rather than executing "
-                "unattended. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need to look at the Kubernetes cluster that runs "
+                "on the HoloRouter appliance. Only reads are allowed. Allowed "
+                "verbs: get, describe, logs, top, explain, api-resources, "
+                "api-versions, cluster-info, version; and config view, config "
+                "get-contexts, config get-clusters, config get-users, config "
+                "current-context, auth can-i, auth whoami. Verbs that change "
+                "the cluster (create, apply, delete, edit, patch, scale, ...) "
+                "are refused. Only flags that pick or format what you read are "
+                "allowed (-n, -A, -l, --field-selector, -o, --tail, -c, ...). "
+                "Flags that change where kubectl connects or which credentials "
+                "it uses (--server, --token, --kubeconfig, --context, "
+                "--insecure-skip-tls-verify), --raw and flags that write files "
+                "are refused. " + _SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call before the command runs. Write "
+                "the command on one line, with no shell characters such as ; | "
+                "& $ > < or quotes."
             ),
             "parameter_hints": {
                 "command": (
-                    "Full kubectl invocation, e.g. ``kubectl get pods "
-                    "-n holodeck``, ``kubectl describe service "
-                    "<name>``, ``kubectl config view``, or "
-                    "``kubectl auth can-i list pods``. Single-line; "
-                    "arguments tokenised via shlex."
+                    "For example 'kubectl get pods -n kube-system', 'kubectl "
+                    "describe service <name>', 'kubectl config view' or "
+                    "'kubectl auth can-i list pods'."
                 ),
             },
             "output_shape": (
-                "``{stdout: '<text>', stderr: '<truncated text>', "
-                "exit_status: <int|null>}``. ``stderr`` is capped at "
-                "4096 chars. ``error`` is set when the safety check "
-                "rejected the verb or a flag, or the SSH call failed."
+                "{stdout, stderr, exit_status, error}. 'stderr' is cut at 4096 "
+                "characters. 'error' is set when the safety check refused the verb "
+                "or a flag."
+            ),
+            "next_step": (
+                "To clean up pods that have ended, call holodeck.k8s.pods.gc. "
+                "For appliance logs, call holodeck.logs.tail."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.logs.tail",
         handler_attr="logs_tail",
-        summary="Tail Holodeck runtime log files for a given component.",
+        summary="Show the last lines of the Holodeck log files of one component.",
         description=(
-            "Runs ``tail -n <lines> /holodeck-runtime/logs/"
-            "<component>*.log`` over plain SSH and returns the tail "
-            "envelope. *component* is a slug (e.g. ``dhcp``, ``dns``, "
-            "``frr``); *lines* defaults to 200, range [1, 5000]. "
-            "Multiple files matching the glob are surfaced separately "
-            "via the GNU ``tail`` ``==> path <==`` header convention. "
-            "Read-only by construction; the cmd is a stock POSIX "
-            "pipeline with no pwsh indirection."
+            "Runs 'tail -n <lines>' on /holodeck-runtime/logs/<component>*.log "
+            "on the HoloRouter and returns the text per file. Read-only. 'lines' "
+            "is 200 by default, at most 5000."
         ),
         parameter_schema={
             "type": "object",
@@ -1814,10 +1691,9 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                     "pattern": r"^[A-Za-z0-9._-]+$",
                     "minLength": 1,
                     "description": (
-                        "Log-file slug; the cmdline expands to "
-                        "``/holodeck-runtime/logs/<component>*.log``. "
-                        "Only ``[A-Za-z0-9._-]+`` accepted to keep the "
-                        "shell pipeline injection-safe."
+                        "Start of the log file name, for example 'dhcp', 'dns' or "
+                        "'frr'. MEHO reads /holodeck-runtime/logs/<component>*.log. "
+                        "Only letters, digits and . _ - are allowed."
                     ),
                 },
                 "lines": {
@@ -1825,232 +1701,119 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                     "minimum": 1,
                     "maximum": 5000,
                     "default": 200,
-                    "description": "Number of trailing lines to return per file.",
+                    "description": "Number of last lines to return per file.",
                 },
             },
             "required": ["component"],
             "additionalProperties": False,
+            "examples": [{"component": "dhcp", "lines": 100}],
         },
-        response_schema={
-            "type": "object",
-            "properties": {
-                "files": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": ["string", "null"]},
-                            "lines": {"type": "string"},
-                        },
-                    },
-                },
-                "raw": {"type": "string"},
-                "lines_requested": {"type": "integer"},
-                "error": {"type": ["string", "null"]},
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.logs.tail"],
         group_key="logs",
         tags=("read-only", "logs", "tail", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants to inspect recent log "
-                "lines for a specific Holodeck Photon service (``dhcp``, "
-                "``dns``, ``frr``, ``webtop``, ``k8s``). Returns the "
-                "last <lines> lines per matching log file. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need the recent log lines of one Holodeck "
+                "component, for example dhcp, dns, frr, webtop or k8s. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
                 "component": (
-                    "Log-file slug; expands to "
-                    "``/holodeck-runtime/logs/<component>*.log``. "
-                    "Allowed chars: [A-Za-z0-9._-]+."
+                    "Start of the log file name; MEHO reads "
+                    "/holodeck-runtime/logs/<component>*.log."
                 ),
-                "lines": "Trailing line count per file; default 200, max 5000.",
+                "lines": "Last lines per file; 200 by default, at most 5000.",
             },
             "output_shape": (
-                "``{files: [{path, lines}], raw: '<full stdout>', "
-                "lines_requested: N}``. When multiple log files match "
-                "the glob, each is surfaced under its own ``files`` "
-                "entry. Single-file matches have ``path=None`` (no "
-                "GNU tail header)."
+                "{files: [{path, lines}], raw, lines_requested, error}. When "
+                "several files match, each has its own entry. When one file "
+                "matches, 'path' is null. An empty 'files' list means no file "
+                "matched."
+            ),
+            "next_step": (
+                "For the deploy state, call holodeck.instance.status. For the "
+                "network view, call holodeck.networking.show."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.networking.show",
         handler_attr="networking_show",
-        summary="Composite FRR/BGP + DNS zone + DHCP lease snapshot for the appliance.",
+        summary="Show the HoloRouter's BGP peers, routes, DNS zones and DHCP leases.",
         description=(
-            "Runs four sub-commands over the pooled SSH connection: "
-            "``vtysh -c 'show bgp summary'``, ``vtysh -c 'show ip "
-            "route'``, ``pwsh`` of ``Get-DnsServerZone | "
-            "ConvertTo-Json -Depth 4``, and ``cat "
-            "/var/lib/dhcp/dhcpd.leases``. Returns an envelope with "
-            "four narrative sub-sections (``bgp``, ``routes``, ``dns``, "
-            "``dhcp``), each carrying its own ``ok`` flag so a "
-            "single-component failure doesn't blank the whole "
-            "response. Read-only; no mutating commands issued."
+            "Runs four reads on the HoloRouter: BGP summary and routes (vtysh), "
+            "DNS zones (Get-DnsServerZone) and DHCP leases (dhcpd.leases). Each "
+            "part has its own 'ok' flag, so one failed part does not hide the "
+            "others."
         ),
         parameter_schema=_EMPTY_PARAMS,
-        response_schema={
-            "type": "object",
-            "properties": {
-                "bgp": {
-                    "type": "object",
-                    "properties": {
-                        "summary_text": {"type": "string"},
-                        "ok": {"type": "boolean"},
-                    },
-                },
-                "routes": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "ok": {"type": "boolean"},
-                    },
-                },
-                "dns": {
-                    "type": "object",
-                    "properties": {
-                        "zones": {"type": "array"},
-                        "total": {"type": "integer"},
-                        "ok": {"type": "boolean"},
-                    },
-                },
-                "dhcp": {
-                    "type": "object",
-                    "properties": {
-                        "leases_text": {"type": "string"},
-                        "ok": {"type": "boolean"},
-                    },
-                },
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.networking.show"],
         group_key="networking",
         tags=("read-only", "networking", "bgp", "dns", "dhcp", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants a one-shot snapshot of "
-                "the HoloRouter's networking surface: FRR/BGP peer "
-                "summary + kernel routes + DNS zones + DHCP leases. "
-                "Use ``holodeck.logs.tail component=frr`` for FRR log "
-                "drill-in. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need a picture of the HoloRouter network: BGP "
+                "peers, routes, DNS zones and DHCP leases, in one call. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {},
             "output_shape": (
-                "``{bgp: {summary_text, ok}, routes: {text, ok}, "
-                "dns: {zones, total, ok}, dhcp: {leases_text, ok}}``. "
-                "Each sub-section's ``ok`` flips false when its "
-                "sub-command failed or produced empty output. BGP and "
-                "routes are operator-formatted text (vtysh output); "
-                "DNS is structured (parsed JSON); DHCP is the raw "
-                "leases file."
+                "{bgp: {summary_text, ok}, routes: {text, ok}, dns: {zones, total, "
+                "ok}, dhcp: {leases_text, ok}}. BGP and routes are vtysh text, DNS "
+                "is a list of {ZoneName, ZoneType}, DHCP is the raw leases file. "
+                "'ok' is false when that part failed or printed nothing."
+            ),
+            "next_step": (
+                "For BGP problems, read the FRR log with holodeck.logs.tail component=frr."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.disk.usage",
         handler_attr="disk_usage",
-        summary="Root-fs usage plus fixed growth-dir usage for pre-eviction disk diagnosis.",
+        summary="Show how full the HoloRouter root disk is, and the size of its growth folders.",
         description=(
-            "Runs ``df -B1 /`` for the HoloRouter root filesystem plus "
-            "``du -sb`` on a fixed, code-constant set of known growth "
-            "directories (``/var/backups``, ``/holodeck-runtime``) over "
-            "the pooled SSH connection. Returns an envelope with a "
-            "``root_fs`` sub-section (total / used / available bytes + "
-            "computed ``percent_used``) and a ``growth_dirs`` list "
-            "(per-dir ``used_bytes``), each carrying its own ``ok`` flag "
-            "so one failed sub-command doesn't blank the others. Takes "
-            "no path parameter -- the growth-dir set is fixed in code, "
-            "so it can never become an arbitrary ``du``. Read-only; the "
-            "value is stable enough for a scheduler to poll for "
-            "early-warning on a filling 74 GB root fs (VCF-9.x backup "
-            "fill)."
+            "Runs 'df -B1 /' and 'du -sb' on /var/backups and /holodeck-runtime "
+            "on the HoloRouter. Returns bytes and percent used. Read-only. The "
+            "folder list is fixed in code; the op takes no path."
         ),
         parameter_schema=_EMPTY_PARAMS,
-        response_schema={
-            "type": "object",
-            "properties": {
-                "root_fs": {
-                    "type": "object",
-                    "properties": {
-                        "total_bytes": {"type": ["integer", "null"]},
-                        "used_bytes": {"type": ["integer", "null"]},
-                        "avail_bytes": {"type": ["integer", "null"]},
-                        "percent_used": {"type": ["number", "null"]},
-                        "ok": {"type": "boolean"},
-                    },
-                },
-                "growth_dirs": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string"},
-                            "used_bytes": {"type": ["integer", "null"]},
-                            "ok": {"type": "boolean"},
-                        },
-                    },
-                },
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.disk.usage"],
         group_key="diagnostics",
         tags=("read-only", "diagnostics", "disk", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call when the operator (or a scheduler) needs the "
-                "HoloRouter's disk pressure before a root-fs fill "
-                "evicts pods: root-fs total/used/available + "
-                "percent-used, plus the byte usage of the two known "
-                "growth directories (``/var/backups``, "
-                "``/holodeck-runtime``). This is the complete "
-                "pre-eviction diagnostic signal -- pair it with "
-                "``holodeck.logs.tail`` to find what is writing. Takes "
-                "no path argument; the measured dirs are fixed in "
-                "code. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call when you need to know if the HoloRouter root disk is "
+                "filling up, before a full disk stops pods. It is also a good "
+                "op for a regular check. Backups in /var/backups and runtime "
+                "data in /holodeck-runtime are the two usual causes. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {},
             "output_shape": (
-                "``{root_fs: {total_bytes, used_bytes, avail_bytes, "
-                "percent_used, ok}, growth_dirs: [{path, used_bytes, "
-                "ok}, ...]}``. All byte counts are integers "
-                "(``df -B1`` / ``du -sb`` -- 1-byte block size). "
-                "``percent_used`` is computed from the byte counts. "
-                "Each sub-section's ``ok`` flips false when its "
-                "sub-command failed or produced empty output."
+                "{root_fs: {total_bytes, used_bytes, avail_bytes, percent_used, "
+                "ok}, growth_dirs: [{path, used_bytes, ok}]}. All sizes are bytes. "
+                "'ok' is false when that part failed."
+            ),
+            "next_step": (
+                "When /var/backups is large, list the files with "
+                "holodeck.backups.list, then remove old ones with "
+                "holodeck.backups.prune."
             ),
         },
     ),
     HolodeckOp(
         op_id="holodeck.backups.list",
         handler_attr="backups_list",
-        summary="List /var/backups artefacts newest-first (pre-prune review + landing).",
+        summary="List the backup files in /var/backups on the HoloRouter, newest first.",
         description=(
-            "Runs ``find <dir> -maxdepth 1 -type f -printf '%T@ %s %p' | "
-            "sort -rn`` over plain SSH -- the read-only half of "
-            "``holodeck.backups.prune``'s own listing pipeline, with a size "
-            "field added and the destructive ``rm`` tail removed. An "
-            "optional ``path`` sub-directory is resolved and confined to "
-            "/var/backups/** via the same bound the prune write op applies "
-            "(a traversal or absolute-path escape is rejected before any "
-            "SSH traffic); the listing runs at -maxdepth 1 so it never "
-            "recurses into a subtree. Returns a ``{rows, total}`` envelope "
-            "with one row per file ({path, mtime, size_bytes}) ordered "
-            "newest-first -- the exact ordering the prune uses to pick its "
-            "keep window, so a caller can pass the same ``keep_newest`` a "
-            "prune request proposes and locally read off which rows that "
-            "prune would delete, without executing anything. Also answers "
-            "the routine backup-landing health check (how old / how large "
-            "is the newest artefact). safety_level=safe, "
-            "requires_approval=False -- pure ``find``, no mutation."
+            "Runs 'find' in /var/backups (or a folder inside it, not recursive) "
+            "on the HoloRouter and returns one row per file: path, modified time, "
+            "size. Read-only. The order is the same one holodeck.backups.prune "
+            "uses."
         ),
         parameter_schema={
             "type": "object",
@@ -2059,63 +1822,42 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Optional sub-path under /var/backups (absolute or "
-                        "relative to it). Must resolve strictly within "
-                        "/var/backups/**. Omit to list the root."
+                        "Optional folder inside /var/backups, as a full path or "
+                        "relative to it. Must stay inside /var/backups. Leave it "
+                        "out to list /var/backups itself."
                     ),
                 },
             },
             "additionalProperties": False,
+            "examples": [{"path": "<backup-folder>"}],
         },
-        response_schema={
-            "type": "object",
-            "properties": {
-                "rows": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string"},
-                            "mtime": {"type": "number"},
-                            "size_bytes": {"type": "integer"},
-                        },
-                    },
-                },
-                "total": {"type": "integer"},
-                "error": {"type": ["string", "null"]},
-            },
-            "additionalProperties": True,
-        },
+        response_schema=_R["holodeck.backups.list"],
         group_key="backups",
         tags=("read-only", "backups", "list", "holodeck"),
         safety_level="safe",
         requires_approval=False,
         llm_instructions={
-            "when_to_use": (
-                "Call before approving a ``holodeck.backups.prune`` (so the "
-                "reviewer sees exactly which files past the keep window "
-                "would be deleted, not just a ``keep_newest`` count), or as "
-                "a routine backup-landing health check on ``/var/backups`` "
-                "(is the hourly backup still landing? how old / how large "
-                "is the newest artefact?). Complements "
-                "``holodeck.disk.usage``'s aggregate byte count with the "
-                "per-file drill-down. " + _SSH_TRANSPORT_NOTE
+            "when_to_call": (
+                "Call before a holodeck.backups.prune, so the person who "
+                "approves it sees which files it would remove. Also call it to "
+                "check that new backups still arrive (age and size of the "
+                "newest file). " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
                 "path": (
-                    "Optional; must stay within /var/backups/**. Omit to "
-                    "list the root. Same bound as ``holodeck.backups.prune``."
+                    "Optional; must stay inside /var/backups. Leave it out for "
+                    "the top folder. Same rule as holodeck.backups.prune."
                 ),
             },
             "output_shape": (
-                "``{rows: [{path, mtime, size_bytes}], total: N}``, rows "
-                "newest-first (by mtime). ``mtime`` is epoch seconds with a "
-                "fractional part (``find -printf '%T@'``); ``size_bytes`` is "
-                "an integer (``%s``). The ordering matches "
-                "``holodeck.backups.prune``'s keep window, so rows at index "
-                ">= keep_newest are the ones that prune would remove. "
-                "``error`` is set (rows empty) when the SSH command failed "
-                "-- distinct from a genuinely empty directory."
+                "{rows: [{path, mtime, size_bytes}], total, error}, newest first. "
+                "'mtime' is seconds since 1970. With keep_newest=N, prune removes "
+                "the rows from index N on. 'error' is set (rows empty) when the "
+                "command failed; that is not the same as an empty folder."
+            ),
+            "next_step": (
+                "To remove old files, call holodeck.backups.prune with the same "
+                "path and a keep_newest value."
             ),
         },
     ),

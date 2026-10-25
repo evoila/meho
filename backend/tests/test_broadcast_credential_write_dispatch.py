@@ -1,33 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""G11.7-T1 (#1401) ``credential_write`` broadcast-redaction dispatch test.
+"""G11.7-T1 (#1401) ``credential_write`` dispatch test.
 
-Proves the request-side secret-redaction guarantee for the new Phase-C
-write ops whose secret rides in the *request params* (Vault
+Covers the write ops whose secret rides in the *request params* (Vault
 ``userpass.write`` / ``update_password``, ``vault.kv.put``, k8s
-``secret.create``): the broadcast feed must emit **aggregate-only** — the
-fact that a credential was written, never the secret material — while the
-:class:`~meho_backplane.connectors.schemas.OperationResult` returned to the
-caller is unaffected.
-
-Mechanism mirrors :mod:`tests.test_broadcast_credential_mint_dispatch`
-(``credential_mint``, response-side secret) but for the request-side
-class:
+``secret.create``):
 
 * :func:`~meho_backplane.broadcast.events.classify_op` returns
-  ``"credential_write"`` for the listed ops.
-* :func:`~meho_backplane.broadcast.events.redact_payload` collapses
-  ``credential_write`` to ``{op_class, result_status}``.
-* The broadcast publisher is swapped for a recording stub so the emitted
-  :class:`~meho_backplane.broadcast.events.BroadcastEvent` is inspectable
-  without a Valkey container — so this test runs **unconditionally** (no
-  ``BROADCAST_REDIS_URL`` skip guard), closing the AC4 leak-assertion gap
-  deterministically in the sandbox.
-
-The assertion is by-exclusion on the *whole serialised event*, not just
-``payload``: a regression that placed the secret in a new top-level field
-would pass a ``payload``-only check.
+  ``"credential_write"`` for the listed ops, and the audit row records it.
+* The written secret never reaches the stored audit row. The check looks
+  at the *whole* row payload, so a regression that adds the secret under
+  a new key is still caught.
 """
 
 from __future__ import annotations
@@ -38,17 +22,18 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-#: Distinctive secret — any appearance in a serialised event is a leak.
+#: Distinctive secret — any appearance in the audit row is a leak.
 _SENTINEL_SECRET = "wr1tesecret0sentinel"
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000007a1")
@@ -86,18 +71,6 @@ def _reset_module_state() -> Iterator[None]:
     yield
     reset_dispatcher_caches()
     clear_registry()
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with an in-memory recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -154,17 +127,14 @@ class _WriteConnector(Connector):
         "k8s.secret.create",
     ],
 )
-async def test_credential_write_broadcast_is_aggregate_only(
+async def test_credential_write_secret_not_in_audit_row(
     op_id: str,
-    captured_events: list[BroadcastEvent],
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A request-secret write broadcasts only ``{op_class, result_status}``.
+    """A request-secret write is audited as ``credential_write`` without the secret.
 
     AC4 (#1401): the written secret in ``params`` never appears in the
-    serialised BroadcastEvent. Driven through the real dispatcher +
-    broadcast path so the redaction is proven where it ships, not just
-    in a unit call to :func:`redact_payload`.
+    stored audit row. Driven through the real dispatcher + audit path.
     """
     register_connector_v2(product="credwrite", version="", impl_id="", cls=_WriteConnector)
     await register_typed_operation(
@@ -187,7 +157,7 @@ async def test_credential_write_broadcast_is_aggregate_only(
         id = uuid.uuid4()
         name = "cred-write-target"
 
-    # The secret rides in params — exactly what the broadcast must not leak.
+    # The secret rides in params — exactly what the audit row must not keep.
     result = await dispatch(
         operator=operator,
         connector_id="credwrite-1.x",
@@ -197,14 +167,13 @@ async def test_credential_write_broadcast_is_aggregate_only(
     )
     assert result.status == "ok", result.error
 
-    assert len(captured_events) == 1
-    event = captured_events[0]
-    assert event.op_id == op_id
-    assert event.op_class == "credential_write"
-    assert event.payload == {"op_class": "credential_write", "result_status": "ok"}
-
-    serialised = event.model_dump_json()
+    async with get_sessionmaker()() as fresh:
+        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.payload["op_class"] == "credential_write"
+    serialised = repr(row.payload)
     assert _SENTINEL_SECRET not in serialised, (
-        f"credential_write leak: {_SENTINEL_SECRET!r} reached the broadcast "
-        f"event for {op_id} — serialised event: {serialised}"
+        f"credential_write leak: {_SENTINEL_SECRET!r} reached the audit row "
+        f"for {op_id} — payload: {serialised}"
     )

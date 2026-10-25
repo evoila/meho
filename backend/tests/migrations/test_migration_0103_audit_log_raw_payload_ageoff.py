@@ -33,6 +33,10 @@ What they prove:
     and does not break the run.
 (h) A role that does not own the table cannot change what the check does
     by putting its own functions or operators on its ``search_path``.
+(i) A run with nothing to empty still writes its audit row, and the next
+    process start reads that row from PostgreSQL (where ``occurred_at``
+    comes back with a time zone, unlike SQLite) and waits for the rest of
+    the interval instead of running again.
 
 Rows are compared by the exact stored text of every column
 (``column::text``), not through ``to_jsonb``: ``to_jsonb`` would hide
@@ -52,6 +56,7 @@ runs inside its own ``asyncio.run`` boundary.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import uuid
@@ -61,6 +66,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from alembic import command
@@ -69,11 +75,15 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from meho_backplane import audit_retention
-from meho_backplane.audit_retention import AUDIT_RAW_PAYLOAD_PRUNE_PATH
+from meho_backplane.audit_retention import (
+    AUDIT_RAW_PAYLOAD_PRUNE_PATH,
+    AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID,
+)
 from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.db.models import AuditLog
 from meho_backplane.settings import get_settings
+from tests._pgvector_image import pgvector_test_image
 
 
 def _docker_socket_present() -> bool:
@@ -166,7 +176,7 @@ def pg() -> Iterator[_Pg]:
     """One PostgreSQL for the module: migrate to ``0102``, record the guard, then to head."""
     from testcontainers.postgres import PostgresContainer
 
-    image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+    image = pgvector_test_image()
     with PostgresContainer(image) as container:
         async_url = _async_url_from(container.get_connection_url())
         _alembic(async_url, "upgrade", "0102")
@@ -454,10 +464,14 @@ _CHANGE_BY_TYPE: dict[str, str] = {
     "timestamp with time zone": "COALESCE({col}, now()) + interval '1 second'",
     "jsonb": "'[\"changed\"]'::jsonb",
     "json": "'[\"changed\"]'::json",
+    "boolean": "NOT COALESCE({col}, false)",
 }
 #: Columns with a CHECK constraint get a value the constraint accepts, so
 #: only the guard can reject the change.
-_CHANGE_BY_COLUMN: dict[str, str] = {"policy_decision": "'deny'"}
+_CHANGE_BY_COLUMN: dict[str, str] = {
+    "policy_decision": "'deny'",
+    "event_class": "'policy_decision'",
+}
 
 
 def test_nulling_raw_payload_and_changing_any_other_column_is_rejected(pg: _Pg) -> None:
@@ -909,3 +923,75 @@ def test_non_owner_cannot_forge_a_row_with_shadowed_names(
             await engine.dispose()
 
     assert asyncio.run(_after()) == before
+
+
+# ---------------------------------------------------------------------------
+# (i) The schedule reads the last run from PostgreSQL
+# ---------------------------------------------------------------------------
+
+
+def test_restart_reads_the_last_run_and_does_not_run_early(
+    pg: _Pg, tick_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run with nothing to empty records itself; a restart then waits.
+
+    The interval counts from the last recorded run, not from process start.
+    This test inserts no rows older than the retention window, so the run
+    empties nothing and must still write its row. Then it starts the loop
+    again (with a fake ``asyncio.sleep``) and checks that it waits for the
+    rest of the interval and does not run.
+    """
+    interval = 604800
+    monkeypatch.setenv("RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS", str(interval))
+    get_settings.cache_clear()
+    newest_run = text("SELECT max(occurred_at) FROM audit_log WHERE path = :p AND tenant_id = :t")
+    run_params = {"p": AUDIT_RAW_PAYLOAD_PRUNE_PATH, "t": AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID}
+
+    async def _run() -> dict[str, Any]:
+        engine = create_async_engine(pg.async_url)
+        try:
+            prune_payloads = await _tick(engine)
+            async with engine.connect() as conn:
+                stored = (await conn.execute(newest_run, run_params)).scalar_one()
+            since = datetime.now(UTC) - timedelta(seconds=interval)
+            read = await audit_retention._last_recorded_run(since=since)
+            await dispose_engine()
+
+            sleeps: list[float] = []
+
+            async def _fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                if len(sleeps) >= 2:
+                    raise asyncio.CancelledError
+
+            with (
+                patch("asyncio.sleep", new=_fake_sleep),
+                contextlib.suppress(asyncio.CancelledError),
+            ):
+                await audit_retention._prune_loop()
+            await dispose_engine()
+
+            async with engine.connect() as conn:
+                after = (await conn.execute(newest_run, run_params)).scalar_one()
+            return {
+                "prune_payloads": prune_payloads,
+                "stored": stored,
+                "read": read,
+                "sleeps": sleeps,
+                "after": after,
+            }
+        finally:
+            await engine.dispose()
+
+    state = asyncio.run(_run())
+
+    assert len(state["prune_payloads"]) == 1, (
+        "a run must write its row even when it empties nothing"
+    )
+    assert state["prune_payloads"][0]["nulled_raw_payload_rows"] == 0
+    assert state["read"] is not None and state["read"].tzinfo is not None
+    assert state["read"] == state["stored"], "the schedule must read the newest run row"
+    sleeps = state["sleeps"]
+    assert sleeps[0] == audit_retention._FIRST_RUN_DELAY_SECONDS
+    assert interval - 60 <= sleeps[1] <= interval, f"expected about one interval; got {sleeps[1]}"
+    assert state["after"] == state["stored"], "the restart must not run again before the interval"

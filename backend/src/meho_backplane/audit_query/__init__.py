@@ -7,6 +7,9 @@ The package exposes the consumer-facing surface T2 (REST), T3 (CLI), and T4
 (MCP) dispatch through:
 
 * :func:`query_audit` — tenant-scoped paginated query handler.
+* :func:`count_event_classes` — per-event-class row counts for the same
+  filters (#3747), the counters the REST route and the console show.
+  Without a ``since`` it counts only the last :data:`DEFAULT_COUNT_WINDOW`.
 * :func:`replay_session` — per-session parent/child replay tree (G8.2-T3).
   The **reconstruct-sense** replay: rebuild what the agent saw by walking
   ``agent_session_id`` + ``parent_audit_id`` lineage in chronological order.
@@ -24,10 +27,10 @@ The package exposes the consumer-facing surface T2 (REST), T3 (CLI), and T4
   ``children``).
 * :class:`AuditQueryResult` — page of rows plus forward-only ``next_cursor``.
 * :class:`InvalidCursorError` — opaque-cursor decode failure.
-* :class:`UnsupportedFilterError` — filter targets a column the v0.2 substrate
-  cannot evaluate. As of G8.2-T3 (#1011) only the flat ``parent_audit_id``
-  filter raises (un-gating it is out of scope for #377); ``agent_session_id``
-  is a usable filter and replay reads ``parent_audit_id`` via a recursive CTE.
+* :class:`UnsupportedFilterError` — filter targets a column the substrate
+  cannot evaluate. No filter raises it today: ``parent_audit_id`` became a
+  normal exact-match filter in #4030, and replay reads the same column via a
+  recursive CTE.
 * :func:`parse_duration` / :class:`DurationParseError` — duration shorthand
   (``"24h"`` / ``"7d"`` / ISO-8601) → :class:`datetime` parser used by the
   T2 REST router layer (G8.1-T2 #466).
@@ -41,31 +44,49 @@ from __future__ import annotations
 
 from .cursor import CursorPosition, InvalidCursorError, decode_cursor, encode_cursor
 from .duration import DurationParseError, parse_duration
+from .loose_rows import (
+    DEFAULT_RECENT_WINDOW,
+    LOOSE_ROWS_MAX_LIMIT,
+    LooseRow,
+    LooseRowsResult,
+    count_loose_rows_in_forest,
+    find_loose_rows,
+)
 from .policy_replay import PolicyReplayResult, PolicyReplayStatus, replay_policy
-from .query import UnsupportedFilterError, query_audit
+from .query import DEFAULT_COUNT_WINDOW, UnsupportedFilterError, count_event_classes, query_audit
 from .replay import replay_session
 from .schemas import (
     AuditEntry,
     AuditQueryFilters,
     AuditQueryResult,
+    EventClassCounts,
     MyRecentPage,
     ReplayNode,
 )
 
 __all__ = [
+    "DEFAULT_COUNT_WINDOW",
+    "DEFAULT_RECENT_WINDOW",
+    "LOOSE_ROWS_MAX_LIMIT",
     "AuditEntry",
     "AuditQueryFilters",
     "AuditQueryResult",
     "CursorPosition",
     "DurationParseError",
+    "EventClassCounts",
     "InvalidCursorError",
+    "LooseRow",
+    "LooseRowsResult",
     "MyRecentPage",
     "PolicyReplayResult",
     "PolicyReplayStatus",
     "ReplayNode",
     "UnsupportedFilterError",
+    "count_event_classes",
+    "count_loose_rows_in_forest",
     "decode_cursor",
     "encode_cursor",
+    "find_loose_rows",
     "parse_duration",
     "query_audit",
     "replay_policy",

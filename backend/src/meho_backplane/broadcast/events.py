@@ -77,7 +77,9 @@ from meho_backplane.redaction.resolver import get_default_policy
 __all__ = [
     "BroadcastEvent",
     "classify_op",
+    "is_secret_param_name",
     "redact_payload",
+    "resolve_op_class",
     "scrub_broadcast_params",
     "scrub_secret_named_values",
 ]
@@ -106,6 +108,44 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         # so audit + broadcast collapse to aggregate-only on top of its
         # requires_approval gate; the result is value-free by construction.
         "k8s.secret.read_to_ref",
+        # #4617 -- the ingested SDDC Manager reads whose answer holds
+        # credentials. Same posture as ``sddc.credential.list``: the catalog
+        # row ``sddc`` / ``9.0`` raises them to caution with approval, and
+        # this entry scrubs the answer and collapses the broadcast. An op id
+        # matches on its own, so one entry covers the path on every
+        # ingested connector that serves it.
+        # The credential store and its password-rotation tasks.
+        "GET:/v1/credentials",
+        "GET:/v1/credentials/{id}",
+        "GET:/v1/credentials/tasks",
+        "GET:/v1/credentials/tasks/{id}",
+        "GET:/v1/credentials/tasks/{id}/subtasks/{subtaskId}",
+        "GET:/v1/credentials/tasks/{id}/resource-credentials",
+        # Depot, backup and proxy settings carry account passwords.
+        "GET:/v1/system/settings/depot",
+        "GET:/v1/system/backup-configuration",
+        "GET:/v1/system/backup-configuration/backup-locations",
+        "GET:/v1/system/proxy-configuration",
+        # Host prechecks echo the host password; VASA providers and their
+        # users carry passwords; a management-component task spec carries
+        # the admin and root passwords.
+        "GET:/v1/hosts/prechecks/{id}",
+        "GET:/v1/vasa-providers",
+        "GET:/v1/vasa-providers/{id}",
+        "GET:/v1/vasa-providers/{id}/users",
+        "GET:/v1/vcf-management-components/tasks/{taskId}/spec",
+        # Users carry an API key; identity providers carry the sync client
+        # bearer token.
+        "GET:/v1/users",
+        "GET:/v1/users/ui",
+        "GET:/v1/users/local/admin",
+        "GET:/v1/identity-providers",
+        "GET:/v1/identity-providers/{id}",
+        # #4617 -- a BIND config file can hold TSIG and rndc key secrets.
+        # The answer is one text field, so the Tier-1 ``bind_key_secret``
+        # rule does the redaction; this entry collapses the broadcast and
+        # keeps the flight recorder from storing the body.
+        "bind9.config.show",
     }
 )
 
@@ -341,15 +381,26 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # would otherwise fall through to ``other`` and broadcast in full).
         # Same posture as its ``vcfa.provider.api_token.create`` sibling.
         "vcfa.provider.api_token.revoke",
+        # The vCenter appliance local-account password change. Like
+        # ``keycloak.user.reset_password``, its params carry only a Vault
+        # *path* (``password_secret_ref``); the new password is read
+        # in-process and sent only in the ``PATCH
+        # /api/appliance/local-accounts/{username}`` request BODY. The pin
+        # sets body_recorded=false for its flight-recorder spans, collapses
+        # the broadcast to aggregate-only, and keeps a waiting approval's
+        # params in the encrypted handoff store. Its sibling
+        # ``vmware.appliance.local_account.policy.set`` sends only expiry
+        # numbers and flags, so it is NOT pinned.
+        "vmware.appliance.local_account.password.set",
     }
 )
 
 #: Op-ids that classify as ``checks`` — the checks subsystem's own
-#: state-change events, published by
-#: :mod:`meho_backplane.checks.broadcast` rather than by the audit
-#: middleware: the Dashboard rollup edge (#2720,
-#: ``publish_check_transition_event``) and the evaluation-loop watchdog's
-#: stall/recovery pair (#2763, ``publish_scheduler_liveness_event``).
+#: state-change events: the Dashboard rollup edge (#2720) and the
+#: evaluation-loop watchdog's stall/recovery pair (#2763). The checks
+#: plane stopped publishing them to Broadcast in #3758 (checks keep their
+#: own notification pipeline); the class stays so older entries still
+#: classify the same way.
 #:
 #: An explicit allowlist, **not** a ``checks.`` prefix branch. The
 #: ``/api/v1/checks/*`` gateway routes already own three shipped op-ids
@@ -487,6 +538,25 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         "keycloak.group.update_attributes",
         "keycloak.group.member.add",
         "keycloak.group.member.remove",
+        # pfSense user flag writes (#3937): ``.disable`` / ``.enable`` are not
+        # write suffixes, and a suffix would also relabel the flat ``meho_``
+        # mirror. The params carry only a user name, so plain ``write``.
+        "pfsense.user.disable",
+        "pfsense.user.enable",
+        # keycloak per-user session logout (#3851): a mutation (it ends live
+        # sessions) whose ``.logout`` suffix is not a write suffix. Its params
+        # are a user id or username only, so plain ``write``.
+        "keycloak.user.logout",
+        # MEHO's own registry writes, run through the dispatcher on synthetic
+        # connectors. None of their verbs is a write suffix, so without a pin
+        # they showed as ``other``. Their params carry no secret material
+        # (``targets.register`` takes a ``secret_ref`` path, never a secret).
+        "targets.register",
+        "topology.annotate",
+        "topology.unannotate",
+        "topology.bulk_import",
+        "topology.create_node",
+        "topology.delete_node",
     }
 )
 
@@ -696,24 +766,19 @@ def classify_op(op_id: str) -> str:
        their dotted identity forever.
     4b. ``approval`` — every op-id with the ``approval.`` prefix
        (``approval.pending`` / ``.approved`` / ``.rejected`` /
-       ``.expired``, emitted by
-       :func:`~meho_backplane.operations.approval_queue.publish_approval_event`)
-       classifies as the dedicated ``approval`` class. The approvals
-       console surface (G10.7-T3 #1778) subscribes its notifications
-       bell to ``/ui/broadcast/stream?op_class=approval`` -- an
-       exact-match server-side filter on this class -- so the lifecycle
-       events need their own class rather than falling through to
-       ``other`` (which would mix them with every unclassified op and
-       defeat the filter). The class is **not** sensitive
+       ``.expired``, and the ``approval.*`` audit op-ids) classifies as
+       the dedicated ``approval`` class, so an ``op_class=approval``
+       audit filter finds the lifecycle rows rather than mixing them
+       with every unclassified op under ``other``. The class is **not** sensitive
        (``approval.*`` payloads carry only ``connector_id`` / ``op_id`` /
        ``decision`` / the request id, never secret material), so it
        stays full-detail like ``other`` did -- see
        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`.
     4c. ``checks`` — the checks subsystem's own state-change events
-       (:data:`_CHECK_EVENT_OPS`; ``checks.transition`` from #2720's
-       :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
+       (:data:`_CHECK_EVENT_OPS`; ``checks.transition`` from #2720
        plus #2763's ``checks.scheduler_stalled`` /
-       ``checks.scheduler_recovered`` watchdog pair).
+       ``checks.scheduler_recovered`` watchdog pair; no longer published
+       since #3758).
        Its own class for the same reason ``approval`` has one: a feed
        watcher filters ``op_class=checks`` server-side to follow
        Dashboard rollup edges without reading every unclassified op.
@@ -816,6 +881,8 @@ def classify_op(op_id: str) -> str:
     'write'
     >>> classify_op("topology.refresh")  # a read: .refresh is deliberately not global
     'other'
+    >>> classify_op("targets.register")  # registry write, exact-match pin
+    'write'
     >>> classify_op("some.unknown.op")
     'other'
     >>> classify_op("meho_audit_replay")
@@ -879,6 +946,42 @@ def classify_op(op_id: str) -> str:
     return "other"
 
 
+#: Classes :func:`resolve_op_class` never lets a declared class replace:
+#: they decide that the broadcast shows only an aggregate (decision #3).
+_SECRET_SHAPE_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_read", "credential_mint", "credential_write", "audit_query"}
+)
+
+
+def resolve_op_class(op_id: str, declared: str | None = None) -> str:
+    """Return the one op class an audit row and its broadcast event both carry.
+
+    Every audit writer (HTTP middleware, MCP handler, dispatcher) and every
+    broadcast publisher calls this, so the two records of one call can never
+    disagree on the class.
+
+    * *declared* is the class the caller states for the op: the MCP tool's
+      ``op_class``, or a route's ``audit_op_class``. It wins over the class
+      :func:`classify_op` derives from the op id, because a tool name like
+      ``list_targets`` carries no verb suffix the classifier knows.
+    * The one exception: when :func:`classify_op` says the op touches
+      credentials or the audit log, that class wins. A declared class can
+      never turn an aggregate-only broadcast into a full one.
+    * With no *declared* class, the derived class is the answer.
+
+    >>> resolve_op_class("list_targets", "read")
+    'read'
+    >>> resolve_op_class("list_targets")
+    'other'
+    >>> resolve_op_class("vault.kv.read", "read")
+    'credential_read'
+    """
+    derived = classify_op(op_id)
+    if declared and derived not in _SECRET_SHAPE_CLASSES:
+        return declared
+    return derived
+
+
 def _maybe_row_count(raw_params: dict[str, Any]) -> int | None:
     """Extract ``row_count`` from the publisher's combined params dict.
 
@@ -939,8 +1042,7 @@ def redact_payload(
     When ``"aggregate"`` or ``"full"`` is passed
     explicitly, the resolver (:func:`compute_effective_broadcast_detail`)
     has already decided the effective detail and this function just
-    renders it. Callers that don't go through the resolver
-    (:func:`meho_backplane.operations._audit.publish_broadcast`) keep
+    renders it. Callers that don't go through the resolver keep
     the ``detail=None`` default and the existing per-class behaviour.
 
     Forward-compatibility note: the return shape is a plain ``dict``
@@ -1032,13 +1134,16 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: Adjacent token pairs that mark a key as secret-bearing when the
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
-#: even though ``secret`` is non-final there).
+#: even though ``secret`` is non-final there; ``license_key`` -- a
+#: product licence is a credential a vendor file may show in clear).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("api", "key"),
         ("access", "key"),
         ("private", "key"),
         ("encryption", "key"),
+        ("license", "key"),
+        ("licence", "key"),
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
@@ -1057,11 +1162,20 @@ def _is_secret_param_name(name: str) -> bool:
     """True when *name* is a secret-shaped param/field name.
 
     Normalises camelCase and kebab-case to snake_case tokens, then
-    checks single tokens and adjacent pairs. Shared by the runtime
-    scrub below and the classifier-coverage test's parameter-schema
-    sweep so both layers agree on what "secret-bearing" means.
+    checks single tokens and adjacent pairs. The name is also checked
+    once without the camelCase split, so an odd-cased whole word still
+    matches as one token. Shared by the runtime scrub below and the
+    classifier-coverage test's parameter-schema sweep so both layers
+    agree on what "secret-bearing" means.
     """
-    normalised = _CAMEL_BOUNDARY.sub("_", name).replace("-", "_").replace(".", "_").lower()
+    flat = name.replace("-", "_").replace(".", "_")
+    return _tokens_are_secret(_CAMEL_BOUNDARY.sub("_", flat).lower()) or _tokens_are_secret(
+        flat.lower()
+    )
+
+
+def _tokens_are_secret(normalised: str) -> bool:
+    """Apply the token rules to an already-normalised snake_case name."""
     tokens = [token for token in normalised.split("_") if token]
     if not tokens:
         return False
@@ -1070,6 +1184,52 @@ def _is_secret_param_name(name: str) -> bool:
     if tokens[-1] in _SECRET_NAME_TOKENS_FINAL:
         return True
     return any(pair in _SECRET_NAME_TOKEN_PAIRS for pair in itertools.pairwise(tokens))
+
+
+def is_secret_param_name(name: str) -> bool:
+    """Public entry to :func:`_is_secret_param_name`.
+
+    The approval-park params echo
+    (:func:`~meho_backplane.operations._preview._redact_echoed_params`)
+    uses it to decide which param values to mask, so the echo and the
+    broadcast scrub cannot disagree on what a secret-named param is.
+    """
+    return _is_secret_param_name(name)
+
+
+#: Each adjacent pair written as one word, for a name whose case is lost.
+_SECRET_NAME_PAIRS_JOINED: Final[frozenset[str]] = frozenset(
+    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS
+)
+
+
+def is_secret_param_name_lowercased(name: str) -> bool:
+    """True when *name* can be a secret-shaped name once its case is lost.
+
+    An HTML parser lowercases element and attribute names, so
+    ``licenseKey`` arrives as ``licensekey`` and the camelCase boundary
+    that :func:`is_secret_param_name` splits on is gone. This check asks
+    whether any placement of such boundaries makes the name secret: a
+    token that contains a secret word anywhere, a last token that ends in
+    a final-position word, or two pair words that touch, inside one
+    token or across two. It matches more names than the exact rule
+    (``passwordless`` counts); that replaces a value more, never less.
+    """
+    flat = name.replace("-", "_").replace(".", "_").lower()
+    tokens = [token for token in flat.split("_") if token]
+    if not tokens:
+        return False
+    if any(word in token for token in tokens for word in _SECRET_NAME_TOKENS_ANYWHERE):
+        return True
+    if any(tokens[-1].endswith(word) for word in _SECRET_NAME_TOKENS_FINAL):
+        return True
+    if any(pair in token for token in tokens for pair in _SECRET_NAME_PAIRS_JOINED):
+        return True
+    return any(
+        left.endswith(first) and right.startswith(second)
+        for left, right in itertools.pairwise(tokens)
+        for first, second in _SECRET_NAME_TOKEN_PAIRS
+    )
 
 
 def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:

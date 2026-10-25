@@ -3,8 +3,8 @@
 
 # Claude Code plugin — PR behavioral + conformance tests.
 #
-# Three suites pin the plugin's behavioural contracts, each stubbing the
-# binary it drives (`npm` / `meho`) on a controlled PATH:
+# Four suites pin the plugin's behavioural contracts. The first three stub
+# the binary they drive (`npm` / `meho`) on a controlled PATH:
 #   1. The stdio shim wrapper (bin/meho-mcp-remote) vendors mcp-remote from
 #      its committed package-lock.json with `npm ci --omit=dev` (no floating
 #      `npx -y`), then runs the lock-installed local entry with
@@ -19,8 +19,17 @@
 #   3. The SessionStart reflex hook (bin/session-start.sh) shells out to
 #      the `meho` CLI and injects a digest whose recent-activity window
 #      must exclude `__sensor__` heartbeat rows.
+#   4. The login guard (lib/login-guard.mjs, #3961, #4000): an unfinished
+#      login stops after a time limit, a login that expires during a session
+#      fails the call fast with a clear message, and a connected session
+#      frees the login callback port so another session can log in. Its
+#      end-to-end tests run the real mcp-remote from the committed lock
+#      against a fake MEHO + Keycloak on 127.0.0.1, so the workflow vendors
+#      that tree first (`npm ci` from the lock — the same install the shim
+#      does on an operator's machine). MEHO_PLUGIN_E2E=1 makes a missing
+#      tree a failure instead of a skip.
 # This workflow runs every `test/*.test.mjs` suite whenever a PR touches
-# the plugin sources. No network / npm install.
+# the plugin sources.
 #
 # Advisory (non-required) and path-scoped, mirroring mcpb-bundle.yml. A
 # required check would need the `changes`-job + job-`if:` shape ci.yml uses
@@ -56,9 +65,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
 
-      - name: Plugin tests — shim argv, hooks matcher conformance, session-start digest
+      - name: Vendor mcp-remote from the committed lock (for the login-guard end-to-end tests)
+        working-directory: clients/claude-code-plugin
+        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+      - name: Plugin tests — shim argv, hooks matcher conformance, session-start digest, login guard
+        env:
+          MEHO_PLUGIN_E2E: '1'
         run: node --test clients/claude-code-plugin/test/*.test.mjs

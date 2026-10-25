@@ -16,6 +16,14 @@
 # suitable for the chassis-stage backplane; tune via overrides for higher-
 # throughput deployments.
 
+# Values Helm hands to the parent chart and every subchart.
+global:
+  # -- Set to true on OpenShift. The built-in core parts then leave out
+  # `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user
+  # id from the project's range (it refuses a fixed one outside it). On
+  # other clusters keep false: the pods run with fixed, non-root user ids.
+  openshift: false
+
 # -- Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2.
 replicaCount: 1
 
@@ -387,6 +395,9 @@ resources:
 # Required fields are placeholders; the chart fails-closed when they're left
 # empty (the backplane raises at startup, which surfaces as a CrashLoopBackOff).
 config:
+  # -- Bring-your-own Keycloak only: the issuer and the token audience.
+  # Leave both empty with the built-in Keycloak (`coreKeycloak.enabled`),
+  # which sets them.
   keycloakIssuerUrl: ""
   keycloakAudience: ""
   # -- Public OAuth client_id the CLI uses to drive the RFC 8628
@@ -556,6 +567,17 @@ config:
   # (docs-site "Do real work → Approvals and break-glass") and
   # `docs/codebase/approvals.md`.
   approvalAllowSelfApproval: "false"
+  # -- Lab-class switch for **delegated** approval decisions (#3693).
+  # Rendered into `APPROVAL_ALLOW_DELEGATED_DECISION`. A delegated decision
+  # is an approve or reject whose reason ends with an `Instructed-by:`
+  # block: the approver acts on another person's written instruction.
+  # Default `"false"` (fail-closed, production): MEHO refuses every
+  # delegated decision with 403 `delegated_decision_forbidden`, so an
+  # approve or reject is always the approver's own call. Set `"true"` ONLY
+  # on a lab-class deployment. Ordinary decisions are never affected.
+  # `GET /ready` → `features.approval_queue.delegated_decision_posture`
+  # shows the stance. See `docs/codebase/approvals.md`.
+  approvalAllowDelegatedDecision: "false"
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's
@@ -628,7 +650,8 @@ topology:
   # required. Range [0, 3650] (10 years upper bound).
   historyRetentionDays: 90
   # -- Cadence of the in-process history retention prune sweeper, in
-  # seconds. Default 604800 (7d / weekly) matches Initiative #365's
+  # seconds. Counted from the last recorded run, so a pod restart does not
+  # start it again. Default 604800 (7d / weekly) matches Initiative #365's
   # stated cadence ("a weekly background task prunes rows"). Range
   # [60, 604800]: below one minute the prune competes with normal
   # write load; the ceiling is the documented weekly cadence --
@@ -667,7 +690,8 @@ auditRawPayload:
   # Range [0, 3650] (10y ceiling).
   retentionDays: 90
   # -- Cadence of the in-process raw-payload age-off sweeper, in seconds.
-  # Default 604800 (7d / weekly) matches the topology-history prune. Range
+  # Counted from the last recorded run, so a pod restart does not start it
+  # again. Default 604800 (7d / weekly) matches the topology-history prune. Range
   # [60, 604800]: operators wanting a tighter exposure window lower
   # `retentionDays` instead of raising the cadence.
   pruneIntervalSeconds: 604800
@@ -697,7 +721,8 @@ broadcastAnnouncement:
   # exchange for full historical retention. Range [0, 3650] (10y ceiling).
   retentionDays: 90
   # -- Cadence of the in-process announcement retention prune sweeper, in
-  # seconds. Default 604800 (7d / weekly). Range [60, 604800]: below one
+  # seconds. Counted from the last recorded run, so a pod restart does not
+  # start it again. Default 604800 (7d / weekly). Range [60, 604800]: below one
   # minute the prune competes with the announce write load; the ceiling
   # is the documented weekly cadence.
   pruneIntervalSeconds: 604800
@@ -877,7 +902,9 @@ checkRunner:
     secretKey: client_secret
 
 keycloak:
-  # -- Keycloak issuer URL — MUST be set; empty fails the schema. The JWT
+  # -- Keycloak issuer URL — MUST be set for a bring-your-own Keycloak;
+  # empty fails the schema. Leave it empty with the built-in Keycloak
+  # (`coreKeycloak.enabled`), which sets the issuer itself. The JWT
   # validator uses this as the `iss` claim expectation and to discover JWKS.
   issuer: ""
   # -- Keycloak audience (= the client ID in Keycloak that fronts the
@@ -919,6 +946,13 @@ agent:
   # matches the ESO target rendered by `eso.agent` when that path is
   # enabled, so operators who opt into both don't have to reconcile names.
   secretKey: api_key
+  # -- Most output tokens the agent asks the model for in one answer
+  # (`AGENT_MAX_OUTPUT_TOKENS`). Output tokens are the text the model writes
+  # back. Used by the Anthropic backend only. Range 1 to 128000. A higher
+  # value costs more, can make one answer take much longer, and above about
+  # 21000 the request is sent as a stream. The default 4096 keeps requests
+  # as they were before this setting existed.
+  maxOutputTokens: 4096
 
 # Keycloak Admin API credentials (G11.2 #803). The
 # `KeycloakAdminClient` (`meho_backplane.auth.keycloak_admin`) is what
@@ -965,6 +999,26 @@ keycloakAdmin:
     # opt into both don't have to reconcile names.
     secretKey: client_secret
 
+sandboxMode:
+  # -- Sandbox mode (#4622, `docs/decisions/sandbox-mode.md`). Only for an
+  # instance that holds disposable test systems: systems built for one
+  # test and deleted after it. When on, a tenant admin may give a service
+  # principal a standing grant that also covers deletes, made in the web
+  # console and expiring within 30 days, so an automated test run deletes
+  # its own systems with no wait for a person. Every other instance keeps
+  # today's rules. Default false renders no sandbox setting at all.
+  #
+  # The mode is set at install time and fixed for the life of the
+  # database: MEHO stores it at the first start and refuses to start when
+  # the stored mode differs. To change it, install a new instance with a
+  # new database. The backplane also refuses to start when the host name
+  # has no dot-separated part that is exactly `sandbox`.
+  enabled: false
+  # -- Must equal `ingress.host` when `enabled` is true; the render fails
+  # otherwise. Rendered into `MEHO_SANDBOX_MODE_CONFIRM`, which the
+  # backplane checks against the host of its MCP resource URI at boot.
+  confirmHost: ""
+
 # Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
 # Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two
 # confidential values in addition to the plain `config.uiKeycloakClientId`:
@@ -1009,10 +1063,187 @@ uiConsole:
 # Credential-write approvals keep their input in a short-lived encrypted
 # custody row. This independent key is wired only by secretKeyRef; it is not
 # shared with the optional browser-console session key.
+#
+# REQUIRED if any credential-write operation (for example a Vault KV write)
+# must wait for approval. While this block is off, the pod gets no
+# APPROVAL_HANDOFF_ENCRYPTION_KEY and MEHO denies every such operation
+# instead of letting it wait for approval. `GET /ready` shows the state under
+# `features.approval_custody`. Create a Fernet key with
+# `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`,
+# store it in a Kubernetes Secret, then set `enabled: true` and `secretName`.
+# Steps and key rotation: docs/codebase/approvals.md.
 approvalHandoff:
   enabled: false
   secretName: ""
   secretKey: approval_handoff_encryption_key
+
+# Built-in core: the Secrets the install makes (#4041).
+#
+# When a built-in part is on, a hook Job runs before every install and
+# upgrade (templates/core-secrets-job.yaml). It makes each password and key
+# that part needs as a Kubernetes Secret named `<release>-core-…`, if the
+# Secret is missing. It never changes an existing Secret and prints no
+# value. Secret names, keys and formats: docs/codebase/core-secrets.md.
+#
+# To use your own Secret instead, put its name in the matching values key
+# (for example `postgres.credentialsSecret` or `approvalHandoff.secretName`).
+# The Job then only checks that your Secret holds the keys MEHO reads. An
+# empty key, or the `<release>-core-…` name itself, lets the install make the
+# Secret.
+#
+# The Job reuses `migrationJob.backoffLimit`, `ttlSecondsAfterFinished` and
+# `resources`. The PostgreSQL and Keycloak subcharts add their own settings
+# to the two blocks below.
+corePostgres:
+  # -- Built-in PostgreSQL. When on, the install makes
+  # `<release>-core-postgres-superuser`, `-core-postgres-meho` and
+  # `-core-postgres-keycloak`.
+  enabled: false
+  existingSecrets:
+    # -- Your own Secret with the PostgreSQL superuser password (key
+    # `password`). Empty = the install makes
+    # `<release>-core-postgres-superuser`.
+    superuser: ""
+    # -- Your own Secret with the password of the `keycloak` database role
+    # (key `password`). Empty = the install makes
+    # `<release>-core-postgres-keycloak`.
+    keycloak: ""
+  # The subchart settings below (#4039): one PostgreSQL 17 server with
+  # pgvector and two databases, `meho` and `keycloak`, each owned by a role
+  # of the same name that is not a superuser. The chart creates the
+  # `vector` extension itself, so the pgvector step described at
+  # `postgres.credentialsSecret` is not needed. A sidecar in the
+  # PostgreSQL pod sets the role passwords again whenever the Secrets
+  # change. The superuser Secret is mounted by the PostgreSQL pod alone.
+  # Off by default for now; it turns on by default once the existing
+  # bring-your-own installs set `corePostgres.enabled: false`.
+  image:
+    repository: pgvector/pgvector
+    tag: "0.8.7-pg17-bookworm"
+    # -- When set, the pod uses `repository@digest`; the tag is a label.
+    digest: "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
+    pullPolicy: IfNotPresent
+  persistence:
+    # -- Data disk size. Fixed after the first install (StatefulSet rule).
+    size: 10Gi
+    # -- Storage class. Empty = the cluster default.
+    storageClass: ""
+  # -- UID/GID 999 is the image's `postgres` user. `global.openshift: true`
+  # leaves out `runAsUser`, `runAsGroup` and `fsGroup`.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 128Mi
+  reconcile:
+    # -- Resources of the reconcile sidecar.
+    resources:
+      limits:
+        cpu: 100m
+        memory: 64Mi
+        ephemeral-storage: 64Mi
+      requests:
+        cpu: 10m
+        memory: 32Mi
+        ephemeral-storage: 16Mi
+  # -- The subchart's own ingress NetworkPolicy: tcp/5432 only from the
+  # backplane pods (also the migration step and the helm test pod) and the
+  # Keycloak pods of this release.
+  networkPolicy:
+    enabled: true
+    backplanePodLabels:
+      app.kubernetes.io/name: meho
+    keycloakPodLabels:
+      app.kubernetes.io/name: keycloak
+    extraAllowedSelectors: []
+coreKeycloak:
+  # -- Built-in Keycloak. When on, the install makes
+  # `<release>-core-keycloak-bootstrap` and the three MEHO client secrets
+  # `-core-keycloak-admin`, `-core-ui-auth` and `-core-check-runner`, and
+  # deploys the Keycloak subchart (`charts/keycloak/`): Keycloak on the
+  # official image at `https://<host>/auth`, with the MEHO realm loaded at
+  # the first start. Needs `corePostgres.enabled: true`. Every other key is
+  # described in `charts/keycloak/values.yaml`; set it here.
+  #
+  # While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`,
+  # `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
+  # `checkRunner.clientSecret.secretName` must stay empty or name the
+  # `<release>-core-…` Secret, because Keycloak reads only that name; the
+  # render stops otherwise.
+  #
+  # When on, the chart also sets the backplane's Keycloak settings itself:
+  # the issuer `https://<hostname>/auth/realms/meho`, the Service address
+  # for discovery and token calls (`KEYCLOAK_DISCOVERY_URL`), the audience
+  # `meho-backplane`, the client ids `meho-cli` and `meho-web`, and
+  # `KEYCLOAK_ADMIN_*` for the `meho-admin` client. Leave
+  # `config.keycloakIssuerUrl` and `keycloak.issuer` empty (the render
+  # stops otherwise); `config.keycloakAudience`, `config.keycloakCliClientId`,
+  # `config.uiKeycloakClientId` and `keycloakAdmin.url` / `clientId` are
+  # not used. Pods call Keycloak over plain HTTP inside the namespace (see
+  # docs/codebase/devops.md, "How the backplane uses it").
+  enabled: false
+  # -- MEHO's public DNS name. Set the same value as `ingress.host`.
+  hostname: ""
+  # -- The first tenant's id (a UUID). Pick one per install and keep it.
+  firstTenantId: ""
+  ingress:
+    # -- Also route the admin console (`/auth/admin`, `/auth/realms/master`)
+    # on the MEHO host. Default false: the admin console is then not
+    # reachable from outside the cluster.
+    exposeAdmin: false
+  existingSecrets:
+    # -- Your own Secret with Keycloak's first-start service account (keys
+    # `client_id` and `client_secret`). Empty = the install makes
+    # `<release>-core-keycloak-bootstrap`.
+    bootstrap: ""
+  # The two people the install makes at the first start (the realm stage of
+  # the bootstrap Job, docs/codebase/core-bootstrap.md). Their temporary
+  # passwords are in `<release>-core-first-login`; Keycloak asks for a new
+  # password at the first login. A change here after the first install has
+  # no effect: the Secret and the users already exist.
+  firstLogin:
+    # -- User name of the first admin (in MEHO-Admins, with platform_admin).
+    adminUsername: admin
+    # -- User name of the second person, who can approve (MEHO-SA-Operators).
+    approverUsername: approver
+  # A login for automated install proofs. Off by default; turn it on only
+  # on a test install. When on, the bootstrap Job makes the service client
+  # `meho-ci` (a tenant admin of the first tenant, secret in
+  # `<release>-core-ci-login`) and the group `MEHO-CI-Admins` for a second
+  # tenant.
+  ci:
+    enabled: false
+    # -- The second tenant's id (a UUID). Required when `ci.enabled` is true.
+    tenantId: ""
+
+coreVault:
+  # -- Built-in OpenBao, the password safe (ADR 0008). When on, the install
+  # deploys the OpenBao subchart (`charts/openbao/`): one OpenBao server with
+  # its own disk at `http://<release>-vault:8200` inside the namespace. The
+  # `vault:` block above stays for a Vault you bring yourself. Every other
+  # key is described in `charts/openbao/values.yaml`; set it here.
+  enabled: false
+  # -- Bind OpenBao's service account to `system:auth-delegator` (a
+  # ClusterRoleBinding, the chart's only cluster-wide object). Default false:
+  # MEHO does not need it.
+  authDelegator: false
 
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store
@@ -1078,6 +1309,67 @@ broadcast:
     password: ""
   # -- Broadcast subchart's own ingress NetworkPolicy (subchart
   # `networkPolicy` block). Admits tcp/6379 only from the backplane Pods.
+  networkPolicy:
+    enabled: true
+    backplanePodLabels:
+      app.kubernetes.io/name: meho
+    extraAllowedSelectors: []
+
+# Dedicated result-cache store (`charts/result-cache/`, Valkey 9.x). Holds
+# the full rows behind result handles, apart from the broadcast store above,
+# so a burst of large handles can only fill this store. Off by default.
+# Roll order: enable the store with `writerEnabled: false`, roll out, check
+# the backplane can reach it, then set `writerEnabled: true`.
+resultCache:
+  enabled: false
+  # -- Sets RESULT_CACHE_WRITER_ENABLED on the backplane. While false, new
+  # result handles are written to the broadcast store; reads already check
+  # this store first and then the broadcast store.
+  writerEnabled: false
+  image:
+    repository: valkey/valkey
+    tag: "9.0-alpine"
+    pullPolicy: IfNotPresent
+  # -- Replica count. Capped at 1 (no persistence, no Sentinel).
+  replicas: 1
+  # -- Valkey `maxmemory` byte ceiling. Generous default; a load test may
+  # tune it. Keep it below `resources.limits.memory`.
+  maxmemory: "768mb"
+  # -- Valkey `maxmemory-policy`. `noeviction` refuses new result writes at
+  # the ceiling instead of dropping live handles.
+  maxmemoryPolicy: noeviction
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 512Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+  service:
+    type: ClusterIP
+    port: 6379
+  # -- Valkey requirepass authentication. Same shape as `broadcast.auth`.
+  auth:
+    enabled: true
+    existingSecret: ""
+    existingSecretPasswordKey: requirepass
+    password: ""
+  # -- The subchart's own ingress NetworkPolicy. Admits tcp/6379 only from
+  # the backplane Pods.
   networkPolicy:
     enabled: true
     backplanePodLabels:
@@ -1279,6 +1571,34 @@ networkPolicy:
   # satellite-runner inbound listener are out of scope — they use the
   # ingress hostname, not this rule.
   ingestAllowedNamespaces: []
+  # -- Extra outgoing rules for the backplane NetworkPolicy, each a normal
+  # Kubernetes egress rule, added exactly as written (#3516). With the
+  # policy on, the backplane reaches only the three CIDRs above, the
+  # in-cluster stores and DNS — list here the networks of the systems MEHO
+  # manages and the AI service. Open only the networks and ports MEHO
+  # needs. Every rule must have a `to` list (the chart refuses a rule
+  # without one, because Kubernetes reads a missing `to` as "every
+  # destination"). The rule is checked against the address the packet is
+  # redirected to, so for a system behind an in-cluster ingress or load
+  # balancer name the ingress Pods and their port, not the VIP. Example:
+  #   extraEgress:
+  #     - to:
+  #         - ipBlock:
+  #             cidr: 192.0.2.0/24
+  #       ports:
+  #         - port: 443
+  #           protocol: TCP
+  #     - to:
+  #         - namespaceSelector:
+  #             matchLabels:
+  #               kubernetes.io/metadata.name: traefik
+  #           podSelector:
+  #             matchLabels:
+  #               app.kubernetes.io/name: traefik
+  #       ports:
+  #         - port: 8443
+  #           protocol: TCP
+  extraEgress: []
 
 # -- Node selector applied to the Pod template.
 nodeSelector: {}

@@ -14,7 +14,7 @@
 * A handle that is too old is ``-32602`` with ``data.reason ==
   "search_again"``; a rate limit is ``-32000`` with ``retry_after_seconds``.
 * ``read_handle`` rides ``search_docs`` hits only for a read-enabled
-  collection, and never reaches the audit row or the broadcast feed.
+  collection, and never reaches the audit row.
 
 The ``corpus-http`` transports are patched at the adapter's seams
 (``corpus_http.read_corpus`` / ``corpus_http.search_corpus``), so the router
@@ -40,7 +40,6 @@ from meho_backplane.auth.corpus import (
     UpstreamRead,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
@@ -103,20 +102,6 @@ def docs_client(request: pytest.FixtureRequest) -> Iterator[TestClient]:
             yield client
     finally:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
-
-
-@pytest.fixture
-def captured_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Capture the MCP dispatcher's broadcast events."""
-    import meho_backplane.mcp.handlers as handlers_module
-
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(handlers_module, "publish_event", _capture)
-    return events
 
 
 def _seed(**kwargs: Any) -> None:
@@ -371,7 +356,7 @@ def test_missing_collection_is_invalid_params(docs_client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The handle never leaks: audit row and broadcast feed
+# The handle never leaks: audit row
 # ---------------------------------------------------------------------------
 
 
@@ -382,11 +367,10 @@ async def _mcp_audit_rows() -> list[AuditLog]:
         return [row for row in result.scalars().all() if row.method == "MCP"]
 
 
-def test_read_handle_never_reaches_the_audit_row_or_the_broadcast_feed(
+def test_read_handle_never_reaches_the_audit_row(
     docs_client: TestClient,
-    captured_broadcast: list[BroadcastEvent],
 ) -> None:
-    """The audit row stores a hash; the broadcast params drop the handle and cursor."""
+    """The audit row stores a hash, not the handle or the cursor."""
     _seed(backend=_READ_ON)
     with patch(_READ_SEAM, new=_fake_read(_FULL_READ)):
         response = _call(docs_client, _read_args(cursor=_CURSOR))
@@ -400,14 +384,6 @@ def test_read_handle_never_reaches_the_audit_row_or_the_broadcast_feed(
     assert read_rows[0].payload["collection"] == "vmware"
     assert _HANDLE not in row_text
     assert _CURSOR not in row_text
-
-    events = [e for e in captured_broadcast if e.op_id == "read_docs"]
-    assert len(events) == 1
-    feed = json.dumps(events[0].payload)
-    assert _HANDLE not in feed
-    assert _CURSOR not in feed
-    # The rest of the arguments still reach the feed as before.
-    assert "vmware" in feed
 
 
 # ---------------------------------------------------------------------------

@@ -60,11 +60,13 @@ from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, Corpus
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, DocCollection
+from meho_backplane.db.models import AgentPermission, AuditLog, DocCollection, Tenant
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
@@ -1143,3 +1145,194 @@ def test_fanout_drops_non_entitled_collection_from_all(client: TestClient) -> No
     assert fake_corpus.await_count == 1
     body = response.json()
     assert {c["collection"] for c in body["chunks"]} == {"vmware"}
+
+
+# ---------------------------------------------------------------------------
+# The default scope from a named target (#3920)
+# ---------------------------------------------------------------------------
+
+_TARGET_HOST = "vcenter-01.example.test"
+
+
+async def _seed_target(*, tenant_id: str = DEFAULT_TENANT_ID) -> UUID:
+    """Seed a probed ``vcenter-01`` target in *tenant_id* (its tenant row too); return its id."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(Tenant(id=UUID(tenant_id), slug=f"t-{tenant_id[-4:]}", name="Tenant"))
+        target = TargetORM(
+            tenant_id=UUID(tenant_id),
+            name="vcenter-01",
+            aliases=[],
+            product="vcenter",
+            host=_TARGET_HOST,
+            port=443,
+            secret_ref="targets/vcenter-01",
+            auth_model="shared_service_account",
+            fingerprint={
+                "vendor": "vmware",
+                "product": "vcenter",
+                "version": "8.0.3.00400",
+                "reachable": True,
+                "probed_at": "2026-10-01T00:00:00Z",
+                "probe_method": "vimServiceVersions.xml",
+            },
+        )
+        session.add(target)
+        await session.flush()
+        return target.id
+
+
+async def _deny_target(target_id: UUID, *, principal_sub: str, verdict: str = "deny") -> None:
+    """Insert a *verdict* permission row (default ``deny``) for every op on *target_id*."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            AgentPermission(
+                tenant_id=UUID(DEFAULT_TENANT_ID),
+                principal_sub=principal_sub,
+                op_pattern="*",
+                verdict=verdict,
+                target_scope=str(target_id),
+                created_by_sub="admin:docs-test",
+            )
+        )
+
+
+def _post_search(
+    client: TestClient, body: dict[str, Any], *, principal_kind: str | None = None
+) -> tuple[Any, AsyncMock]:
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key,
+        sub="op-target",
+        tenant_role=TenantRole.OPERATOR.value,
+        capabilities=_ENTITLED_CAPS,
+        principal_kind=principal_kind,
+    )
+    fake_corpus = _mock_corpus(_make_chunk("c1"))
+    with respx.mock as mock_router, patch(_CORPUS_SEAM, new=fake_corpus):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "upgrade pre-check fails", "collection": "vmware", **body},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    return response, fake_corpus
+
+
+@pytest.mark.asyncio
+async def test_target_default_forwarded_as_soft_scope_and_audited(client: TestClient) -> None:
+    """``target`` and no product/version: the fingerprint is the soft scope.
+
+    No filters are sent, even with the hard-filter gate also on. The audit
+    row names the scope source and the target, never its address.
+    """
+    await _seed_global_collection(
+        backend={"type": "corpus-http", "ref": {"scope": "soft", "scope_filters": True}}
+    )
+    await _seed_target()
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"})
+
+    assert response.status_code == 200, response.text
+    assert fake_corpus.await_args.kwargs["metadata_filters"] is None
+    assert fake_corpus.await_args.kwargs["soft_scope"] == {
+        "product": "vcenter",
+        "release": "8.0.3.00400",
+        "source": "default",
+    }
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/search_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["scope_source"] == "default"
+    assert payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_explicit_version_ignores_the_target_default(client: TestClient) -> None:
+    """With an explicit ``version`` the caller's value is sent (``source: caller``)."""
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target()
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01", "version": "9.1"})
+
+    assert response.status_code == 200, response.text
+    assert fake_corpus.await_args.kwargs["soft_scope"] == {"version": "9.1", "source": "caller"}
+
+
+@pytest.mark.asyncio
+async def test_target_in_another_tenant_is_404_no_target(client: TestClient) -> None:
+    """A target the caller's tenant does not hold is the target routes' 404."""
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target(tenant_id="00000000-0000-0000-0000-00000000beef")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"})
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["error"] == "no_target"
+    fake_corpus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_denied_target_in_own_tenant_is_403_denied(client: TestClient) -> None:
+    """An agent whose permission rows deny it the target gets ``call_operation``'s denial.
+
+    The target is in the agent's tenant, so the lookup succeeds; the shared
+    permission check refuses it as 403 ``{"error": "denied", "query",
+    "reason"}``. No corpus call runs, and the audit row names the target.
+    """
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    target_id = await _seed_target()
+    await _deny_target(target_id, principal_sub="op-target")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=deny")
+    fake_corpus.assert_not_awaited()
+
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/search_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_needs_approval_target_is_403_denied(client: TestClient) -> None:
+    """A ``needs-approval`` row refuses the docs call: only ``auto-execute`` proceeds.
+
+    ``call_operation`` would park this verdict for an operator's decision.
+    The docs tools have no approval path, so the call is refused as 403
+    ``denied`` with a reason naming the verdict, and the target's product
+    and version never reach the corpus.
+    """
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    target_id = await _seed_target()
+    await _deny_target(target_id, principal_sub="op-target", verdict="needs-approval")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=needs-approval")
+    fake_corpus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_without_deny_row_uses_the_target_default(client: TestClient) -> None:
+    """An agent with no matching row is allowed: a docs lookup is a safe read."""
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target()
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 200, response.text
+    assert fake_corpus.await_args.kwargs["soft_scope"]["source"] == "default"

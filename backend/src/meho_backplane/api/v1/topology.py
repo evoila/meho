@@ -108,6 +108,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
+from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors import (
@@ -201,7 +202,7 @@ _OP_HISTORY = "topology.history"
 
 #: HTTP-boundary ceiling on the number of edges accepted in one
 #: ``POST /edges/bulk`` body. The consumer's INVENTORY.md
-#: (https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/INVENTORY.md)
+#: (kept in the consumer's private repo)
 #: lists ~30 curated cross-system edges at v0.2; the ceiling is sized
 #: well above that so onboarding does not need to chunk the file, but
 #: low enough that a stray hostile body cannot hold a single transaction
@@ -676,16 +677,18 @@ def _ambiguous_node_http(exc: AmbiguousNodeError) -> HTTPException:
     caller re-issue with an explicit ``kind`` — the same recovery the
     CLI/MCP fronts will offer. The ambiguous kinds are echoed in
     ``detail`` so the client can present the choice without a second
-    round trip.
+    round trip. After the scope cut-over (#3749) one ``(kind, name)``
+    can exist in several source scopes; ``detail`` then also carries
+    ``scopes``.
     """
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail={
-            "error": "ambiguous_node",
-            "name": exc.name,
-            "kinds": sorted(exc.kinds),
-        },
-    )
+    detail: dict[str, object] = {
+        "error": "ambiguous_node",
+        "name": exc.name,
+        "kinds": sorted(exc.kinds),
+    }
+    if exc.scopes:
+        detail["scopes"] = exc.scopes
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
 def _no_matching_connector_http(product: str, exc: NoMatchingConnector) -> HTTPException:
@@ -1245,6 +1248,9 @@ async def bulk_import_edges_route(
         )
         for edge in body.edges
     ]
+    if body.dry_run:
+        # A dry run changes nothing, so the request needs no audit row (#3757).
+        note_preview()
     try:
         result = await bulk_import_edges(session, operator, rows, dry_run=body.dry_run)
     except BulkImportValidationError as exc:

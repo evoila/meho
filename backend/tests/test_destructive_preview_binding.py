@@ -46,9 +46,10 @@ from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._errors import result_blast_radius_required
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._preview import (
     _PREVIEW_BUILDERS,
@@ -369,6 +370,43 @@ def test_blast_radius_missing_reason(effect: dict[str, Any] | None, is_valid: bo
     assert (reason is None) is is_valid
 
 
+def test_blast_radius_refusal_carries_builder_error_with_secrets_redacted() -> None:
+    """A builder that raises names why in the refusal, but secrets are redacted (#3944).
+
+    A destructive builder raises on purpose to refuse a delete, so the refusal
+    reason carries its error. That text is ``str(exc)``, so it goes through the
+    same redaction + length cap as every other error a result builder emits.
+    """
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXZhbHVl"
+    leaky = {
+        "preview_unavailable": True,
+        "preview_error": f"RuntimeError: upstream said Authorization: Bearer {token}",
+    }
+    reason = blast_radius_missing_reason(leaky)
+    assert reason is not None
+    assert "preview builder failed" in reason
+    result = result_blast_radius_required("op.delete", reason, 1.0)
+    assert result.status == "denied"
+    assert result.error is not None
+    assert token not in result.error
+    assert token not in result.extras["reason"]
+
+    refusal = {
+        "preview_unavailable": True,
+        "preview_error": (
+            "KeycloakDeleteRefusedError: keycloak.client.delete refused (builtin_client): "
+            "'admin-cli' is a built-in Keycloak client; deleting it breaks login or the "
+            "admin console."
+        ),
+    }
+    result = result_blast_radius_required(
+        "keycloak.client.delete", blast_radius_missing_reason(refusal) or "", 1.0
+    )
+    assert "(builtin_client)" in result.extras["reason"]
+    # The whole refusal fits under the length cap: the explanation is not cut.
+    assert result.extras["reason"].endswith("admin console.")
+
+
 # ---------------------------------------------------------------------------
 # Requirement 2 — the dispatcher refuses to park without a matching binding
 # ---------------------------------------------------------------------------
@@ -480,6 +518,71 @@ async def test_dispatch_refuses_park_without_blast_radius(embedding: list[float]
     assert result.extras["error_code"] == "blast_radius_required"
     assert connector.calls == []
     assert await _approval_row_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# A refused destructive park is recorded as a ``denied`` audit row (#4647)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case, error_code",
+    [
+        ("no_hash", "preview_binding_required"),
+        ("wrong_hash", "preview_hash_mismatch"),
+        ("no_blast_radius", "blast_radius_required"),
+    ],
+)
+async def test_refused_destructive_park_writes_one_denied_audit_row(
+    embedding: list[float], case: str, error_code: str
+) -> None:
+    """Each destructive-tier refusal leaves exactly one ``denied`` audit row.
+
+    The refusal goes through the same writer as a policy denial, so the row
+    sits on the op's own path, is a ``policy_decision``, carries the synthetic
+    403 and names the refusal code under ``payload["error"]``. Still no
+    approval row and nothing sent to the vendor.
+    """
+    connector = _register_recording_connector()
+    if case != "no_blast_radius":
+        register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _insert_destructive_descriptor(embedding=embedding)
+    preview_hash: str | None = None
+    if case == "wrong_hash":
+        preview_hash = "deadbeef" * 8
+    elif case == "no_blast_radius":
+        env = await preview_dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=_FakeTarget(),
+            params=_PARAMS,
+        )
+        preview_hash = env["preview_hash"]
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_ID,
+        target=_FakeTarget(),
+        params=_PARAMS,
+        preview_hash=preview_hash,
+    )
+    assert result.status == "denied"
+    assert result.extras["error_code"] == error_code
+    assert connector.calls == []
+    assert await _approval_row_count() == 0
+
+    async with get_sessionmaker()() as s:
+        rows = (await s.execute(select(AuditLog))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].path == _OP_ID
+    assert rows[0].event_class == "policy_decision"
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].payload["error"]["error_code"] == error_code
+    assert result.audit_id == rows[0].id
 
 
 # ---------------------------------------------------------------------------

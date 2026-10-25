@@ -67,6 +67,7 @@ from meho_backplane.audit_query import (
     DurationParseError,
     InvalidCursorError,
     UnsupportedFilterError,
+    count_loose_rows_in_forest,
     parse_duration,
     query_audit,
     replay_session,
@@ -74,9 +75,9 @@ from meho_backplane.audit_query import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
 __all__: list[str] = []
 
@@ -128,8 +129,9 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         "principal": {
             "type": ["string", "null"],
             "description": (
-                "Operator sub or partial-name substring. Matches "
-                "`audit_log.operator_sub` via case-insensitive LIKE."
+                "Part of the user id or of the name. Matches "
+                "`audit_log.operator_sub` or the row's `principal_name` "
+                "via case-insensitive LIKE."
             ),
             "maxLength": 256,
         },
@@ -157,10 +159,33 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         "result_status": {
             "type": ["string", "null"],
             "description": (
-                'One of "ok" / "error" / "denied". Maps to status-code '
-                "ranges on the substrate side."
+                'One of "ok" / "error" / "denied" / "pending". Maps to '
+                'status-code ranges on the substrate side. "pending" is '
+                "history: the run stopped to wait for approval (the "
+                "`approval.request` row, and the stopped operation's own "
+                "`operation_execution` row). It stays "
+                '"pending" after the request is approved, rejected or '
+                "expired. To see what waits now, use the approval queue "
+                "(`meho approvals list`, or the console's approvals page). "
+                "Add `event_class` to pick one kind of row."
             ),
             "maxLength": 16,
+        },
+        "event_class": {
+            "type": ["string", "null"],
+            "enum": [*(c.value for c in AuditEventClass), None],
+            "description": (
+                "What kind of record to return (exact match). "
+                "`operation_execution`: an action ran, with success or "
+                "failure. `policy_decision`: a gate decided before the "
+                "action ran (deny, rate limit, or wait for approval). "
+                "`approval_decision`: a person approved or rejected a "
+                "request, or it expired. `security_event`: a security "
+                "signal. `legacy_request`: a row from before record "
+                "kinds existed. Without it you get every kind. Same "
+                "filter as the REST route `POST /api/v1/audit/query`."
+            ),
+            "maxLength": 32,
         },
         "since": {
             "type": ["string", "null"],
@@ -188,9 +213,11 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "format": "uuid",
             "description": (
-                "Filter to one composite-operation subtree. NOT supported "
-                "in v0.2 — the substrate raises UnsupportedFilterError "
-                "(returned as -32602) until the column lands with G0.6-T7."
+                "Return the rows whose parent is this audit id "
+                "(`audit_log.parent_audit_id`, exact match). Use it to "
+                "find what an approval request led to: its decision row "
+                "and its run row. Returns direct children only, not "
+                "grandchildren."
             ),
         },
         "agent_session_id": {
@@ -359,15 +386,16 @@ async def _build_replay_response(
     ``session_too_large`` token — the MCP analogue of T4's REST 413, the
     transport has no streaming body for a 413-style partial), dispatches
     through :func:`replay_session`, and returns the
-    ``{root, session_id, tenant_id, row_count, excluded_null_session_count}``
-    envelope. ``row_count`` is the assembled-node count (post depth-cap),
+    ``{root, session_id, tenant_id, row_count, excluded_null_session_count,
+    loose_row_count}`` envelope. ``row_count`` is the assembled-node count (post depth-cap),
     so it reflects what the caller actually receives.
     ``excluded_null_session_count`` (#2700 → #2776 MCP parity) is the
     tenant-wide tally of header-less ``method=MCP`` rows that no replay can
     reach — it keeps an empty forest distinguishable from an empty history.
     It is computed *after* the over-cap guard, so a rejected session raises
     ``session_too_large`` before the field is ever built (matching REST's
-    pre-413 behaviour).
+    pre-413 behaviour). ``loose_row_count`` (#4670) is the number of nodes
+    in the tree whose parent id names no row in the tenant.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -397,6 +425,11 @@ async def _build_replay_response(
             tenant_id=tenant_id,
             session=session,
         )
+        loose_row_count = await count_loose_rows_in_forest(
+            root,
+            tenant_id=tenant_id,
+            session=session,
+        )
 
     serialized_root = [node.model_dump(mode="json") for node in root]
     return {
@@ -405,6 +438,7 @@ async def _build_replay_response(
         "tenant_id": str(tenant_id),
         "row_count": _count_tree_nodes(serialized_root),
         "excluded_null_session_count": excluded_null_session_count,
+        "loose_row_count": loose_row_count,
     }
 
 
@@ -456,7 +490,7 @@ def _resolve_self_session_id(arguments: dict[str, Any]) -> uuid.UUID:
         except ValueError:
             bound_id = None
     if bound_id is None or bound_id != requested_id:
-        raise McpInvalidParamsError(
+        raise McpPermissionDeniedError(
             'shape="tree" replays only your own session: agent_session_id '
             "must equal the caller's own MCP session id",
         )
@@ -582,6 +616,15 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
                 "empty history (#2700)."
             ),
         },
+        "loose_row_count": {
+            "type": "integer",
+            "description": (
+                "Nodes in the tree whose `parent_audit_id` names a row "
+                "that does not exist: a multi-step operation that is "
+                "still running, or that stopped before its own row was "
+                "saved (#4670)."
+            ),
+        },
     },
     "required": [
         "root",
@@ -589,6 +632,7 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
         "tenant_id",
         "row_count",
         "excluded_null_session_count",
+        "loose_row_count",
     ],
 }
 

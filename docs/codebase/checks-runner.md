@@ -62,15 +62,12 @@ runner loop:  sleep(interval) → run_one_sensor_tick()
                                   └─ note_tick_completed()
                                        └─ stall flagged? → emit
                                           checks_scheduler_recovered
-                                          (log + event, stall duration)
+                                          (log, stall duration)
 
 watchdog loop: sleep(interval) → evaluate_stall_watchdog()
                  quiet ≤ N × interval → healthy, return False
                  quiet > N × interval, first time →
                      error-log checks_scheduler_stalled
-                     fan checks.scheduler_stalled event out to every
-                       tenant with ≥1 active Sensor (set captured for
-                       the recovery pair)
                  already flagged → True, no re-emission
 
 health read:   GET /api/v1/health · GET /api/v1/health/live
@@ -149,27 +146,19 @@ by that cadence instead of `retry_backoff_seconds`).
   the tick grid; the minimum of 2 keeps the threshold above the ordinary
   sleep-then-tick gap.
 
-## Event kinds and log lines
+## Log lines
 
 | Surface | Name | When |
 |---|---|---|
 | structlog `error` | `checks_scheduler_stalled` | stall detection edge |
 | structlog `warning` | `checks_scheduler_recovered` | first completed tick after a stall (carries `stalled_for_seconds`) |
-| structlog `warning` | `checks_watchdog_emit_failed` | fan-out query/publish block failed (fail-open) |
+| structlog `warning` | `checks_watchdog_check_failed` | one watchdog check raised; the loop keeps running |
 | structlog `info` | `sensor_tick_lock_busy` | tick skipped: advisory lock held elsewhere (#3010; also counts on `advisory_lock_busy_total{subsystem="sensor_runner"}`) |
 | structlog `warning` | `advisory_unlock_failed` | unlock returned `false` — the #3010 same-connection invariant regressed (tripwire, should never fire) |
-| broadcast event | `checks.scheduler_stalled` | detection edge, per affected tenant |
-| broadcast event | `checks.scheduler_recovered` | recovery, to the same tenants |
 
-Both event op-ids are pinned in `broadcast/events.py::_CHECK_EVENT_OPS`
-(exact membership, never a `checks.` prefix match) and classify as
-op-class `checks`, so `broadcast_recent` / `broadcast_watch` /
-`/ui/broadcast/stream?op_class=checks` all see them. They ride the
-`publish_check_transition_event` mould: principal `__checks__`,
-nil-UUID `audit_id` (a quiet loop is a non-operation — there is no
-audit row to point at), fail-open publish
-(`checks_scheduler_broadcast_failed`). See
-`docs/codebase/checks-broadcast.md`.
+Since #3758 the watchdog publishes no Broadcast event (Broadcast carries
+agent announcements only). The logs and the health facet below are the
+signals. See `docs/codebase/checks-broadcast.md`.
 
 ## The health facet
 
@@ -227,8 +216,7 @@ external prober alerts on it (`stalled == true`,
 ## References
 
 - `backend/src/meho_backplane/checks/runner.py`,
-  `backend/src/meho_backplane/checks/watchdog.py`,
-  `backend/src/meho_backplane/checks/broadcast.py`
+  `backend/src/meho_backplane/checks/watchdog.py`
 - `backend/src/meho_backplane/db/advisory.py` (#3010 pinned-connection
   advisory-lock helper)
 - `backend/src/meho_backplane/api/v1/health.py` (`SensorRunnerStatus`)

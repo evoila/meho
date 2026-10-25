@@ -11,10 +11,29 @@
 # accumulate, vendor a curated rule set under .semgrep/rules/ and
 # switch the --config flag.
 #
-# SARIF is uploaded to GitHub Code Scanning (continue-on-error: true
-# on the upload step so a not-yet-enabled Code Scanning UI doesn't
-# block the workflow). The Semgrep step itself fails on ERROR-severity
-# findings (--error --severity ERROR).
+# The job runs Semgrep twice, with the same four packs:
+#
+# 1. "Report all findings" runs every rule (error, warning and info)
+#    and writes a SARIF file (the standard file format for scan
+#    results). Findings never fail this step. The file goes to GitHub
+#    code scanning, so all findings show on the Security tab, and new
+#    ones show as annotations on the changed lines of a pull request.
+# 2. "Fail on error-level findings" runs only the error rules, with
+#    --error. So this job, the required "Semgrep SAST" check, fails
+#    only on an error-level finding. This is the same gate as before.
+#
+# Why not one run plus a count of errors in the SARIF file: in
+# Semgrep's SARIF the level sits on each rule, not on each result. A
+# simple count of results with "level: error" is always 0, so it would
+# quietly turn the gate off. The second run uses only documented
+# Semgrep flags. It costs one more, smaller scan.
+#
+# The upload keeps the category GitHub gives this job by default
+# (.github/workflows/security-scan.yml:semgrep), so the results stay in
+# the same code scanning entry as before. A new category name would
+# start a second entry and leave the old one behind, to be deleted by
+# hand. Both upload steps have continue-on-error: true, so an upload
+# problem never blocks the workflow.
 #
 # Per evoila-bosnia/MEHO.X#712: pip-audit and npm-audit jobs deferred
 # until pyproject.toml / package.json exist (their suppression lists
@@ -98,7 +117,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Run Semgrep
+      - name: Report all findings
+        # All rules and all severities. No --error, so findings do not
+        # fail this step. A scan error (for example a rule pack that
+        # cannot be downloaded) still fails it.
         run: >
           semgrep scan
           --config p/python
@@ -107,11 +129,9 @@ jobs:
           --config p/owasp-top-ten
           --sarif
           -o semgrep-results.sarif
-          --error
-          --severity ERROR
 
       - name: Upload SARIF as job artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always()
         continue-on-error: true  # tolerate org artifact-storage quota; SARIF goes to Code Scanning regardless
         with:
@@ -120,8 +140,20 @@ jobs:
           retention-days: 14
 
       - name: Upload SARIF to GitHub Code Scanning
-        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v3
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v3
         if: always()
         continue-on-error: true  # graceful fallback if Code Scanning not enabled
         with:
           sarif_file: semgrep-results.sarif
+
+      - name: Fail on error-level findings
+        # The gate: only the error rules, and --error exits with 1 on
+        # any finding. The findings are listed in this step's log.
+        run: >
+          semgrep scan
+          --config p/python
+          --config p/typescript
+          --config p/security-audit
+          --config p/owasp-top-ten
+          --error
+          --severity ERROR

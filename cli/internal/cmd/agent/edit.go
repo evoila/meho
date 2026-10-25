@@ -80,10 +80,10 @@ func newEditCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&identityRef, "identity-ref", "", "new identity reference")
 	cmd.Flags().StringVar(&modelTier, "model-tier", "", "new model tier: standard | fast | deep")
-	cmd.Flags().StringVar(&systemPrompt, "system-prompt", "", "new system prompt")
+	cmd.Flags().StringVar(&systemPrompt, "system-prompt", "", "new system prompt: the agent's standing rules (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)")
 	cmd.Flags().IntVar(&turnBudget, "turn-budget", 0, "new turn budget (1..1000)")
 	cmd.Flags().StringVar(&toolset, "toolset", "",
-		"new toolset spec as a JSON object: inline JSON, @<path>, or @-")
+		"new toolset spec as a JSON object: inline JSON, @<path>, or @-; fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/")
 	cmd.Flags().StringVar(&outputSchema, "output-schema", "",
 		"new output schema as a JSON object: inline JSON, @<path>, or @-")
 	cmd.Flags().BoolVar(&enabled, "enabled", false, "enable the definition")

@@ -106,7 +106,9 @@ func newIngestCmd() *cobra.Command {
 			"tenant) — the request then leaves tenant_id unset, the\n" +
 			"omit-equals-global semantics the REST and MCP surfaces share.\n" +
 			"Pass your OWN tenant UUID for a tenant-curated ingest; the\n" +
-			"backplane rejects any other tenant's UUID with HTTP 403.\n\n" +
+			"backplane rejects any other tenant's UUID with HTTP 403. A\n" +
+			"platform_admin may pass another tenant's UUID to ingest on that\n" +
+			"tenant's behalf; the write is audited.\n\n" +
 			"--auth-scheme (manual mode) selects a named auth scheme from the\n" +
 			"closed catalog so the connector is stamped DISPATCHABLE (a profiled\n" +
 			"connector), still staged behind review/enable — never auto-enabled.\n" +
@@ -159,7 +161,8 @@ func newIngestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tenantID, "tenant-id", "",
 		"write scope for the ingested rows (works with both modes): omit for the built-in / "+
 			"global scope (tenant_id left unset — visible to every tenant); pass your own "+
-			"tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403)")
+			"tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 "+
+			"unless you hold platform_admin)")
 	cmd.Flags().StringVar(&authScheme, "auth-scheme", "",
 		"manual mode: select a named auth scheme (closed catalog) so the connector is stamped "+
 			"DISPATCHABLE (a profiled connector, still staged behind review) instead of a "+
@@ -743,6 +746,28 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// printGroupingGroups lists the groups the grouping pass changed: one
+// line per group that gained ops or was created. It also warns about a
+// typed group (one that holds typed operations) that holds ingested
+// operations too, so an operator sees a mixed group before enabling it.
+// Composite operations do not make a group typed.
+func printGroupingGroups(w io.Writer, groups []api.GroupSummaryModel) {
+	for _, g := range groups {
+		if g.OperationsAdded > 0 || g.Created {
+			note := ""
+			if g.Created {
+				note = " (new group)"
+			}
+			fmt.Fprintf(w, "    %s: +%d ops%s\n", g.GroupKey, g.OperationsAdded, note)
+		}
+		if g.TypedOperationCount > 0 && g.IngestedOperationCount > 0 {
+			fmt.Fprintf(w, "    warning: typed group %s also holds %d ingested op(s)\n",
+				g.GroupKey, g.IngestedOperationCount,
+			)
+		}
+	}
+}
+
 // printIngestSummary renders an IngestResponse for human eyes. The
 // shape matches what an operator running `meho connector ingest`
 // interactively expects to read: connector_id first (so they can
@@ -798,6 +823,9 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *api.IngestResponse) 
 			)
 		}
 		fmt.Fprintln(w)
+		if r.Grouping.Groups != nil {
+			printGroupingGroups(w, *r.Grouping.Groups)
+		}
 	} else if !opts.DryRun {
 		fmt.Fprintln(w, "  grouping: skipped (backplane returned no grouping result)")
 	}

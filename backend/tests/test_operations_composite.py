@@ -45,9 +45,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -109,18 +107,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -400,9 +386,9 @@ async def _direct_seam_gate_return_verbatim(
     The faithful write-composite shape: the first governed child that parks
     short-circuits the composite and the handler returns the
     ``awaiting_approval`` :class:`OperationResult` verbatim (the dispatcher
-    passes a handler-returned result straight through, writing no composite
-    DISPATCH row). Records the ``parent_audit_id_var`` seen inside the body
-    so the test can assert the composite's audit id reached the seam.
+    then writes the composite's own ``awaiting_approval`` row, #4275).
+    Records the ``parent_audit_id_var`` seen inside the body so the test can
+    assert the composite's audit id reached the seam.
     """
     _direct_seam_parent_ids.append(parent_audit_id_var.get())
     gate = await enforce_subop_policy(
@@ -609,7 +595,6 @@ async def test_get_dispatch_child_raises_when_depth_cap_breached(
 async def test_dispatch_composite_two_children_produces_audit_tree(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Composite with two child dispatches -> three audit rows + correct linkage."""
     register_connector_v2(
@@ -700,7 +685,6 @@ async def test_dispatch_composite_two_children_produces_audit_tree(
 async def test_dispatch_composite_direct_session_bypasses_descriptor_lookup(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``connector``-declaring composite calls the session directly (#2251).
@@ -784,7 +768,6 @@ async def test_dispatch_composite_direct_session_bypasses_descriptor_lookup(
 async def test_dispatch_composite_nested_inside_composite(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Composite -> composite -> typed child: nested linkage and depth-2 succeeds."""
     register_connector_v2(
@@ -863,7 +846,6 @@ async def test_dispatch_composite_nested_inside_composite(
 async def test_dispatch_composite_recursion_cap_blocks_overdepth(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Over-depth dispatch -> ``connector_error`` + no audit row for rejected sub-op."""
@@ -958,7 +940,6 @@ async def test_dispatch_composite_default_max_depth_is_eight() -> None:
 async def test_dispatch_composite_child_inherits_target_unless_overridden(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Child sub-call defaults to parent target; explicit ``target=`` wins."""
     register_connector_v2(
@@ -1010,7 +991,6 @@ async def test_dispatch_composite_child_inherits_target_unless_overridden(
 async def test_dispatch_composite_direct_seam_child_park_records_parent_lineage(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A child parked on the direct ``enforce_subop_policy`` seam links to its composite.
 
@@ -1090,15 +1070,14 @@ async def test_dispatch_composite_direct_seam_child_park_records_parent_lineage(
 async def test_dispatch_composite_direct_seam_child_park_verbatim_not_orphaned(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The real write-composite shape (park returned verbatim) is not orphaned.
 
     A governed write composite returns the child's ``awaiting_approval``
-    verbatim on the first parked sub-op, so the dispatcher passes it straight
-    through and writes no composite DISPATCH row. The bind still fired for the
-    handler body, so the child's ``approval.request`` audit row carries the
-    composite's ``audit_id`` -- ``None`` before #3348.
+    verbatim on the first parked sub-op. The bind fired for the handler body,
+    so the child's ``approval.request`` audit row carries the composite's
+    ``audit_id`` -- ``None`` before #3348. Since #4275 that id also has a row:
+    the composite's own ``awaiting_approval`` execution row.
     """
     _direct_seam_parent_ids.clear()
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)

@@ -129,9 +129,12 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     destructive deletes ``pfsense.nat.delete`` / ``pfsense.alias.delete``
     (#3232), plus the teardown-inverse deletes
     ``pfsense.route.static.delete`` / ``pfsense.gateway.delete`` /
-    ``pfsense.alias.member.remove`` (#3313)) + ``MGMT_FLOW_OPS`` (the
-    management-plane flow classifier ``pfsense.mgmt_flow.summary``).
-    Nineteen ops total.
+    ``pfsense.alias.member.remove`` (#3313)) + ``FILTER_RULE_OPS`` (the
+    firewall rule add / delete ``pfsense.filter.rule.add`` /
+    ``pfsense.filter.rule.delete``, #3850) + ``MGMT_FLOW_OPS`` (the
+    management-plane flow classifier ``pfsense.mgmt_flow.summary``) +
+    ``USER_WRITE_OPS`` (``pfsense.user.disable`` / ``pfsense.user.enable``,
+    #3937). Twenty-three ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -147,8 +150,10 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     """
     from meho_backplane.connectors.pfsense.ops_config_reads import CONFIG_READ_OPS
     from meho_backplane.connectors.pfsense.ops_delete import DELETE_OPS
+    from meho_backplane.connectors.pfsense.ops_filter_rule import FILTER_RULE_OPS
     from meho_backplane.connectors.pfsense.ops_mgmt_flow import MGMT_FLOW_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
+    from meho_backplane.connectors.pfsense.ops_user_write import USER_WRITE_OPS
     from meho_backplane.connectors.pfsense.ops_write import WRITE_OPS
 
     return (
@@ -157,7 +162,9 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
         *CONFIG_READ_OPS,
         *WRITE_OPS,
         *DELETE_OPS,
+        *FILTER_RULE_OPS,
         *MGMT_FLOW_OPS,
+        *USER_WRITE_OPS,
     )
 
 
@@ -175,8 +182,12 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: #252 (meho-internal) adds the management-plane flow classifier
 #: (``pfsense.mgmt_flow.summary``) via the ``ops_mgmt_flow`` module;
 #: #3954 adds the allow-listed config reads (``pfsense.user.list``,
-#: ``pfsense.route.static.list``) via the ``ops_config_reads`` module
-#: -- 19 ops total. The shape of each follow-on PR is "import a new
+#: ``pfsense.route.static.list``) via the ``ops_config_reads`` module;
+#: #3850 adds the firewall rule add / delete (``pfsense.filter.rule.add``,
+#: ``pfsense.filter.rule.delete``) via the ``ops_filter_rule`` module;
+#: #3937 adds the governed user writes (``pfsense.user.disable``,
+#: ``pfsense.user.enable``) via the ``ops_user_write`` module -- 23 ops
+#: total. The shape of each follow-on PR is "import a new
 #: module-level tuple and splat it into :data:`PFSENSE_OPS` via
 #: :func:`_pfsense_ops`" -- the registration walk in
 #: :meth:`PfSenseConnector.register_operations` does not need to

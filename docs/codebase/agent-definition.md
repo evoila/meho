@@ -60,7 +60,8 @@ The write / partial-update / read shapes. Create and Update set
 boundary. `name` is constrained to the safe-URL alphabet
 (`NAME_PATTERN`, mirroring memory's slug pattern) because it is a URL
 path segment. `turn_budget` is bounded `1..1000`. Update is partial via
-`model_dump(exclude_unset=True)`; `name` is not updatable (it is the
+`model_dump(exclude_unset=True, exclude_none=True)`, so a field sent as
+`null` is ignored like a missing one; `name` is not updatable (it is the
 natural key — renaming is delete + recreate). Read uses
 `from_attributes=True` so handlers hand back the ORM row directly.
 
@@ -121,11 +122,16 @@ service method.
 ### Write path — partial update
 
 `PATCH /api/v1/agents/{name}` → `edit_agent` → `service.update`. Only
-fields the caller set (`exclude_unset`) are applied; `model_tier`
+fields the caller set to a value are applied. A field sent as `null` is
+dropped, the same as a missing field. The editable columns are NOT NULL
+(except `output_schema`), so writing `null` used to fail the database
+write and return 500 (#4235); `model_tier`
 round-trips through the enum's `.value` so the column stores the wire
 string. Absent / cross-tenant name returns `None` → 404. The CLI
-`edit` verb uses `cmd.Flags().Changed(...)` to send only the changed
-fields, mirroring `exclude_unset`.
+`edit` verb uses `cmd.Flags().Changed(...)` to fill only the changed
+fields. Its generated request type has no `omitempty` on most fields,
+so the unset ones still go on the wire as `null`; the server ignores
+them.
 
 ### Read path — list / show
 
@@ -199,9 +205,8 @@ event regardless of transport (REST vs MCP).
 
 ## Known issues
 
-- `output_schema` cannot be *cleared* through `PATCH` — under
-  `exclude_unset`, a `None` value is indistinguishable from "field
-  omitted". Clearing a structured-output schema is a delete + recreate
+- `output_schema` cannot be *cleared* through `PATCH` — a `null`
+  value is treated the same as "field omitted". Clearing a structured-output schema is a delete + recreate
   in v0.2; documented on `AgentDefinitionUpdate`. A future shape (a
   sentinel / discriminated value) can lift this.
 - The CLI MCP-tool surface intentionally keeps agent definitions out of

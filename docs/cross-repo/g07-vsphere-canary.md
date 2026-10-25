@@ -48,8 +48,9 @@ parameter-ref parser branch and #503 extended this canary):
    ``operation_group`` rows with operator-readable ``when_to_use``
    hints and per-op group assignments. Pass-1 runs once during the
    vcenter ingest (proposing the full vcenter + vi-json taxonomy up
-   front); the vi-json ingest takes the partial-regrouping path
-   (Pass-1 skipped) and runs only Pass-2 against the new ops.
+   front); the vi-json ingest takes the partial-regrouping path:
+   Pass-2 files the new ops into the existing groups, then an
+   "extend" Pass-1 may propose new groups for the ops left over.
    Idempotent re-runs are no-ops.
 4. **Review.** T4's
    [`ReviewService`](../../backend/src/meho_backplane/operations/ingest/service.py)
@@ -188,9 +189,9 @@ meho connector edit-op vmware-rest-9.0 'DELETE:/vcenter/vm/{vm}' \
   --safety dangerous --requires-approval
 ```
 
-The parser defaults DELETE to ``safety_level='dangerous'`` but
-``requires_approval=false`` — operators flip the latter on any
-ops whose execution should block on the approval queue.
+The parser sets DELETE to ``safety_level='dangerous'`` with
+``requires_approval=true`` (#3827). Operators flip the latter on any
+other ops whose execution should block on the approval queue.
 
 ### Step 5 — enable the connector
 

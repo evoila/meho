@@ -32,8 +32,10 @@ because the shim runs on a machine already on the VPN.
 |---|---|
 | `manifest.json` | MCPB manifest (`manifest_version` 0.3). Committed with a `0.0.0` placeholder version; `build.sh` injects the real version at pack time. |
 | `server/index.mjs` | The bundle's entry point. A thin stdio launcher that runs the vendored `mcp-remote` in-process (imports its CLI entry — spawns nothing), and presents the pre-registered `meho-mcp` OAuth client. |
-| `package.json` + `package-lock.json` | Pin `mcp-remote@0.1.38` and its full, integrity-checked dependency tree. `build.sh` runs `npm ci --omit=dev` from the lock to vendor `node_modules` into the bundle. Never committed: `node_modules/`. |
+| `../claude-code-plugin/lib/login-guard.mjs` | The login guard, shared with the Claude Code plugin. `build.sh` copies it to `server/login-guard.mjs` in the bundle. See [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished). |
+| `package.json` + `package-lock.json` | Pin `mcp-remote@0.1.39` and its full, integrity-checked dependency tree. `build.sh` runs `npm ci --omit=dev` from the lock to vendor `node_modules` into the bundle. Never committed: `node_modules/`. |
 | `test/index.test.mjs` | Behavioral suite (`node --test`) for the launcher's in-process invocation contract, the in-process CA injection, and the guards. Runs on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
+| `test/login-guard.test.mjs` | Tests for the login guard in the bundle: stub tests, plus end-to-end tests with the real pinned `mcp-remote` against a fake MEHO and Keycloak on `127.0.0.1`. Run on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
 | `build.sh` | Vendors dependencies, then validates + packs the bundle via the pinned `@anthropic-ai/mcpb` CLI. |
 
 ## Building locally
@@ -74,17 +76,23 @@ requested OAuth scopes delivered as `MEHO_MCP_SCOPES`. The launcher:
    advanced field still authenticates. The seam variable is scrubbed from
    the environment `mcp-remote` inherits.
 4. Resolves the requested OAuth scopes from `MEHO_MCP_SCOPES`, falling back
-   to the default working surface `mcp:read mcp:execute` when the host
+   to the default `mcp:read mcp:execute offline_access` (the working
+   surface plus a login that lasts — see
+   [How long the login lasts](#how-long-the-login-lasts)) when the host
    substitutes an empty/whitespace value for the untouched optional
    `scopes` config. Setting it to an elevated value (e.g.
-   `mcp:read mcp:execute mcp:admin`) is the deliberate opt-in to
+   `mcp:read mcp:execute offline_access mcp:admin`) is the deliberate opt-in to
    [operator mode](#elevated-operator-mode-opt-in). The seam variable is
    scrubbed from the environment `mcp-remote` inherits.
-5. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
+5. Waits until no other copy of the extension is signing in, then takes a
+   small lock file — see [One sign-in at a time](#one-sign-in-at-a-time).
+6. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
    plus `--static-oauth-client-info '{"client_id": "…"}'` and
    `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'` — and
-   **imports** the vendored `mcp-remote@0.1.38` CLI entry into this
-   process. `mcp-remote` reads `process.argv` at import and takes over the
+   **imports** the login guard, which imports the vendored
+   `mcp-remote@0.1.39` CLI entry into this process (see
+   [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished)).
+   `mcp-remote` reads `process.argv` at import and takes over the
    launcher's stdio; nothing is spawned. The static client info is
    load-bearing: MEHO's Keycloak realm blocks anonymous RFC 7591 Dynamic
    Client Registration (default Trusted Hosts policy → `403 "Host not
@@ -122,7 +130,9 @@ backplane's and Keycloak's TLS certificates. There are two routes; either
 one is enough, and a public-CA deploy needs neither.
 
 1. **The "Internal CA bundle" field.** Pick the CA's PEM file in the
-   install dialog. Claude Desktop passes the path to the launcher as an
+   install dialog with the file picker. A typed path must be absolute or
+   start with `~/`; the launcher expands a leading `~` to the home folder.
+   Claude Desktop passes the path to the launcher as an
    argument; the launcher reads the file and appends its certificates to
    Node's default CA list with
    [`tls.setDefaultCACertificates()`](https://nodejs.org/api/tls.html#tlssetdefaultcacertificatescerts)
@@ -187,6 +197,94 @@ lapsed*:
 succeeds **every later launch connects instantly** — the race only bites the
 very first connect on a fresh machine (or again after you clear `~/.mcp-auth`).
 
+## One sign-in at a time
+
+Claude Desktop can start the extension **twice** at almost the same moment
+(it checks which MCP protocol version the server speaks). Before this fix,
+both copies ran the browser login: two browser tabs opened, and one copy
+failed with `InvalidGrantError: Code not valid` (#3857).
+
+Now only one copy signs in:
+
+- The first copy creates a lock file next to the saved logins:
+  `~/.mcp-auth/meho-claude-desktop-<id>.lock`. It removes the file as soon
+  as it is connected to MEHO, and when it stops.
+- The second copy waits while that file exists. Then it starts and uses the
+  saved login. It opens no browser tab.
+- A lock file whose copy has stopped, or that is older than five minutes, is
+  taken over by the next copy. The copy does not delete the old file. It
+  writes its own process id into it, after a check that only one copy can
+  pass. So two copies that find the same old lock never both sign in.
+- A copy never waits more than five minutes. After that, or when it cannot
+  use the lock file, it starts anyway.
+
+**Expected log lines.** In the extension's log, the waiting copy writes
+these lines. They are normal, not an error:
+
+```
+meho-claude-desktop: another MEHO instance (pid 12345) is signing in; waiting for it to finish
+meho-claude-desktop: the other MEHO instance finished; starting
+```
+
+This line is also normal. It means an earlier copy stopped without cleaning
+up, and this copy took over:
+
+```
+meho-claude-desktop: found an old sign-in lock: its instance (pid 12345) stopped; taking it over
+```
+
+If Claude Desktop stops the first copy before you finish the login, the
+waiting copy takes over and opens a new browser tab. Finish the login in the
+new tab.
+
+## How long the login lasts
+
+The bundle asks Keycloak for `offline_access` by default. Keycloak then
+issues an offline refresh token, and the login lasts until you have not
+used MEHO for the `meho-mcp` client's offline idle limit. The realm docs
+recommend 48 hours
+([Keycloak realm setup](../../docs-site/install/keycloak-realm.md)).
+
+Without `offline_access`, the login ends at the realm's SSO idle limit,
+which is 30 minutes by default. The next MEHO call then needs a new browser
+login. So if you change the `scopes` field, keep `offline_access` in it.
+
+## When the login expires or is not finished
+
+The launcher runs `mcp-remote` through a small login guard. It is the same
+file the Claude Code plugin uses (`clients/claude-code-plugin/lib/login-guard.mjs`).
+The guard makes sure a MEHO call never hangs because of a login:
+
+- **The login expired during a session.** This happens after the offline
+  idle limit (48 hours with no use, see
+  [How long the login lasts](#how-long-the-login-lasts)) or when an admin
+  ended the session in Keycloak. The next MEHO call fails at once with:
+  "Your MEHO login has expired. Turn the MEHO extension off and on again in
+  Claude Desktop (Settings > Extensions) to log in again." Then the
+  extension stops. Do what the message says: turning it on again opens the
+  browser login. A browser tab with the MEHO login may also open when the
+  call fails. You can close it.
+- **Nobody finishes a browser login.** The extension stops after 5 minutes
+  without a connection. This frees the local login port. The extension's
+  log then has a line like this:
+
+  ```
+  meho-claude-desktop: MEHO did not connect within 5 minutes, so this attempt stopped. Finish any open MEHO login in your browser, then turn the MEHO extension off and on again in Claude Desktop (Settings > Extensions).
+  ```
+
+- **Claude Desktop starts the extension twice.** The second copy waits for
+  the first one, as described in [One sign-in at a time](#one-sign-in-at-a-time).
+  Its 5 minutes start only when it stops waiting. It does not crash.
+
+Older bundles used `mcp-remote@0.1.38`. A call whose login had expired got
+no answer, and an unfinished login waited forever.
+
+**One new browser login after the update.** `mcp-remote@0.1.39` keeps saved
+logins in `~/.mcp-auth/mcp-remote-0.1.38/` (it names the folder after its
+previous version). Older bundles used `~/.mcp-auth/mcp-remote-0.1.37/`. So
+after you install this bundle, the first use opens one browser login. If no
+other tool on your machine still uses the old folder, you can delete it.
+
 ## Elevated operator mode (opt-in)
 
 By default a session lists only the **working surface** — status,
@@ -194,13 +292,13 @@ connector/operation discovery, `call_operation` / `preview_operation` /
 `result_query`, knowledge, memory, the broadcast trio, target/topology
 reads, and the runbook run family. That is everything an operator needs to
 get work done, and it is what every session gets with the `scopes` field
-left at its default `mcp:read mcp:execute`.
+left at its default `mcp:read mcp:execute offline_access`.
 
 The advanced `scopes` user_config is the deliberate opt-in to **operator
 mode**. Set it to add the elevated scope:
 
 ```
-mcp:read mcp:execute mcp:admin
+mcp:read mcp:execute offline_access mcp:admin
 ```
 
 An elevated session additionally lists the **operator planes**: the agents
@@ -215,17 +313,12 @@ human decisions made through the console or CLI only (#3155). A model
 holding the approve button would collapse the four-eyes gate, so it is
 never on the wire.
 
-**Realm prerequisite (and the fallback if it is missing).** `mcp:admin`
-must be offered as an **optional** (requestable, non-default) client scope
-on the realm's `meho-mcp` client before elevation takes effect — tracked as
-[`evoila-bosnia/claude-rdc-hetzner-dc#2734`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/2734).
-Until it lands, requesting `mcp:admin` **degrades to the default working
-surface**: per OAuth 2.1 (RFC 6749 §3.3) the authorization server may ignore
-a scope it does not grant, and Keycloak drops any requested scope that is
-not an assigned default/optional client scope — so the token comes back
-without `mcp:admin`, no error is raised, and the operator planes simply do
-not appear. Setting the `scopes` field on a realm that does not yet offer
-the scope is therefore safe: the session behaves exactly as the default.
+**Realm prerequisite.** `mcp:admin` must be offered as an **optional**
+(requestable, non-default) client scope on the realm's `meho-mcp` client.
+If it is not, Keycloak refuses the whole login: it answers `invalid_scope`
+("Invalid scopes: …") and issues no token. Keycloak does not drop a scope
+it does not offer. So add `mcp:admin` to the `scopes` field only after the
+realm offers it; until then, leave the field at its default.
 
 ## Verifying a built bundle
 

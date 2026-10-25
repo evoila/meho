@@ -578,6 +578,143 @@ missing and the Python jobs fail** — the intended fail-closed behaviour (a
 layout/pin regression must fail CI, not silently skip the lane); the entry is
 **not** removed to force green.
 
+### Extension: vcenter-8.0, vcf-installer-9.1, esxi-9.0 and vks-9.0 (#4330)
+
+This change checks out four more shelf folders. Two reconcile lanes now run
+in CI instead of skipping. The other two folders have no lane yet, but the
+verify step requires their main file, so a shelf layout change fails CI
+today and not only when the first lane arrives. The same secret-gated
+checkout and the same rules apply (read-only, the runner is deleted when the
+job ends, never committed, never in artifacts or logs, no secret for fork PRs
+or Dependabot).
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcenter-8.0` | `vcenter-8.0/vcenter.yaml` | `backend/tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` |
+| `vcf-installer-9.1` | `vcf-installer-9.1/vcf-installer-openapi.json` | `backend/tests/test_connectors_vcf_installer_spec_reconcile.py` |
+| `esxi-9.0` | `esxi-9.0/wsdl/vim/vim.wsdl` | none yet |
+| `vks-9.0` | `vks-9.0/vks-paths-from-vcenter.txt` | none yet |
+
+- **`vcenter-8.0`** (~5 MB). The vSphere 8.0 U3 `vcenter.yaml`, made from a
+  vCenter's own API metadata and pinned on the shelf (provenance and sha256:
+  the `vsphere-8.x` entry of `docs/compatibility/vcf-api-contract-manifest.yaml`
+  and the shelf's `vcenter-8.0/MANIFEST.md`). This is a vendor-served file, so
+  the wave-3 blanket determination in the NSX section above covers it. No new
+  attestation is needed.
+- **`vcf-installer-9.1`** (~0.4 MB). The VCF Installer OpenAPI 3.0.1 file from
+  the **public, Apache-2.0** [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs)
+  repo (pinned at `3949fc33`). Provenance note of record: the shelf's
+  `vcf-installer-9.1/MANIFEST.md`. No attestation is needed.
+- **`esxi-9.0`** (~13 MB). ESXi has no OpenAPI spec. Its API contract is the
+  set of SOAP WSDL files, mirrored from the **public, Apache-2.0**
+  [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+  (`specifications/vsphere/wsdl/`, pinned at `85151f6b`). The verify step
+  requires `wsdl/vim/vim.wsdl`, the main VIM service file. Provenance note of
+  record: the shelf's `esxi-9.0/MANIFEST.md`. No attestation is needed.
+- **`vks-9.0`** (~0.4 MB). Two files are path and tag lists derived from the
+  `vcenter-9.0/vcenter.yaml` already on the shelf (same Apache-2.0 source,
+  same `85151f6b` pin). The verify step requires one of them,
+  `vks-paths-from-vcenter.txt`. The other files are nine vendor documentation
+  pages saved as markdown. Those pages have no explicit open licence, so this
+  extension records a reference to the **wave-3 blanket determination** in
+  the NSX section above, the same way the Hetzner Robot extension does.
+  Provenance note of record: the shelf's `vks-9.0/MANIFEST.md`.
+
+No test reads `esxi-9.0` or `vks-9.0` yet. The Task that adds the first lane
+for one of these folders only has to add the lane: the folder is already in
+both Python jobs' checkout list, and its main file is already in the verify
+step. If that lane reads a different file, add that file to the verify step
+in the same pull request.
+
+Both lanes passed against the pinned files before this change was merged
+(9 tests, none skipped). There are no known gaps.
+
+### Extension: the vSphere 8.0 U1, U2 and U3 VI/JSON files (#4333)
+
+This change adds no new shelf folder. `vcenter-8.0` is already in both Python
+jobs' checkout list. The verify step now also requires the three vendor
+VI/JSON files in that folder, so the new VI-JSON check of
+`backend/tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` cannot skip
+in CI.
+
+| File the verify step requires | What it is |
+|---|---|
+| `vcenter-8.0/vi-json-8.0u1.yaml` | vendor VI/JSON file of vSphere 8.0 U1 (`info.version` 8.0.1.0) |
+| `vcenter-8.0/vi-json-8.0u2.yaml` | vendor VI/JSON file of vSphere 8.0 U2 (8.0.2.0) |
+| `vcenter-8.0/vi-json-8.0u3.yaml` | vendor VI/JSON file of vSphere 8.0 U3 (8.0.3.0) |
+
+- The files come from the vendor's
+  [vSphere Management SDK 8.0 page](https://developer.broadcom.com/sdks/vsphere-management-sdk/8.0)
+  (no login), under the vendor's SDK licence. They are byte for byte the
+  vendor files. Provenance and sha256: the `vsphere-vi-json-8.0u1`, `-8.0u2`
+  and `-8.0u3` entries of `docs/compatibility/vcf-api-contract-manifest.yaml`
+  and the shelf's `vcenter-8.0/MANIFEST.md`.
+- These are vendor-licensed files pinned on the operator's shelf for a
+  reconcile lane. So this extension records a reference to the **wave-3
+  blanket determination** in the NSX section above
+  (<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>)
+  instead of a fresh attestation. The same rules apply: read-only checkout,
+  the runner is deleted when the job ends, never committed, never in
+  artifacts or logs, no secret for fork PRs or Dependabot.
+
+The lane passed against the pinned files before this change was opened
+(10 tests, none skipped).
+
+### Extension: vcf-automation-9.0-reference, vcf-automation-9.1 and vcf-automation-9.1.1 (#4604)
+
+This change checks out three more shelf folders. The VCF Automation
+reconcile lane now checks that the region list path MEHO picks for each
+version is in that version's list of provider operations. The same
+secret-gated checkout and the same rules apply (read-only, the runner is
+deleted when the job ends, never committed, never in artifacts or logs, no
+secret for fork PRs or Dependabot).
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcf-automation-9.0-reference` | `vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv` | `backend/tests/test_connectors_vcf_automation_spec_reconcile.py` (`test_region_path_is_in_the_reference_list_of_each_version`) |
+| `vcf-automation-9.1` | `vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv` | same test |
+| `vcf-automation-9.1.1` | `vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv` | same test |
+
+- **Size:** about 0.4 MB per folder.
+- **What the files are:** each TSV file is a list of operations (method and
+  path, one per line). It was made from the vendor's public Provider
+  Infrastructure API reference pages for that version. Provenance note of
+  record: each folder's `MANIFEST.md` on the shelf.
+- **Licence:** these lists come from vendor documentation pages with no
+  explicit open licence, pinned on the operator's shelf for a reconcile
+  lane. So this extension records a reference to the **wave-3 blanket
+  determination** in the NSX section above
+  (<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>),
+  the same way the `vks-9.0` entry does. No new attestation is needed.
+
+The lane passed against the pinned files before this change was opened (one
+test per version, none skipped).
+
+### Extension: vcf-installer-9.0 (#4467)
+
+This change checks out one more shelf folder, `vcf-installer-9.0`. The
+installer reconcile lane now also checks every path MEHO calls against the
+9.0 installer file. The verify step requires that file, so the 9.0 case of the
+lane cannot skip in CI.
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vcf-installer-9.0` | `vcf-installer-9.0/vcf-installer-openapi.json` | `backend/tests/test_connectors_vcf_installer_spec_reconcile.py` |
+
+- **`vcf-installer-9.0`** (~0.3 MB). The VCF Installer 9.0 OpenAPI 3.0.1 file
+  from the **public, Apache-2.0**
+  [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+  (tag `9.0.0.0`, pinned at `85151f6b`). Byte for byte the vendor file.
+  Provenance and sha256: the `installer-9.0` entry of
+  `docs/compatibility/vcf-api-contract-manifest.yaml` and the shelf's
+  `vcf-installer-9.0/MANIFEST.md`. No attestation is needed.
+- The same rules apply: read-only checkout, the runner is deleted when the
+  job ends, never committed, never in artifacts or logs, no secret for fork
+  PRs or Dependabot.
+
+The lane passed against both pinned installer files before this change was
+opened (5 tests, none skipped).
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

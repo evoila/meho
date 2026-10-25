@@ -210,7 +210,41 @@ not dispatchable without operator approval), the op-id is on
 `credential_read` and audit/broadcast rows collapse to aggregate-only), and the
 handler scrubs every secret-keyed value at the connector boundary
 (`_redact_secrets`). Three layers; no secret ever rides the result. `safety_level`
-is `caution`; the other 13 reads are `safe` / no-approval.
+is `caution`; the other 13 reads are `safe` / no-approval. The ingested twins
+(`GET:/v1/credentials` and the other SDDC Manager reads whose answer holds
+credentials) get the same guards through the catalog row's `safety_overlay`
+and the same `_CREDENTIAL_READ_OPS` entry (#4617); see
+[spec-ingestion.md](spec-ingestion.md), "Catalog safety overlay".
+
+**License keys are masked (`sddc.license.list`).** The rows of
+`GET /v1/license-keys` hold each license key in its `key` field. The handler
+replaces that field by `key_masked` before it returns; every other field of a
+row stays. Only the last 5 characters of the key stay visible, for example
+`*****-*****-*****-*****-AB12C`, and a key of 10 characters or fewer is hidden
+in full. `key_masked` is null when SDDC Manager sends an empty key or a key
+that is not text; the response schema allows both. The rule is `mask_license_key` in
+`connectors/_shared/license_key.py`, the same one `vrops.license.info` uses.
+The op also carries the tag `license-key`. Its `key` token is a secret tag
+token of the flight recorder, so the trace stores no body of the vendor call:
+the flight recorder records the raw answer before the handler masks it. Tests:
+[`backend/tests/test_connectors_sddc_manager_license.py`](../../backend/tests/test_connectors_sddc_manager_license.py).
+
+**Operation contracts.** The 20 typed ops meet the VMware operation-contract
+check (`backend/tests/test_operation_contracts.py`), with one exception (last item):
+
+- Each `response_schema` names the main fields of the vendor answer
+  (`PageOf<X>` → `elements[]` + `pageMetadata`, or the single object), taken
+  from the SDDC Manager 9.x OpenAPI schemas. It is informational; the reducer
+  does not read it.
+- Each `parameter_schema` describes every field, nested ones too, and carries
+  one example call under `examples` with neutral placeholders (`<domain-id>`).
+- Fields with fixed values carry an `enum`: the `sddc.host.list` `status`
+  filter, the `sddc.task.list` `status` filter and the host `storageType`.
+- `llm_instructions` carries `when_to_call`, `output_shape` and `next_step`;
+  the ops that are not `safe` also carry `preconditions`.
+- The two validation ops (`sddc.host.validate`, `sddc.domain.validate`) stay on
+  the gap list for `requires_approval`: they change nothing on the appliance
+  and run without approval today.
 
 ## Ingested breadth + read enablement
 
@@ -272,23 +306,34 @@ operation call <op_id> --params @spec.json` (CLI) — **no new MCP tool and no n
 CLI verb** (CLAUDE.md postulate 5; the generic `operation call` verb carries the
 body). No `enable_writes` bulk path exists by design; each mutating op is a
 distinct approval-gated typed op that the dispatcher **parks** for approval
-before the handler runs. The reviewer context
-(`resolve_reviewer_context`) surfaces the op + target + subject identity only —
-never the hidden `params` body — so a `DomainCreationSpec`'s or
-`HostCommissionSpec`'s plaintext passwords never reach the approver (the
-connector-boundary redaction engine is the backstop on any identity field that
-resolves). A custom park-time blast-radius preview builder (the vcf-installer
-`bringup` shape) is a possible future enhancement, not required at the
-`dangerous` tier.
+before the handler runs.
+
+What the approver sees:
+
+- **`sddc.host.validate` and `sddc.host.commission`** have a preview (#4850,
+  `sddc_manager/host_commission_preview.py`). It shows the host count and, for
+  each host, `fqdn`, `username`, `storageType` and `networkPoolId`. It never
+  shows the ESXi password or any other field of the `HostCommissionSpec`. See
+  [approvals.md — Credential writes: what the approver sees](approvals.md#credential-writes-what-the-approver-sees-4850).
+- **`sddc.domain.validate` and `sddc.domain.create`** have no preview. The
+  reviewer context (`resolve_reviewer_context`) surfaces the op + target +
+  subject identity only — never the hidden `params` body — so a
+  `DomainCreationSpec`'s plaintext passwords never reach the approver (the
+  connector-boundary redaction engine is the backstop on any identity field
+  that resolves). A custom park-time blast-radius preview builder (the
+  vcf-installer `bringup` shape) is a possible future enhancement, not
+  required at the `dangerous` tier.
 
 **The governed WLD build sequence** (the caller's responsibility — runbook or
 the meho-automation add-on — not the dispatcher's): `network_pool.create` →
-`host.validate` → `host.commission` → `domain.validate` → `domain.create`. The
-create calls are `202`-async (they return a `Task` in seconds while the build
-runs for hours on the appliance); poll `sddc.task.get` with the returned task id
-and `sddc.domain.status` once the domain object exists, to a terminal state.
+`host.validate` → `host.commission` → `domain.validate` → `domain.create`.
+`network_pool.create` returns the new pool at once; keep its id for
+`host.validate`. `host.commission` and `domain.create` are `202`-async (they
+return a `Task` in seconds while the build runs for hours on the appliance);
+poll `sddc.task.get` with the returned task id and `sddc.domain.status` once
+the domain object exists, to a terminal state.
 
-**NFS-principal shape.** For the Envision estate (and any NFS-principal domain)
+**NFS-principal shape.** For an NFS-principal domain
 the `DomainCreationSpec` uses
 `computeSpec.clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[].nasVolume`
 (`NasVolumeSpec`: `serverName[]` / `path` / `readOnly`) — **not**
@@ -297,8 +342,9 @@ so a well-formed NFS spec validates while a malformed `nasVolume` (the common
 trap of reusing a vSAN spec and swapping only the datastore) is rejected before
 dispatch; the schema stays permissive elsewhere so the full vendor
 `DomainCreationSpec` reaches the wire verbatim. Host commission and validation
-take a JSON **array** of `HostCommissionSpec` (`storageType="NFS"` for the
-estate).
+take a JSON **array** of `HostCommissionSpec`; `storageType` is an `enum` of the
+values the SDDC Manager 9.x spec lists (`VSAN`, `VSAN_ESA`, `VSAN_REMOTE`,
+`VSAN_MAX`, `NFS`, `NFS41`, `VMFS`, `VMFS_FC`, `FC`, `VVOL`).
 
 **JSONFlux.** The `Task` and `Validation` responses are set-shaped (a live
 build's `Task.subTasks[]` runs to hundreds of rows). `task.get` /

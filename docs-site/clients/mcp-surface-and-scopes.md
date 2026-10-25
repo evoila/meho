@@ -81,16 +81,21 @@ token only on request (the realm grants `mcp:admin` request-only):
   the space-separated scopes you want, adding `mcp:admin`:
 
     ```bash
-    MEHO_MCP_SCOPES="mcp:read mcp:execute mcp:admin"
+    MEHO_MCP_SCOPES="mcp:read mcp:execute offline_access mcp:admin"
     ```
+
+    The variable replaces the whole default list. Keep `offline_access`
+    in it, so the login still lasts between uses.
 
 - **Claude Desktop `.mcpb` bundle** — set the bundle's **OAuth scopes**
   (`scopes`) user-config field to the same value in the install dialog.
 
-Requesting a scope your realm does not grant simply degrades to the
-default working surface — it never fails the connection. Leave the scope
-off entirely and the session stays on the 26-tool working surface, which
-is the right default for almost every agent.
+The `meho-mcp` client on your realm must offer `mcp:admin` as an
+**optional** client scope first. If it does not, Keycloak refuses the
+whole login with `invalid_scope` and issues no token — it does not drop
+the scope silently. Leave the scope off entirely and the session stays on
+the 26-tool working surface, which is the right default for almost every
+agent.
 
 ## The human-only decision verbs (no MCP path)
 

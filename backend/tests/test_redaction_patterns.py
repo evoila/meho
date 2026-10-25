@@ -16,8 +16,15 @@ so a pattern added in a future task fails CI until a row is added.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from meho_backplane.redaction import (
+    DEFAULT_POLICY_PACKAGE,
+    DEFAULT_POLICY_RESOURCE,
+    load_policy_yaml,
+)
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.patterns import (
     NAMED_PATTERNS,
@@ -36,6 +43,7 @@ _EXPECTED_NAMES = {
     "jwt",
     "api_key",
     "kubeconfig",
+    "bind_key_secret",
     "uuid",
     "ipv4",
     "ipv6",
@@ -68,6 +76,9 @@ _PRIVATE_KEY_FIXTURE_POS = "private_key" + ": " + "MIIEvQIBADA" + "NBgkq"
 _PUNCT_QUOTED_FIXTURE = "password" + ": " + "'s3cr3tValue" + "!'"
 _PUNCT_LEADING_AT_FIXTURE = "password" + "=" + "P@ssw0rd" + "!withMore"
 _PUNCT_DOLLAR_HASH_FIXTURE = "password" + ": " + "hunter2" + "$plus#tail"
+# BIND key block (#4617): ``secret "<base64>";`` inside a ``key`` statement.
+_BIND_KEY_SECRET_FIXTURE_POS = 'secret "' + "exampleTsig" + 'Value==";'
+_BIND_KEY_SECRET_FIXTURE_NEG = 'the secret is in the vault; key "rndc-key" { algorithm hmac-md5; };'
 
 
 def test_catalog_lists_expected_patterns() -> None:
@@ -77,6 +88,156 @@ def test_catalog_lists_expected_patterns() -> None:
     # PATTERN_NAMES is sorted; downstream policy error messages rely
     # on the deterministic order.
     assert list(PATTERN_NAMES) == sorted(_EXPECTED_NAMES)
+
+
+_BIND_KEY_SECRET_ONLY_POLICY = RedactionPolicy(
+    id="test-bind-key-secret",
+    version=1,
+    rules=(
+        RedactionRule(
+            name="strip-bind-key-secret",
+            pattern="bind_key_secret",
+            action="redact",
+            reason="BIND key secret",
+        ),
+    ),
+)
+
+
+def test_bind_key_secret_keeps_the_keyword() -> None:
+    """Only the quoted value is replaced, so the file stays readable (#4617)."""
+    line = 'key "rndc-key" { algorithm hmac-sha256; ' + _BIND_KEY_SECRET_FIXTURE_POS + " };"
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        'key "rndc-key" { algorithm hmac-sha256; secret [REDACTED:bind_key_secret]; };'
+    )
+    # The manifest span points at the quoted value, not at the keyword.
+    start, end = result.manifest[0].span
+    assert line[start:end] == '"exampleTsigValue=="'
+
+
+@pytest.mark.parametrize(
+    "separator",
+    [
+        " /* rotation note */ ",
+        " // rotated last week\n    ",
+        " # note\n    ",
+        " /* first\n   line */ // second\n    ",
+        "",
+    ],
+    ids=["block-comment", "line-comment", "hash-comment", "mixed-comments", "no-space"],
+)
+def test_bind_key_secret_skips_comments_before_the_value(separator: str) -> None:
+    """BIND allows comments between ``secret`` and the value (#4620 review).
+
+    The keyword and the comments stay in the output; only the quoted
+    value is replaced, and no fragment of the value survives.
+    """
+    line = "secret" + separator + '"' + "exampleTsig" + 'Value==";'
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == "secret" + separator + "[REDACTED:bind_key_secret];"
+    assert "exampleTsig" not in result.redacted
+
+
+@pytest.mark.parametrize(
+    "comment_run",
+    ["#" * 80, "//" * 40, "/*" * 40, "# a\n" * 40],
+    ids=["hash-run", "slash-run", "unclosed-block-run", "many-lines"],
+)
+def test_bind_key_secret_comments_without_a_value_finish_fast(comment_run: str) -> None:
+    """A comment run with no quoted value after it must not stall (#4620 review).
+
+    The gap between ``secret`` and the value is matched once. Before the
+    possessive quantifier a run of ``#`` characters could be split into
+    comments in exponentially many ways, and 24 of them already took
+    seconds through the default policy, which every connector uses.
+    """
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    payload = "secret " + comment_run + " no value here"
+    started = time.perf_counter()
+    result = redact(payload, policy)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, f"redaction took {elapsed:.2f}s"
+    assert result.redacted == payload
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [DEFAULT_POLICY_RESOURCE, "example.yaml"],
+    ids=["default-policy", "example-policy"],
+)
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "/* password=oldvalue*/",
+        "/* token=rotated12345 */",
+        "/* Authorization: Basic b2xkOnZhbHVl */",
+        "/* Bearer oldbearer1234 */",
+        "// password=oldvalue\n   ",
+    ],
+    ids=[
+        "password-in-block",
+        "token-in-block",
+        "header-in-block",
+        "bearer-in-block",
+        "password-in-line",
+    ],
+)
+def test_bind_key_secret_runs_before_rules_that_change_the_comment(
+    resource: str, comment: str
+) -> None:
+    """The packaged policies redact the value when the comment holds a credential.
+
+    ``api_key`` and the header rules consume a value up to the next
+    whitespace or quote. In ``/* password=oldvalue*/`` that takes the
+    closing ``*/`` with it, so a BIND rule that ran later no longer saw
+    a whole comment and left the real value visible (#4620 review).
+    The packaged policies list the BIND rule first for this reason.
+    """
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, resource)
+    line = "secret " + comment + ' "' + "exampleTsig" + 'Value==";'
+    result = redact(line, policy)
+    assert "exampleTsig" not in result.redacted
+    assert "[REDACTED:bind_key_secret];" in result.redacted
+    assert policy.rules[0].pattern == "bind_key_secret"
+
+
+def test_bind_key_secret_ignores_a_value_commented_out_on_the_same_line() -> None:
+    """``secret # "..."`` is a comment to BIND, so nothing is a secret here."""
+    line = 'secret # "exampleTsigValue==";'
+    result = redact(line, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == line
+    assert result.manifest == ()
+
+
+@pytest.mark.parametrize(
+    "key_name",
+    ["transfer-secret", "secret", "my secret", "SECRET"],
+    ids=["hyphen-tail", "bare", "space-tail", "upper"],
+)
+def test_bind_key_secret_ignores_a_key_name_that_ends_in_secret(key_name: str) -> None:
+    """A quoted key name ending in ``secret`` is not the directive (#4620 review).
+
+    Without the guard the rule paired the name's closing quote with the
+    value's opening quote and left the real value in the output.
+    """
+    block = (
+        'key "' + key_name + '" {\n'
+        "    algorithm hmac-sha256;\n"
+        '    secret "' + "exampleTsig" + 'Value==";\n'
+        "};"
+    )
+    result = redact(block, _BIND_KEY_SECRET_ONLY_POLICY)
+    assert result.redacted == (
+        'key "' + key_name + '" {\n'
+        "    algorithm hmac-sha256;\n"
+        "    secret [REDACTED:bind_key_secret];\n"
+        "};"
+    )
+    assert "exampleTsig" not in result.redacted
+    assert len(result.manifest) == 1
+    start, end = result.manifest[0].span
+    assert block[start:end] == '"exampleTsigValue=="'
 
 
 def test_get_pattern_returns_compiled_regex() -> None:
@@ -216,6 +377,40 @@ def test_get_pattern_unknown_raises() -> None:
             "the token machine is broken",
             False,
         ),
+        # api_key: a value that already is a placeholder is not redacted
+        # again (the label would go with it)
+        (
+            "api_key",
+            "password: [REDACTED:param_name]",
+            False,
+        ),
+        (
+            "api_key",
+            'password="[REDACTED:param_name]"',
+            False,
+        ),
+        (
+            "api_key",
+            "api_key=[REDACTED:api_key]",
+            False,
+        ),
+        # api_key: only a complete placeholder is skipped; a value that
+        # only starts like one, or goes on after the ``]``, is redacted
+        (
+            "api_key",
+            "password=[REDACTED:madeup-value",
+            True,
+        ),
+        (
+            "api_key",
+            "password=[REDACTED:param_name]madeup-value",
+            True,
+        ),
+        (
+            "api_key",
+            'password="[REDACTED:param_name]madeup-value"',
+            True,
+        ),
         # kubeconfig: requires the apiVersion + kind preamble
         (
             "kubeconfig",
@@ -225,6 +420,17 @@ def test_get_pattern_unknown_raises() -> None:
         (
             "kubeconfig",
             ("apiVersion: v1\nkind: Pod\nmetadata:\n  name: nginx\n"),
+            False,
+        ),
+        # bind_key_secret: the quoted value after the ``secret`` keyword
+        (
+            "bind_key_secret",
+            _BIND_KEY_SECRET_FIXTURE_POS,
+            True,
+        ),
+        (
+            "bind_key_secret",
+            _BIND_KEY_SECRET_FIXTURE_NEG,
             False,
         ),
         # uuid: RFC 4122 canonical hex form
@@ -338,6 +544,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("api_key", "the token machine is broken", False),
     ("kubeconfig", "apiVersion: v1\nkind: Config\n", True),
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
+    ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_POS, True),
+    ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),
     ("uuid", "build_hash=abcdef0123456789", False),
     ("ipv4", "192.168.1.42", True),
@@ -406,3 +614,30 @@ def test_punctuated_secret_value_fully_redacted(
     assert redacted.endswith(" during login")
     assert len(result.manifest) == 1
     assert result.manifest[0].pattern == "api_key"
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        pytest.param("password=[REDACTED:madeup-value", id="unfinished"),
+        pytest.param("password=[REDACTED:param_name]madeup-value", id="appended"),
+        pytest.param("password='[REDACTED:param_name]madeup-value'", id="appended-quoted"),
+    ],
+)
+def test_placeholder_look_alike_is_redacted_whole(sample: str) -> None:
+    """A value that only looks like a placeholder is a value: nothing of it survives."""
+    payload = "dispatch failed for " + sample + " during login"
+    result = redact(payload, _API_KEY_ONLY_POLICY)
+    redacted = result.redacted
+    assert isinstance(redacted, str)
+    assert "madeup-value" not in redacted
+    assert "[REDACTED:api_key]" in redacted
+    assert redacted.startswith("dispatch failed for ")
+    assert redacted.endswith(" during login")
+
+
+def test_complete_placeholder_keeps_its_label() -> None:
+    payload = "password=[REDACTED:param_name] token='[REDACTED:presidio:PERSON]' end"
+    result = redact(payload, _API_KEY_ONLY_POLICY)
+    assert result.redacted == payload
+    assert not result.manifest

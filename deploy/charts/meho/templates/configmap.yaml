@@ -37,8 +37,15 @@ data:
   # Secrets (DATABASE_URL, Keycloak client secret, Vault role bindings)
   # live in Kubernetes Secrets and are wired via `valueFrom.secretKeyRef`
   # in the Deployment template.
-  KEYCLOAK_ISSUER_URL: {{ .Values.config.keycloakIssuerUrl | quote }}
-  KEYCLOAK_AUDIENCE: {{ .Values.config.keycloakAudience | quote }}
+  {{- /* The five Keycloak keys below come from the built-in Keycloak when it is on (#4591). */}}
+  {{- $kc := include "meho.keycloakSettings" . | fromYaml }}
+  KEYCLOAK_ISSUER_URL: {{ $kc.issuerUrl | quote }}
+  {{- with $kc.discoveryUrl }}
+  # Pods call the built-in Keycloak through its Service; the issuer check
+  # keeps the public address above.
+  KEYCLOAK_DISCOVERY_URL: {{ . | quote }}
+  {{- end }}
+  KEYCLOAK_AUDIENCE: {{ $kc.audience | quote }}
   # G0.9.1-T9 (#789, RDC Signal #16). Public OAuth client_id surfaced
   # to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`.
   # Unconditionally emitted so the env-var contract stays stable
@@ -46,7 +53,7 @@ data:
   # backplane sends an empty string and the CLI surfaces an
   # actionable public-client error rather than silently misusing
   # `KEYCLOAK_AUDIENCE` (the confidential resource-server id).
-  KEYCLOAK_CLI_CLIENT_ID: {{ .Values.config.keycloakCliClientId | quote }}
+  KEYCLOAK_CLI_CLIENT_ID: {{ $kc.cliClientId | quote }}
   # #2594 (Goal #336) — public client_id of the confidential `meho-web`
   # client the operator-console browser BFF login runs its OAuth 2.1
   # authorization-code grant against. Unconditionally emitted so the
@@ -57,7 +64,7 @@ data:
   # non-empty, so an empty value here keeps the console cleanly disabled
   # (`503 ui_oauth_not_configured`) without touching `/api/*` or the CLI's
   # `KEYCLOAK_CLI_CLIENT_ID` device-code flow.
-  UI_KEYCLOAK_CLIENT_ID: {{ .Values.config.uiKeycloakClientId | quote }}
+  UI_KEYCLOAK_CLIENT_ID: {{ $kc.uiClientId | quote }}
   KEYCLOAK_JWKS_CACHE_TTL_SECONDS: {{ .Values.config.keycloakJwksCacheTtlSeconds | quote }}
   KEYCLOAK_JWT_LEEWAY_SECONDS: {{ .Values.config.keycloakJwtLeewaySeconds | quote }}
   # Emitted only for a Vault-backend install (Initiative #2227). A
@@ -189,6 +196,10 @@ data:
   # `deploy/charts/meho/values.yaml` (`config.approvalAllowSelfApproval`)
   # and `docs/codebase/approvals.md`).
   APPROVAL_ALLOW_SELF_APPROVAL: {{ .Values.config.approvalAllowSelfApproval | quote }}
+  # Lab-class switch for delegated approval decisions (#3693). Rendered
+  # unconditionally, like the self-approval switch above; the default
+  # `"false"` refuses decisions made on someone else's instruction.
+  APPROVAL_ALLOW_DELEGATED_DECISION: {{ .Values.config.approvalAllowDelegatedDecision | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
@@ -219,6 +230,24 @@ data:
   {{- if $mcpResourceUri }}
   MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
   {{- end }}
+  {{- /* #4622 -- sandbox mode: rendered only when on. The confirm host
+       must be the instance's own host name (ingress.host); the backplane
+       checks it again at boot against the MCP resource URI, and refuses a
+       host without a `sandbox` label. With the default (off) no sandbox
+       key is rendered at all. */}}
+  {{- if .Values.sandboxMode.enabled }}
+  {{- if not .Values.ingress.enabled }}
+  {{- fail "sandboxMode.enabled is true but ingress is disabled: sandboxMode.confirmHost must equal ingress.host, the instance's public host name." }}
+  {{- end }}
+  {{- if ne .Values.sandboxMode.confirmHost .Values.ingress.host }}
+  {{- fail (printf "sandboxMode.confirmHost (%q) must equal ingress.host (%q). Sandbox mode is only for an instance that holds disposable test systems; the confirm host proves these values belong to this instance." .Values.sandboxMode.confirmHost .Values.ingress.host) }}
+  {{- end }}
+  MEHO_SANDBOX_MODE: "true"
+  MEHO_SANDBOX_MODE_CONFIRM: {{ .Values.sandboxMode.confirmHost | quote }}
+  {{- end }}
+  # #3997 — most output tokens the agent asks the model for in one answer.
+  # Rendered always; it only matters when the agent runtime is in use.
+  AGENT_MAX_OUTPUT_TOKENS: {{ .Values.agent.maxOutputTokens | quote }}
   # G5.2-T1 (#623) — memory layer knobs. `userDefaultTtlDays` is consumed
   # by G5.2-T2 (#624) on `POST /api/v1/memory`; `expiryTickIntervalSeconds`
   # + `expiryEnabled` gate the in-process memory-expiry sweeper started

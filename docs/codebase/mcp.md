@@ -57,7 +57,7 @@ just occurred. A client pinned to `"2025-03-26"` receiving a
 `"2025-06-18"` response had no way to know which revision the server
 agreed to, and the operator's log stream stayed silent on the
 mismatch. The consumer-side closed-loop reporting flagged this as
-[`mcp-initialize-protocol-version-silent-upgrade`](https://github.com/evoila-bosnia/meho-internal/issues/697)
+`mcp-initialize-protocol-version-silent-upgrade`
 (signal 15), and the v0.6.0 release body was amended (PR #1159) to
 call out the gap explicitly as observation-not-commitment.
 
@@ -319,11 +319,295 @@ A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)
 rather than publish a schema its payloads violate. `call_operation` exposes an
 `audit_id` only after its dispatcher audit row commits; a null value promises no
-audit receipt. Its nullable `delivery` is about response shaping, not how much
+audit receipt. This holds for every answer that has a row: a completed call, a
+failed call, and a call MEHO refused before it ran (a deny grant, the announce
+gate, a rate limit, a target version the catalog does not serve, a refused
+approval request; #4669). Its nullable `delivery` is about response shaping, not how much
 upstream data a result handle retained: `complete` means the shaped response was
 delivered, `unavailable` means execution completed but shaping failed and callers
-must inspect audit/status evidence without re-invoking it, and `partial` is
-reserved for later delivery-budget handling.
+must inspect audit/status evidence without re-invoking it, and `partial` means
+the response was too large to deliver but the `handle` still reaches the caller.
+
+### `call_operation` outcomes and `isError` (#3675)
+
+The `call_operation` `status` enum lists every status the dispatcher can
+return at this boundary: `ok`, `error`, `denied`, `awaiting_approval` and
+`rate_limited`. It also lists `pending` and `running`, the answers of the
+async mode (#3695, see the section on long calls below). `already_resumed`
+is not in it: only the human approval path (the approve endpoint resuming
+a waiting call) sees it.
+
+`rate_limited` means the caller is over its rate limit or its limit on
+operations running at the same time (#3500, see
+[`rate-limiting.md`](rate-limiting.md)). The operation did not run. The
+envelope carries `extras.retry_after_seconds`; the caller decides when to
+try again. MEHO never retries on its own.
+
+`handle_tools_call` sets the MCP `isError` flag from the envelope
+`status` for the two tools that return an `OperationResult` envelope,
+`call_operation` and `preview_operation`
+(`_tool_result_is_error` in `mcp/handlers.py`):
+
+| `status` | `isError` |
+|---|---|
+| `error`, `denied`, `rate_limited` | `true` |
+| `ok`, `awaiting_approval`, anything else (for example `unavailable`) | `false` |
+
+This follows MCP 2025-06-18 §Tools/Error Handling: a failure the tool
+caught (API failure, business rule) is a tool execution error, reported
+inside a normal JSON-RPC result with `isError: true`. The
+`structuredContent` and the text block are sent either way, so the
+caller still reads `extras`. A call that waits for approval
+(`awaiting_approval`) is a successful hand-off: the request is stored
+and audited, so it is not an error and must not be retried. Every other
+tool keeps `isError: false`.
+
+The REST route `POST /api/v1/operations/call` does not change: every
+dispatcher outcome, `rate_limited` included, is HTTP 200 with the
+envelope (#136 / #2110). The back-off signal is
+`extras.retry_after_seconds` in the envelope, not an HTTP 429.
+
+Tests: `tests/test_operations_meta_tools.py` (enum lock),
+`tests/test_mcp_output_schema_conformance.py`
+(`test_call_operation_rate_limited_envelope_conforms`),
+`tests/test_mcp_structured_content.py`
+(`test_is_error_follows_operation_result_status`) and
+`tests/test_api_v1_operations.py`
+(`test_post_call_rate_limited_rides_200_envelope`).
+
+### Response wire ceiling (#3641)
+
+A completed `call_operation` response is also checked against a wire ceiling,
+`RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB). The size is measured
+on the real `tools/call` wire by `measure_delivered_wire_bytes`
+(`operations/delivery_budget.py`): the encoded text block plus the encoded
+`structuredContent` copy, escaping included. It is a byte count, not a token
+count. The MCP dispatcher builds the text block with the same
+`tool_result_text` function, so the measurement cannot drift from what is sent.
+
+When an `ok` response is over the ceiling, `bound_complete_response` drops the
+inline `result` and the extras and keeps the status `ok`:
+
+- `delivery="partial"` when the `handle` can be read back and the receipt with
+  the handle still fits. The caller reads the result through `result_query`. A
+  handle counts as readable only when its `fetch_more.drill_in.available` is
+  true: the reducer also mints handles whose rows were never stored (store
+  down, no tenant context, admission limit), and those cannot be read.
+- `delivery="unavailable"` otherwise. Only the `audit_id` receipt and the
+  remediation text remain; an unreadable handle is dropped too.
+
+`extras.remediation` says the operation already ran and must not be re-invoked,
+and `extras.retry` is `false` so a program can see the same rule;
+`extras.delivered_bytes` and `extras.delivery_max_bytes` give the numbers. A
+completed write is never reported as an error because its response was too
+large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the
+same check; REST sends the payload once, so its real size is always smaller.
+
+The receipt must always reach the caller. Two checks make sure it can:
+
+- The ceiling has a floor, `RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048
+  bytes, `settings.py`). `Settings` rejects a smaller
+  `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` at startup, before any operation
+  runs. The floor holds the receipt for an ASCII `op_id` of 256 characters.
+- The receipt grows with the `op_id`, and non-ASCII characters cost more
+  because the text block escapes them twice. So `call_operation` runs
+  `refuse_undeliverable_receipt` before dispatch. It measures the widest
+  receipt the `op_id` can produce (`receipt_wire_bytes`: the real `op_id`, the
+  widest possible `audit_id`, `duration_ms` and byte counts, same encoders as
+  the response). A call whose receipt could not fit the ceiling is refused
+  with `status="error"` and `extras.error_code="receipt_too_large"`, and the
+  operation never runs. The refusal says so and that calling again is safe.
+
+`bound_complete_response` still measures the final `unavailable` response. Only
+a caller that skipped the pre-check could push it over the ceiling; then it is
+delivered anyway with a `delivery_receipt_over_ceiling` warning, because
+dropping the `audit_id` of a completed write would be worse.
+
+### Reading result handles, and the call receipt
+
+A large `call_operation` result comes back as a `handle`. Three facts
+shape what the caller sees and how it reads more:
+
+- **Result field catalog (#3631, #3635).** The handle's `schema_` comes
+  from a catalog built over every captured row, not from the first row or
+  the sample. It has one property per top-level key, sorted by name. When
+  `result_query` runs a query, it builds the same catalog from the stored
+  rows and checks each field the query names. A field with mixed kinds,
+  objects, lists, only nulls, or integers past 64 bits cannot be used in
+  `filter`, `order_by`, `group_by`, or `aggregate`, but `select` still
+  returns it. Two cases still count as one kind: nulls next to one
+  scalar kind (the field is nullable, not mixed), and whole numbers next
+  to decimals, which query as one decimal column as long as every whole
+  number is within ±2^53. A flat query returns the stored rows exactly
+  as captured.
+- **`path` reads (#3633).** A large payload with no single list is kept
+  whole as a document record. `result_query` reads part of it with
+  `query={"path": "<RFC 6901 JSON Pointer>"}` (`""` is the whole
+  document; `~1` means `/` and `~0` means `~`). `path` cannot be combined
+  with the other query fields. The `result_query` `outputSchema` covers
+  both the rows shape and the `path` shape.
+- **The `audit_id` receipt (#3636).** `call_operation` returns
+  `audit_id` only after the dispatch audit row commits (`delivery` is
+  explained above, under "Response wire ceiling"). If the operation ran but its result could
+  not be shaped, the call stays `ok` with `delivery="unavailable"` and
+  the `audit_id`, so the caller knows not to run it again. A failed call
+  (#3864) and a refused call (#4669) return the id of their `error` or
+  `denied` row the same way, so an agent can link a refusal to its audit
+  row without searching the audit log. `audit_id` is `null` only when no
+  row was written or the write failed.
+
+The full rules, bounds, and errors are in
+[`result-spill.md`](result-spill.md). Tests:
+`tests/test_mcp_tool_result_query.py`,
+`tests/test_mcp_output_schema_conformance.py`, and
+`tests/test_result_reduction_properties.py`.
+
+### Long calls: `call_operation` async mode (#3695)
+
+A long call (a deploy, a multi-step operation that runs for minutes) should
+not hold one MCP request open the whole time. `call_operation` takes two
+optional arguments for this. They are MCP controls and never reach the
+dispatcher:
+
+- **`async: true`** starts the call in the background and answers at once
+  with `status="pending"` and `extras.run_id`. It uses the same
+  `operation_run` row and background runner as `POST /api/v1/operations/call`
+  with `async: true` (see [`async-governed-dispatch.md`](async-governed-dispatch.md)),
+  so the policy checks, approvals and audit rows are the same as for a normal
+  call.
+- **`run_id`** (with the same `connector_id` and `op_id`) checks that run.
+  While it runs: `status="pending"` or `"running"`, with
+  `extras.started_at` and `duration_ms` counted from the start. When it is
+  done: the stored `OperationResult` of the call, with `extras.run_id` added.
+  The answer is checked against the wire limit again after the run details
+  are added, like a normal call: a result that no longer fits keeps
+  `status="ok"` and its `audit_id` and gets `delivery="partial"` or
+  `"unavailable"`. A failed or cancelled run gives `status="error"` and `extras.error_code`
+  `run_failed` / `run_cancelled`. Checking never runs the call again.
+
+An unknown run, a run of another tenant, or a run of a different
+`connector_id` / `op_id` gives the same `-32602` error with
+`data.reason="unknown_run"`. Sending `async: true` and `run_id` together
+gives `data.reason="async_with_run_id"`. No tool is added: the working
+surface stays at 26 tools, and the `outputSchema` status enum gains
+`pending` and `running`. Code: `mcp/tools/_call_operation_async.py`. Tests:
+`tests/test_mcp_call_operation_async.py`.
+
+### Wrong connector or op id (#4031)
+
+`call_operation` and `preview_operation` look up the op on the named
+connector first. When that lookup finds nothing, the error says why and
+what to do next:
+
+- **`unknown_op`** — the connector exists, but it has no enabled op with
+  this `op_id`. MEHO then looks for the same `op_id` on the other
+  connectors the caller can see. `extras.connectors_with_op` lists them
+  (sorted, at most 10), and the message names them, for example "This
+  operation exists on connector(s) vmware-rest-9.0". When the list is
+  empty, the message tells the caller to use `search_operations` on the
+  connector. `extras.known_op_count` still carries the connector's op
+  count. A common cause is the other version of the same product; op ids
+  can also be spelled differently between versions.
+- **`unknown_connector`** — the `connector_id` matches no connector the
+  caller can see: no operation rows and no registered connector class.
+  This is the same test `list_operation_groups` and `search_operations`
+  use. `extras.connector_id` echoes the id. Before #4031 this case was an
+  `unknown_op` with `known_op_count: 0`.
+
+The search for other connectors uses the same tenant rule as
+dispatch (`visible_scope_clause` in `operations/_lookup.py`), applied to
+each connector: a connector of another tenant is never named, and a
+built-in op hidden by the tenant's own connector row is not named
+either. The extra lookups run only on this error path
+(`operations/_op_miss.py`). Tests: `tests/test_operations_op_miss.py`.
+
+### `search_operations` exact-op mode, and slim hits (#3668)
+
+A ranked hit tells the caller *which* operation to use. It does not
+say *how* to call it. Exact-op mode closes that gap without a new tool:
+`search_operations` takes an optional `op_id` argument.
+
+- **With `op_id`** there is no ranking. The handler looks up that one
+  enabled operation in the caller's visible scope (the same rule the
+  dispatcher uses) and returns `{"operation": {...}}`, not `hits`.
+  `query`, `group` and `limit` are ignored. The contract carries:
+  - `parameter_schema` — the stored schema, returned as-is. The
+    ingester already bundles every referenced component into it
+    (#3095), so params that validate against it pass `call_operation`.
+  - `examples` — at most 5 small values (each at most 500 characters
+    of JSON) from the schema's `example` / `examples` and the op's
+    registered `examples` / `example_call`.
+  - `target` — `required` (true for every ingested op, and for typed
+    ops whose handler reaches a connector), and `resolves_by: "name"`:
+    pass the target's name, not the id `list_targets` returns.
+  - `result_shape` — the `call_operation` result fields, and that a
+    large result comes back as a `handle` read only through
+    `result_query`.
+  - `pagination_hint` — only when the op registered one, else `null`.
+  - `safety_level`, `requires_approval`, and `recovery` — plain retry
+    rules (fix `params` on `invalid_params`; `awaiting_approval` is a
+    success that waits for a person and must not be retried; a
+    destructive op needs `preview_operation` first).
+- **Unknown op.** A known connector with no such enabled op raises
+  `UnknownOperationError`: MCP answers `-32602` with
+  `data.reason="unknown_op"`, REST answers `404` with
+  `detail.reason="unknown_op"`. An unknown connector keeps its own
+  `unknown_connector` / `connector_not_ingested` errors. The lookup
+  is deterministic and never returns an empty list.
+- **Slim ranked hits.** A ranked hit carries `op_id`, `summary`,
+  `description`, `group_key`, `safety_level` and `requires_approval`.
+  The ranking scores (`fused_score`, `bm25_score`, `cosine_score`) are
+  added only when the caller sets `include_scores` **and** is
+  `tenant_admin` (the same role the full descriptor read needs);
+  anyone else gets the slim hit.
+
+The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
+the `outcome` fields described in the next section) and the exact-op
+shape. The `inputSchema` needs `query` or `op_id` through a
+top-level `anyOf`; that combinator is removed from the wire copy (see
+`_wire_safe_input_schema`) and still checked on the server. The REST
+twin is `GET /api/v1/operations/search?op_id=...` (and
+`include_scores=true`); the CLI twin is
+`meho operation search <connector_id> --op-id <op_id>` (and `--scores`).
+Code: `operations/_contract.py`, `operations/meta_tools.py`.
+
+### Why a search found nothing, or nothing good (#3670)
+
+`search_operations` tells the agent why a search found no suitable
+operation. This helps the agent stop instead of calling the wrong one.
+
+Two cases are errors (`-32602` on MCP, `404` on REST), unchanged since
+#1482:
+
+- `data.reason="unknown_connector"` — no connector has this id.
+- `data.reason="connector_not_ingested"` — the connector exists, but its
+  operations are not loaded yet. `data.next_step.verb` says what to run.
+
+Every other result has an `outcome` field:
+
+| `outcome` | Meaning | What the agent should do |
+|---|---|---|
+| `matched` | The top hit matched the query's words and is clearly ahead. | Check `safety_level` and `requires_approval`, then call it. |
+| `ambiguous` | Hits came back, but the top hit matched no query word (it is only close in meaning), or the top two are nearly tied. | Do not call any hit. Narrow the search first. |
+| `no_match` | The connector has enabled operations, but none matched. | Do not call anything. Search again with other words. |
+| `unknown_group` | The `group` filter names no visible group. | Retry with a group key from `narrowing`. |
+| `zero_enabled_operations` | The connector is loaded, but no operation is enabled for this caller. | Do not call it. An operator must enable operations. |
+
+`advisory` explains any outcome other than `matched` in one sentence.
+`narrowing` lists next steps, at most `SEARCH_NARROWING_MAX` entries.
+
+- The outcome reads the scores the search already made. Hit order does
+  not change. The search always reads at least two hits from the
+  retriever (`SEARCH_CLASSIFY_MIN_HITS`), even for `limit=1`, so a tied
+  second hit cannot hide. The returned list is then cut to `limit`.
+- The near-tie band is `SEARCH_NEAR_TIE_BAND`: one list position at the
+  top of one ranking signal.
+- The enabled-operation check and the group list use the same tenant
+  filter as dispatch, and count enabled rows only. So the text never
+  names a disabled operation or another tenant's operation.
+
+Code: `operations/meta_tools.py` (`search_operations`, `_run_search`,
+`_classify_hits`). Tests: `tests/test_operations_meta_tools.py`.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 
@@ -400,7 +684,10 @@ table can never silently drift from the code:
 
 Counts: **26 working + 54 operator + 1 pairing-gated automation =
 81 registered tools**, plus the **3 human-only verbs** (below) that
-carry no MCP registration under any claim set. The 26 working and 54
+carry no MCP registration under any claim set. Four of the 26 working
+tools (`ask_docs`, `search_docs`, `read_docs`, `list_doc_collections`)
+appear only when the tenant has the `meho-docs` capability; a session
+without it lists 22. The 26 working and 54
 operator counts are the **unpaired baseline** — a session with every
 capability provisioned but no add-on paired — so they stay byte-identical
 to a build that never carried the automation family; the single
@@ -443,7 +730,7 @@ add-on-family gate.
 | `list_operation_groups` | operator | — | List a connector's enabled operation groups. |
 | `list_targets` | operator | — | List the tenant's accessible infrastructure targets. |
 | `meho_broadcast_announce` | operator | — | CLI: `meho broadcast announce <activity>` publishes through the shared durable publisher. |
-| `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads through the shared strict history reader. |
+| `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads stored agent announcements through the shared archive reader (operation, approval and check events are on the SSE feed and in `query_audit`). |
 | `meho_broadcast_watch` | operator | — | CLI: `meho broadcast watch` tails the authenticated `/api/v1/feed` SSE route. |
 | `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global). |
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
@@ -452,7 +739,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status. |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |
@@ -460,7 +747,7 @@ add-on-family gate.
 | `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |
 | `search_knowledge` | operator | — | Search the tenant knowledge base. |
 | `search_memory` | operator | — | Search the operator's accessible memories. |
-| `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. |
+| `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. With `op_id` (exact-op mode) it returns that one operation's call contract instead: the stored `parameter_schema`, small examples, the target-by-name rule, the result shape and retry rules (#3668). |
 
 ### Operator surface (`mcp:admin` elevation required)
 
@@ -691,7 +978,7 @@ the default-allow immediate branch. `requires_approval=True` would park
 humans too; `safety_level="dangerous"` would deny agents rather than
 park them.
 
-Three synthetic connectors follow this mould (natural key
+Four synthetic connectors follow this mould (natural key
 `(product, "1.x", impl_id)` → wire `connector_id`):
 
 | Wire `connector_id` | Op | MCP front | Since |
@@ -699,6 +986,7 @@ Three synthetic connectors follow this mould (natural key
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+| `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last

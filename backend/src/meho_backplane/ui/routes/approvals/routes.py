@@ -7,10 +7,11 @@
 
 Initiative #1775 (G10.7 Operator-console hardening), Task #1778.
 
-The approval queue, its decision endpoints, and the lifecycle broadcasts
-already exist (Goal #800). This surface is the operator-console face of
-them: a bell/badge in the app-shell, fed live by the SSE bridge, opening a
-modal that approves or denies a pending request.
+The approval queue and its decision endpoints already exist (Goal #800).
+This surface is the operator-console face of them: a bell/badge in the
+app-shell, refreshed every few seconds while the page is visible
+(``approvals-bell.js``, #3758), opening a modal that approves or denies a
+pending request.
 
 Why a session BFF and not the Bearer ``/api/v1/approvals/*`` routes
 -------------------------------------------------------------------
@@ -73,7 +74,7 @@ Route inventory
   the modal's own ``hx-headers`` echo lines up with the cookie (the modal
   render rotates it -- #1693 / #1754).
 * ``POST /ui/approvals/{id}/approve`` -- approve in-process, re-dispatch
-  the parked op, publish the fail-open broadcast.
+  the parked op, record the add-on step event.
 * ``POST /ui/approvals/{id}/reject`` -- reject in-process, publish.
 
 The ``params`` / ``params_hash`` columns are internal (swap-defence +
@@ -130,16 +131,22 @@ from meho_backplane.operations.approval_context import (
     resolve_reviewer_context,
 )
 from meho_backplane.operations.approval_queue import (
+    MAX_REASON_LENGTH,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    DelegatedDecisionForbiddenError,
+    DelegatedReasonInvalidError,
+    Delegation,
     PreviewBindingMissingError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
+    get_decision_delegation,
     get_request,
     list_pending,
-    publish_approval_event,
+    parse_delegation,
+    record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
 )
@@ -151,8 +158,10 @@ from meho_backplane.ui.auth.refresh import (
 )
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import (
+    RESULT_STATE_PILL,
     STATUS_PILL_CLASS,
     project_request_to_view,
+    project_run_result,
     set_csrf_cookie,
 )
 from meho_backplane.ui.templating import get_templates
@@ -221,8 +230,9 @@ _SINGLE_OPERATOR_DOCS_URL: Final[str] = (
 
 #: Optional human reason length accepted on the deny form. The audit row
 #: stores it verbatim; bounding the wire shape protects the form-body
-#: parse against a paste-from-clipboard accident.
-_MAX_REASON_LENGTH: Final[int] = 2000
+#: parse against a paste-from-clipboard accident. Shared with the REST
+#: bodies so both surfaces accept the same reasons (#3692).
+_MAX_REASON_LENGTH: Final[int] = MAX_REASON_LENGTH
 
 #: Module-level ``Depends`` closure for the operator-session gate. Built
 #: once (rather than inline) to satisfy ruff B008, matching the convention
@@ -343,7 +353,7 @@ async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) 
 
 async def _get_request_with_context_or_404(
     session: UISessionContext, request_id: uuid.UUID
-) -> tuple[ApprovalRequest, ReviewerContext]:
+) -> tuple[ApprovalRequest, ReviewerContext, Delegation | None]:
     """Fetch one request + its resolved reviewer context in one session (#3353).
 
     The redacted, human-legible judging context (resolved target name,
@@ -353,7 +363,9 @@ async def _get_request_with_context_or_404(
     the CLI's ``GET /api/v1/approvals/{id}`` uses -- so the modal and
     ``meho approvals show`` render the same contract and never drift.
     Fail-open: the resolver never raises, so a resolution miss just yields
-    an empty context and the modal keeps the raw ids.
+    an empty context and the modal keeps the raw ids. The delegated-decision
+    block (#3692) is read off the decision audit row in the same session so
+    the decided banner shows who instructed the approver.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -369,7 +381,8 @@ async def _get_request_with_context_or_404(
                 detail="approval_request_not_found",
             ) from exc
         reviewer_context = await resolve_reviewer_context(db_session, row)
-    return row, reviewer_context
+        delegation = await get_decision_delegation(db_session, row)
+    return row, reviewer_context, delegation
 
 
 def _is_self_approval_blocked(operator: Operator, request: ApprovalRequest) -> bool:
@@ -548,6 +561,7 @@ async def _build_history_context(
     return {
         "requests": [project_request_to_view(row) for row in rows],
         "status_pill_class": STATUS_PILL_CLASS,
+        "result_state_pill": RESULT_STATE_PILL,
         "active_tab": tab,
         "tabs": list(_HISTORY_TABS.keys()),
         "work_ref": work_ref.strip(),
@@ -631,12 +645,14 @@ async def _render_detail_modal(
     bare error to the actionable single-operator guidance (#2669).
     """
     operator = await _resolve_operator(session)
-    approval, reviewer_context = await _get_request_with_context_or_404(session, request_id)
+    approval, reviewer_context, delegation = await _get_request_with_context_or_404(
+        session, request_id
+    )
 
     self_approval_blocked = _is_self_approval_blocked(operator, approval)
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
-        "request": project_request_to_view(approval),
+        "request": project_request_to_view(approval, delegation),
         # Redacted reviewer context (#3353), resolved from the shared
         # resolver so the modal renders the same substance ``meho approvals
         # show`` does. Always present in this context (StrictUndefined-safe)
@@ -648,6 +664,7 @@ async def _render_detail_modal(
         "self_approval_error": self_approval_error,
         "operator_sub": operator.sub,
         "status_pill_class": STATUS_PILL_CLASS,
+        "result_state_pill": RESULT_STATE_PILL,
         "csrf_token": csrf_token,
         "error_status": error_status,
         "error_message": error_message,
@@ -713,6 +730,7 @@ async def _decide(
     # Approve re-dispatches the parked op (the committed approval is the
     # authorization). Reject does not. Mirrors the REST /approve route; the
     # service helper owns target re-hydration + the fail-closed branches.
+    run: dict[str, object] | None = None
     if decision == "approved":
         dispatch_result = await resume_dispatch_after_approval(
             operator=operator, request=approval, params=None
@@ -724,10 +742,14 @@ async def _decide(
             dispatch_status=dispatch_result.status,
             operator_sub=operator.sub,
         )
+        run = project_run_result(dispatch_result)
 
     context: dict[str, object] = {
-        "request": project_request_to_view(approval),
+        # The reason already passed validation in the service, so this
+        # re-parse cannot raise; it shows the delegation on the outcome card.
+        "request": project_request_to_view(approval, parse_delegation(reason)),
         "decision": decision,
+        "run": run,
     }
     response = get_templates().TemplateResponse(request, "approvals/_decided.html", context)
     # Drive the app-shell bell: decrement the live count + close the modal.
@@ -749,8 +771,8 @@ async def _commit_decision(
     (:func:`~meho_backplane.operations.approval_queue.approve_request` /
     :func:`reject_request`); this projects each onto the same HTTP status
     the REST surface uses so the modal can render a consistent banner. The
-    fail-open broadcast publishes only AFTER the commit (a phantom event
-    cannot outlive a failed transaction).
+    fail-open add-on step event is recorded only AFTER the commit (a phantom
+    event cannot outlive a failed transaction).
     """
     sessionmaker = get_sessionmaker()
     try:
@@ -764,11 +786,10 @@ async def _commit_decision(
                     db_session, request_id, operator=operator, reason=reason
                 )
             await db_session.commit()
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision=decision,
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:
@@ -817,6 +838,23 @@ async def _commit_decision(
                 "This destructive request is missing its preview-result-hash "
                 "binding and cannot be approved. Re-file it via a fresh "
                 "preview + call."
+            ),
+        ) from exc
+    except DelegatedReasonInvalidError as exc:
+        # #3692: the reason names who instructed the decision but the
+        # trailer block is incomplete; the message says what is missing.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        # #3693: delegated decisions are allowed only on lab-class deploys.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This deployment does not allow decisions made on someone "
+                "else's instruction. Decide on your own judgement, without "
+                "the Instructed-by: lines."
             ),
         ) from exc
     return request

@@ -172,8 +172,10 @@ cluster.
 
 Operator-supplied strings (node / group name, target node, disk-resource name,
 file-share path, `Test-Cluster -Include` categories) are interpolated only
-inside **single-quoted** PowerShell literals via `ps_single_quote` (embedded `'`
-doubled — complete escaping inside a single-quoted PowerShell string). The
+inside **single-quoted** PowerShell literals via `ps_single_quote` (every
+single-quote character PowerShell accepts — `'` and the typographic quotes U+2018
+to U+201B — is doubled, which is complete escaping inside a single-quoted
+PowerShell string). The
 `Resume-ClusterNode -Failback` value and the `witness_type` are validated against
 bounded enums before they select a fixed cmdlet flag. Every non-parameterized
 script (`cluster.get`, `cluster.quorum`, `validation-report`, the two `list`

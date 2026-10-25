@@ -34,7 +34,7 @@ approve / resume substrate that shipped in v0.6.0 (#817 / #820) and the
 human-queue routing + write-op secret redaction that shipped in
 [#1401](https://github.com/evoila/meho/issues/1401) — it only
 *dispatches* the ops under test and *reads back* the already-shipped
-audit, broadcast, and READ surfaces.
+audit and READ surfaces.
 
 ## The two halves
 
@@ -56,7 +56,7 @@ connector script produces the evidence bundle; the driver grades it.
 | 1 | **Dry-run / read-back parity** — MEHO resolves the same target + params + **plan** as the wrapper (`kubectl apply --dry-run=server` vs `meho k8s apply --dry-run`; VCF task-preview / DRS recommendation). Diverging plans fail before anything writes. | ✅ `parity_diff` | core |
 | 2 | **Dual-run on a disposable target** — both wrapper and MEHO op run against the same scratch target (holodeck, k3d/CI cluster, scratch Vault path), same operator workflow. Capture each side's **effect**, not stdout. | Orchestrated (driver + consumer hooks) | driver |
 | 3 | **State diff, not framing** — read post-op state back via the **already-shipped READ ops**, normalising cosmetic diffs (timestamps, generated UIDs, MEHO's reduced envelope). Idempotent ops run twice to prove no drift. Any semantic divergence is a blocker with recorded rationale. | ✅ `state_diff` + `idempotency_drift` | core |
-| 4 | **Audit + broadcast + approval completeness** — exactly one **dispatch audit row** (`path == op_id`, the durable write-record the dispatcher writes once the op executes) + one broadcast event AND (being `dangerous` + `requires_approval`) exactly the **two synchronous approval audit rows** (`approval.request` + `approval.decision`, the #817 invariant), with the op not returning until the decision row commits. A rejected decision never executes → zero dispatch rows + zero write broadcasts. Redacted-class ops never leak a credential to the feed. | ✅ `assert_approval_completeness` | core |
+| 4 | **Audit + approval completeness** — exactly one **dispatch audit row** (`path == op_id`, the durable write-record the dispatcher writes once the op executes) AND (being `dangerous` + `requires_approval`) exactly the **two synchronous approval audit rows** (`approval.request` + `approval.decision`, the #817 invariant), with the op not returning until the decision row commits. A rejected decision never executes → zero dispatch rows. A dispatch publishes no Broadcast event (#3758), so the feed is not part of the evidence. | ✅ `assert_approval_completeness` | core |
 | 5 | **Bounded live soak** — MEHO + wrapper in parallel on the **real** target for a bounded window (~2 weeks / N≥10 real invocations per op), wrapper authoritative. The scorecard write column moves 🟡→✅ only after a clean soak. | Documented protocol (below) | runbook |
 
 ## The evidence bundle (consumer wiring contract)
@@ -73,7 +73,6 @@ an `--evidence-dir`, **before** invoking the driver:
 | `meho-state.json` | 3 | post-op read-back of MEHO's effect (via the **shipped MEHO READ op**) |
 | `meho-state-2.json` | 3 | (only with `--idempotent`) read-back after a **second** MEHO run |
 | `audit-rows.json` | 4 | array of `audit_log` rows for the op window — the two `approval.*` rows **and** the dispatch row with `path == op_id` (`[{path, operator_sub}, …]`) |
-| `broadcast-events.json` | 4 | array of broadcast events for the window (`[{op_id, op_class, payload}, …]`) |
 | `meta.json` | 4 | `{"returned_after_decision": bool, "decision": "approved"｜"rejected"}` |
 
 Read-back must use the **already-shipped READ ops**, never the write op's
@@ -158,8 +157,8 @@ is the reference application of the harness against **live backplane
 primitives**. #1398 (the real k8s write ops) is not yet merged, so the
 reference run drives a stand-in `requires_approval=True` write op through
 the full **human** queued → approve → resume cycle that #1401 shipped,
-captures the real `approval.request` / `approval.decision` audit rows and
-the real broadcast events, and feeds them into the stage-4 verifier —
+captures the real `approval.request` / `approval.decision` audit rows
+and feeds them into the stage-4 verifier —
 proving the governance invariant holds against the actual substrate. When
 #1398 merges, the consumer's `parity-check-kubernetes.sh` produces the
 same evidence shape against the real `k8s.scale` op and this same driver
@@ -211,10 +210,10 @@ contract, populated with realistic vSphere shapes —
   `network-9`, zero DVS proxy switches left on the host), read via the
   **shipped READ ops** — not the write op's own `status` framing. The
   two runs differ only in fresh `taskId` / `endTime`, which strip away.
-* **stage 4** — `audit-rows.json` / `broadcast-events.json` /
-  `meta.json`: the two `approval.*` rows bracketing the single
-  `path == "vmware.composite.host.detach_from_vds"` dispatch row, one
-  write broadcast event, `returned_after_decision: true`.
+* **stage 4** — `audit-rows.json` / `meta.json`: the two `approval.*`
+  rows bracketing the single
+  `path == "vmware.composite.host.detach_from_vds"` dispatch row,
+  `returned_after_decision: true`.
 
 Run it:
 
@@ -257,7 +256,7 @@ ESXi host and a real vDS. On the holodeck lab:
 ### Cross-repo handoff — queue the script for Phase-D deletion
 
 `scripts/host-detach-from-vds.py` lives in the consumer/ops repo
-[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc),
+`evoila-bosnia/claude-rdc-hetzner-dc`,
 **not** in `evoila/meho` — its deletion is a cross-repo operator action,
 tracked but not performed here. Once the soak grades ✅ READY:
 

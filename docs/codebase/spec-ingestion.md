@@ -51,8 +51,10 @@ The pipeline is broken into work items per Initiative #389:
   descriptors (`group_id IS NULL`) too (#3681) — the same connector scope
   `enable-reads` reaches group-agnostically — so a full `enable` never
   strands ungrouped write/typed ops at default-deny, and `connector review`
-  reports the ungrouped count (`ungrouped_op_count`, printed in the CLI
-  render) so an operator can see any the grouping pass left out.
+  reports the ungrouped count (`ungrouped_op_count`) and lists each
+  ungrouped op with its enabled state and safety level
+  (`ungrouped_ops`, the `[ungrouped]` section of the CLI render, #3870).
+  So `groups` plus `ungrouped_ops` is every op dispatch can serve.
 * **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline. T6
   (REST routes) lands the seven `/api/v1/connectors*` endpoints —
   `POST /ingest`, `GET /` (list), `GET /{id}/review`, `PATCH
@@ -289,8 +291,9 @@ vCenter variant — owned by the profiled-dispatch wiring
 
 `run_llm_grouping()` opens its own transaction and runs:
 
-1. **Pass 1 (group derivation)** — only when no `operation_group`
-   rows yet exist for the connector triple. Sends every unassigned
+1. **Pass 1 (group derivation)** — when the connector triple has no
+   `operation_group` row that can take ingested ops (none at all, or
+   only typed groups). Sends every unassigned
    op's `(op_id, summary, tags)` to the LLM and asks for an array of
    `{group_key, name, when_to_use}` proposals. Output is validated
    against `GroupProposal` (snake_case key, non-empty fields, bounded
@@ -307,7 +310,8 @@ vCenter variant — owned by the profiled-dispatch wiring
 The function commits exactly once at the end of both passes, in the
 same transaction as a single `meho_connector_llm_grouping` audit row
 that records `{connector_id, groups_created, operations_assigned,
-operations_unassigned, llm_call_count, batch_size}`. Partial failure
+operations_unassigned, llm_call_count, batch_size,
+operations_added_by_group}`. Partial failure
 (LLM output that fails schema validation) raises
 `LlmOutputInvalid`, rolls back the transaction, and leaves the
 connector in whatever state preceded the call — operator retries via
@@ -316,12 +320,35 @@ the CLI verb T5 will ship.
 Idempotency:
 
 * No unassigned ops → true no-op, zero LLM calls, no audit row.
-* Existing `operation_group` rows present but some ops still
-  unassigned → Pass 1 skipped, Pass 2 only runs against the
-  unassigned-op subset using the existing groups verbatim. This is
-  the "partial-regrouping" branch.
 * Fully fresh connector → both passes run, all groups + assignments
   persist in one transaction.
+* Existing groups present but some ops still unassigned → the
+  "partial-regrouping" branch (#3713):
+  * **Typed groups are never targets.** A group that holds any
+    `source_kind='typed'` op belongs to a typed registrar. It is a
+    curated, single-purpose surface, so Pass 2 never files an ingested
+    op into it. The signal is the group's members, not its key shape;
+    `operation_group` has no source column.
+  * **Composite ops do not make a group typed.** Hand-written
+    composites are filed into the shared semantic groups (`vm`,
+    `cluster`, `storage`, ...). Those groups stay Pass-2 targets, so
+    ingested ops can still fill them.
+  * **Only typed groups exist** → the run is a full grouping run
+    (Pass 1 + Pass 2) over the unassigned ops.
+  * **Non-typed groups exist** → Pass 2 runs over the unassigned ops
+    against those groups (persisted keys are projected without
+    re-validation, #3685). Ops still left over get an "extend" Pass 1:
+    the prompt lists the existing groups and asks for at most
+    `max_groups` new ones, and `[]` is a valid answer. A second Pass 2
+    then files the leftovers into the new groups only.
+  * Every Pass-1 proposal whose key already exists in the connector
+    scope (typed keys included) is dropped, so no persisted group is
+    renamed or duplicated.
+* `GroupingResult.groups` carries one `GroupSummary` per group in
+  scope: `operations_added` this run, `created`, and how many typed,
+  composite, and ingested ops the group now holds. The ingest job result and
+  `meho connector ingest` show it; the CLI prints a warning for a typed
+  group that also holds ingested ops.
 
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
@@ -476,8 +503,26 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints or a connector-owned minimum safety floor |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
+
+Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
+delete usually removes something that cannot be brought back. Without the
+approval flag, a human operator seat ran it at once. Now it waits until a
+second person approves, on every seat. The parser does not use the
+`destructive` tier by itself: that tier also needs a blast-radius statement
+from a preview builder before the op can wait for approval, and a generic
+ingested delete has no builder, so a `destructive` default would make every
+ingested delete un-runnable. A connector floor raises an op to
+`destructive` when it ships the builder: the VMware floor does this for the
+vCenter tagging removals and the content-library item delete (see the floor
+tables below, `connectors/vmware_rest/tagging_delete_preview.py`, and
+`connectors/vmware_rest/library_item_delete_preview.py`).
+`test_operations_ingest_delete_approval.py` checks that no `DELETE` in a
+shipped spec, or in the pinned vCenter and NSX specs, lands without
+approval, and that the pinned vCenter tagging removals and the library item
+delete land `destructive`.
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -486,7 +531,11 @@ methods as `POST /<Type>/{moId}/<Method>`, so its HTTP verb alone would
 otherwise classify an object destroy as `caution`. This is a raise-only rule:
 it never weakens a stricter existing classification. The vocabulary is narrow
 by design; connector-owned safety floors remain the explicit scoped overlay
-for vendor- and version-specific rules.
+for vendor- and version-specific rules. The word list and the rule live in
+one module, `meho_backplane/delete_names.py`, and the standing-grant checks,
+the governed-step list, the flight recorder and the stored-delete review use
+the same list, so an op id such as `POST:/VirtualMachine/{moId}/Destroy_Task`
+counts as a delete everywhere MEHO makes that decision (#4632).
 
 #### Connector safety floors
 
@@ -502,9 +551,61 @@ an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
 
+#### Connector spec corrections
+
+Some vendor specs describe an operation's request body wrongly. The parser
+stays vendor-neutral, so a connector can register a correction in
+`ingest/spec_corrections.py`. A correction gets the catalog `version` and one
+parsed proto, and returns the same proto or a fixed copy. It runs just before
+the safety floor, on both the register path and the dry-run path.
+
+A connector can also register a batch correction
+(`register_ingest_batch_correction`). It gets the catalog `version` and every
+proto of one spec, for a fix that must compare operations with each other.
+`apply_spec_corrections` runs the per-operation correction on each proto and
+then the batch correction; both ingest paths call it.
+
+A correction may also set `llm_instructions`. Registration stores it on a new
+row. On re-ingest it fills `llm_instructions` only when the row has none, so
+an operator's own edit is never replaced.
+
+VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
+
+- on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
+  `{filter_spec, result_spec}` body;
+- an operation with no summary gets the first sentence of its description
+  (at most 120 characters);
+- a VI-JSON operation whose summary another operation of the same spec shares
+  gets its managed object type in front.
+
+See [connectors-vmware-rest.md](connectors-vmware-rest.md).
+
+#### Catalog safety overlay (#3340)
+
+A catalog row can also declare `safety_overlay`: a list of
+`(method, path glob) -> safety_level, requires_approval` rules
+(`SafetyOverlayEntry` in `ingest/catalog.py`). `apply_safety_floor` runs
+the connector floor first and then the overlay. The overlay only raises:
+the strictest level wins and approval is never cleared. An op that a rule
+matches counts as governed in `has_safety_floor`, so re-ingest uses the
+same raise-only update for existing rows. The overlay is keyed on the
+catalog `(product, version)`, like `op_allowlist`. Operator guide:
+`docs/cross-repo/connector-catalog.md`, "Safety overlay".
+
+An ingested read whose answer holds credentials gets two guards, the same
+as its hand-written twin (#4617): a `safety_overlay` rule on its catalog
+row (`caution`, with approval) and an entry in `_CREDENTIAL_READ_OPS` in
+`broadcast/events.py`, so the dispatcher replaces every secret field in
+the answer with `[REDACTED:param_name]`. That list stays the only list of
+secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
+the `/v1/credentials` reads, the depot, backup and proxy settings, host
+prechecks, VASA providers, the management-component task spec, users and
+identity providers. Stored rows change at the next ingest (see "Applying
+corrected floors to existing rows" below).
+
 #### Applying corrected floors to existing rows
 
-Deploying a corrected connector floor does not rewrite rows that were already
+Deploying a corrected connector floor or catalog safety overlay does not rewrite rows that were already
 ingested. Run the next connector ingest — `POST /api/v1/connectors/ingest` or
 `meho connector ingest` — to apply the corrected `safety_level` and approval
 posture to existing `endpoint_descriptor` rows. That re-ingest is the
@@ -523,6 +624,79 @@ listed methods.
 | `DELETE` `/vcenter/vm/{vm}` | Promoted: matches the governed VM-destroy posture. |
 | mutating `/vcenter/vm/{vm}/power` and `/power/**` | Promoted: matches the governed VM-power posture. |
 | VM reads and non-VMware connectors | Unchanged: no connector floor applies. |
+
+The same floor puts the vCenter **tagging removals** in the `destructive`
+tier with `requires_approval=True` (#3827), on the 8.0 and 9.0 catalogs and
+with or without the `/api` mount in the path:
+
+| Op | Why destructive | Preview lists |
+|---|---|---|
+| `DELETE` `/cis/tagging/category/{id}` | Removes every tag in the category and detaches them from every object. | The category, its tags, and the objects each tag is attached to. |
+| `DELETE` `/cis/tagging/tag/{id}` | Detaches the tag from every object. | The tag and its attached objects. |
+| `POST` `/cis/tagging/tag-association[/{id}]?action=detach*` (three actions) | Drops the association that governance (for example storage policy tags) relies on. | The tag and the objects named in the request; marked as reversible by attaching the tag again. |
+
+`destructive` means: every seat waits for a second person; a standing
+service-account grant can never satisfy the op (refused at grant creation
+and again at dispatch); and the caller must present a `preview_hash` from
+`preview_operation` so the park carries the blast radius above. The
+builders in `connectors/vmware_rest/tagging_delete_preview.py` are
+registered under every op_id spelling (`{categoryId}` / `{category_id}`,
+`{tagId}` / `{tag_id}`, with and without `/api`), because the vendor spec
+and an appliance-served spec spell the path parameter differently.
+A stored row can also spell a tag detach without the path parameter
+(`POST /api/cis/tagging/tag-association?action=detach`, the op_id the
+issue observed on a live connector); that spelling is registered too, and
+the builder takes the tag id from the request body.
+
+The builders follow three rules, because a detach request names tag ids
+in its body and the preview reads run before anyone approves:
+
+- Every id that enters a read path is escaped as one path segment, the
+  same way the dispatcher renders the write itself. A `..` traversal
+  segment, plain or percent-encoded, makes the builder raise, so the
+  removal is refused before it waits for approval and the refusal names
+  the reason.
+- Child lists are complete. The block carries `children_count`, the
+  exact number. Only the per-child detail reads (tag name, attached
+  objects) stop at 50 children; a child past that cap is listed by id
+  with `detail_omitted: true`.
+- A tag's attached-object list stops at 50 entries, next to the exact
+  `attached_object_count`; a cut list carries `attached_objects_omitted`.
+  When that list is the children of a tag delete, the block also carries
+  `children_omitted` and `children_full_list_op`, the read-only op that
+  lists every attached object.
+
+`test_connectors_vmware_rest_tagging_delete_dispatch.py` proves the
+dispatch contract: refusal without a bound preview, the park with the
+blast radius, a second operator's approval running the delete once, a
+service account's live grant never running a detach, the escaping and
+traversal refusal for body-supplied ids, and the complete lists above the
+detail cap.
+
+The same floor puts the **content-library item delete**
+(`DELETE /content/library/item/{id}`) in the `destructive` tier with
+`requires_approval=True` (#4058), on the 8.0 and 9.0 catalogs and with or
+without the `/api` mount. The item and its files cannot be brought back,
+like a deleted VM.
+
+The preview builder in `connectors/vmware_rest/library_item_delete_preview.py`
+is registered under every op_id spelling (`{libraryItemId}` /
+`{library_item_id}`, with and without `/api`). It reuses the read-only
+planner of the governed `vmware.composite.content_library.item.delete`, so
+the approver sees the item, its library, its files, and any VM that mounts
+it. Two rules:
+
+- The id must be a content-library id (a UUID). Any other id makes the
+  builder raise, so the delete is refused before it waits for approval.
+- The plain delete does not apply the composite's refusals (an item in a
+  subscribed library, an item a VM still mounts). When the composite would
+  refuse, the block carries a `warning` that names the composite, so the
+  approver can reject the plain delete and use the composite instead.
+
+`test_connectors_vmware_rest_composites_library_delete.py` covers the
+builder; `test_operations_ingest_delete_approval.py` covers the floor. Rows
+stored by an earlier ingest keep their old posture until the next ingest;
+`meho connector review` lists them as needing correction.
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 (always `'ingested'`), `product`, `version`, `impl_id`, `embedding`,
@@ -570,8 +744,9 @@ per role in the T3 grouping run:
   validator; oversized prose rejected via bounded `max_length`.
 * `GroupingResult` — counts + timings the orchestrator returns
   (`groups_created`, `operations_assigned`, `operations_unassigned`,
-  `llm_call_count`, `llm_duration_ms`). Surfaced in the operator-
-  facing CLI / API at T5.
+  `llm_call_count`, `llm_duration_ms`, and `groups`: one
+  `GroupSummary` per group). Surfaced in the operator-facing CLI / API
+  at T5.
 * `GroupingConfig` — tunable knobs (`batch_size`, `min_groups`,
   `max_groups`). Constructed from the keyword arguments to
   `run_llm_grouping()`; `validate()` raises `ValueError` before any
@@ -605,7 +780,8 @@ sensor's id / name / tenant_id as `AffectedSensor` entries. The join
 follows the ingest's own tenant scope: a tenant-scoped ingest
 overwrote only that tenant's descriptor rows, so it filters
 `Sensor.tenant_id` to match — other tenants' sensors resolve their
-own or the built-in rows (tenant-wins, `operations/_lookup.py`) and
+own or the built-in rows (the tenant row is authoritative, see
+[Tenant connector row is authoritative](#tenant-connector-row-is-authoritative-3870)) and
 listing them would leak foreign sensor identities. Only a built-in /
 global ingest (`tenant_id IS NULL`) is deliberately unfiltered,
 since the built-in rows serve every tenant's Sensors. One structlog
@@ -770,6 +946,34 @@ product does not round-trip (the `_fixture` mechanism row parses to
 `validate_shipped_artifacts()`; the stamp path re-parses with the same
 model, so it stays fail-closed as a second line of defence.
 
+### Tenant connector row is authoritative (#3870)
+
+A tenant-scoped ingest gives a tenant its own `endpoint_descriptor` rows
+for a connector triple `(product, version, impl_id)`. When such rows
+exist, they are the only rows that count for that tenant:
+
+- An op that is **enabled** on the tenant row runs from the tenant row.
+- An op that is **disabled** on the tenant row is refused (`unknown_op`).
+  It does not fall back to the built-in row, even when the built-in row
+  has it enabled.
+- An op that is **absent** from the tenant row is refused the same way.
+- A tenant with **no** descriptor row for the triple uses the built-in
+  rows (`tenant_id IS NULL`), as before.
+
+Ownership is decided by descriptor rows in any `is_enabled` state, so
+disabling every op on the tenant row leaves the tenant with nothing to
+run on that connector. To use the built-in row again, delete the tenant
+row (`connector delete` on the tenant scope).
+
+One predicate, `visible_scope_clause` in `operations/_lookup.py`, carries
+this rule. `lookup_descriptor` (dispatch, preview, sensors, gateway
+commands), `descriptor_exists_any_state`, `count_known_ops`,
+`list_operation_groups`, and `search_operations` (both the PostgreSQL SQL
+in `_search.py` and the SQLite fallback) all filter on it, so they always
+agree. The `GET /api/v1/connectors` listing still shows both rows; its
+`shadowed_by_tenant_scope` marker on the built-in row now means the
+built-in row is not used at all for that tenant.
+
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 
 Boot stamping (above) makes a *shipped* profile-backed catalog row
@@ -919,6 +1123,11 @@ run_llm_grouping pipeline for one connector. Constructed from an
 `Operator` (so the service-level audit rows the helpers write carry
 the originating operator's identity); the same instance is reused
 across T5's CLI verbs, T6's REST routes, and T7's admin MCP tools.
+Those rows also carry the request's change ticket: the audit
+middleware binds the `Meho-Work-Ref` header onto `work_ref_var` for the
+whole request, and `write_audit_row` in `ingest/_internals.py` reads it
+into `audit_log.work_ref` (#3804). The async ingest job inherits the
+binding because `asyncio.create_task` copies the request context.
 
 The `LlmClient` Protocol is injected via a factory parameter so the
 chassis can lazy-resolve it; the fail-closed default factory raises
@@ -1625,6 +1834,39 @@ modal's Write-scope select (`global`/`tenant` discriminator; the BFF
 derives the UUID from the authenticated operator, never from the
 client).
 
+**Platform-admin ingest into another tenant (#3800).** One exception
+to the "any other UUID is rejected" rule. An operator whose token
+carries `platform_admin` may name another tenant's UUID in
+`tenant_id` (CLI: `--tenant-id`). This lets a platform operator seed
+a tenant-scoped connector row for a new tenant that has no usable
+admin seat yet. The rules:
+
+- It only applies when the tenant id is given. An omitted or `null`
+  `tenant_id` still means the built-in scope, for every operator.
+- Without `platform_admin`, a foreign UUID is still rejected (REST
+  403, MCP `-32602`), exactly as before. The route's `tenant_admin`
+  floor still applies too.
+- Before any row is written, `ingest()` commits one
+  `meho_connector_ingest_cross_tenant` (`OP_CROSS_TENANT_INGEST`)
+  audit row. The row is attributed to the acting operator
+  (`operator_sub` and the operator's own `tenant_id`); the payload
+  names the `connector_id` and the `target_tenant_id`. The row also
+  carries the agent session (`agent_session_id`), read through
+  `resolve_agent_session_id` like every row `write_audit_row` builds,
+  so a session search finds it whether or not
+  `AUDIT_WRAPPER_ROWS_RETIRED` is on. The async MCP path keeps the
+  session too: the background task copies the tool call's context.
+  If that write fails, the ingest stops with nothing written. A dry
+  run writes no audit row.
+- The `--auth-scheme` profile stamp follows the same allowance:
+  `ReviewService.record_profile_stamp` passes
+  `allow_platform_admin_cross_tenant=True` to `_resolve_scope`. No
+  other `ReviewService` path sets it, so review, enable and delete
+  stay strict.
+- A `platform_admin` may poll an ingest job in another tenant
+  (`IngestJobRegistry.get(..., is_platform_admin=...)`), and the REST
+  async job's "is it dispatchable" check probes the target tenant.
+
 **Shared scope resolution (`get_review_payload` + `enable_reads`,
 G0.13-T5 #1135 / G0.26-T1 #1801).** Every read/enable-reads path
 applies the same "operator's-tenant rows + built-ins (`tenant_id IS
@@ -1641,7 +1883,10 @@ so they can never diverge on *which row* they act on. The resolver:
   path) does a single-pass existence check — no fallback, no
   ambiguity;
 - for the operator's own tenant, probes **both** the tenant scope and
-  the built-in scope with `scope_has_groups` and then:
+  the built-in scope with `scope_has_rows` (a group row **or** a
+  descriptor row counts, so a connector whose grouping pass produced no
+  groups is still found and reviewed with `groups=[]` and every op in
+  `ungrouped_ops`, #3870) and then:
   - both exist → raises `AmbiguousConnectorScopeError` (the route maps
     it to a 409 `connector_scope_ambiguous` enumerating the candidate
     rows — neither a silent pick nor a bare 404);
@@ -1660,15 +1905,17 @@ asymmetry. `bulk_enable_read_ops` and the `/review` payload render
 both run against the scope the shared resolver returns.
 
 The PATCH editing routes (`/groups`, `/operations`) and the
-connector-level `enable` / `disable` / `delete` transitions still
-keep their single-pass lookup against the operator's `tenant_id` via
-`_resolve_scope`: "do tenant_admins get to edit / transition
-built-ins?" is a policy choice distinct from the read/enable-reads
-visibility surface, and the route gate is `tenant_admin`-only —
-built-in writes already have an explicit MCP / CLI affordance
-(`ReviewService` accepts `tenant_id=None` under the `TENANT_ADMIN`
-role). They are free to adopt `_resolve_existing_scope` later if the
-same global-fallback / disambiguation is wanted there.
+connector-level `enable` / `disable` transitions resolve through
+`ReviewService._resolve_writable_scope` instead. It prefers the
+operator's own tenant row and falls back to the built-in row, which a
+`tenant_admin` without `platform_admin` may not write (403
+`BuiltinConnectorWriteForbiddenError`). It never raises the ambiguity
+error: with both rows present it acts on the tenant row. The group
+transitions and the group edit probe for group rows, because they have
+nothing to act on without them. The per-op edit (`edit_op`) probes with
+`scope_has_rows` (a group row **or** an operation row): an op that
+`enable_reads` enabled on a group-less connector must be disable-able
+again through the same tenant row (#3870).
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)
@@ -1975,6 +2222,37 @@ not recoverable server-side. The shipped repair path is
   existing `meho connector ingest` / `POST /api/v1/connectors/ingest` /
   `meho_connector_ingest` surfaces are the repair path.
 
+### Review report for stored deletes (#3827)
+
+A corrected parser default or connector floor changes nothing for rows an
+earlier ingest already stored; they keep their old `safety_level` and
+`requires_approval` until the connector is ingested again (the
+"Applying corrected floors to existing rows" rule above). A spec guard test
+cannot show an operator which stored rows still run without approval. The
+review payload therefore carries a report:
+
+* `ConnectorReviewPayload.delete_ops_below_destructive` — one
+  `ConnectorReviewDeleteOp` per stored `source_kind='ingested'` row that is
+  delete-shaped (a `DELETE` verb, or a write the connector floor treats as
+  a removal, such as the vCenter tag detach actions) and sits below
+  `destructive`. Each row shows the stored `safety_level` /
+  `requires_approval` next to the posture a fresh ingest of the same
+  `(method, path)` would assign today — `default_safety_posture` (parser),
+  then `apply_safety_floor` (connector floor + catalog overlay) — plus
+  `needs_correction` and a plain-English `reason`.
+* `ConnectorReviewPayload.delete_ops_needing_correction_count` — how many
+  of those rows are weaker than the fresh-ingest posture.
+
+`operations/ingest/delete_review.py` builds the report from
+`load_ingested_writes_in_scope` (full descriptor universe, group or not).
+`meho connector review` prints the count line and a WARNING table of the
+rows that need correction; `--json` and the MCP `meho_connector_review`
+tool carry the full list. The fix is the same as for `needs_reingest`:
+ingest the connector again, or correct single rows with `edit-op`.
+`test_operations_ingest_review.py` seeds stored unsafe rows (the issue's
+`caution` category delete, a `caution` detach, a `dangerous` delete without
+approval) and checks the report and the count.
+
 The four supported component buckets are: `#/components/schemas/*`,
 `#/components/parameters/*` (vi-json.yaml's shared `moId`),
 `#/components/responses/*` (the GitHub REST spec's 1.9k shared
@@ -1984,6 +2262,57 @@ vendor specs; not yet used in the v0.x catalogue). Each opts in via
 a separate kwarg on `resolve_shallow_ref`; `parse_openapi` threads
 all four dicts uniformly so the full pipeline never trips the
 opt-out branch.
+
+### Group text check on the review payload (#3671)
+
+An LLM writes each group's `when_to_use` text at ingest. The operator
+reads it before enabling the group. The review payload now checks that
+text against the ops in the group, so the operator does not have to
+trust it blindly.
+
+Each `ConnectorReviewGroup` carries `advisory`
+(`ConnectorReviewGroupAdvisory`):
+
+* `distribution` (`GroupSafetyDistribution`) — counts of the **enabled**
+  ops per `safety_level` (`safe` / `caution` / `dangerous` /
+  `destructive`), how many of them need approval
+  (`requires_approval_count`), and the enabled total
+  (`enabled_op_count`). Disabled ops are not counted.
+* `flags` — short, plain notes, at most five, without repeats:
+  * the text makes a safety claim the ops break: "read-only" (or "no
+    side effects", "does not modify") while an op is not `safe` or needs
+    approval; "non-destructive" while an op is `destructive`; "all ...
+    dangerous/destructive" while an op is at another level, higher or
+    lower; "all ... require approval" while an op does not;
+  * the text shares no word with the op ids and summaries.
+
+A `staged` group has no enabled op until the operator enables it. Then
+the flags check every op in the group (the ops enabling would turn on)
+and each flag says so. The counts still cover enabled ops only.
+
+`operations/ingest/group_truth.py` builds this from the ops the payload
+already loaded, so it adds no database query. The check is a simple word
+match, not a language parser.
+
+This is advice only. It never blocks dispatch, ingest, or the move from
+`staged` to `enabled`. Dispatch keeps using each op's own `safety_level`,
+`requires_approval`, and policy. The group label and its text are never
+part of that decision, and the agent-facing `list_operation_groups`
+result does not carry these fields. `--json` on `meho connector review`,
+`GET /api/v1/connectors/{id}/review`, and the MCP `meho_connector_review`
+tool carry them.
+
+**Re-ingest keeps operator edits.** A re-ingest of the same spec never
+writes `custom_description`, `custom_notes`, `is_enabled`, the group's
+`review_status`, or an edited `when_to_use` (the upsert's existing-row
+branches in `_upsert.py` skip those fields, the grouping pass skips ops
+that already have a group, and typed registration does not write its
+`when_to_use` over an existing group row). A breaking change ships as a
+new connector `version` with its own rows next to the old ones. The same
+`(product, version, impl_id, op_id)` from a different spec raises
+`OpIdCollision`. `test_operations_ingest_review.py` pins all of this
+(`-k override_preserved_on_reingest`,
+`-k breaking_change_new_version_identity`).
 
 ### T2 control flow
 
@@ -2047,20 +2376,27 @@ run_llm_grouping
 ├─ GroupingConfig.validate     # bounds check on min/max/batch_size
 ├─ load_unassigned_ops         # group_id IS NULL + scope match
 │  └─ early return GroupingResult(...zeros...) if none
-├─ _resolve_groups_for_pass2
-│  ├─ load_existing_groups
-│  ├─ if existing → project rows into GroupProposal list (skip Pass 1)
-│  └─ else
-│     ├─ render_propose_groups_prompt
-│     ├─ llm_client.generate_json   # Pass 1 LLM call
-│     ├─ parse_proposal_response   # GroupProposal schema validation
-│     └─ _persist_proposed_groups  # session.add per row + flush
-├─ _assign_ops_in_batches
-│  └─ for each batch of `batch_size` ops:
-│     ├─ render_assign_ops_prompt
-│     ├─ llm_client.generate_json   # Pass 2 LLM call
-│     └─ parse_assignment_response  # filter unknown ops + coerce unknown keys
-├─ _apply_assignments_to_rows   # mutate EndpointDescriptor.group_id
+├─ _drive_two_pass_grouping
+│  ├─ load_existing_groups + load_group_membership
+│  ├─ candidates = groups with no typed member (composites allowed)
+│  ├─ if no candidates → _create_groups_and_assign(all unassigned ops)
+│  ├─ else
+│  │  ├─ _assign_and_apply(unassigned ops, candidates)   # Pass 2
+│  │  └─ if leftovers → _create_groups_and_assign(leftovers, extend)
+│  └─ _summarise_groups            # per-group GroupSummary
+│
+│  _create_groups_and_assign:
+│  ├─ render_propose_groups_prompt  # extend mode lists existing groups
+│  ├─ llm_client.generate_json      # Pass 1 LLM call
+│  ├─ parse_proposal_response       # GroupProposal schema validation
+│  ├─ drop proposals with an existing key
+│  ├─ _persist_proposed_groups      # session.add per row + flush
+│  └─ _assign_and_apply             # Pass 2
+│
+│  _assign_and_apply:
+│  ├─ _assign_ops_in_batches        # one LLM call per `batch_size` ops
+│  │  └─ parse_assignment_response  # filter unknown ops + coerce unknown keys
+│  └─ _apply_assignments_to_rows    # mutate EndpointDescriptor.group_id
 ├─ _write_grouping_audit_row    # meho_connector_llm_grouping
 └─ session.commit               # atomic: groups + assignments + audit
 ```

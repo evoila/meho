@@ -9,78 +9,36 @@ fragment; it renders the historical events the operator can scroll
 back through, with each row opening the same T2 event-detail drawer on
 a click.
 
-Live feed vs. history pane
-==========================
+What it reads (#3758)
+=====================
 
-The live feed (:mod:`~meho_backplane.ui.routes.broadcast.stream`) tails
-the per-tenant Valkey stream with a BLOCKing ``XREAD`` -- an open-ended
-generator that yields events as they are published. The history pane is
-the opposite shape: a **finite** ``XRANGE`` pull of the events already
-on the stream, bounded by both a 24h time window and a row cap, rendered
-once into the page. There is no streaming, no generator, no
-``while True`` -- the endpoint reads a bounded batch and returns, so it
-cannot hang a worker the way an unguarded stream loop could.
+Broadcast carries deliberate agent announcements only. The pane reads
+the newest announcements stored in the ``agent_announcement`` archive
+within the last :attr:`Settings.broadcast_retention_hours` hours (default
+24), capped at :data:`IN_DOM_ROW_CAP` rows, through
+:func:`~meho_backplane.broadcast.archive_reader.latest_announcements`.
+It is a finite read: no stream, no generator. A database error degrades
+the pane to its empty state (logged), not a 500.
 
-The 24h window
-==============
-
-The ``XRANGE`` lower bound is the bare millisecond timestamp ``now_ms -
-broadcast_retention_hours * 3_600_000``; the upper bound is ``"+"``
-(latest). The retention setting is :attr:`Settings.broadcast_retention_hours`
-(default 24, the locked decision-3 contract -- the same retention the
-publisher's ``MAXLEN`` trim targets). ``XRANGE`` returns ascending
-(oldest-first); the pane renders newest-first to match the live feed,
-so the parsed list is reversed before it reaches the template.
-
-Shared read helper (G6.4-T4 #1103)
-==================================
-
-The xrange + redact-aware parse loop lives in
-:func:`meho_backplane.broadcast.history.list_recent_events_fail_soft`
-(the fail-soft sibling of the MCP ``broadcast.recent`` tool's
-fail-loud caller). The wrapper catches :class:`redis.exceptions.RedisError`
-and returns the empty result so a Valkey blip degrades this pane to
-its empty state, not 500. That guarantee is what keeps the page
-useful when the broadcast subchart is unhealthy.
-
-The shared helper handles both :class:`BroadcastEvent` (audit-driven)
-and :class:`AgentAnnouncementEvent` (agent-authored). #2549 makes the
-pane render both: the shared row partial (``broadcast/_event_row.html``)
-branches on ``ev.kind`` so an operation renders the audit columns
-(``op_class`` / ``op_id`` / ``result_status`` / ``payload``) and an
-announcement renders its agent-authored variant (principal, phase chip,
-enveloped activity text shown as escaped quoted prose, plus the #2544
-structured claim fields -- targets / work_ref / TTL). The former hard
-drop in :func:`_fetch_history` becomes the optional ``?kind=`` filter
-(see :func:`_matches_kind_filter`), so an operator can still narrow the
-pane to one kind. This mirrors the SSE feed, which #2549 also union-
-validates so announcements flow as first-class frames.
+The ``?kind=`` filter stays for the page's "All / Operations /
+Announcements" control; automatic operations are no longer on
+Broadcast, so ``kind=operation`` shows nothing. ``query_audit`` and the
+audit console are the record of operations.
 
 Why reuse the live feed's row + drawer
 ======================================
 
-The history rows render through the **same** ``broadcast/_event_row.html``
-partial and the **same** ``broadcastFeed`` Alpine controller the live
-feed uses. The controller is seeded with the historical events from a
-``<script type="application/json">`` data island (the template renders
-the ``history_events`` list through Jinja ``| tojson``) instead of an
-SSE subscription, so the row markup, the op_class badge palette, the 🔒
-aggregate-only marker, the timestamp formatting, and the
-click-to-open-drawer behaviour are all single-sourced -- a history row
-is byte-identical to a live row and opens the identical T2 drawer. The
-data-island shape (not an ``x-data`` attribute) keeps quote- and
-markup-bearing event fields from breaking out of the markup (B1, PR
-#1044).
+The history rows render through the same ``broadcast/_event_row.html``
+partial and ``broadcastFeed`` Alpine controller the live feed uses,
+seeded from a ``<script type="application/json">`` data island (Jinja
+``| tojson``) so quote- and markup-bearing fields cannot break out of
+the markup (B1, PR #1044). Announcement text renders as escaped prose.
 
 Tenant scoping
 ==============
 
-The stream key is ``meho:feed:{session.tenant_id}`` taken from the
-validated session, never a query parameter -- the identical guarantee
-the live stream bridge makes. A tenant-A operator's history pane reads
-only ``meho:feed:{A}``; there is no parameter that could redirect it to
-another tenant's stream, so tenant-A events can never surface on
-tenant-B's history pane (and vice versa).
+The tenant comes from the validated session, never a query parameter,
+so a tenant-A operator's pane reads only tenant A's announcements.
 """
 
 from __future__ import annotations
@@ -88,48 +46,25 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
-from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy.exc import SQLAlchemyError
 
-from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import list_recent_events_fail_soft
+from meho_backplane.broadcast.archive_reader import latest_announcements
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.routes.broadcast.feed import (
     IN_DOM_ROW_CAP,
     OP_CLASS_BADGE_CLASSES,
 )
+from meho_backplane.ui.routes.broadcast.stream import session_reader
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_history_router"]
 
 _log = structlog.get_logger(__name__)
-
-
-def _window_start_iso(*, retention_hours: int, now: datetime) -> str:
-    """Build the inclusive ISO-8601 ``since`` for the retention-window read.
-
-    Returns ``now - retention_hours``, ISO-8601 with a ``Z`` suffix --
-    the shape :func:`~meho_backplane.broadcast.history.parse_since`
-    accepts as an ISO-8601 ``since`` and converts to a bare-ms inclusive
-    lower bound. ``retention_hours`` is bounded by the
-    :attr:`Settings.broadcast_retention_hours` setting (default 24).
-
-    Returns the epoch when the window would underflow (e.g. a
-    misconfigured absurdly-large retention window) so the helper never
-    sees a negative timestamp. The epoch maps to bare-ms ``0`` after
-    parsing, which Valkey treats as "start from the beginning of time".
-    """
-    delta = timedelta(hours=retention_hours)
-    start = (
-        now - delta
-        if now - delta > datetime(1970, 1, 1, tzinfo=UTC)
-        else datetime(1970, 1, 1, tzinfo=UTC)
-    )
-    return start.isoformat().replace("+00:00", "Z")
 
 
 #: The top-level discriminator value for an audit-driven
@@ -193,59 +128,31 @@ def _normalise_kind_filter(raw: str | None) -> str | None:
 
 
 async def _fetch_history(
-    tenant_id: UUID,
-    operator_sub: str,
+    session_ctx: UISessionContext,
     *,
     kind: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Pull the last-24h events for *tenant_id*, newest-first, capped.
+    """Return the session tenant's stored announcements of the retention window.
 
-    Delegates to :func:`~meho_backplane.broadcast.list_recent_events_fail_soft`
-    -- a single finite ``XRANGE`` over ``meho:feed:{tenant_id}`` from the
-    retention-window start to ``"+"`` (latest), bounded by ``COUNT`` =
-    :data:`IN_DOM_ROW_CAP` so the pane stays within the same in-DOM row
-    budget as the live feed.
-
-    The helper returns ascending (oldest-first) dict-shaped events with a
-    stream-cursor ``id``. On the fail-soft path it serialises via
-    ``_dump_event_plain`` (no untrusted-text envelope) because this pane's
-    HTML sink escapes every field separately (Alpine ``x-text`` sets
-    ``textContent``); the announcement free text renders as escaped quoted
-    prose, never interpreted. This route reverses to newest-first to match
-    the live feed's display order and applies the optional ``kind`` filter
-    (see :func:`_matches_kind_filter`). Both event kinds render -- the
-    shared row partial branches on ``ev.kind`` so an announcement renders
-    its agent-authored variant and an operation renders the audit columns.
-
-    Fail-soft: a Valkey error returns an empty list (the pane renders its
-    empty state) rather than 500-ing the fragment. The helper logs the
-    structured warning; this route does not re-log or transform the failure.
-
-    *operator_sub* is the session's principal subject; the helper takes a
-    synthesised :class:`Operator` because its API is operator-scoped even
-    though the UI doesn't validate operator role for the read (the session
-    middleware already gated the request). The role on the synthesised
-    operator is OPERATOR (sufficient for the helper's structural tenant
-    check).
+    Newest first, capped at :data:`IN_DOM_ROW_CAP`. Each row is the plain
+    model dump (no untrusted-text envelope): this pane's HTML sink escapes
+    every field (Alpine ``x-text`` sets ``textContent``). Fail-soft: a
+    database error is logged and returns an empty list.
     """
-    operator = Operator(
-        sub=operator_sub,
-        raw_jwt="ui-session",
-        tenant_id=tenant_id,
-        tenant_role=TenantRole.OPERATOR,
-    )
-    since_iso = _window_start_iso(
-        retention_hours=get_settings().broadcast_retention_hours,
-        now=datetime.now(UTC),
-    )
-    result = await list_recent_events_fail_soft(
-        operator,
-        since=since_iso,
-        limit=IN_DOM_ROW_CAP,
-    )
-    # XRANGE is ascending (oldest-first); the pane renders newest-first
-    # to match the live feed's reverse-chronological order.
-    events = [e for e in result["events"] if _matches_kind_filter(e, kind)]
+    since = datetime.now(UTC) - timedelta(hours=get_settings().broadcast_retention_hours)
+    try:
+        latest = await latest_announcements(
+            session_reader(session_ctx), limit=IN_DOM_ROW_CAP, since=since
+        )
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "ui_broadcast_history_unavailable",
+            tenant_id=str(session_ctx.tenant_id),
+            error_class=type(exc).__name__,
+        )
+        return []
+    events = [item.event.model_dump(mode="json") for item in latest.events]
+    events = [event for event in events if _matches_kind_filter(event, kind)]
     events.reverse()
     return events
 
@@ -278,8 +185,8 @@ def build_history_router() -> APIRouter:
     ) -> HTMLResponse:
         """``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.
 
-        Pulls the session tenant's last-24h events via the shared
-        fail-soft read helper, passes them as a list the template
+        Reads the session tenant's stored announcements of the retention
+        window (fail-soft, :func:`_fetch_history`), passes them as a list the template
         serialises with Jinja ``| tojson`` into a
         ``<script type="application/json">`` data island the shared
         ``broadcastFeed`` controller seeds from, and returns the
@@ -294,11 +201,7 @@ def build_history_router() -> APIRouter:
         blank or unknown value renders both kinds.
         """
         kind_filter = _normalise_kind_filter(kind)
-        events = await _fetch_history(
-            session_ctx.tenant_id,
-            session_ctx.operator_sub,
-            kind=kind_filter,
-        )
+        events = await _fetch_history(session_ctx, kind=kind_filter)
         context: dict[str, object] = {
             "in_dom_row_cap": IN_DOM_ROW_CAP,
             "op_class_badge_json": _badge_palette_json(),

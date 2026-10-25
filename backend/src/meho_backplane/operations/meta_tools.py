@@ -39,12 +39,13 @@ that comprise that surface:
 Tenant scoping
 ==============
 
-Every read query filters by ``tenant_id`` in the same shape the G0.6
+Every read query filters by ``tenant_id`` with the same predicate the G0.6
 dispatcher's :func:`~meho_backplane.operations._lookup.lookup_descriptor`
-does: built-in / global rows (``tenant_id IS NULL``) are visible to all
-operators; tenant-curated rows (``tenant_id == operator.tenant_id``) are
-visible only to that tenant's operators. The two row sets are unioned
-before ranking so search can hit both.
+uses (:func:`~meho_backplane.operations._lookup.visible_scope_clause`).
+When a tenant has its own row for a connector, only that row is visible to
+the tenant's operators; the built-in row for the same connector is not
+used (#3870). Otherwise the built-in rows (``tenant_id IS NULL``) are
+visible. Another tenant's rows are never visible.
 
 Hybrid retrieval over endpoint_descriptor
 =========================================
@@ -80,16 +81,17 @@ from __future__ import annotations
 import time
 import uuid
 from contextlib import AsyncExitStack
-from typing import Annotated, Any, Final
+from typing import Annotated, Any, Final, Literal, get_args
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, WithJsonSchema
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._contract import UnknownOperationError, build_operation_contract
 from meho_backplane.operations._errors import (
     result_ambiguous_target,
     result_no_target,
@@ -100,6 +102,7 @@ from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
     parse_connector_id,
+    visible_scope_clause,
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
@@ -107,9 +110,15 @@ from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
 )
+from meho_backplane.operations.delivery_budget import (
+    bound_complete_response,
+    refuse_undeliverable_receipt,
+)
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
+from meho_backplane.retrieval.retriever import RRF_K
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
     TargetNotFoundError,
@@ -117,14 +126,20 @@ from meho_backplane.targets.resolver import (
 )
 
 __all__ = [
+    "SEARCH_CLASSIFY_MIN_HITS",
     "SEARCH_LIMIT_MAX",
+    "SEARCH_NARROWING_MAX",
+    "SEARCH_NEAR_TIE_BAND",
+    "SEARCH_OUTCOMES",
     "CallOperationBody",
     "ConnectorNotIngestedError",
     "OperationDescriptor",
     "OperationGroupSummary",
     "OperationSearchHit",
     "PreviewOperationBody",
+    "SearchOutcome",
     "UnknownConnectorError",
+    "UnknownOperationError",
     "call_operation",
     "call_operation_with_approval",
     "describe_descriptor",
@@ -223,6 +238,46 @@ _log = structlog.get_logger(__name__)
 #: descriptors per connector.
 SEARCH_LIMIT_MAX: int = 50
 
+#: The ``outcome`` values every ``search_operations`` result carries (#3670).
+#: An unknown or not-yet-ingested ``connector_id`` is not in this list: those
+#: two cases stay errors (``-32602`` on MCP, ``404`` on REST).
+#:
+#: * ``matched`` — the top hit matched the query's words and is clearly
+#:   ahead of the next hit.
+#: * ``ambiguous`` — hits came back, but they are weak: the top hit did not
+#:   match the query's words (it is only close in meaning), or the top two
+#:   hits are nearly tied. Narrow the search before calling anything.
+#: * ``no_match`` — the connector has enabled operations, but none matched.
+#: * ``unknown_group`` — the ``group`` filter names no visible group.
+#: * ``zero_enabled_operations`` — the connector is ingested, but none of
+#:   its operations is enabled for this caller. Nothing can be called.
+SearchOutcome = Literal[
+    "matched",
+    "ambiguous",
+    "no_match",
+    "unknown_group",
+    "zero_enabled_operations",
+]
+SEARCH_OUTCOMES: Final[tuple[str, ...]] = get_args(SearchOutcome)
+
+#: Most entries a ``search_operations`` ``narrowing`` list holds.
+SEARCH_NARROWING_MAX: Final[int] = 20
+
+#: Fewest hits :func:`_classify_hits` needs to tell ``matched`` from a
+#: near tie. ``search_operations`` always reads at least this many from the
+#: retriever, even when the caller asked for ``limit=1``, and cuts the list
+#: down to the caller's ``limit`` afterwards. Otherwise a tied second hit
+#: would be hidden and the result would read as ``matched``.
+SEARCH_CLASSIFY_MIN_HITS: Final[int] = 2
+
+#: Near-tie band for the ``ambiguous`` outcome. When the top hit's
+#: ``fused_score`` beats the second hit's by less than this, the two are
+#: treated as tied. The value is one rank step at the top of a single RRF
+#: signal: a top hit only wins clearly when it is ahead by more than one
+#: list position. This reads the scores the retriever already produced; it
+#: never changes hit order. Tuning belongs to the routing evaluation.
+SEARCH_NEAR_TIE_BAND: Final[float] = 1.0 / (RRF_K + 1) - 1.0 / (RRF_K + 2)
+
 
 # ---------------------------------------------------------------------------
 # Pydantic response models (shared with the REST router + MCP outputSchema)
@@ -271,11 +326,12 @@ class OperationGroupSummary(BaseModel):
 class OperationSearchHit(BaseModel):
     """One ranked hit from :func:`search_operations`.
 
-    Same per-signal observability shape as
-    :class:`~meho_backplane.retrieval.retriever.RetrievalHit` — callers
-    tuning operation description quality want to see whether the top
-    candidate scored well on BM25 (lexical match) or cosine (semantic
-    match) or both.
+    The three score fields are the same per-signal shape as
+    :class:`~meho_backplane.retrieval.retriever.RetrievalHit`. They help
+    people who tune operation descriptions see whether a hit matched on
+    words (BM25), on meaning (cosine), or both. They are not on the wire
+    by default (#3668): :func:`search_operations` drops them unless a
+    ``tenant_admin`` caller asks for them with ``include_scores``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -289,6 +345,11 @@ class OperationSearchHit(BaseModel):
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
+
+
+#: Ranking fields kept off a search hit unless a ``tenant_admin`` caller
+#: opts in with ``include_scores`` (#3668).
+_SCORE_FIELDS: Final[frozenset[str]] = frozenset({"fused_score", "bm25_score", "cosine_score"})
 
 
 class OperationDescriptor(BaseModel):
@@ -437,6 +498,22 @@ class CallOperationBody(BaseModel):
             "keeps a bare call_operation byte-identical to pre-#3197."
         ),
     )
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Optional retry key for a call that waits for approval (#3486). "
+            "If you send the same key again with the identical call, MEHO "
+            "returns the approval request it already made (same "
+            "approval_request_id, extras.approval_request_reused=true) "
+            "instead of a second one. The key belongs to you: another "
+            "principal's key never matches. It is free again once that "
+            "request is rejected or expires. The same key with a different "
+            "call is refused with idempotency_key_conflict. Ignored when the "
+            "call does not wait for approval."
+        ),
+    )
     async_: bool = Field(
         default=False,
         alias="async",
@@ -556,8 +633,9 @@ def _build_operation_groups_query(
 ) -> Any:
     """Build the keyset-paginated :class:`OperationGroup` SELECT.
 
-    Filters: matching connector triple + tenant scope (NULL global OR
-    this tenant) + a *visibility* predicate; orders by ``group_key``
+    Filters: matching connector triple + tenant scope
+    (:func:`~meho_backplane.operations._lookup.visible_scope_clause`) + a
+    *visibility* predicate; orders by ``group_key``
     ASC; capped at ``limit``. ``cursor`` (when given) advances past
     the prior page's last ``group_key`` via strict ``>`` — keyset
     pagination with no offset and no overlap.
@@ -590,7 +668,13 @@ def _build_operation_groups_query(
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
             (OperationGroup.review_status == "enabled") | has_enabled_op,
-            (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == tenant_id),
+            visible_scope_clause(
+                OperationGroup,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
         )
         .order_by(OperationGroup.group_key)
         .limit(limit)
@@ -631,7 +715,8 @@ async def _require_dispatchable_connector(
       is ingested; return so the caller proceeds to its (possibly empty)
       data query. An ingested connector with zero *enabled* groups still
       falls here and yields the operationally-meaningful empty list — the
-      existence gate is enable-agnostic.
+      existence gate is enable-agnostic. ``search_operations`` labels that
+      case ``outcome="zero_enabled_operations"`` (#3670).
     * **No DB rows, class registered** (:func:`connector_class_registered`
       ``True``) — "State 0.5": the connector is v2-registered but awaiting
       ingest. Raise :class:`ConnectorNotIngestedError` carrying the same
@@ -685,9 +770,10 @@ async def list_operation_groups(
     a non-zero ``enabled_op_count`` so groups-first discovery isn't blind
     to per-op enablement that ``search_operations`` + dispatch already
     honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and
-    holds zero enabled ops stays hidden. Tenant scoping: the union of
-    built-in (``tenant_id IS NULL``) and tenant-curated
-    (``tenant_id == operator.tenant_id``) rows.
+    holds zero enabled ops stays hidden. Tenant scoping:
+    :func:`~meho_backplane.operations._lookup.visible_scope_clause` — the
+    tenant's own rows when it has a row for the connector, the built-in
+    rows otherwise.
 
     Per-group enablement note: a service-layer
     :meth:`~meho_backplane.operations.ingest.service.ReviewService.enable_group`
@@ -785,35 +871,238 @@ async def list_operation_groups(
     }
 
 
+async def _has_enabled_operation(
+    session: Any,
+    *,
+    tenant_id: uuid.UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> bool:
+    """Return ``True`` when the caller can see at least one enabled op.
+
+    One bounded ``EXISTS`` over ``endpoint_descriptor``. It uses the same
+    tenant scope as dispatch (:func:`visible_scope_clause`) and counts
+    enabled rows only, so it never reveals a disabled or foreign-tenant op.
+    """
+    stmt = select(
+        select(EndpointDescriptor.id)
+        .where(
+            visible_scope_clause(
+                EndpointDescriptor,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
+            EndpointDescriptor.product == product,
+            EndpointDescriptor.version == version,
+            EndpointDescriptor.impl_id == impl_id,
+            EndpointDescriptor.is_enabled.is_(True),
+        )
+        .exists()
+    )
+    return bool((await session.execute(stmt)).scalar())
+
+
+async def _visible_group_keys(
+    session: Any,
+    *,
+    tenant_id: uuid.UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> list[str]:
+    """Return the group keys ``list_operation_groups`` would show, capped.
+
+    Reuses :func:`_build_operation_groups_query`, so the tenant scope and
+    the enabled-only visibility rule are the same as that tool's. The
+    agent can already see these keys; nothing hidden is revealed.
+    """
+    stmt = _build_operation_groups_query(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        tenant_id=tenant_id,
+        limit=SEARCH_NARROWING_MAX,
+        cursor=None,
+    )
+    groups = (await session.execute(stmt)).scalars().all()
+    return [g.group_key for g in groups]
+
+
+def _classify_hits(hits: list[OperationSearchHit]) -> SearchOutcome:
+    """Decide ``matched`` or ``ambiguous`` for a non-empty hit list.
+
+    Reads the scores the retriever already returned; never re-ranks.
+    ``ambiguous`` when the top hit has no lexical (BM25) score — it is only
+    close in meaning, the usual shape of a misleading near-match — or when
+    the top two ``fused_score`` values sit inside
+    :data:`SEARCH_NEAR_TIE_BAND`.
+    """
+    top = hits[0]
+    if top.bm25_score is None:
+        return "ambiguous"
+    if len(hits) > 1 and top.fused_score - hits[1].fused_score < SEARCH_NEAR_TIE_BAND:
+        return "ambiguous"
+    return "matched"
+
+
+def _search_guidance(
+    outcome: SearchOutcome,
+    *,
+    group_key: str | None,
+    group_keys: list[str] | None = None,
+) -> tuple[str | None, list[str]]:
+    """Return the ``(advisory, narrowing)`` pair for *outcome*.
+
+    The text names no disabled op and no count of hidden rows.
+    """
+    if outcome == "matched":
+        return None, []
+    if outcome == "unknown_group":
+        return (
+            f"Group {group_key!r} does not exist on this connector or has no "
+            "enabled operations. Use one of the group keys in `narrowing`, "
+            "or search without a group.",
+            (group_keys or [])[:SEARCH_NARROWING_MAX],
+        )
+    if outcome == "zero_enabled_operations":
+        return (
+            "This connector has no enabled operations you can use. An "
+            "operator must enable operations first. Do not call any "
+            "operation on this connector.",
+            ["Ask an operator to enable the operations you need on this connector."],
+        )
+    narrowing = ["Use more specific words that describe the action you need."]
+    if group_key is None:
+        narrowing.append("Call `list_operation_groups` and search again with a `group` filter.")
+    else:
+        narrowing.append("Search again without the `group` filter.")
+    if outcome == "no_match":
+        return (
+            "No enabled operation matched this query. Do not call an "
+            "operation that this search did not return.",
+            narrowing,
+        )
+    return (
+        "The hits are weak or nearly tied. Do not call any of them. Narrow the search first.",
+        narrowing,
+    )
+
+
+async def _run_search(
+    session: Any,
+    *,
+    tenant_id: uuid.UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+    group_key: str | None,
+    query: str,
+    limit: int,
+) -> tuple[list[OperationSearchHit], SearchOutcome, list[str] | None]:
+    """Run the search and pick its outcome.
+
+    Returns ``(hits, outcome, group_keys)``. ``group_keys`` is set only for
+    ``unknown_group``. The enabled-op ``EXISTS`` runs only when the search
+    found nothing, to tell ``no_match`` from ``zero_enabled_operations``.
+
+    The retriever is asked for at least :data:`SEARCH_CLASSIFY_MIN_HITS`
+    hits so the near-tie check can see the second hit. The outcome is read
+    from that list; the returned ``hits`` are then cut to *limit* without
+    changing their order.
+    """
+    group_id: uuid.UUID | None = None
+    if group_key is not None:
+        # An unknown group_key is not an error: it returns no hits and the
+        # ``unknown_group`` outcome, with the visible group keys to retry with.
+        group_id = await resolve_group_id(
+            session,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            group_key=group_key,
+        )
+        if group_id is None:
+            group_keys = await _visible_group_keys(
+                session,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            )
+            return [], "unknown_group", group_keys
+    hits = await hybrid_search(
+        session,
+        tenant_id=tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        group_id=group_id,
+        query=query,
+        limit=max(limit, SEARCH_CLASSIFY_MIN_HITS),
+    )
+    if hits:
+        return hits[:limit], _classify_hits(hits), None
+    has_enabled = await _has_enabled_operation(
+        session,
+        tenant_id=tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    )
+    return [], "no_match" if has_enabled else "zero_enabled_operations", None
+
+
 async def search_operations(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Hybrid BM25 + cosine RRF retrieval over ``endpoint_descriptor``.
 
-    ``arguments`` shape: ``{"connector_id": str, "query": str,
-    "group": str | None, "limit": int = 10}``.
+    ``arguments`` shape: ``{"connector_id": str, "query"?: str,
+    "op_id"?: str, "group": str | None, "limit": int = 10,
+    "include_scores"?: bool}``. One of ``query`` / ``op_id`` is needed.
 
-    Returns ``{"hits": [...], "query_duration_ms": float}``. Tenant
-    boundary enforced: every candidate query filters on
-    ``(tenant_id IS NULL OR tenant_id == operator.tenant_id)``. The
-    ``group`` filter (when set) narrows by ``operation_group.group_key``
-    within the same connector's natural key.
+    **Exact-op mode (#3668).** When ``op_id`` is set, there is no
+    ranking: the handler looks up that one operation and returns
+    ``{"operation": <OperationContract>}`` -- the stored
+    ``parameter_schema`` as-is, small examples, the target rule, the
+    result shape, the pagination hint and retry guidance (see
+    :mod:`meho_backplane.operations._contract`). ``query`` / ``group`` /
+    ``limit`` are ignored in this mode. An op that is not visible and
+    enabled raises :class:`UnknownOperationError`.
+
+    **Ranked mode.** Returns ``{"hits": [...], "query_duration_ms":
+    float, "outcome": str, "advisory": str | None, "narrowing":
+    [str]}``. Each hit carries ``op_id`` / ``summary`` / ``description``
+    / ``group_key`` / ``safety_level`` / ``requires_approval``. The
+    ranking scores are added only when ``include_scores`` is true and
+    the caller is ``tenant_admin``; anyone else gets the slim hit. Tenant
+    boundary enforced: every candidate query filters on the same
+    :func:`~meho_backplane.operations._lookup.visible_scope_clause`
+    dispatch uses, so a hit is always an op ``call_operation`` can run.
 
     The handler embeds the query once, runs the BM25 + cosine candidate
     queries against the indexed ``endpoint_descriptor`` table, fuses the
     two ranked lists via RRF, and returns the top ``limit`` hits. Per-
     signal scores + ranks are surfaced so the agent (and operator
     debugging) can see whether a hit came from lexical match, semantic
-    match, or both.
+    match, or both -- behind the admin opt-in above.
 
-    Shares :func:`list_operation_groups`'s connector-existence taxonomy
-    via :func:`_require_dispatchable_connector`: an *unknown*
-    ``connector_id`` raises :class:`UnknownConnectorError` (REST →
-    ``404``); a *registered-but-not-ingested* connector raises
-    :class:`ConnectorNotIngestedError` with the ingest ``next_step`` hint
-    (#1482); a *known* connector with no matching ops still returns an
-    empty ``hits`` list (``200 []``).
+    No-suitable-match taxonomy (#3670). Two cases are errors, raised by
+    :func:`_require_dispatchable_connector`: an *unknown* ``connector_id``
+    (:class:`UnknownConnectorError`) and a *registered-but-not-ingested*
+    one (:class:`ConnectorNotIngestedError`, #1482). Every other result
+    carries one ``outcome`` from :data:`SEARCH_OUTCOMES`: ``matched``,
+    ``ambiguous`` (:func:`_classify_hits`), ``no_match``,
+    ``unknown_group`` (``narrowing`` lists the visible group keys), or
+    ``zero_enabled_operations`` (an abstention advisory, no op ids).
+    ``advisory`` explains a non-``matched`` outcome in one sentence;
+    ``narrowing`` holds at most :data:`SEARCH_NARROWING_MAX` next steps.
+    Hit order is the retriever's; the outcome never re-ranks.
 
     #3500: per-principal dispatch rate limit. A burst of searches from one
     principal over its per-minute cap is rejected with a structured
@@ -823,14 +1112,7 @@ async def search_operations(
     if rate_limited is not None:
         return rate_limited
     connector_id = arguments["connector_id"]
-    query = arguments["query"]
-    group_key: str | None = arguments.get("group")
-    limit = int(arguments.get("limit", 10))
-    if limit < 1:
-        limit = 1
-    if limit > SEARCH_LIMIT_MAX:
-        limit = SEARCH_LIMIT_MAX
-
+    op_id: str | None = arguments.get("op_id")
     product, version, impl_id = parse_connector_id(connector_id)
     await _require_dispatchable_connector(
         operator=operator,
@@ -839,47 +1121,60 @@ async def search_operations(
         version=version,
         impl_id=impl_id,
     )
+    if op_id is not None:
+        contract = await build_operation_contract(
+            tenant_id=operator.tenant_id,
+            connector_id=connector_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=op_id,
+        )
+        _log.info(
+            "search_operations_exact_op",
+            connector_id=connector_id,
+            op_id=op_id,
+            tenant_id=str(operator.tenant_id),
+        )
+        return {"operation": contract.model_dump(mode="json")}
+
+    query = arguments["query"]
+    group_key: str | None = arguments.get("group")
+    limit = min(max(int(arguments.get("limit", 10)), 1), SEARCH_LIMIT_MAX)
+    show_scores = (
+        bool(arguments.get("include_scores")) and operator.tenant_role == TenantRole.TENANT_ADMIN
+    )
     started = time.monotonic()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        # Resolve group_key -> group_id (if supplied). Unknown group_key
-        # short-circuits to empty hits rather than an error: same shape
-        # as list_operation_groups returning [] for unknown connector_id.
-        group_id: uuid.UUID | None = None
-        if group_key is not None:
-            group_id = await resolve_group_id(
-                session,
-                tenant_id=operator.tenant_id,
-                product=product,
-                version=version,
-                impl_id=impl_id,
-                group_key=group_key,
-            )
-            if group_id is None:
-                duration_ms = (time.monotonic() - started) * 1000
-                return {"hits": [], "query_duration_ms": duration_ms}
-        hits = await hybrid_search(
+        hits, outcome, group_keys = await _run_search(
             session,
             tenant_id=operator.tenant_id,
             product=product,
             version=version,
             impl_id=impl_id,
-            group_id=group_id,
+            group_key=group_key,
             query=query,
             limit=limit,
         )
     duration_ms = (time.monotonic() - started) * 1000
+    advisory, narrowing = _search_guidance(outcome, group_key=group_key, group_keys=group_keys)
     _log.info(
         "search_operations",
         connector_id=connector_id,
         group=group_key,
         hit_count=len(hits),
+        outcome=outcome,
         tenant_id=str(operator.tenant_id),
         duration_ms=duration_ms,
     )
+    exclude = None if show_scores else set(_SCORE_FIELDS)
     return {
-        "hits": [h.model_dump(mode="json") for h in hits],
+        "hits": [h.model_dump(mode="json", exclude=exclude) for h in hits],
         "query_duration_ms": duration_ms,
+        "outcome": outcome,
+        "advisory": advisory,
+        "narrowing": narrowing,
     }
 
 
@@ -1044,6 +1339,7 @@ async def _call_operation_impl(
     arguments: dict[str, Any],
     *,
     approved: bool,
+    resolved_target: Any = None,
 ) -> dict[str, Any]:
     """Resolve target + dispatch; shared body for the approved/unapproved entries.
 
@@ -1061,18 +1357,36 @@ async def _call_operation_impl(
     dict form before :func:`~meho_backplane.targets.resolver.resolve_target`
     is called). Passing ``target=None`` is valid for typed operations whose
     handler does not consume a target.
+
+    A caller that already holds the live target row passes it as
+    *resolved_target*; then ``arguments["target"]`` is not read at all. The
+    agent waiter's composite re-entry uses this (#3421): it loads the target
+    the approval row saved by id, so the name the agent used when it parked
+    cannot point at a different target by the time the approval lands.
     """
     connector_id = arguments["connector_id"]
     op_id = arguments["op_id"]
     params: dict[str, Any] = arguments.get("params") or {}
 
-    # #136: target-resolution failures ride the dispatcher envelope (a single
-    # ``extras.error_code`` for the consumer), not an HTTP 400/404.
-    resolved_target, target_error = await _resolve_target_or_error(
-        operator, op_id, arguments.get("target"), bind_audit_target=True
-    )
-    if target_error is not None:
-        return target_error
+    # #3641: a completed op must deliver its receipt inside the wire
+    # ceiling. The receipt grows with ``op_id``, so an ``op_id`` whose
+    # receipt could never fit is refused here, before the target is
+    # resolved and before anything runs.
+    wire_max_bytes = get_settings().result_complete_response_wire_max_bytes
+    refusal = refuse_undeliverable_receipt(op_id, wire_max_bytes)
+    if refusal is not None:
+        return refusal.model_dump(mode="json")
+
+    if resolved_target is not None:
+        structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
+    else:
+        # #136: target-resolution failures ride the dispatcher envelope (a
+        # single ``extras.error_code`` for the consumer), not an HTTP 400/404.
+        resolved_target, target_error = await _resolve_target_or_error(
+            operator, op_id, arguments.get("target"), bind_audit_target=True
+        )
+        if target_error is not None:
+            return target_error
 
     # work_ref I1-T2 (#1657): bind an explicit per-op ``work_ref`` (the
     # MCP ``call_operation`` tool arg / the REST ``CallOperationBody``
@@ -1092,15 +1406,15 @@ async def _call_operation_impl(
         work_ref_token = work_ref_var.set(work_ref_arg)
     try:
         async with AsyncExitStack() as linkage_stack:
-            # #3028 out-of-process parent-linkage: when a paired add-on service
-            # principal dispatches under a ``work_ref``, group its per-step
-            # dispatches into one audit-replay subtree by binding the
-            # orchestration run's synthesized ``session_id`` + anchor
-            # ``parent_audit_id`` around the dispatch. Resolution reads the
-            # *effective* work_ref (the arg above or an ambient ``Meho-Work-Ref``
-            # header) and returns ``None`` for any non-paired caller, so the
-            # pre-#3028 behaviour (an independent audit row) is untouched for
-            # users, agents, and unpaired service principals.
+            # #3028 / #3446 out-of-process parent-linkage: when a
+            # client-credential service principal (paired add-on or not)
+            # dispatches under a ``work_ref``, group its per-step dispatches
+            # into one audit-replay subtree by binding the orchestration run's
+            # synthesized ``session_id`` + anchor ``parent_audit_id`` around the
+            # dispatch. Resolution reads the *effective* work_ref (the arg above
+            # or an ambient ``Meho-Work-Ref`` header) and returns ``None`` for
+            # users and agents, so their behaviour (an independent audit row)
+            # is untouched.
             effective_work_ref = work_ref_var.get()
             if effective_work_ref:
                 linkage_run = await resolve_or_open_orchestration_run(operator, effective_work_ref)
@@ -1119,6 +1433,9 @@ async def _call_operation_impl(
                 # ``params``, so it stays out of ``params_hash`` and the op's
                 # parameter_schema. ``None`` for a non-destructive call.
                 preview_hash=arguments.get("preview_hash"),
+                # #3486: retry key for a parked call, a MEHO dispatch control
+                # like ``preview_hash`` -- never part of ``params``.
+                idempotency_key=arguments.get("idempotency_key"),
             )
     finally:
         if work_ref_token is not None:
@@ -1133,6 +1450,10 @@ async def _call_operation_impl(
         tenant_id=str(operator.tenant_id),
         approved=approved,
     )
+    # #3641: terminal wire ceiling, measured on the real MCP encoding. A
+    # completed op that is too large to deliver keeps ``status="ok"`` and
+    # gets ``delivery="partial"`` / ``"unavailable"`` instead.
+    result = bound_complete_response(result, wire_max_bytes)
     return result.model_dump(mode="json")
 
 
@@ -1170,6 +1491,8 @@ async def call_operation(
 async def call_operation_with_approval(
     operator: Operator,
     arguments: dict[str, Any],
+    *,
+    resolved_target: Any = None,
 ) -> dict[str, Any]:
     """Re-dispatch a previously-parked ``call_operation`` after operator approval.
 
@@ -1196,8 +1519,16 @@ async def call_operation_with_approval(
     the approved op (a single conditional ``UPDATE ... WHERE resumed_at IS
     NULL``; the loser no-ops). This is what closes the double-dispatch the
     unenforced "coexist by design" note (#1117) had left open.
+
+    *resolved_target*: the live target row to dispatch against, when the
+    caller already loaded it. The waiter's composite re-entry passes the
+    target the approval row saved by id (#3421), so ``arguments["target"]``
+    is ignored and no name lookup runs. A direct re-dispatch leaves it
+    ``None`` and resolves the agent's original ``target`` name as before.
     """
-    return await _call_operation_impl(operator, arguments, approved=True)
+    return await _call_operation_impl(
+        operator, arguments, approved=True, resolved_target=resolved_target
+    )
 
 
 async def preview_operation(

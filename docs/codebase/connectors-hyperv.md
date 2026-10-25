@@ -128,8 +128,9 @@ stable.
 
 Operator-supplied strings — `vm_name`, `checkpoint_name`, VHD `path`, export
 `path` — are interpolated only inside single-quoted PowerShell literals via
-`ps_single_quote` (a single quote is doubled; a single-quoted literal does no
-`$` expansion). `mode` (power.stop) is validated against a fixed enum in Python
+`ps_single_quote` (every single-quote character — `'` and the typographic
+quotes U+2018 to U+201B — is doubled; a single-quoted literal does no `$`
+expansion). `mode` (power.stop) is validated against a fixed enum in Python
 and maps to a constant switch string; `timeout_seconds` (export) is a
 Python-validated bounded `int` and never reaches the script text. The identity /
 host-read scripts take no operator input (constant scripts). The unit suite

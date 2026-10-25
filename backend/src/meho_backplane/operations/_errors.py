@@ -15,14 +15,15 @@ dispatcher's :func:`dispatch` body stay focused on control flow.
 
 Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
-``unknown_op`` / ``invalid_params`` / ``invalid_op_schema`` /
-``no_connector`` /
+``unknown_op`` / ``unknown_connector`` / ``invalid_params`` /
+``invalid_op_schema`` / ``no_connector`` /
 ``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``not_found`` / ``connector_timeout`` / ``connector_error``.
+``write_capability_denied`` / ``not_found`` / ``connector_timeout`` /
+``vault_credentials_read_error`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -35,23 +36,31 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 from uuid import UUID
 
 import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
+if TYPE_CHECKING:
+    from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
+
 __all__ = [
+    "UPSTREAM_SAID",
+    "VAULT_SAID",
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
+    "result_audit_commit_failed",
     "result_awaiting_approval",
     "result_composite_resume_multi_gate_unsupported",
+    "result_composite_resume_repeats_write",
+    "result_composite_resume_state_missing",
     "result_composite_terminal_error",
     "result_connector_auth_failed",
     "result_connector_error",
@@ -65,15 +74,20 @@ __all__ = [
     "result_connector_vault_write_forbidden",
     "result_denied",
     "result_handler_unreachable",
+    "result_idempotency_key_conflict",
     "result_invalid_op_schema",
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
     "result_rate_limited",
+    "result_receipt_too_large",
     "result_target_invalid_type",
     "result_target_required",
+    "result_unknown_connector",
     "result_unknown_op",
     "result_unqualified_target_version",
+    "result_vault_credentials_read_error",
+    "result_write_capability_denied",
     "status_code_for_result",
     "wrap_ok_result",
 ]
@@ -87,13 +101,29 @@ __all__ = [
 #: first 256 chars does not ride the envelope in cleartext.
 _EXC_MESSAGE_CAP: int = 256
 
+#: Cap on ``extras["upstream_message"]`` and on the faultstring in
+#: ``extras["upstream_fault"]`` (#3567). An upstream error body is the
+#: vendor's own diagnosis, and a vim fault often puts the useful text past
+#: the first 256 chars, so the 256-char :data:`_EXC_MESSAGE_CAP` cut it to
+#: a useless fragment. 2 KB fits a full vim faultstring and still bounds a
+#: pathological body. Redaction still runs before this cap.
+_UPSTREAM_MESSAGE_CAP: int = 2048
+
 #: Fail-closed placeholder when Tier-1 redaction itself is unavailable
 #: on the never-raises error path. Returning the raw text instead would
 #: reintroduce exactly the passthrough this sanitizer exists to close.
 _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 
 
-def _sanitize_free_text(text: str) -> str:
+#: What joins the vendor's text to the end of an ``error`` summary. The
+#: dispatcher finds the vendor's part by these markers when it hides the
+#: vendor's text of an operation that sends a secret (#4854,
+#: :mod:`meho_backplane.operations._vendor_text`).
+UPSTREAM_SAID: Final = " Upstream said: "
+VAULT_SAID: Final = " Vault said: "
+
+
+def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     """Tier-1-redact, then length-cap, one free-text diagnostic string.
 
     Every ``str(exc)`` / upstream-body line a result builder emits
@@ -112,6 +142,9 @@ def _sanitize_free_text(text: str) -> str:
     path. Fail-closed: if redaction itself errors, the text is withheld
     entirely -- this is a never-raises path and an unredacted fallback
     would be the leak.
+
+    *cap* defaults to :data:`_EXC_MESSAGE_CAP`; upstream body text passes
+    the larger :data:`_UPSTREAM_MESSAGE_CAP` (#3567).
     """
     try:
         redacted = redact(text, get_default_policy()).redacted
@@ -119,20 +152,89 @@ def _sanitize_free_text(text: str) -> str:
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
         return _TEXT_WITHHELD
-    if len(redacted) > _EXC_MESSAGE_CAP:
-        return redacted[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    if len(redacted) > cap:
+        return redacted[:cap] + "...<truncated>"
     return redacted
 
 
-def result_unknown_op(op_id: str, known_op_count: int, duration_ms: float) -> OperationResult:
-    """Descriptor lookup miss for *(product, version, impl_id, op_id)*."""
+def result_unknown_op(
+    op_id: str,
+    known_op_count: int,
+    duration_ms: float,
+    *,
+    connector_id: str | None = None,
+    connectors_with_op: list[str] | None = None,
+) -> OperationResult:
+    """Descriptor lookup miss for *(product, version, impl_id, op_id)*.
+
+    The dispatcher and the preview path pass *connector_id* and
+    *connectors_with_op* (#4031). The message then tells the caller where
+    to go next: the other connectors that have this op, or
+    ``search_operations`` on the named connector when no other connector
+    has it. ``extras.connectors_with_op`` carries the same ids for
+    callers that parse the envelope. The typed-connector ``execute``
+    shims pass neither and keep the short ``unknown_op: <op_id>`` form.
+    """
+    extras: dict[str, Any] = {"error_code": "unknown_op", "known_op_count": known_op_count}
+    if connector_id is None:
+        return OperationResult(
+            status="error",
+            op_id=op_id,
+            error=f"unknown_op: {op_id}",
+            duration_ms=duration_ms,
+            extras=extras,
+        )
+    found = connectors_with_op or []
+    extras["connectors_with_op"] = found
+    error = (
+        f"unknown_op: no operation {op_id!r} for connector {connector_id!r} "
+        f"({known_op_count} known op(s) for the connector)."
+    )
+    if found:
+        names = ", ".join(found)
+        error += (
+            f" This operation exists on connector(s) {names}. "
+            "Call it with one of those connector ids."
+        )
+    else:
+        error += f" Use search_operations on connector {connector_id!r} to find the right op_id."
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"unknown_op: {op_id}",
+        error=error,
         duration_ms=duration_ms,
-        extras={"error_code": "unknown_op", "known_op_count": known_op_count},
+        extras=extras,
     )
+
+
+def result_unknown_connector(connector_id: str, op_id: str, duration_ms: float) -> OperationResult:
+    """The *connector_id* matches no connector the caller can see (#4031).
+
+    Same meaning as the ``unknown_connector`` answer of
+    ``list_operation_groups`` / ``search_operations``: no operation rows
+    and no registered connector class for the parsed id. Before #4031 this
+    case surfaced as ``unknown_op`` with ``known_op_count: 0``, which
+    hid that the connector id itself was wrong.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"unknown_connector: unknown connector_id {connector_id!r}. Expected "
+            "<impl_id>-<version> (e.g. 'vmware-rest-9.0', 'vault-1.x'). The id is "
+            "mistyped or the connector is not registered on this deploy. Use "
+            "meho_connector_list to see the connector ids."
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "unknown_connector", "connector_id": connector_id},
+    )
+
+
+#: Most ``validation_errors`` entries one ``invalid_params`` envelope carries
+#: (#3669). A params object that breaks many rules would otherwise grow the
+#: response and audit envelope without bound; the rest is counted in
+#: ``extras["validation_errors_suppressed"]``.
+_MAX_VALIDATION_ERRORS: int = 10
 
 
 def result_invalid_params(
@@ -140,15 +242,26 @@ def result_invalid_params(
     validation_errors: list[dict[str, Any]],
     duration_ms: float,
 ) -> OperationResult:
-    """JSON Schema validation against ``parameter_schema`` failed."""
+    """JSON Schema validation against ``parameter_schema`` failed.
+
+    The ``error`` summary counts every violation. ``extras`` keeps the
+    first :data:`_MAX_VALIDATION_ERRORS` entries and records how many were
+    left out in ``validation_errors_suppressed`` (``0`` when none were).
+    """
+    total = len(validation_errors)
+    suppressed = max(0, total - _MAX_VALIDATION_ERRORS)
+    summary = f"invalid_params: {total} validation error(s)"
+    if suppressed:
+        summary += f"; showing the first {_MAX_VALIDATION_ERRORS}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"invalid_params: {len(validation_errors)} validation error(s)",
+        error=summary,
         duration_ms=duration_ms,
         extras={
             "error_code": "invalid_params",
-            "validation_errors": validation_errors,
+            "validation_errors": validation_errors[:_MAX_VALIDATION_ERRORS],
+            "validation_errors_suppressed": suppressed,
         },
     )
 
@@ -533,6 +646,106 @@ def result_rate_limited(
     )
 
 
+def result_receipt_too_large(
+    op_id: str, receipt_bytes: int, max_bytes: int, duration_ms: float
+) -> OperationResult:
+    """The receipt of a completed run could not be delivered, so the call is refused.
+
+    #3641. A completed ``call_operation`` must always deliver its receipt
+    (``status``, ``op_id``, ``audit_id``, ``delivery`` and the remediation
+    text) inside ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``. The receipt
+    grows with the ``op_id``, so an unusually long one (or one with many
+    non-ASCII characters, which the text block escapes twice) can push it
+    over the ceiling. ``refuse_undeliverable_receipt`` in
+    :mod:`meho_backplane.operations.delivery_budget` measures the widest
+    receipt for the ``op_id`` before dispatch and returns this envelope
+    instead of running the operation. Nothing ran, so the caller may call
+    again once the ``op_id`` or the ceiling changes.
+
+    The ``op_id`` is not repeated in the message: it already rides the
+    envelope's ``op_id`` field, and repeating a very long id would only
+    make the refusal larger.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"receipt_too_large: the receipt for this op_id ({len(op_id)} characters) "
+            f"would take {receipt_bytes} bytes on the wire; the delivery limit is "
+            f"{max_bytes} bytes. The operation did not run. Check the op_id with "
+            "search_operations. If it is correct, an operator must raise "
+            "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES. See docs/codebase/mcp.md, "
+            '"Response wire ceiling".'
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "receipt_too_large",
+            "receipt_bytes": receipt_bytes,
+            "delivery_max_bytes": max_bytes,
+            "remediation": (
+                "The operation did not run, so it is safe to call again. Check the "
+                "op_id with search_operations; if it is correct, an operator must "
+                "raise RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES."
+            ),
+        },
+    )
+
+
+def result_audit_commit_failed(
+    op_id: str,
+    duration_ms: float,
+    *,
+    approval_request_id: str | None = None,
+) -> OperationResult:
+    """The handler finished, but its audit record could not be saved.
+
+    An operation does not return success unless its audit row commits
+    (CLAUDE.md postulate 7 / v0.1-spec §6). This applies to every completed
+    handler: safe reads, writes, and approved runs, and to a multi-step
+    operation that stopped because a step waits for approval or was denied
+    (#4275). When the commit fails after the handler returned, MEHO cannot
+    prove what happened, so:
+
+    * ``status`` is ``error``, but the error is not a connector error -- the
+      connector call itself worked.
+    * ``extras.execution_outcome`` is ``uncertain``: the vendor may already
+      hold the change.
+    * ``extras.retry`` is ``False``: running it again could repeat a change.
+    * ``audit_id`` stays ``None``: there is no committed record to point at.
+
+    *approval_request_id* is set when the run stopped because a step waits
+    for approval. That request was saved before the row and still waits, so
+    the caller keeps its id under ``extras.approval_request_id``.
+    """
+    remediation = (
+        "The operation may have changed the target. Do not run it again. "
+        "Check the target's current state, and ask an operator to check "
+        "the audit database."
+    )
+    extras: dict[str, Any] = {
+        "error_code": "audit_commit_failed",
+        "execution_outcome": "uncertain",
+        "retry": False,
+    }
+    if approval_request_id is not None:
+        extras["approval_request_id"] = approval_request_id
+        remediation += (
+            f" A step of this run waits for approval (request {approval_request_id}); "
+            "that request is saved. Check the approval queue before you do anything else."
+        )
+    extras["remediation"] = remediation
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            "audit_commit_failed: the operation ran, but MEHO could not save its "
+            "audit record. Do not run it again."
+        ),
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
 def result_composite_resume_multi_gate_unsupported(
     *,
     composite_op_id: str,
@@ -587,6 +800,63 @@ def result_composite_resume_multi_gate_unsupported(
                 "requires_approval=False, or add a completed-leg guard before "
                 "introducing a second gate"
             ),
+        },
+    )
+
+
+def result_composite_resume_state_missing(*, op_id: str, duration_ms: float) -> OperationResult:
+    """Refusal of a sub-op marked ``after_main_effect`` that saved no resume state (#4217).
+
+    Returned by
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy`. Such a
+    step tells the seam that its resume continues at this step, but without
+    saved state the composite can only start again from the beginning and
+    repeat its earlier writes. This is a bug in the composite, so the write
+    does not run and does not wait for approval.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"composite_resume_state_missing: sub-op {op_id!r} is marked "
+            "after_main_effect but saved no resume state; it did not run and does "
+            "not wait for approval, because an approval could repeat earlier writes"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "composite_resume_state_missing", "blocked_op_id": op_id},
+    )
+
+
+def result_composite_resume_repeats_write(
+    *,
+    composite_op_id: str,
+    approved_op_id: str,
+    blocked_op_id: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Refusal of an earlier write during a resume that must skip it (#4217).
+
+    Returned by
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy` while a
+    composite resumes an approved step marked ``after_main_effect``: the
+    resume must go straight to that step, so a governed write before it
+    that is not itself ``after_main_effect`` is a write the first run already
+    did. It is refused before it runs, whatever the policy verdict.
+    """
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=(
+            f"composite_resume_repeats_write: resuming composite {composite_op_id!r} "
+            f"for the approved step {approved_op_id!r} reached the earlier write "
+            f"{blocked_op_id!r}; it did not run, because the first run already did it"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_resume_repeats_write",
+            "composite_op_id": composite_op_id,
+            "approved_op_id": approved_op_id,
+            "blocked_op_id": blocked_op_id,
         },
     )
 
@@ -672,7 +942,13 @@ def result_blast_radius_required(op_id: str, reason: str, duration_ms: float) ->
     Returned when that block is absent or malformed. Fail-closed: the op is
     neither executed nor parked. ``reason`` names the missing field so the
     connector author can populate the op's preview builder.
+
+    ``reason`` can carry a preview builder's exception text (a builder raises
+    on purpose to refuse a delete, #3944), so it goes through
+    :func:`_sanitize_free_text` like every other ``str(exc)`` a result
+    builder emits.
     """
+    reason = _sanitize_free_text(reason)
     return OperationResult(
         status="denied",
         op_id=op_id,
@@ -686,6 +962,8 @@ def result_awaiting_approval(
     op_id: str,
     approval_request_id: uuid.UUID,
     duration_ms: float,
+    *,
+    reused: bool = False,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -704,14 +982,49 @@ def result_awaiting_approval(
     this value; callers that only handled ``"ok"`` / ``"error"`` /
     ``"denied"`` will treat it as an unrecognised status and surface it
     as a pending call, which is the correct semantics.
+
+    *reused* (#3486) is ``True`` when an ``idempotency_key`` retry got an
+    existing request back instead of a new one. It adds
+    ``extras["approval_request_reused"] = True``; the key is absent
+    otherwise, so a new park's envelope is unchanged.
     """
+    extras: dict[str, Any] = {
+        "error_code": "awaiting_approval",
+        "approval_request_id": str(approval_request_id),
+    }
+    if reused:
+        extras["approval_request_reused"] = True
     return OperationResult(
         status="awaiting_approval",
         op_id=op_id,
         error=f"awaiting_approval: {op_id!r} requires approval before execution",
         duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_idempotency_key_conflict(
+    op_id: str,
+    approval_request_id: uuid.UUID,
+    duration_ms: float,
+) -> OperationResult:
+    """The ``idempotency_key`` is held by a live request for a different call (#3486).
+
+    The same principal already has a ``pending`` or ``approved`` request
+    with this key, but for another ``op_id`` / ``connector_id`` / target /
+    params / ``preview_hash`` / ``work_ref``. Nothing is parked or run.
+    ``extras["approval_request_id"]`` names the request that holds the key.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            "denied: idempotency_key is already used by another approval request "
+            "for a different call; send the identical call, or use a new key"
+        ),
+        duration_ms=duration_ms,
         extras={
-            "error_code": "awaiting_approval",
+            "error_code": "idempotency_key_conflict",
             "approval_request_id": str(approval_request_id),
         },
     )
@@ -759,9 +1072,11 @@ def result_composite_terminal_error(
     op_id: str,
     *,
     error_code: str,
-    envelope: dict[str, Any],
+    envelope: dict[str, Any] | None,
     error_summary: str,
     duration_ms: float,
+    handle: ResultHandle | None = None,
+    delivery: Literal["complete", "partial", "unavailable"] | None = None,
 ) -> OperationResult:
     """A composite handler's terminal-error envelope mapped to a dispatch error (#3809).
 
@@ -782,6 +1097,14 @@ def result_composite_terminal_error(
     error-severity issue; it is Tier-1-redacted + length-capped here as a second
     line of defence even though the dispatcher's connector-boundary middleware
     already redacted the envelope's string leaves.
+
+    *envelope* is the envelope **after** the dispatcher ran it through the
+    result reducer (#4223): an oversized refusal (an ``ambiguous_parent``
+    naming hundreds of candidate folder ids) arrives as the reducer's bounded
+    summary with the full envelope behind *handle*, the same contract a
+    success payload gets. ``None`` + ``delivery="unavailable"`` when the
+    reducer failed — the operation stays an error and the unbounded envelope
+    is not shipped inline.
     """
     return OperationResult(
         status="error",
@@ -789,6 +1112,8 @@ def result_composite_terminal_error(
         result=envelope,
         error=_sanitize_free_text(error_summary),
         duration_ms=duration_ms,
+        handle=handle,
+        delivery=delivery,
         extras={"error_code": error_code},
     )
 
@@ -820,6 +1145,16 @@ def result_connector_error(
     ``error`` summary is unchanged (``connector_error: HTTPStatusError``)
     so existing string matchers keep working; the new detail is additive
     in ``extras``.
+
+    #3876: a :exc:`~meho_backplane.connectors.base.ConnectorUpstreamError`
+    (raised by a connector whose client library is not ``httpx``, for
+    example the Kubernetes API server rejecting a server-side apply)
+    sets the same ``http_status`` and ``upstream_message`` keys from the
+    values the connector read at its boundary.
+
+    #3567: ``extras.upstream_fault`` is set from the response body as above,
+    or from a SOAP fault the ESXi path attached to *exc* (see
+    :func:`_add_attached_upstream_fault`).
     """
     msg = _sanitize_free_text(str(exc))
     extras: dict[str, Any] = {
@@ -830,12 +1165,56 @@ def result_connector_error(
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
+        _add_upstream_fault(extras, exc.response)
+    elif isinstance(exc, ConnectorUpstreamError):
+        extras["http_status"] = exc.http_status
+        extras["upstream_message"] = (
+            _sanitize_free_text(exc.upstream_message, cap=_UPSTREAM_MESSAGE_CAP)
+            if exc.upstream_message
+            else None
+        )
+    _add_attached_upstream_fault(extras, exc)
+    remediation = getattr(exc, "remediation", None)
+    if isinstance(remediation, str) and remediation:
+        # MEHO's own next step, set by the raising connector. It stays when the
+        # dispatcher withholds the vendor text of an op that sends a secret.
+        extras["remediation"] = _sanitize_free_text(remediation, cap=_UPSTREAM_MESSAGE_CAP)
     return OperationResult(
         status="error",
         op_id=op_id,
         error=f"connector_error: {type(exc).__name__}",
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+def result_vault_credentials_read_error(
+    op_id: str,
+    exc: SecretRefReadError,
+    duration_ms: float,
+) -> OperationResult:
+    """A secret named in the op params could not be read (#3864).
+
+    Example: an approved ``keycloak.user.create`` whose ``password_secret_ref``
+    MEHO may not read. The op did not run. The extras carry only the ref cut
+    to its prefix and the class of the store error, so the caller and the
+    audit row learn where the read failed without the full path.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"vault_credentials_read_error: {exc}. The operation did not run. "
+            f"Check that MEHO may read this secret, or point {exc.param} at a "
+            "path it can read, then request the operation again."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "vault_credentials_read_error",
+            "param": exc.param,
+            "secret_ref_prefix": exc.ref_prefix,
+            "cause_class": exc.cause_class,
+        },
     )
 
 
@@ -1181,7 +1560,7 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
     JSON, or JSON without a usable ``message``, fall back to the capped
     raw text. ``None`` only when the body is empty. Either branch runs
     through :func:`_sanitize_free_text` -- Tier-1 redaction plus the
-    :data:`_EXC_MESSAGE_CAP` discipline -- so credential-bearing
+    :data:`_UPSTREAM_MESSAGE_CAP` (2 KB, #3567) -- so credential-bearing
     upstream text never reaches the envelope in cleartext. Shared by
     the 403 / 422 / auth-failed builders (the body shape is identical
     across GitHub's 4xx responses).
@@ -1207,14 +1586,124 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
     if isinstance(body, dict):
         message = body.get("message")
         if isinstance(message, str) and message.strip():
-            return _sanitize_free_text(message)
+            return _sanitize_free_text(message, cap=_UPSTREAM_MESSAGE_CAP)
     try:
         text = (response.text or "").strip()
     except httpx.StreamError:
         return None
     if not text:
         return None
-    return _sanitize_free_text(text)
+    return _sanitize_free_text(text, cap=_UPSTREAM_MESSAGE_CAP)
+
+
+def _vi_json_fault(response: httpx.Response) -> tuple[str, str | None] | None:
+    """``(_typeName, faultstring)`` of a VI/JSON vim fault body, else ``None``.
+
+    vCenter's VI/JSON API returns a vim fault as a JSON object whose
+    ``_typeName`` names the fault class (``NotAuthenticated``,
+    ``InvalidLogin``, ...) next to a ``faultstring``. It has no top-level
+    ``message`` key, so :func:`_http_upstream_message` only sees it as raw
+    text.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError, httpx.StreamError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    fault_type = body.get("_typeName")
+    if not isinstance(fault_type, str) or not fault_type.strip():
+        return None
+    faultstring = body.get("faultstring")
+    if not isinstance(faultstring, str) or not faultstring.strip():
+        faultstring = None
+    return fault_type, faultstring
+
+
+def _soap_fault(text: str) -> tuple[str | None, str | None] | None:
+    """``(fault_type, faultstring)`` of a SOAP ``<soapenv:Fault>`` body, else ``None``."""
+    # Imported here, not at module top: the vmware_rest package imports the
+    # operations package, so a top-level import would be circular.
+    from meho_backplane.connectors.vmware_rest.soap import parse_soap_fault
+
+    try:
+        fault = parse_soap_fault(text)
+    except Exception:  # never raise on the error path (e.g. a defusedxml refusal)
+        return None
+    if fault is None or (fault.fault_type is None and fault.faultstring is None):
+        return None
+    return fault.fault_type, fault.faultstring
+
+
+def _http_upstream_fault(response: httpx.Response) -> dict[str, str | None] | None:
+    """Structured ``{type, faultstring}`` of an upstream vim fault body (#3567).
+
+    Two body shapes are recognised: a VI/JSON fault from vCenter
+    (``{"_typeName": ..., "faultstring": ...}``) and a SOAP
+    ``<soapenv:Fault>`` from the ESXi / vim25 SOAP path (parsed by
+    :func:`~meho_backplane.connectors.vmware_rest.soap.parse_soap_fault`).
+    Any other body yields ``None``. The fault type is the most useful field
+    for triage (``NotAuthenticated`` vs ``InvalidLogin`` vs
+    ``InvalidArgument``), so it gets its own field instead of being buried in
+    the capped ``upstream_message`` text. Both values are Tier-1-redacted,
+    then capped, like every other free-text field here. Never raises.
+    """
+    try:
+        text = (response.text or "").strip()
+    except httpx.StreamError:
+        return None
+    if not text:
+        return None
+    parsed = _soap_fault(text) if text.startswith("<") else _vi_json_fault(response)
+    if parsed is None:
+        return None
+    return _upstream_fault_fields(*parsed)
+
+
+def _upstream_fault_fields(
+    fault_type: str | None, faultstring: str | None
+) -> dict[str, str | None]:
+    """Redact, then cap, the two ``upstream_fault`` fields (type at 256, text at 2 KB)."""
+    return {
+        "type": _sanitize_free_text(fault_type) if fault_type is not None else None,
+        "faultstring": (
+            _sanitize_free_text(faultstring, cap=_UPSTREAM_MESSAGE_CAP)
+            if faultstring is not None
+            else None
+        ),
+    }
+
+
+def _add_upstream_fault(extras: dict[str, Any], response: httpx.Response) -> None:
+    """Set ``extras["upstream_fault"]`` when the upstream body is a vim fault.
+
+    The key is added only when a fault was found, so envelopes from other
+    upstreams keep their exact shape.
+    """
+    fault = _http_upstream_fault(response)
+    if fault is not None:
+        extras["upstream_fault"] = fault
+
+
+def _add_attached_upstream_fault(extras: dict[str, Any], exc: BaseException) -> None:
+    """Set ``extras["upstream_fault"]`` from a SOAP fault stored on *exc* (#3567).
+
+    On the ESXi SOAP path the connector parses the fault itself and raises a
+    plain :exc:`RuntimeError` or a ``ConnectorAuthError`` with the parsed fault
+    attached (:func:`~meho_backplane.connectors.vmware_rest.soap.attach_soap_fault`).
+    No :exc:`httpx.HTTPStatusError` reaches the builders there, so this reads the
+    attached fault instead. Same redact-then-cap steps as the HTTP case. Does
+    nothing when no fault is attached, or when the key is already set.
+    """
+    if "upstream_fault" in extras:
+        return
+    # Imported here for the same reason as in :func:`_soap_fault`.
+    from meho_backplane.connectors.vmware_rest.soap import soap_fault_of
+
+    fault = soap_fault_of(exc)
+    if fault is None or (fault.fault_type is None and fault.faultstring is None):
+        return
+    extras["upstream_fault"] = _upstream_fault_fields(fault.fault_type, fault.faultstring)
 
 
 def _http_validation_errors(response: httpx.Response) -> list[Any]:
@@ -1298,13 +1787,14 @@ def result_connector_http_403(
         "convention."
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_http_403",
         "http_status": 403,
         "upstream_message": upstream_message,
         "permission_headers": permission_headers,
     }
+    _add_upstream_fault(extras, response)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1364,13 +1854,14 @@ def result_connector_http_422(
         "convention."
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_http_422",
         "http_status": 422,
         "upstream_message": upstream_message,
         "validation_errors": validation_errors,
     }
+    _add_upstream_fault(extras, response)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1494,7 +1985,7 @@ _AUTH_FAILED_DOC_TAIL = (
 
 def _auth_failed_summary(
     *,
-    stage: Literal["establish", "dispatch", "after_relogin"],
+    stage: Literal["establish", "dispatch", "after_relogin", "call"],
     status_code: int,
     host: str,
     remediation: str,
@@ -1515,7 +2006,16 @@ def _auth_failed_summary(
     * ``after_relogin`` -- the **only** stage that re-logged in: the forced
       re-establish SUCCEEDED and the fresh session was still rejected, so the
       "already re-logged-in and retried once" sentence lives here alone.
+    * ``call`` -- a connector rejected a normal call on a live session with
+      an auth/permission fault that a fresh login cannot fix (#3566), so no
+      re-login was tried.
     """
+    if stage == "call":
+        return (
+            f"connector_auth_failed: the upstream rejected this call with an "
+            f"auth/permission fault (HTTP {status_code}) for {host}. "
+            f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
+        )
     if stage == "establish":
         lead = (
             f"connector_auth_failed: the login itself was rejected (HTTP "
@@ -1629,14 +2129,19 @@ def result_connector_auth_failed(
     for debugging per #2329), and ``upstream_message`` (the upstream body's
     ``message`` when JSON, else capped raw text, ``None`` when empty --
     shared with the 403/422 builders via :func:`_http_upstream_message`).
+    Like the other upstream-HTTP builders, it also adds ``upstream_fault``
+    (``{type, faultstring}``) when the body is a vim fault, or when the
+    exception carries a parsed SOAP fault from the ESXi path (#3567).
     """
-    stage: Literal["establish", "dispatch", "after_relogin"]
+    stage: Literal["establish", "dispatch", "after_relogin", "call"]
     if isinstance(exc, ConnectorAuthError):
-        # A login POST was rejected -- the establish stage, whichever call
-        # site raised it (first establish, or a forced re-login whose POST
-        # was itself rejected -- ``relogin == "attempted_failed"``). The
-        # ``session_establish_<status>`` cause is unchanged (#2400).
-        stage = "establish"
+        # Usually a login POST was rejected -- the establish stage, whichever
+        # call site raised it (first establish, or a forced re-login whose
+        # POST was itself rejected -- ``relogin == "attempted_failed"``). The
+        # ``session_establish_<status>`` cause is unchanged (#2400). A
+        # connector that classifies an auth fault on a normal call says so
+        # with ``exc.stage`` (``call`` / ``after_relogin``, #3566).
+        stage = exc.stage
         status_code = exc.status_code
         cause = exc.cause
         raw_message: str | None = _sanitize_free_text(str(exc))
@@ -1648,19 +2153,16 @@ def result_connector_auth_failed(
         # The underlying transport error (chained via ``raise ... from``)
         # may carry a useful upstream body message; read it opportunistically.
         underlying = exc.__cause__
-        upstream_message = (
-            _http_upstream_message(underlying.response)
-            if isinstance(underlying, httpx.HTTPStatusError)
-            else None
+        upstream_response: httpx.Response | None = (
+            underlying.response if isinstance(underlying, httpx.HTTPStatusError) else None
         )
     else:
-        response = exc.response
-        status_code = response.status_code
+        upstream_response = exc.response
+        status_code = upstream_response.status_code
         raw_message = None
         target_name = getattr(target, "name", None)
         host = getattr(target, "host", None) or "the target host"
         secret_ref = getattr(target, "secret_ref", None)
-        upstream_message = _http_upstream_message(response)
         # #2400: the HTTPStatusError branch is stage-aware on ``relogin``.
         # ``reestablished`` -- the dispatcher forced a re-login that SUCCEEDED
         # and the fresh session was still rejected (keep the ``session_``
@@ -1673,11 +2175,15 @@ def result_connector_auth_failed(
         else:
             stage = "dispatch"
             cause = f"dispatch_{status_code}"
-    if stage == "after_relogin":
-        remediation = _auth_scheme_remediation(target_name)
-    elif isinstance(exc, ConnectorAuthError) and exc.remediation:
-        # The connector named a more specific fix than "restage" (#3865).
+    upstream_message = (
+        _http_upstream_message(upstream_response) if upstream_response is not None else None
+    )
+    if isinstance(exc, ConnectorAuthError) and exc.remediation:
+        # The connector named a more specific fix than the stage default
+        # (#3865, #3566).
         remediation = exc.remediation
+    elif stage == "after_relogin":
+        remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
     summary = _auth_failed_summary(
@@ -1688,7 +2194,7 @@ def result_connector_auth_failed(
         relogin=relogin,
     )
     if upstream_message is not None:
-        summary = f"{summary} Upstream said: {upstream_message}"
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_auth_failed",
         "cause": cause,
@@ -1700,6 +2206,9 @@ def result_connector_auth_failed(
         "raw_message": raw_message,
         "upstream_message": upstream_message,
     }
+    if upstream_response is not None:
+        _add_upstream_fault(extras, upstream_response)
+    _add_attached_upstream_fault(extras, exc)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1804,7 +2313,7 @@ def result_connector_vault_forbidden(
     if msg:
         # hvac renders Forbidden as "permission denied, on GET <url>" —
         # the URL is the operator-supplied path, never secret material.
-        summary = f"{summary} Vault said: {msg}"
+        summary = f"{summary}{VAULT_SAID}{msg}"
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1826,6 +2335,20 @@ def result_connector_vault_forbidden(
 _VAULT_WRITE_POLICY_DOC = "docs/cross-repo/connector-vault-policy.md"
 
 
+def _vault_write_target_clause(target_name: str | None, vault_role: str | None) -> str:
+    """Name the acting vault target and its role, or ``""`` when unknown (#3716)."""
+    if not target_name:
+        return ""
+    if vault_role:
+        return f" It was dispatched on target {target_name!r} under vault_role {vault_role!r}."
+    return (
+        f" It was dispatched on target {target_name!r}, which sets no vault_role "
+        f"override, so the role came from the deployment's fallback chain "
+        f"(for a check run: the check-runner role, or the global default when "
+        f"it is unset; otherwise: the per-tenant role, then the global default)."
+    )
+
+
 def result_connector_vault_write_forbidden(
     op_id: str,
     exc: BaseException,
@@ -1833,6 +2356,8 @@ def result_connector_vault_write_forbidden(
     *,
     write_path: str | None,
     identity_hint: str | None = None,
+    target_name: str | None = None,
+    vault_role: str | None = None,
 ) -> OperationResult:
     """A KV-v2 write was denied by Vault RBAC (post-approval write-identity gap).
 
@@ -1841,9 +2366,12 @@ def result_connector_vault_write_forbidden(
     can succeed end to end — park → approve → re-dispatch — and the write
     still fails at Vault's ACL because the identity the connector dispatches
     with lacks the required capability on the path the op authorizes against
-    (``create``/``update`` on ``<mount>/data/<path>`` for ``put``/``patch``,
+    (``create``/``update`` on ``<mount>/data/<path>`` for ``put``,
+    ``read``/``update`` there for ``patch`` — #4831,
     ``update`` on ``<mount>/delete/<path>`` for the ``vault.kv.delete``
-    version soft-delete — #3274). Routing that denial through the
+    version soft-delete — #3274; ``read``/``delete`` on
+    ``<mount>/metadata/<path>`` for the permanent
+    ``vault.kv.metadata.delete`` — #3424). Routing that denial through the
     read-oriented :func:`result_connector_vault_forbidden` mis-describes it:
     that builder talks about a target's ``secret_ref`` being outside the
     readable per-tenant subtree, which does not apply to a typed
@@ -1858,10 +2386,16 @@ def result_connector_vault_write_forbidden(
     path is the op's own authorization path (rendered by the caller via
     :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
     and the identity hint is the dispatching / reviewing operator's ``sub``.
-    The remediation points at the write-capability stanza (§6.1) and the
-    ``sys/capabilities-self`` probe (§6.2) of the policy doc, and repeats
-    the do-NOT-widen-the-shared-policy warning: the grant is per-operator
-    templated, not a role-wide widen.
+    The remediation names two fixes, cheapest first (#3716). The write runs
+    under the operator's token logged in with the dispatch target's
+    ``extras["vault_role"]`` (#3274), so the first fix is to check that role
+    and run the same write on a vault target whose role can already write
+    the path — no policy change. Only when no such target exists does it
+    point at the write-capability stanza (§6.1) and the
+    ``sys/capabilities-self`` probe (§6.2), and repeat the
+    do-NOT-widen-the-shared-policy warning: the grant is per-operator
+    templated, not a role-wide widen. ``target_name`` / ``vault_role`` name
+    the acting target and its role in the text when the caller knows them.
 
     ``extras`` carries the machine-usable fields
     (``error_code`` / ``path`` / ``identity_hint`` / ``doc_ref`` /
@@ -1878,30 +2412,42 @@ def result_connector_vault_write_forbidden(
     identity_clause = (
         f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
     )
+    target_clause = _vault_write_target_clause(target_name, vault_role)
     # #3274: the capability + path kind is op-aware. A version soft-delete
     # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
-    # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
-    # path. Keep the message consistent with the ``write_path`` rendered by
-    # ``vault_kv_write_target_path`` so the two never disagree.
+    # path; ``put`` with ``create``/``update`` on the ``/data/`` path; ``patch``
+    # reads before it writes, so ``read``/``update`` there (#4831). Keep the
+    # message consistent with the ``write_path`` rendered by
+    # ``vault_kv_write_target_path`` so the two never disagree. The permanent
+    # delete (#3424) reads and deletes on the ``/metadata/`` path.
     if op_id == "vault.kv.delete":
         capability_clause = "lacks 'update' on that delete path"
+    elif op_id == "vault.kv.metadata.delete":
+        capability_clause = "lacks 'read' or 'delete' on that metadata path"
+    elif op_id == "vault.kv.patch":
+        capability_clause = "lacks 'read'/'update' on that data path"
     else:
         capability_clause = "lacks 'create'/'update' on that data path"
     summary = (
         f"vault_write_identity_forbidden: Vault denied the KV-v2 write{path_clause} "
         f"(permission denied). The approval handshake succeeded, but the identity "
-        f"the connector dispatched the write with {capability_clause}.{identity_clause} "
-        f"This is a deploy write-identity gap, not a bug in the approve→execute flow: "
-        f"add the per-operator write-capability stanza (§6.1) so the "
-        f"dispatching/reviewing operator's token can write the path, and verify it "
-        f"with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the backplane's "
-        f"shared Vault policy — the write grant is per-operator templated. See "
-        f"{_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
+        f"the connector dispatched the write with {capability_clause}.{identity_clause}"
+        f"{target_clause} "
+        f"This is a deploy write-identity gap, not a bug in the approve→execute flow. "
+        f"Fix it in this order: (1) check the target's vault_role — the write runs "
+        f"under the operator's token and the vault_role of the target it is "
+        f"dispatched on, so another registered vault target may already hold this "
+        f"path under a broader role; dispatch the same write there (no policy "
+        f"change). (2) Otherwise add the per-operator write-capability stanza (§6.1) "
+        f"so the dispatching/reviewing operator's token can write the path, and "
+        f"verify it with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the "
+        f"backplane's shared Vault policy — the write grant is per-operator "
+        f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
     )
     if msg:
         # hvac renders Forbidden as "permission denied, on POST <url>" — the
         # URL is the operator-supplied data path, never secret material.
-        summary = f"{summary} Vault said: {msg}"
+        summary = f"{summary}{VAULT_SAID}{msg}"
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1914,6 +2460,57 @@ def result_connector_vault_write_forbidden(
             "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
             "exception_class": type(exc).__name__,
             "exception_message": msg,
+        },
+    )
+
+
+def result_write_capability_denied(
+    op_id: str, preflight: Mapping[str, Any], duration_ms: float
+) -> OperationResult:
+    """Park refused: the park-time permission check says the write will fail (#3542).
+
+    The op needs approval, and its park-time permission preflight
+    (``vault.kv.*`` writes probe ``sys/capabilities-self``) returned
+    ``will_be_denied: true``. Parking it would ask a person to approve a
+    write that the identity cannot perform, so MEHO refuses instead: no
+    approval row is written and the caller gets this result to fix the
+    write grant and call again. ``status`` is ``"denied"`` with a distinct
+    ``error_code``.
+
+    *preflight* is the secret-free preflight dict (capability names, path,
+    reason). Its ``granted`` / ``required`` / ``path`` / ``reason`` fields
+    ride in ``extras`` next to the ``doc_ref`` for the write policy. The
+    ``reason`` may hold a probe exception class or a target lookup problem,
+    so it goes through :func:`_sanitize_free_text`.
+    """
+    path = preflight.get("path")
+    granted = list(preflight.get("granted") or [])
+    required = list(preflight.get("required") or [])
+    reason = preflight.get("reason")
+    reason = _sanitize_free_text(str(reason)) if reason else None
+    detail = f" on {path!r}" if path else ""
+    if required:
+        detail += f" (needs {required}, has {granted})"
+    if reason:
+        detail += f" (check result: {reason})"
+    summary = (
+        f"write_capability_denied: the identity this write runs under cannot "
+        f"perform it{detail}. MEHO did not create an approval request, because "
+        f"the write would fail after approval. Add the write grant (see "
+        f"{_VAULT_WRITE_POLICY_DOC} section 6), then call the operation again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"denied: {summary}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "write_capability_denied",
+            "path": path,
+            "granted": granted,
+            "required": required,
+            "reason": reason,
+            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
         },
     )
 

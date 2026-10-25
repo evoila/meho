@@ -45,7 +45,7 @@ from meho_backplane.docs_collections import (
     resolve_doc_collection,
 )
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
 __all__: list[str] = []
 
@@ -141,7 +141,7 @@ async def _delete_doc_collections_handler(
                 data=cast("dict[str, Any]", exc.detail),
             ) from exc
         except DocCollectionGlobalError as exc:
-            raise McpInvalidParamsError(str(exc), data=exc.detail) from exc
+            raise McpPermissionDeniedError(str(exc), data=exc.detail) from exc
         except DocCollectionNotDisabledError as exc:
             raise McpInvalidParamsError(str(exc), data=exc.detail) from exc
 

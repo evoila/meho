@@ -79,6 +79,7 @@ __all__ = [
     "DroppedOpModel",
     "EditGroupBody",
     "EditOpBody",
+    "GroupSummaryModel",
     "GroupingResultModel",
     "IngestJobHandle",
     "IngestJobStatusResponse",
@@ -235,7 +236,8 @@ class IngestRequest(BaseModel):
     omit-equals-global semantics the MCP sibling
     ``meho_connector_ingest`` documents. The operator's own tenant
     UUID targets their tenant-curated namespace; any other UUID is
-    rejected with a synchronous 403 on both the sync and async
+    rejected (unless the operator holds ``platform_admin``, #3800)
+    with a synchronous 403 on both the sync and async
     branches by :meth:`IngestionPipelineService.authorize_scope`
     (checked eagerly at the route before the async job row is
     created, #2208, and again inside the service as defence-in-depth).
@@ -273,7 +275,9 @@ class IngestRequest(BaseModel):
             "semantics as the MCP tool meho_connector_ingest "
             "(tenant_admin only). Pass your own tenant UUID for a "
             "tenant-scoped ingest; another tenant's UUID is rejected "
-            "with 403."
+            "with 403 unless the caller holds platform_admin, which "
+            "may ingest into another tenant when it names that "
+            "tenant here (the write is audited)."
         ),
     )
     #: Explicit-quadruple counterpart to the catalog row's
@@ -678,6 +682,27 @@ class IngestionResultModel(BaseModel):
     dropped_ops: list[DroppedOpModel] = Field(default_factory=list)
 
 
+class GroupSummaryModel(BaseModel):
+    """Pydantic projection of
+    :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
+
+    One row per group: how many ops this run added to it, and how many
+    typed, composite, and ingested ops it holds now.
+    ``typed_operation_count > 0`` means a typed registrar owns the
+    group; grouping never files ingested ops into such a group.
+    Composite ops do not make a group typed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    group_key: str
+    created: bool
+    operations_added: int
+    typed_operation_count: int
+    composite_operation_count: int
+    ingested_operation_count: int
+
+
 class GroupingResultModel(BaseModel):
     """Pydantic projection of
     :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
@@ -694,6 +719,7 @@ class GroupingResultModel(BaseModel):
     operations_unassigned: int
     llm_call_count: int
     llm_duration_ms: float
+    groups: list[GroupSummaryModel] = Field(default_factory=list)
 
 
 class IngestResponse(BaseModel):

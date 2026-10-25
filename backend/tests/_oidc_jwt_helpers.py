@@ -79,6 +79,7 @@ def mint_token(
     approver: bool | None = None,
     principal_kind: str | None = None,
     runner_id: str | None = None,
+    extra_claims: dict[str, Any] | None = None,
 ) -> str:
     """Mint a happy-path JWT signed by *private_key*.
 
@@ -117,6 +118,10 @@ def mint_token(
     call site is unchanged; pass ``approver=True`` alongside
     ``tenant_role="read_only"`` to mint a dedicated approver principal that
     can decide approvals but cannot dispatch.
+
+    ``extra_claims`` merges arbitrary claims into the payload last (so a
+    caller can add ``azp`` / ``client_id`` to mint a client-credentials
+    token, #3446). ``None`` leaves the payload unchanged.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -148,6 +153,8 @@ def mint_token(
             payload["principal_kind"] = principal_kind
         if runner_id is not None:
             payload["runner_id"] = runner_id
+        if extra_claims is not None:
+            payload.update(extra_claims)
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, private_key)
         return token.decode("ascii") if isinstance(token, bytes) else token

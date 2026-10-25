@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``GET /api/v1/retrieve/usage`` -- audit-backed retrieval usage telemetry.
+"""``GET /api/v1/retrieve/usage`` -- retrieval usage telemetry.
 
 G4.3-T5 (#444) of Initiative #373. Exposes per-day, per-surface,
-per-tenant aggregates of the retrieval-class MCP meta-tool invocations
-that ``audit_log`` already records, computed by
-:func:`meho_backplane.retrieval.usage.compute_usage`. Operator workflow:
+per-tenant aggregates of the retrieval-class MCP meta-tool invocations,
+computed by :func:`meho_backplane.retrieval.usage.compute_usage`. Since
+#3747 it reads request usage events (``request_usage``), not
+``audit_log``. MEHO collects them only when
+``REQUEST_USAGE_RETENTION_DAYS`` is set, so the report is empty when
+that setting is off. Operator workflow:
 
 * ``GET /api/v1/retrieve/usage`` — operator's own tenant; defaults to
   the last 30 days, all three surfaces.
@@ -27,7 +30,7 @@ Reading audit_log is itself privacy-sensitive (decision #3,
 ``docs/decisions/locked-decisions.md``): a free-text broadcast of "operator
 X queried usage for tenant Y in window Z" would leak the investigation
 target. The route binds two audit overrides via the chassis contextvar
-mechanism (see :func:`meho_backplane.audit._publish_broadcast_event`):
+mechanism (see :func:`meho_backplane.audit._resolve_op_id_and_class_override`):
 
 * ``audit_op_id = "meho.retrieval.usage"`` — the canonical op_id for
   every audit row this route writes. Operators querying ``audit_log``
@@ -105,7 +108,7 @@ def _bind_request_audit_context(
     (incident postmortem hook). The two override keys
     (``audit_op_id`` / ``audit_op_class``) are honoured by the
     chassis broadcast publisher per
-    :func:`meho_backplane.audit._publish_broadcast_event`;
+    :func:`meho_backplane.audit._resolve_op_id_and_class_override`;
     ``audit_tenant_scope`` distinguishes own-tenant inspection
     from genuine cross-tenant audit-trail queries.
     """
@@ -127,7 +130,12 @@ async def usage_endpoint(
     tenant_filter: UUID | None = Query(default=None),
     operator: Operator = _require_operator,
 ) -> UsageReport:
-    """Return audit-backed retrieval usage aggregates for *operator*.
+    """Return retrieval usage aggregates for *operator*.
+
+    Reads request usage events (``request_usage``), not ``audit_log``. MEHO
+    collects them only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the
+    report is empty when that setting is off and covers only the time
+    since collection started.
 
     Tenant scoping: callers are scoped to ``operator.tenant_id``; a
     ``tenant_filter`` naming a different tenant returns 403
@@ -164,6 +172,7 @@ async def usage_endpoint(
             until=now,
             surfaces=surfaces,
             tenant_id=target_tenant,
+            source="request_usage",
         )
 
     # ``audit_row_count`` becomes the broadcast event's ``row_count``

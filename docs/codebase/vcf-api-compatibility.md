@@ -27,11 +27,34 @@ and its [CI provisioning decision](../decisions/vendor-spec-ci-provisioning.md).
 Public Apache-2.0 `vmware/vcf-api-specs` documents are pinned by commit and
 hash, but are also summarized instead of copied.
 
-The exact 9.0 and 9.1 tags are `85151f6b` and `3949fc33`. The official
-`31b01a6` 9.1.1 upstream snapshot is untagged; it is catalog evidence only,
-until it is matched to a release ZIP or a live appliance. There is no static
-8.0 U1/U2/U3 vSphere or NSX 4.1/4.2 catalog pin yet, so their full 8-to-9 and
-4-to-9 deltas remain explicit gaps.
+The exact 9.0, 9.1 and 9.1.1 tags of `vmware/vcf-api-specs` are `9.0.0.0`
+(`85151f6b`), `9.1.0.0` (`3949fc33`) and `9.1.1.0` (`98086628`). The 9.1.1
+files were first recorded from the untagged commit `31b01a6`. The tag is two
+commits later and changes only the README, so every 9.1.1 file and its sha256
+stay the same. The 9.1.1 rows are catalog evidence only, until they are matched
+to a live appliance.
+
+The 9.1.1 component builds come from the
+[VCF 9.1.1.0 Bill of Materials](https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/release-notes/vmware-cloud-foundation-9-1-1-0-release-notes/vmware-cloud-foundation-9-1-1-0-bill-of-material.html):
+
+| Component | Version | Build |
+|---|---|---|
+| VCF Installer / SDDC Manager | 9.1.1.0 | 25713928 |
+| vCenter | 9.1.1.0 | 25712839 |
+| ESX | 9.1.1.0 | 25714478 |
+| NSX | 9.1.1.0 | 25691509 |
+| VCF Operations | 9.1.1.0 | 25679751 |
+| Log management | 9.1.1.0 | 25679624 |
+| Fleet lifecycle | 9.1.1.0 | 25713934 |
+| VCF Automation | 9.1.1.0 | 25714559 |
+
+For vSphere 8.0, the vendor VI/JSON files of 8.0 U1, U2 and U3 are pinned on
+the private shelf (the `vsphere-vi-json-8.0u1`, `-8.0u2` and `-8.0u3`
+artifacts; source: the
+[vSphere Management SDK 8.0 page](https://developer.broadcom.com/sdks/vsphere-management-sdk/8.0)).
+The 8.0 REST side has only the 8.0 U3 file (see below). There is no NSX
+4.1/4.2 catalog pin yet. So the full 8-to-9 REST delta and the 4-to-9 NSX delta
+remain explicit gaps.
 
 ## Catalog comparison
 
@@ -64,7 +87,7 @@ operation gate.
 
 Known catalog facts are recorded in the manifest. Examples: SDDC 9.0 to 9.1
 adds 48 operations and removes none; vSphere REST adds 101 and removes 9 while
-VI JSON adds 48 and removes none; the untagged 9.1.1 snapshot adds 6 SDDC,
+VI JSON adds 48 and removes none; the 9.1.1 tag adds 6 SDDC,
 31 Operations, and 1 Installer operation. Schema counts and raw named changes
 are not a substitute for transitive closure comparison.
 
@@ -109,8 +132,10 @@ Operations for Logs uses the same Bearer family across the documented classes,
 but the 9.0 and 9.1 documents are differently named service artifacts, so no
 removal is inferred without lineage evidence.
 
-The Installer currently advertises `>=9.1,<10.0`. A 9.0 spec exists, but that
-does not lower the connector floor until a focused contract test proves it.
+The Installer advertises `>=9.0,<10.0`. Every path it calls is in the pinned
+9.0 installer file, and the 9.0 case of its spec-reconcile lane checks that in
+CI. The [Installer page](connectors-vcf-installer.md#installer-90) lists what
+differs on 9.0.
 VCF Automation Native Public Cloud endpoints in 9.1.1 are disabled by default;
 that is a target capability/configuration gate, not a class fork. VCD API 38.0
 is evidenced only for 10.5/10.6 and needs negotiation or a narrow range.
@@ -195,6 +220,35 @@ the ingested-catalog boundary.
   descriptor against an 8.0.3 target is therefore **not** rejected with
   `unqualified_target_version` — the mirror image of the 9.0 guard's rejection
   of the same target. The 9.0 guard is unchanged.
+- **Sibling-catalog fallback (#3600).** When the named catalog's guard
+  rejects the target, the dispatcher checks the catalog the resolver picks
+  for that target. If it is a sibling of the same implementation
+  (`vmware-rest`, another version), its own guard accepts the target, and it
+  has the same `op_id` as an **enabled ingested** descriptor, the call runs
+  there instead. So a caller that pins `vmware-rest-9.0` keeps working for an
+  8.0.x target once the 8.0 catalog has the op, and the reverse. The sibling
+  descriptor is used for parameter checks, policy, approval and audit: the
+  audit row and any approval request name the catalog that really ran
+  (`vmware-rest-8.0`), not the one the caller named. If no sibling qualifies,
+  or the op is missing or disabled there, the result is still
+  `unqualified_target_version` with the same fields. Typed and composite
+  descriptors are not affected. The params are checked once, after this
+  choice, against the schema of the catalog that runs. So for a guarded
+  op, `unqualified_target_version` is reported before `invalid_params`.
+  `preview_operation` makes the same choice (without an audit row), so its
+  envelope names the sibling's `connector_id` and its `preview_hash` matches
+  the call. A destructive op can then use the fallback too. The fallback
+  is for a fresh call only. When an approved request resumes, the call
+  stays on the catalog the approval request stored. If the target's
+  detected version moved while the request waited and that catalog no
+  longer fits, the resume is refused with `unqualified_target_version`
+  and the caller must make a new request. The resume skips the policy
+  gate, so switching catalogs there would run an operation the approver
+  never saw. Both resume paths use the stored catalog: the operator surface
+  reads it from the request row, and the agent waiter replaces the
+  `connector_id` in the agent's original call with it
+  (`backend/src/meho_backplane/agent/approval_wait.py`). Code:
+  `backend/src/meho_backplane/operations/_catalog_guard.py`.
 - **Safety floors.** The VMware hardware/lifecycle/power write floor
   (`dangerous` + approval) is keyed on `(product, impl_id)` and applies to the
   8.0 catalog's ingested rows exactly as it does for 9.0.
@@ -209,19 +263,40 @@ target guard (#3565), a target below 9.x served by the 9.0 catalog fails with
 an 8.x catalog is ingested. Ingest the `vmware-rest-8.0` catalog
 (`meho connector ingest --catalog vmware/8.0`) to restore governed generic
 operations on fingerprinted 8.0.x targets; typed and composite ops are
-unaffected either way.
+unaffected either way. Callers that pin `vmware-rest-9.0` do not need to
+change their `connector_id`: an op that is enabled in the 8.0 catalog runs
+there through the sibling-catalog fallback (#3600).
 
-**Acquisition gap (Package 1, 8.0 U3).** The pinned 8.0 U3 vendor `vcenter.yaml`
-/ `vi-json.yaml` are **not yet acquired** — the public `vmware/vcf-api-specs`
-repo is tagged 9.0/9.1 only, and the appliance/portal specs need authenticated
-retrieval (Broadcom Developer Portal login, or generation off a live 8.0.3
-vCenter). The `vsphere-8.x` artifact in the contract manifest therefore stays
-`availability: unavailable`, and the VCF 5.2.x release rows it serves are
-`evidence_level: registered` (the class advertises the 8.0.x band) rather than
-`spec-fixture-qualified`. Pinning the raw catalog to the shelf's
-`docs/vcenter-8.0/` arms the always-shipped reconcile lane
-(`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py`) to compare the
-shipped minimal against the vendor surface.
+**Acquisition (Package 1, 8.0 U3).** The 8.0 U3 `vcenter.yaml` is pinned on
+the private shelf as `docs/vcenter-8.0/vcenter.yaml`. It was made from a live
+8.0.3 vCenter's API metadata, because the public `vmware/vcf-api-specs` repo is
+tagged 9.0/9.1 only (the `vsphere-8.x` artifact in the contract manifest has the
+provenance and sha256). CI checks out that folder and requires the file, so the
+reconcile lane (`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py`)
+compares the shipped minimal against the vendor surface on every run.
+
+**VI-JSON calls against 8.0 U1, U2 and U3 (#4333).** The same lane reads the
+`vmware_rest` connector source and collects every VI-JSON method it calls
+(`POST /sdk/vim25/{release}/<Type>/<moId>/<Method>`, 50 methods today). It
+checks each one against the vendor VI/JSON file of each 8.0 update
+(`docs/vcenter-8.0/vi-json-8.0u1.yaml`, `-8.0u2.yaml`, `-8.0u3.yaml` on the
+shelf) and prints the methods a file lacks. CI requires the three files, so
+this check runs on every CI run. Without the shelf it skips.
+
+A method that a file lacks needs a version gate in the operation, or an entry
+in the lane's exclusion list (`_NOT_IN_8_0_VI_JSON`) with the reason. The list
+is empty today: every VI-JSON method MEHO calls on 8.0 is in all three files.
+
+**vSAN methods on 8.0 (#4441).** No 8.0 VI/JSON file has vSAN paths. So on
+vCenter 8.0 the connector sends vSAN methods as SOAP to `/vsanHealth`, not as
+VI-JSON; on vCenter 9.x it sends them as VI-JSON under `/vsan/...` (see "vSAN
+calls" in [connectors-vmware-rest.md](connectors-vmware-rest.md)). The same
+lane checks every vSAN method MEHO calls against the method lists of the
+vendor's vSAN Management SDK for Python 8.0 U1 and U2
+(`docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt`, `.../8.0u2/...` on the
+shelf). Today that is one method,
+`VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary`, and both lists
+have it.
 
 ## References
 

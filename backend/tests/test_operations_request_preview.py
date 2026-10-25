@@ -22,7 +22,7 @@ Acceptance criteria covered:
   default-safe policy; a UUID under a registered override) is masked in
   the preview. No new raw-secret surface.
 * **AC3** -- the persisted audit row is unchanged: a preview writes **no**
-  ``AuditLog`` row and publishes **no** broadcast event (regression).
+  ``AuditLog`` row (regression).
 * **AC4** -- the error-echo option is **deferred** (see the module-level
   note in :mod:`meho_backplane.operations._request_preview` and the PR
   body): the dedicated read-only preview is the diagnosis surface; the
@@ -53,9 +53,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -63,6 +61,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._composite_preview import PLAN_NOT_SHOWN_NOTE
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._preview import (
     _PREVIEW_BUILDERS,
@@ -113,22 +112,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub.
-
-    Lets each test assert the preview path publishes **zero** broadcast
-    events (it never dispatches), the broadcast-side half of AC3.
-    """
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -347,7 +330,6 @@ async def _assert_no_audit_rows(path: str) -> None:
 async def test_preview_gh_issue_create_returns_literal_request_without_dispatching(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """AC1: gh-rest issue-create preview -> POST + substituted path + unwrapped body.
 
@@ -395,8 +377,7 @@ async def test_preview_gh_issue_create_returns_literal_request_without_dispatchi
 
     # AC1: nothing was dispatched -- the HTTP transport was never reached.
     assert connector.calls == []
-    # AC3: no broadcast event, no audit row.
-    assert captured_events == []
+    # AC3: no audit row.
     await _assert_no_audit_rows("POST:/repos/{owner}/{repo}/issues")
 
 
@@ -404,7 +385,6 @@ async def test_preview_gh_issue_create_returns_literal_request_without_dispatchi
 async def test_preview_get_op_splits_query_and_path(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A GET op previews its substituted path + query bucket, no body.
 
@@ -452,7 +432,6 @@ async def test_preview_get_op_splits_query_and_path(
 async def test_preview_matches_what_dispatch_ingested_sends(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Shared-resolver regression: the previewed request == the sent request.
 
@@ -513,7 +492,6 @@ async def test_preview_matches_what_dispatch_ingested_sends(
 async def test_preview_masks_credential_body_field_default_policy(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """AC2: a credential-shaped body value is masked by the default-safe policy.
 
@@ -563,7 +541,6 @@ async def test_preview_masks_credential_body_field_default_policy(
 async def test_preview_redaction_honours_registered_override(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """AC2: the preview resolves the per-(connector_id) policy override.
 
@@ -637,7 +614,6 @@ async def _handler_returning_ok(
 async def test_preview_typed_op_is_unavailable(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A typed op has no single literal HTTP request -> status=unavailable.
 
@@ -715,7 +691,6 @@ async def _pure_delete_preview(ctx: PreviewContext) -> dict[str, Any]:
 async def test_preview_requires_approval_typed_op_serves_bespoke_proposed_effect(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     _preview_builders_snapshot: None,
 ) -> None:
     """A dangerous + requires_approval typed op previews ok, carrying proposed_effect (#3312).
@@ -770,15 +745,68 @@ async def test_preview_requires_approval_typed_op_serves_bespoke_proposed_effect
         "semantics": "soft_delete",
         "versions": [3],
     }
+    assert envelope["plan_shown"] is True
+    assert "plan_note" not in envelope
     # No dispatch happened.
-    assert captured_events == []
+
+
+async def _live_read_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """A live-read builder: it needs a connector, so it declines offline (#4028)."""
+    if ctx.connector_instance is None:
+        return None
+    return {"blast_radius": {"present": True}}
+
+
+@pytest.mark.asyncio
+async def test_preview_says_plan_not_shown_when_builder_needs_the_target(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    _preview_builders_snapshot: None,
+) -> None:
+    """A plan that must read the target is not in the preview, and the preview says so (#4028).
+
+    The preview never dials the target, so a live-read builder (DRS rule
+    delete, Keycloak deletes, ``windns.record.remove``) declines. The envelope
+    must not look like a complete preview: ``plan_shown`` is false and
+    ``plan_note`` names where the plan is shown. The hash binding is unchanged.
+    """
+    register_connector_v2(product="demo", version="", impl_id="", cls=_RecordingHttpConnector)
+    await register_typed_operation(
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        op_id="demo.rule.delete",
+        handler=_handler_returning_ok,
+        summary="A governed delete that reads the target to plan.",
+        description="Typed, destructive.",
+        parameter_schema={"type": "object"},
+        safety_level="destructive",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_preview_builder("demo.rule.delete", _live_read_delete_preview)
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.rule.delete",
+        target=_FakeTarget(product="demo", version="1.x", name="demo-prod"),
+        params={"cluster": "c1", "rule_name": "r1"},
+    )
+
+    assert envelope["status"] == "ok"
+    assert isinstance(envelope["preview_hash"], str)
+    assert "proposed_effect" not in envelope
+    assert envelope["plan_shown"] is False
+    assert envelope["plan_note"] == PLAN_NOT_SHOWN_NOTE
+    assert "approval request" in envelope["plan_note"]
 
 
 @pytest.mark.asyncio
 async def test_preview_proposed_effect_does_not_perturb_the_binding_hash(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     _preview_builders_snapshot: None,
 ) -> None:
     """Attaching proposed_effect must not change the preview_hash (#3197 binding intact).
@@ -827,7 +855,6 @@ async def test_preview_proposed_effect_does_not_perturb_the_binding_hash(
 async def test_preview_requires_approval_generic_echo_scrubs_secret_param(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     _preview_builders_snapshot: None,
 ) -> None:
     """The reused proposed_effect applies park-time redaction to a builder-less op (#3312).
@@ -871,7 +898,6 @@ async def test_preview_requires_approval_generic_echo_scrubs_secret_param(
 async def test_preview_credential_class_requires_approval_op_stays_unavailable(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
     _preview_builders_snapshot: None,
 ) -> None:
     """A credential-class requires_approval op is NOT previewable — no secret leak (#3312).
@@ -923,7 +949,6 @@ async def test_preview_credential_class_requires_approval_op_stays_unavailable(
 async def test_preview_invalid_params_returns_structured_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Params failing parameter_schema -> structured invalid_params envelope.
 
@@ -967,7 +992,6 @@ async def test_preview_invalid_params_returns_structured_error(
 async def test_preview_invalid_op_schema_returns_structured_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A poisoned stored schema -> structured invalid_op_schema envelope (#3095).
 
@@ -1014,7 +1038,6 @@ async def test_preview_invalid_op_schema_returns_structured_error(
 async def test_preview_unknown_op_returns_structured_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """An op id that resolves no descriptor -> structured unknown_op envelope."""
     register_connector_v2(
@@ -1044,7 +1067,6 @@ async def test_preview_unknown_op_returns_structured_error(
 async def test_preview_operation_meta_tool_resolves_target_by_name(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The shared ``preview_operation`` funnel both surfaces call resolves the target.
 
@@ -1108,7 +1130,6 @@ async def test_preview_operation_meta_tool_resolves_target_by_name(
     assert envelope["resolved_path"] == "/repos/evoila/meho/issues"
     assert envelope["redacted_body"] == {"title": "via-funnel"}
     assert connector.calls == []
-    assert captured_events == []
     await _assert_no_audit_rows("POST:/repos/{owner}/{repo}/issues")
 
 
@@ -1195,7 +1216,6 @@ async def test_call_operation_dispatches_operator_bearing_path_param(
 async def test_preview_operator_bearing_path_param_resolves_clean(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Previewing the same ``/v1/{+path}`` op returns the reserved-expanded path."""
     connector = _register_recording_gh_connector()
@@ -1232,7 +1252,6 @@ async def test_preview_operator_bearing_path_param_resolves_clean(
 async def test_preview_unresolvable_path_var_returns_structured_dispatch_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A path template var with no schema property -> structured ``dispatch_error``.
 
@@ -1278,7 +1297,6 @@ async def test_preview_unresolvable_path_var_returns_structured_dispatch_error(
 async def test_preview_operation_meta_tool_missing_path_var_never_raises(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The shared ``preview_operation`` funnel returns the structured error too.
 

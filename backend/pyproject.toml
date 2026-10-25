@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = [
-    "fastapi>=0.141.1,<0.142",
+    "fastapi>=0.141.1,<0.144",
     "uvicorn[standard]>=0.52.3",
     "pydantic[email]>=2.13.4",
     "structlog>=26.1.0",
@@ -280,6 +280,7 @@ select = [
 "tests/test_mcp_resource_tenant_info.py" = ["F811"]
 "tests/test_mcp_resource_tenant_feed.py" = ["F811"]
 "tests/test_mcp_resource_tenant_conventions.py" = ["F811"]
+"tests/test_mcp_resource_tenant_conventions_index.py" = ["F811"]
 "tests/test_mcp_initialize_instructions.py" = ["F811"]
 "tests/test_mcp_capability_gating.py" = ["F811"]
 "tests/test_mcp_inputschema_format_enforcement.py" = ["F811"]
@@ -354,7 +355,8 @@ module = ["hvac.*"]
 ignore_missing_imports = true
 
 # ``requests`` is hvac's transport dependency. We only catch its
-# exception types in :mod:`meho_backplane.auth.vault` to map them
+# exception types in :mod:`meho_backplane.auth.vault` and
+# :mod:`meho_backplane.connectors._shared.vault_creds` to map them
 # through to backplane-side errors; we don't depend on its public API
 # directly. ``types-requests`` would pull a separate stub package into
 # the runtime image; whitelisting the module keeps the dev image lean
@@ -400,7 +402,8 @@ ignore_missing_imports = true
 # ``py.typed`` marker as of 32.x. The connector module
 # (:mod:`meho_backplane.connectors.kubernetes`) localises the untyped
 # surface to the ``ApiClient`` / ``VersionApi`` / ``config.*`` calls;
-# the rest of the codebase never imports kubernetes_asyncio directly.
+# the only other importer is the install-time secrets Job
+# (:mod:`meho_backplane.core.secrets`, Secret read + create only).
 # Drop this override if upstream later ships stubs (open issue
 # tomplus/kubernetes_asyncio#260 tracks the request).
 [[tool.mypy.overrides]]

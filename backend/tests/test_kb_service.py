@@ -34,6 +34,7 @@ engine. PG-real coverage of the search + BM25 ranking lives in
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -46,10 +47,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
-from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.schemas import KB_KIND_ENTRY, KB_SOURCE, InvalidKbSlugError
 from meho_backplane.kb.service import KbIngestRootError, KbService
+from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import get_settings
+from tests._kb_embedding_stub import fake_embedding_service
 
 
 @pytest.fixture(autouse=True)
@@ -82,15 +85,13 @@ def stub_embedding() -> Iterator[AsyncMock]:
     the import site inside the indexer module so the embed singleton
     factory is bypassed entirely.
     """
-    fake_service = AsyncMock()
-    fake_service.encode_one.return_value = [0.1] * 384
-    fake_service.encode.return_value = [[0.1] * 384]
-    fake_service.dimension = 384
+    fake_service = fake_embedding_service()
     with patch(
         "meho_backplane.retrieval.indexer.get_embedding_service",
         return_value=fake_service,
     ):
-        yield fake_service.encode_one
+        # A kb write embeds its head and passages in one ``encode`` call.
+        yield fake_service.encode
 
 
 @pytest.fixture
@@ -238,6 +239,180 @@ async def test_ingest_directory_continues_past_bad_files(
 
 
 # ---------------------------------------------------------------------------
+# ingest_directory -- deterministic order, slug conflicts, provenance
+# ---------------------------------------------------------------------------
+
+
+def _write_conflict_corpus(root: Path) -> None:
+    """Two files claim ``dup`` (one by stem, one by front-matter); one file is unique."""
+    _write(root / "b" / "dup.md", "Body from b/dup.md.")
+    _write(root / "a" / "other.md", "---\nslug: dup\n---\nBody from a/other.md.")
+    _write(root / "unique.md", "Unique body.")
+
+
+async def _kb_rows(tenant_id: uuid.UUID) -> dict[str, Document]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(Document).where(
+                        Document.tenant_id == tenant_id, Document.source == KB_SOURCE
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return {row.source_id: row for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_ingest_reports_all_slug_conflicts_and_writes_none_of_them(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """Every file in a slug collision is reported; none is written; others proceed."""
+    _write_conflict_corpus(tmp_path)
+    _write(tmp_path / "x.md", "---\nslug: twice\n---\nX.")
+    _write(tmp_path / "y" / "twice.md", "Y.")
+    tenant_id = uuid.uuid4()
+
+    result = await KbService().ingest_directory(tmp_path, tenant_id)
+
+    assert result.inserted_count == 1
+    assert result.conflict_count == 4
+    assert [(c.slug, c.relative_paths) for c in result.conflicts] == [
+        ("dup", ["a/other.md", "b/dup.md"]),
+        ("twice", ["x.md", "y/twice.md"]),
+    ]
+    assert set(await _kb_rows(tenant_id)) == {"unique"}
+
+
+@pytest.mark.asyncio
+async def test_ingest_conflict_leaves_existing_entry_unchanged(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """A pre-existing entry with a conflicting slug keeps its body and metadata."""
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.create_entry(tenant_id, "dup", "Original body.", {"owner": "ops"})
+    before = await service.get_entry(tenant_id, "dup")
+    assert before is not None
+    _write_conflict_corpus(tmp_path)
+
+    for dry_run in (True, False):
+        result = await service.ingest_directory(tmp_path, tenant_id, dry_run=dry_run)
+        assert result.conflict_count == 2
+        assert [c.slug for c in result.conflicts] == ["dup"]
+
+    after = await service.get_entry(tenant_id, "dup")
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_ingest_result_is_stable_across_filesystem_enumeration_order(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """Reversing the order ``rglob`` returns files does not change the result."""
+    _write_conflict_corpus(tmp_path)
+    _write(tmp_path / "BadCase.md", "Invalid slug.")
+    (tmp_path / "binary.md").write_bytes(b"\x00\xff\xfe")
+    real_rglob = Path.rglob
+    results = []
+    for reverse in (False, True):
+
+        def fake_rglob(self: Path, pattern: str, _reverse: bool = reverse) -> list[Path]:
+            return sorted(real_rglob(self, pattern), reverse=_reverse)
+
+        with patch.object(Path, "rglob", fake_rglob):
+            results.append(await KbService().ingest_directory(tmp_path, uuid.uuid4(), dry_run=True))
+
+    assert results[0] == results[1]
+    assert results[0].errors[0].startswith("BadCase.md: ")
+    assert results[0].errors[1].startswith("binary.md: ")
+
+
+@pytest.mark.asyncio
+async def test_ingest_provenance_has_relative_path_and_no_host_path(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """Stored provenance names the root-relative path; no absolute path anywhere."""
+    _write(tmp_path / "runbooks" / "vm-restart.md", "Restart steps.")
+    (tmp_path / "broken.md").write_bytes(b"\xff\xfe")
+    tenant_id = uuid.uuid4()
+    before = datetime.now(UTC)
+
+    result = await KbService().ingest_directory(tmp_path, tenant_id)
+
+    entry = await KbService().get_entry(tenant_id, "vm-restart")
+    assert entry is not None
+    assert entry.provenance.state == "recorded"
+    assert entry.provenance.source_kind == "directory"
+    assert entry.provenance.relative_path == "runbooks/vm-restart.md"
+    assert entry.provenance.ingested_at is not None
+    assert entry.provenance.ingested_at >= before
+    assert str(tmp_path) not in str(entry.metadata)
+    assert result.errors and all(str(tmp_path) not in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_legacy_entry_reads_as_legacy_until_next_ingest(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """A row without provenance stays readable as ``legacy``; re-ingest records it."""
+    tenant_id = uuid.uuid4()
+    _write(tmp_path / "old.md", "Old body.")
+    await index_document(
+        tenant_id=tenant_id,
+        source=KB_SOURCE,
+        source_id="old",
+        kind=KB_KIND_ENTRY,
+        body="Old body.",
+        metadata={"source_path": "/legacy/host/old.md"},
+    )
+    service = KbService()
+
+    legacy = await service.get_entry(tenant_id, "old")
+    assert legacy is not None
+    assert legacy.provenance.state == "legacy"
+    assert legacy.provenance.relative_path is None
+    assert legacy.metadata == {"source_path": "/legacy/host/old.md"}
+
+    await service.ingest_directory(tmp_path, tenant_id)
+    refreshed = await service.get_entry(tenant_id, "old")
+    assert refreshed is not None
+    assert refreshed.provenance.relative_path == "old.md"
+    assert "source_path" not in refreshed.metadata
+
+
+@pytest.mark.asyncio
+async def test_direct_create_is_last_write_wins_with_direct_provenance(
+    stub_embedding: AsyncMock,
+) -> None:
+    """Explicit create replaces the entry; provenance says ``direct``; caller cannot forge it."""
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.create_entry(tenant_id, "shared", "First.", actor_sub="user-a")
+    forged: dict[str, object] = {
+        "provenance": {"source_kind": "directory", "relative_path": "x.md"}
+    }
+
+    entry, created = await service.create_entry(
+        tenant_id, "shared", "Second.", forged, actor_sub="user-b"
+    )
+
+    assert created is False
+    assert entry.body == "Second."
+    assert entry.provenance.source_kind == "direct"
+    assert entry.provenance.relative_path is None
+
+
+# ---------------------------------------------------------------------------
 # KB_INGEST_ROOT guard -- path-traversal / LFI (#101 L8 + L14)
 # ---------------------------------------------------------------------------
 
@@ -362,6 +537,77 @@ async def test_ingest_admits_directory_inside_root(
     assert stub_embedding.call_count == 2
 
 
+@pytest.mark.asyncio
+async def test_ingest_rejects_sibling_directory_with_root_as_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """``<root>-old`` is not inside ``<root>``: whole folder names are compared."""
+    root = tmp_path / "allowed"
+    root.mkdir()
+    sibling = tmp_path / "allowed-old"
+    _make_corpus(sibling, n=2)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    with pytest.raises(KbIngestRootError):
+        await service.ingest_directory(sibling, uuid.uuid4())
+
+    assert stub_embedding.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_admits_linked_directory_inside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """The requested directory may be a link when its real location is inside the root."""
+    root = tmp_path / "allowed"
+    _make_corpus(root / "releases" / "one", n=2)
+    (root / "current").symlink_to(root / "releases" / "one", target_is_directory=True)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    result = await service.ingest_directory(root / "current", uuid.uuid4())
+
+    assert result.inserted_count == 2
+    assert result.error_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_reads_only_regular_files_inside_the_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """Only the regular file is ingested; links and special files are skipped."""
+    root = tmp_path / "allowed"
+    corpus = root / "kb"
+    elsewhere = tmp_path / "elsewhere"
+    _write(corpus / "regular.md", "Regular entry about Kubernetes.")
+    _write(elsewhere / "note.md", "Not part of the kb.")
+    _write(elsewhere / "folder" / "deep.md", "Not part of the kb either.")
+    (corpus / "linked-file.md").symlink_to(elsewhere / "note.md")
+    (corpus / "linked-folder").symlink_to(elsewhere / "folder", target_is_directory=True)
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(corpus / "pipe.md")
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    service = KbService()
+    result = await service.ingest_directory(corpus, tenant_id)
+
+    assert result.inserted_count == 1
+    assert result.error_count == 0
+    assert [entry.slug for entry in await service.list_entries(tenant_id)] == ["regular"]
+    assert stub_embedding.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Tenant boundary
 # ---------------------------------------------------------------------------
@@ -402,7 +648,7 @@ async def test_list_entries_returns_slug_sorted_entries(
     tmp_path: Path,
     stub_embedding: AsyncMock,
 ) -> None:
-    """``list_entries`` returns sorted-by-slug; metadata enriched with source_path."""
+    """``list_entries`` returns sorted-by-slug; provenance records the relative path."""
     _write(tmp_path / "zebra.md", "Z.")
     _write(tmp_path / "alpha.md", "A.")
     _write(tmp_path / "mid.md", "M.")
@@ -412,9 +658,10 @@ async def test_list_entries_returns_slug_sorted_entries(
     await service.ingest_directory(tmp_path, tenant_id)
     entries = await service.list_entries(tenant_id)
     assert [e.slug for e in entries] == ["alpha", "mid", "zebra"]
-    # source_path metadata was enriched.
     for entry in entries:
-        assert "source_path" in entry.metadata
+        assert "source_path" not in entry.metadata
+        assert entry.provenance.state == "recorded"
+        assert entry.provenance.relative_path == f"{entry.slug}.md"
 
 
 @pytest.mark.asyncio
@@ -499,7 +746,10 @@ async def test_create_entry_writes_new_row(stub_embedding: AsyncMock) -> None:
     )
     assert was_created is True
     assert created.slug == "net-policy"
-    assert created.metadata == {"author": "ops"}
+    assert created.metadata["author"] == "ops"
+    assert created.provenance.state == "recorded"
+    assert created.provenance.source_kind == "direct"
+    assert created.provenance.relative_path is None
 
     fetched = await service.get_entry(tenant_id, "net-policy")
     assert fetched is not None

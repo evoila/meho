@@ -51,9 +51,11 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 
+from meho_backplane.conventions.index import index_revision
 from meho_backplane.conventions.preamble import (
     BLOCK_END,
     BLOCK_START,
@@ -61,6 +63,7 @@ from meho_backplane.conventions.preamble import (
     BROADCAST_DISCIPLINE_BAND,
     GUARD_PREFIX,
     assemble_preamble,
+    assemble_preamble_detailed,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantConvention
@@ -268,12 +271,10 @@ async def test_over_budget_drops_lowest_priority_whole_never_mid_entry() -> None
     ``dropped_slugs``.
     """
     tenant = uuid.uuid4()
-    # Header (the fixed `## Operational conventions...` heading +
-    # the GUARD_PREFIX block) costs ~71 tokens at 3.3 chars/token.
-    # Each block here is ~28 tokens (## title + 80 chars of body +
-    # newlines). A 110-token budget admits the header (~71) +
-    # exactly one block (~28); a second block (push to ~127) would
-    # exceed the budget and trigger the drop.
+    # The rendered band with one block here (delimiters + heading +
+    # GUARD_PREFIX + "### High priority" + 80 chars of body) is ~116
+    # tokens at 3.3 chars/token; with the second block it is ~146. A
+    # 125-token budget admits exactly one block, so the second drops.
     big_body = "x" * 80
     await _insert_convention(
         tenant_id=tenant,
@@ -290,7 +291,7 @@ async def test_over_budget_drops_lowest_priority_whole_never_mid_entry() -> None
         priority=100,
     )
 
-    result = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, max_tokens=110)
+    result = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, max_tokens=125)
 
     # High-priority block is in the assembled text verbatim.
     assert "High priority" in result.text
@@ -737,3 +738,94 @@ async def test_conventions_text_appears_before_priming_text() -> None:
     # And conventions precede priming in pack order -- the load-
     # bearing ordering invariant from Initiative #1199.
     assert conventions_end < priming_start
+
+
+# ---------------------------------------------------------------------------
+# #3759 -- conventions_only for hosted agent runs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_conventions_only_empty_tenant_is_empty() -> None:
+    """With no conventions, the hosted form has no text at all (no broadcast band)."""
+    result = await assemble_preamble(uuid.uuid4(), _NO_RUNS_OPERATOR, conventions_only=True)
+    assert result.text == ""
+    assert result.dropped_slugs == []
+
+
+@pytest.mark.asyncio
+async def test_conventions_only_matches_the_conventions_band() -> None:
+    """The hosted form is exactly the conventions band the MCP preamble carries."""
+    tenant = uuid.uuid4()
+    await _insert_convention(tenant_id=tenant, slug="be-brief", title="Brief", body="One line.")
+
+    full = await assemble_preamble(tenant, _NO_RUNS_OPERATOR)
+    only = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, conventions_only=True)
+
+    assert only.text.startswith(BLOCK_START)
+    assert only.text.endswith(BLOCK_END)
+    assert GUARD_PREFIX in only.text
+    assert BROADCAST_BLOCK_START not in only.text
+    assert full.text == f"{BROADCAST_DISCIPLINE_BAND}\n\n{only.text}"
+
+
+@pytest.mark.asyncio
+async def test_conventions_only_keeps_budget_and_drops() -> None:
+    """Same packer and budget: an entry that does not fit is dropped whole and listed."""
+    tenant = uuid.uuid4()
+    await _insert_convention(
+        tenant_id=tenant, slug="high-fits", title="High", body="x" * 80, priority=100
+    )
+    await _insert_convention(
+        tenant_id=tenant, slug="low-fits-not", title="Low", body="x" * 80, priority=1
+    )
+
+    only = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, max_tokens=125, conventions_only=True)
+    full = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, max_tokens=125)
+
+    assert only.dropped_slugs == ["low-fits-not"] == full.dropped_slugs
+    assert "### High" in only.text
+    assert "### Low" not in only.text
+
+
+@pytest.mark.asyncio
+async def test_conventions_only_skips_runbook_priming() -> None:
+    """The priming band names runbook tools a hosted run does not have."""
+    tenant = uuid.uuid4()
+    with patch(
+        "meho_backplane.conventions.preamble.assemble_runbook_priming",
+        side_effect=AssertionError("priming must not run for conventions_only"),
+    ):
+        result = await assemble_preamble(tenant, _PRIMING_OPERATOR, conventions_only=True)
+    assert result.text == ""
+
+
+# ---------------------------------------------------------------------------
+# #3763 -- conventions revision for hosted delivery receipts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_conventions_revision_tracks_the_operational_set() -> None:
+    """The revision is stable for one set and changes when an operational row changes."""
+    tenant = uuid.uuid4()
+    empty = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR, conventions_only=True)
+    assert empty.conventions_revision == index_revision([])
+
+    await _insert_convention(tenant_id=tenant, slug="be-brief", title="Brief", body="One line.")
+    first = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR, conventions_only=True)
+    again = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR)
+    assert first.conventions_revision == again.conventions_revision != empty.conventions_revision
+    assert len(first.conventions_revision) == 16
+
+    await _insert_convention(
+        tenant_id=tenant, slug="ref", title="Ref", body="Reference.", kind="reference"
+    )
+    with_reference = await assemble_preamble_detailed(
+        tenant, _NO_RUNS_OPERATOR, conventions_only=True
+    )
+    assert with_reference.conventions_revision == first.conventions_revision
+
+    await _insert_convention(tenant_id=tenant, slug="second", title="Second", body="Two.")
+    changed = await assemble_preamble_detailed(tenant, _NO_RUNS_OPERATOR, conventions_only=True)
+    assert changed.conventions_revision != first.conventions_revision

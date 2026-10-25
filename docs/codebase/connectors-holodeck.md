@@ -108,6 +108,30 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   #2908) — **17 ops total**. The pattern mirrors bind9's `_bind9_ops()` and
   pfSense's `_pfsense_ops()`.
 
+- **Response schemas** (`_response_schemas.py`) — `HOLODECK_RESPONSE_SCHEMAS`,
+  one schema per op id, split out so the op tables stay readable.
+
+**Operation contracts.** The 17 ops meet the VMware operation-contract check
+(`backend/tests/test_operation_contracts.py`); none is on its gap list.
+
+- Each `response_schema` names the fields the handler returns, with a
+  description per field. Holodeck publishes no API file. Where a field is a
+  cmdlet answer passed through as is (`Get-HoloDeckConfig` → `config`,
+  `Get-HoloDeckPod` → `rows[]` / `pod`), the object stays open and the text
+  names only the keys MEHO reads (`Version`, `PodId`).
+- Each `parameter_schema` describes every field, nested ones too, and carries
+  one example call under `examples`. The parameter rules themselves (types,
+  enums, patterns, the 5.2.x depot refusal) are unchanged.
+- `llm_instructions` carries `when_to_call` (with the SSH-only transport
+  note), `output_shape` and `next_step`; the seven changes (`k8s.exec`,
+  `k8s.pods.gc`, `backups.prune`, `images.import`, `config.apply`,
+  `instance.start`, `router.patch`) also carry `preconditions`.
+- The texts say what MEHO really sends. `holodeck.config.apply` sends only
+  `description` and `external_ip` to `New-HoloDeckConfig`; `master_cidr`,
+  `vlan_range`, `placement`, `depot` and `instance_id` are checked and echoed
+  back, not sent. `holodeck.instance.start` sends `-ManagementOnly` only for
+  `variant=management_only`; for `vvf` and `full` it sends no profile flag.
+
 - **Deploy-lifecycle op handlers + helpers** (`ops_deploy.py`, #2908) —
   `holodeck_config_apply`, `holodeck_instance_start`, `holodeck_instance_status`,
   `holodeck_router_patch`, plus the pure helpers `validate_config_apply_params`
@@ -206,7 +230,7 @@ The probe does not mutate state. `Get-Service` is read-only on Photon.
 The read ops route through the dispatcher's standard
 `call_operation` path. Each registers via `register_typed_operation()` with
 `safety_level="safe"`, `requires_approval=False`, and an
-`llm_instructions.when_to_use` blob that includes the SSH-only transport
+`llm_instructions.when_to_call` text that includes the SSH-only transport
 disclosure (CLAUDE.md postulate 5 + Initiative #371).
 
 - **`holodeck.config.show`** (group `config`). Runs `Get-HoloDeckConfig |
@@ -224,7 +248,7 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   `null` shape into a uniform list.
 - **`holodeck.pod.info`** (group `pod`). Runs `Get-HoloDeckPod -Id '<id>' |
   ConvertTo-Json -Depth 4` via `pwsh_run`. `pod_id` parameter is required;
-  the handler PowerShell-quotes single quotes via doubling. Returns
+  the handler quotes it with `ps_single_quote`. Returns
   `{pod: <dict>}` or `{pod: None, error}` on cmdlet / missing-id failure.
 - **`holodeck.service.list`** (group `service`, JSONFlux-shaped). Runs
   `Get-Service | Where-Object { $_.Name -like 'Holo*' } | Select-Object
@@ -582,7 +606,6 @@ External (pinned in `backend/pyproject.toml`):
 - `ConvertTo-Json`:
   https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertto-json
 - VMware Holodeck Toolkit: https://core.vmware.com/holodeck-toolkit
-- Consumer wrapper replaced:
-  https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/holodeck.sh
+- Consumer wrapper replaced: `scripts/holodeck.sh` in the consumer's private repo.
 - Sister wrapper deferred to Runbooks Initiative:
-  https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/clone-holodeck-instance.sh
+  `scripts/clone-holodeck-instance.sh` in the consumer's private repo.

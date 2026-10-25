@@ -63,6 +63,20 @@ spec:
       ports:
         - port: 8200
           protocol: TCP
+    {{- if .Values.coreKeycloak.enabled }}
+    # Built-in Keycloak (#4591): the backplane calls its Service for
+    # discovery, keys, tokens and the Admin REST API. A NetworkPolicy
+    # matches the pod's port, which is always 8080 (the Service's
+    # `targetPort: http`). Selectors match `coreKeycloak.selectorLabels`.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- else }}
     # Keycloak — typically reached over HTTPS through the cluster ingress
     # or an external load balancer; CIDR is operator-supplied.
     - to:
@@ -71,6 +85,7 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    {{- end }}
     {{- if .Values.broadcast.enabled }}
     # Activity-broadcast subchart (`charts/broadcast/` — Valkey per ADR
     # 0005). Selectors match the broadcast subchart's `_helpers.tpl`
@@ -88,6 +103,22 @@ spec:
         - port: {{ .Values.broadcast.service.port }}
           protocol: TCP
     {{- end }}
+    {{- if .Values.resultCache.enabled }}
+    # Dedicated result-cache subchart (`charts/result-cache/`). Selectors
+    # match that subchart's `resultCache.selectorLabels`. Without this rule
+    # the backplane cannot reach the store and every result read misses.
+    # The port is the Pod port (Valkey always listens on 6379), not
+    # `resultCache.service.port`: the policy is checked after the Service
+    # forwards the connection to the Pod.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: result-cache
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 6379
+          protocol: TCP
+    {{- end }}
     # DNS — UDP/53 to kube-dns / CoreDNS. Without this rule every other
     # egress rule above fails on name resolution. The selector matches the
     # standard `k8s-app: kube-dns` label CoreDNS ships with by default.
@@ -99,4 +130,18 @@ spec:
       ports:
         - port: 53
           protocol: UDP
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- range $i, $rule := . }}
+    {{- /* Also guarded by the schema; this check holds under --skip-schema-validation. */}}
+    {{- if not $rule.to }}
+    {{- fail (printf "networkPolicy.extraEgress[%d] has no 'to' list. Kubernetes reads a rule without 'to' as 'allow every destination'. Add a 'to' list with the networks MEHO must reach." $i) }}
+    {{- end }}
+    {{- end }}
+    # Operator egress rules, added exactly as written (#3516): the
+    # systems MEHO manages, the AI service, and anything the fixed rules
+    # above cannot express (Vault / Keycloak behind an ingress, whose
+    # traffic is redirected to the ingress Pod port before the rule is
+    # checked). Default empty — nothing is added.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 {{- end }}

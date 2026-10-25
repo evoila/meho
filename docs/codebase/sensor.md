@@ -27,6 +27,13 @@ by-IP probe reads a misleading 404 / `tls_error` whether the service is
 healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
 § *Vhost-routed probes by IP*.
 
+A second one watches MEHO itself: **loose audit rows** (#4670). The
+`safe`, targetless op `audit.loose_rows` on `audit-integrity-1.x` lists
+audit records whose parent row does not exist, and
+`connectors/audit/sensor_template.py` holds the ready Sensor body (once
+an hour; `$.recent_count` `gt` 0 → `degraded`, `gt` 10 → `critical`).
+See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
+
 ## Key types
 
 - `meho_backplane.db.models.Sensor` — the ORM row. 30 columns: identity
@@ -87,8 +94,8 @@ healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
    downstream principal token is a separate axis, #2642).
 3. The service parses `connector_id` into `(product, version, impl_id)`
    (`operations/_lookup.parse_connector_id`) and resolves the
-   `EndpointDescriptor` via `lookup_descriptor` (tenant-scoped, then
-   global). No descriptor ⇒ 422 `sensor_operation_not_found`.
+   `EndpointDescriptor` via `lookup_descriptor` (the tenant's own
+   connector row when it has one, otherwise the built-in row). No descriptor ⇒ 422 `sensor_operation_not_found`.
 4. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
    `sensor_requires_safe_operation`. This is the create-time half of a
    two-point enforcement. The dispatch-time policy gate
@@ -159,6 +166,53 @@ history and projection can never diverge. The row records the *observed*
 outcome of each evaluation (committed, soft/pending, or re-confirmed), so a
 flapping reading that never commits still lands in history.
 
+### The rule runs over the full result (#4117)
+
+MEHO shortens an operation answer that is over 50 rows or over 4 KB. The
+caller gets a short summary and a handle to the stored full result (see
+[`result-spill.md`](result-spill.md)). A long list keeps only counts
+(`row_count`, `total`, ...). A big object with no top-level list keeps
+only its small top-level values; nested objects such as a Prometheus
+answer's `data` are gone (#4119).
+
+The runner does not check its rule against that summary. Around its own
+dispatch it sets `full_result_capture_var`
+(`operations/reducer.py`), and the dispatcher fills the capture with the
+full redacted payload just before the reduce. So the runner has two
+views of one call: the normal shortened result, and the full payload
+every other caller would read back through `result_query`. The
+redaction and the credential scrub have already run on both, so the
+check never sees a secret value. The store is not read: a sensor on a
+deployment without a reachable result store evaluates the same way.
+
+`_evaluate_result` (`checks/runner.py`) then decides:
+
+- Not shortened (no handle): the result is the whole payload. Checked as
+  before.
+- Shortened: the rule runs over the full payload. A rule on the rows
+  (`$.hosts[*].connected`, `all`) or on a nested list
+  (`$.data.result[*].value_num`, `max`) reads `ok` / `degraded` /
+  `critical` as it would on a small answer.
+- The full payload cannot answer the rule (for example `missing key
+  'row_count'`) but the summary can: the summary's outcome wins and the
+  evidence carries `checked: "summary"`. This keeps a rule that reads the
+  summary on purpose working. When neither view can answer, the evidence
+  reason is the full payload's (the vendor data), not the summary's.
+- The reducer refused the payload under its admission work limit
+  (`RESULT_REDUCTION_MAX_*`; the handle's drill-in reason is
+  `admission_limit_exceeded`): the answer is too big to check and the
+  sensor reads `unknown` with `reason: result_too_large` plus the handle
+  id and `total_rows`.
+
+The evidence stays small: a breaching aggregate samples at most 5 rows,
+as before (next section). The runner never evaluates the stored rows
+through the handle, so the spill caps (`RESULT_HANDLE_MAX_SPILL_ROWS`,
+`RESULT_HANDLE_MAX_RECORD_BYTES`) do not bound the check: the capture is
+the payload as the handler returned it.
+
+Tests: `tests/test_sensor_runner_full_result.py` drives the real
+dispatcher with the production reducer and an in-memory store.
+
 ### Aggregate offender sample (#2976)
 
 An aggregate assertion (`count` / `sum` / `max` / `min` / `any` / `all`)
@@ -200,6 +254,19 @@ a total order the trend query's keyset cursor rides with no tiebreaker.
   behaviour. This deliberately diverges from the announcement/topology sweepers'
   `0`=keep-forever, because an evidence history that grows forever is the
   surprise #2756 exists to prevent.
+- **When the evidence prune runs**: the interval counts from the **last
+  recorded run**, not from pod start, so a pod restart does not start it
+  again. One minute after a pod starts, the sweeper reads its newest
+  `checks.evidence.prune` audit row within the last interval
+  (`operator_sub='system:checks-evidence-retention'`, `method='INTERNAL'`,
+  the system tenant id). Every run writes this row, also when it deleted
+  0 rows. No such row: it runs at once. Otherwise it waits only for the
+  rest of the interval, then runs once per interval. A future last-run
+  time counts as due; a failed read logs
+  `checks_evidence_retention_last_run_read_failed` and runs at once. Each
+  start logs `checks_evidence_retention_scheduled` with `last_run_at` and
+  `next_run_in_seconds`. The shared steps live in
+  `backend/src/meho_backplane/loop_schedule.py`.
 - **The trend query** (`SensorAdminService.list_results` →
   `repository.list_sensor_results`) answers the forensic question with binary
   filters only — `sensor_id` (exact), `from`/`to` (inclusive window), optional
@@ -239,6 +306,9 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
   `0071_create_sensor_results.py` (`down_revision="0070"`, #2756 history table).
 - **#2756** (Initiative #2780) — per-tick evidence retention + trend query;
   the retention sweeper reuses the #2547 announcement-sweeper mould.
+- `meho_backplane.operations.reducer` — `FullResultCapture` /
+  `full_result_capture_var`, the seam the runner uses to read the full
+  result of its own dispatch (#4117).
 
 ## Known issues / boundaries
 

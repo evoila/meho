@@ -12,7 +12,8 @@ set materializes regardless of size). The test:
 * Asserts the returned :class:`~meho_backplane.connectors.schemas.OperationResult`
   carries a populated :attr:`OperationResult.handle` with the real
   materialized shape (fresh UUID id, summary_md naming the row count,
-  a JSON-Schema ``schema_`` mapping inferred from the DuckDB table,
+  a JSON-Schema ``schema_`` mapping built from the all-row field catalog
+  (its keys are the union of the keys of every raw VM record),
   ≥1 real sample row, ttl_seconds set).
 * Asserts the inlined :attr:`OperationResult.result` carries the
   reduced summary (row_count + bounded sample) rather than the full
@@ -121,8 +122,8 @@ async def test_force_handle_reducer_populates_operation_result_handle(
     assert "50" in handle["summary_md"], (
         f"expected summary_md to mention the row count; got {handle['summary_md']!r}"
     )
-    # schema_ is the real JSON Schema the reducer inferred from the
-    # DuckDB-materialized table: an array-of-objects with typed columns.
+    # schema_ is the JSON Schema the reducer built from its field catalog
+    # over every captured row: an array-of-objects with typed fields.
     assert isinstance(handle["schema_"], dict) and handle["schema_"], (
         f"handle.schema_ must be a non-empty mapping; got {handle['schema_']!r}"
     )
@@ -133,11 +134,37 @@ async def test_force_handle_reducer_populates_operation_result_handle(
     assert sample_rows, (
         f"expected ≥1 sample row from vcsim's 50-VM list; got sample_rows={sample_rows!r}"
     )
-    # Sample rows are real VM records whose keys match the inferred schema.
-    assert set(sample_rows[0]) == set(schema_props), (
-        f"sample-row columns must match the inferred schema; "
-        f"row keys={set(sample_rows[0])} schema keys={set(schema_props)}"
+    # The schema comes from a field catalog built over every captured row,
+    # not over the first row. So its keys are exactly the union of the keys
+    # of all 50 raw VM records, and every sample row's keys are in it. Read
+    # the raw records with the pass-through reducer to get that union.
+    set_default_reducer(PassThroughReducer())
+    try:
+        raw_envelope = await call_operation(
+            ingested_canary_vcsim.operator,
+            {
+                "connector_id": ingested_canary_vcsim.connector_id,
+                "op_id": "GET:/vcenter/vm",
+                "target": {"name": ingested_canary_vcsim.target_name},
+                "params": {},
+            },
+        )
+    finally:
+        set_default_reducer(JsonFluxReducer(row_threshold=0))
+    raw_rows = raw_envelope.get("result")
+    assert isinstance(raw_rows, list) and len(raw_rows) == 50, (
+        f"expected the raw 50-VM list from the pass-through read; got {raw_envelope!r}"
     )
+    all_row_keys = {key for row in raw_rows for key in row}
+    assert set(schema_props) == all_row_keys, (
+        f"schema keys must be the union of keys over every captured row; "
+        f"schema keys={set(schema_props)} all-row keys={all_row_keys}"
+    )
+    for row in sample_rows:
+        assert set(row) <= set(schema_props), (
+            f"every sample-row key must be in the catalog schema; "
+            f"row keys={set(row)} schema keys={set(schema_props)}"
+        )
 
     # The inlined result is the reducer's summary, not the raw 50-VM
     # set. ``row_count`` matches the handle's total; ``sample`` is

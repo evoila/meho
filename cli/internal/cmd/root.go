@@ -10,10 +10,14 @@ package cmd
 import (
 	"context"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/addon"
 	"github.com/evoila/meho/cli/internal/cmd/admin"
 	"github.com/evoila/meho/cli/internal/cmd/agent"
 	agentprincipal "github.com/evoila/meho/cli/internal/cmd/agent-principal"
@@ -58,27 +62,38 @@ import (
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
 	"github.com/evoila/meho/cli/internal/discovery"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // Execute builds the command tree and runs it, returning any error
 // produced by the executed subcommand. The caller is responsible for
-// translating that error into a process exit code; cobra has already
-// rendered the human-facing error message to stderr because the root
-// command is configured with SilenceUsage = true (suppress the usage
-// wall on RunE errors).
+// translating that error into a process exit code; the error message
+// is already on stderr. A command prints its own errors (SilenceErrors)
+// or cobra prints them; an unknown flag or a wrong argument count is
+// printed by installUsageErrors. SilenceUsage = true on the root
+// suppresses the usage wall on RunE errors.
 //
 // The returned error may satisfy output.ExitCoder; main inspects it
 // to pick the process exit code (auth_expired → 2, unreachable → 3,
 // unexpected → 4, generic → 1).
 func Execute() error {
-	return newRootCmd().Execute()
+	return newRootCmdFor(os.Args[1:]).Execute()
 }
 
-// newRootCmd constructs a fresh root command. A constructor (rather
-// than a package-level var) keeps the command tree free of mutable
-// global state, which matters for tests: every test gets its own
-// independent tree and can swap stdout/stderr via SetOut / SetErr.
+// newRootCmd builds the command tree for the process's own arguments.
 func newRootCmd() *cobra.Command {
+	return newRootCmdFor(os.Args[1:])
+}
+
+// newRootCmdFor constructs a fresh root command for args (the command
+// line without the program name). A constructor (rather than a
+// package-level var) keeps the command tree free of mutable global
+// state, which matters for tests: every test gets its own independent
+// tree and can swap stdout/stderr via SetOut / SetErr. args decides
+// whether the dynamic command discovery fetch runs, and lets a usage
+// error find a --json that cobra did not parse (see
+// installUsageErrors); cobra parses the real arguments in Execute.
+func newRootCmdFor(args []string) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "meho",
 		Short: "Operator CLI for the MEHO governance backplane",
@@ -113,10 +128,18 @@ func newRootCmd() *cobra.Command {
 		false,
 		"enable verbose output",
 	)
+	root.PersistentFlags().String(
+		"work-ref",
+		"",
+		"external change-ticket reference sent on every backplane request, so the audit rows carry it "+
+			"(e.g. gh:evoila/meho#13; default: $"+api.WorkRefEnv+")",
+	)
+	root.PersistentPreRunE = applyWorkRef
 
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newStatusCmd())
+	root.AddCommand(newDoctorCmd())
 
 	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
 	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,
@@ -170,6 +193,13 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot shadow the
 	// built-in `automation` parent.
 	root.AddCommand(automation.NewRootCmd())
+
+	// #4891 -- the `meho addon` tree: pair / list / show / unpair wrap the
+	// four operator routes under /api/v1/addons/pairings. pair prints the
+	// add-on's client secret once, to stdout only. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot shadow
+	// the built-in `addon` parent.
+	root.AddCommand(addon.NewRootCmd())
 
 	// G6.3-T4 (#381) -- broadcast-detail override management verbs
 	// (overrides list / set / remove) for Initiative #376. Wraps the
@@ -230,7 +260,8 @@ func newRootCmd() *cobra.Command {
 	// consumer-needs.md §G5 ergonomic shape (`meho remember "..."`
 	// rather than `meho memory remember "..."`). Wraps the four
 	// /api/v1/memory* routes shipped by G5.1-T2 (#422) plus the
-	// /api/v1/retrieve route for the `recall --query` retrieval form.
+	// POST /api/v1/memory/search route for the `recall --query` search
+	// form.
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in verbs.
 	//
@@ -583,8 +614,8 @@ func newRootCmd() *cobra.Command {
 	// G0.9.1-T11 (#791) -- install-time provisioning verbs for the
 	// MEHO deployer onramp. The first verb (`admin keycloak
 	// bootstrap-clients`) idempotently creates the public CLI
-	// device-code + MCP browser-flow clients, their 5 protocol
-	// mappers + 4 default client scopes, the meho-admins group, and
+	// device-code + MCP browser-flow clients, their 6 protocol
+	// mappers + 4 default client scopes, the five MEHO role groups, and
 	// an admin user against a Keycloak realm — encoding the 5-step
 	// recipe documented in deploy/values-examples/README.md.
 	// Confidential-client provisioning is explicitly refused; this
@@ -607,9 +638,81 @@ func newRootCmd() *cobra.Command {
 	// backplane URL comes from the same config.json `meho login`
 	// writes — operators with no login persist no URL and skip the
 	// discovery fetch entirely.
-	registerDynamicSubcommands(root)
+	//
+	// `meho doctor` is left out: it must make exactly the network calls
+	// it reports, and none at all with --no-network.
+	if !invokesDoctor(root, args) {
+		registerDynamicSubcommands(root)
+	}
+
+	// Last, so the discovered commands are covered too.
+	installUsageErrors(root, args)
 
 	return root
+}
+
+// applyWorkRef reads the global --work-ref flag (or MEHO_WORK_REF when
+// the flag is not set), checks its shape, and puts it on the command
+// context. Every AuthedClient request and every hand-rolled backplane
+// request built from that context then sends the Meho-Work-Ref header.
+//
+// A subcommand that defines its own local --work-ref (operation call,
+// audit query, ...) hides the global flag; for those commands only the
+// environment variable reaches the header.
+//
+// Commands that send no backplane request skip the check, so a bad
+// MEHO_WORK_REF does not break help, shell completion, version or
+// `doctor --no-network`. An online doctor run sends an authenticated
+// request to the health route, which the backplane audits, so it keeps
+// the check and sends the header like every other verb.
+func applyWorkRef(cmd *cobra.Command, _ []string) error {
+	if sendsNoBackplaneRequest(cmd) {
+		return nil
+	}
+	ref, source := "", ""
+	if f := cmd.Root().PersistentFlags().Lookup("work-ref"); f != nil && f.Changed {
+		ref, source = f.Value.String(), "--work-ref"
+	} else if v, ok := os.LookupEnv(api.WorkRefEnv); ok {
+		ref, source = strings.TrimSpace(v), api.WorkRefEnv
+	}
+	if ref == "" {
+		return nil
+	}
+	if !api.ValidWorkRef(ref) {
+		jsonOut := false
+		if f := cmd.Flags().Lookup("json"); f != nil {
+			jsonOut = f.Value.String() == "true"
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(source+" must match gh:<owner>/<repo>#<n>"), jsonOut)
+	}
+	cmd.SetContext(api.WithWorkRef(cmd.Context(), ref))
+	return nil
+}
+
+// sendsNoBackplaneRequest reports whether cmd is, or sits under, a
+// top-level command that never talks to the backplane. `doctor` counts
+// only with --no-network; its online layer talks to the backplane.
+func sendsNoBackplaneRequest(cmd *cobra.Command) bool {
+	top := cmd
+	for top.HasParent() && top.Parent().HasParent() {
+		top = top.Parent()
+	}
+	switch top.Name() {
+	case "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "version":
+		return true
+	case "doctor":
+		f := cmd.Flags().Lookup("no-network")
+		return f != nil && f.Value.String() == "true"
+	}
+	return false
+}
+
+// invokesDoctor reports whether args select the built-in `doctor`
+// command (global flags before the verb are fine).
+func invokesDoctor(root *cobra.Command, args []string) bool {
+	c, _, err := root.Find(args)
+	return err == nil && c != nil && c.Parent() == root && c.Name() == "doctor"
 }
 
 // registerDynamicSubcommands runs the discovery fetch and grafts

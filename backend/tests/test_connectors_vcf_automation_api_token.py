@@ -6,7 +6,7 @@
 ``vcfa.provider.api_token.create`` mints an org user's refresh token and
 writes it straight to Vault. The load-bearing assertions here are that
 the token value never reaches any audit-facing surface: the op result,
-the durable audit row, the broadcast event, the park-time
+the durable audit row, the park-time
 ``proposed_effect``, or a flight-recorder body. Also covers the flow
 (user session → OAuth register → jwt-bearer grant), idempotency on the
 token name, the System-org path, Vault patch→put fallback, revoke-on-
@@ -55,6 +55,7 @@ from meho_backplane.operations import (
 from meho_backplane.operations._audit import policy_decision_var
 from meho_backplane.operations._handler_resolve import reset_handler_cache
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from tests._vcfa_provisioning_support import (
     BASE_URL,
@@ -126,19 +127,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-@pytest.fixture
-def events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr("meho_backplane.operations._audit.publish_event", _capture)
-    return captured
-
-
 @pytest.fixture(autouse=True)
-def _reset_state(monkeypatch: pytest.MonkeyPatch, events: list[Any]) -> Iterator[None]:
+def _reset_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(
         "meho_backplane.operations.typed_register.encode_endpoint_text",
         AsyncMock(return_value=[0.1] * 384),
@@ -277,10 +267,9 @@ async def test_create_mints_as_the_user_and_stores_in_vault(
     assert not routes["delete"].called
 
 
-async def test_token_never_reaches_result_audit_or_broadcast(
+async def test_token_never_reaches_result_or_audit(
     vcfa: VcfAutomationConnector,
     vault_writes: list[tuple[str, dict[str, Any]]],
-    events: list[Any],
 ) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         _mount_user_flow(mock)
@@ -298,13 +287,8 @@ async def test_token_never_reaches_result_audit_or_broadcast(
     assert rows, "the approved dispatch must write an audit row"
     for row in rows:
         assert MINTED_TOKEN not in json.dumps(row.payload, default=str)
-    # Broadcast: credential_mint collapses to aggregate-only.
+    # The op is classed as a credential mint.
     assert classify_op("vcfa.provider.api_token.create") == "credential_mint"
-    mint_events = [e for e in events if e.op_id == "vcfa.provider.api_token.create"]
-    assert mint_events
-    for event in mint_events:
-        assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
-        assert MINTED_TOKEN not in event.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -738,9 +722,12 @@ async def test_create_register_403_is_an_upstream_error(
         routes = _mount_user_flow(mock)
         routes["register"].respond(403, json={"message": "Missing right API Tokens: Manage"})
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
-    # An upstream 403 is the dispatcher's authorization-denied envelope.
+    # An upstream 403 is the dispatcher's authorization-denied envelope. The
+    # op holds a secret (its tags), so the vendor's text is withheld (#4854).
     assert result["extras"]["error_code"] == "connector_http_403"
-    assert "API Tokens: Manage" in result["extras"]["upstream_message"]
+    assert result["extras"]["http_status"] == 403
+    assert result["extras"]["upstream_message"] == VENDOR_TEXT_WITHHELD
+    assert "API Tokens: Manage" not in json.dumps(result)
     assert vault_writes == []
 
 
@@ -791,7 +778,7 @@ async def test_revoke_unknown_token_is_unchanged(vcfa: VcfAutomationConnector) -
 async def test_unapproved_dispatch_parks_without_touching_the_appliance(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _capabilities(monkeypatch, ["create", "update"])
+    _capabilities(monkeypatch, ["read", "update"])
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock)
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
@@ -870,29 +857,35 @@ async def _parked_effect() -> dict[str, Any]:
     return dict(rows[0].proposed_effect)
 
 
-async def test_park_card_carries_the_vault_write_preflight(
+async def _assert_park_refused(result: dict[str, Any]) -> dict[str, Any]:
+    """The preflight said the Vault write will be denied: no park (#3542)."""
+    assert result["status"] == "denied"
+    extras: dict[str, Any] = result["extras"]
+    assert extras["error_code"] == "write_capability_denied"
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(ApprovalRequest))).scalars().all()
+    assert rows == []
+    return extras
+
+
+async def test_park_refused_when_the_target_role_may_not_write(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     probes = _capabilities(monkeypatch, ["read"])
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock)
-        await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
+        result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
     assert not any(route.called for route in routes.values())
-    effect = await _parked_effect()
-    preflight = effect["permission_preflight"]
-    assert preflight["vault_target"] == _VAULT_TARGET
-    assert preflight["path"] == "secret/data/example/vcfa-target"
-    assert preflight["required"] == ["create", "update"]
-    assert preflight["will_be_denied"] is True
-    assert effect["write_capability_warning"] == "connector_identity_may_lack_write"
+    extras = await _assert_park_refused(result)
+    assert extras["path"] == "secret/data/example/vcfa-target"
+    assert extras["required"] == ["read", "update"]
+    assert extras["granted"] == ["read"]
     # Probed under the named Vault target (its role), not the caller's identity.
     assert [(t.name, paths) for t, paths in probes] == [
         (_VAULT_TARGET, ["secret/data/example/vcfa-target"])
     ]
-    store = effect["preview"]["store"]
-    assert store["vault_target"] == _VAULT_TARGET
     for secret in (MINTED_TOKEN, PASSWORD, USER_JWT):
-        assert secret not in json.dumps(effect)
+        assert secret not in json.dumps(result)
 
 
 async def test_park_card_preflight_passes_when_the_target_role_may_write(
@@ -901,11 +894,16 @@ async def test_park_card_preflight_passes_when_the_target_role_may_write(
     _capabilities(monkeypatch, ["create", "read", "update"])
     await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
     effect = await _parked_effect()
-    assert effect["permission_preflight"]["will_be_denied"] is False
+    preflight = effect["permission_preflight"]
+    assert preflight["will_be_denied"] is False
+    assert preflight["vault_target"] == _VAULT_TARGET
     assert "write_capability_warning" not in effect
+    assert effect["preview"]["store"]["vault_target"] == _VAULT_TARGET
+    for secret in (MINTED_TOKEN, PASSWORD, USER_JWT):
+        assert secret not in json.dumps(effect)
 
 
-async def test_park_card_reports_a_failed_probe(
+async def test_park_refused_when_the_probe_fails(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class _RoleRefusedError(Exception):
@@ -919,27 +917,22 @@ async def test_park_card_reports_a_failed_probe(
             return None
 
     monkeypatch.setattr(vault_ops_module, "vault_client_for_target", lambda _o, _t: _Ctx())
-    await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
-    effect = await _parked_effect()
-    preflight = effect["permission_preflight"]
-    assert preflight["will_be_denied"] is True
-    assert preflight["reason"] == "probe_failed:_RoleRefusedError"
-    assert preflight["vault_target"] == _VAULT_TARGET
-    assert effect["write_capability_warning"] == "connector_identity_may_lack_write"
+    result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
+    extras = await _assert_park_refused(result)
+    assert extras["reason"] == "probe_failed:_RoleRefusedError"
 
 
-async def test_park_card_flags_a_non_vault_target(
+async def test_park_refused_for_a_non_vault_target(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    probes = _capabilities(monkeypatch, ["create", "update"])
-    await run(
+    probes = _capabilities(monkeypatch, ["read", "update"])
+    result = await run(
         "vcfa.provider.api_token.create",
         {**_CREATE_PARAMS, "vault_target": TARGET_NAME},
         approved=False,
     )
-    preflight = (await _parked_effect())["permission_preflight"]
-    assert preflight["will_be_denied"] is True
-    assert "not a Vault-connector target" in preflight["reason"]
+    extras = await _assert_park_refused(result)
+    assert "not a Vault-connector target" in extras["reason"]
     assert probes == []
 
 

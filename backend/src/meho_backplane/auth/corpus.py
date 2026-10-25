@@ -24,7 +24,10 @@ credential-capture + SSRF path). Two controls close it here:
   so a corpus URL cannot be pointed at ``http://``, loopback, RFC 1918
   space, or ``169.254.169.254``. On-prem corpora on private space are
   opted back in via ``MEHO_TARGET_SSRF_ALLOWLIST`` (the same allowlist
-  the connector target-dial guard reads).
+  the connector target-dial guard reads). A host listed as an exact
+  entry on that allowlist (a hostname, or a single IP) may also use
+  plain ``http`` (#3573) — the in-cluster corpus shape; every other host
+  still needs ``https``.
 * **Configured downstream credential.** The bearer presented to the
   corpus is ``settings.corpus_service_token`` — a dedicated, corpus-scoped
   service credential owned by the deployment, not the operator's inbound
@@ -89,8 +92,10 @@ from pydantic import (
 from meho_backplane.auth.operator import Operator
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.targets.ssrf_guard import (
+    TARGET_SSRF_ALLOWLIST_ENV,
     TargetDestinationBlockedError,
     assert_public_destination_async,
+    is_allowlisted,
 )
 
 __all__ = [
@@ -204,9 +209,14 @@ def corpus_endpoint_host(url: str) -> str:
     """Return the host to SSRF-screen for a corpus *url*, requiring ``https``.
 
     Parses *url* and returns the host component the transport will dial.
-    Rejects — with :class:`CorpusEndpointBlockedError` — any URL whose
-    scheme is not ``https`` or that names no host, so a corpus endpoint can
-    never be a plaintext (`http://`) or structurally-degenerate destination.
+    Rejects — with :class:`CorpusEndpointBlockedError` — any URL that names
+    no host, or whose scheme is not ``https``. One exception (#3573): plain
+    ``http`` is allowed when the host is an exact entry on
+    ``MEHO_TARGET_SSRF_ALLOWLIST`` — a hostname listed verbatim, or a
+    single IP; an IP that only falls inside a listed range does not count (see
+    :func:`~meho_backplane.targets.ssrf_guard.is_allowlisted`). That is the
+    trusted in-cluster corpus an operator has already declared; any other
+    host can never be a plaintext (`http://`) destination.
     The returned host is what the caller passes to
     :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`;
     keeping the parse here (not in the guard) leaves the guard a
@@ -214,16 +224,22 @@ def corpus_endpoint_host(url: str) -> str:
     """
     parts = urlsplit(url)
     host = parts.hostname
-    if parts.scheme != "https" or not host:
+    if not host:
         raise CorpusEndpointBlockedError("corpus endpoint must be an https:// URL naming a host")
-    return host
+    if parts.scheme == "https" or (parts.scheme == "http" and is_allowlisted(host)):
+        return host
+    raise CorpusEndpointBlockedError(
+        "corpus endpoint must be an https:// URL, or an http:// URL whose host "
+        f"is listed as an exact entry on {TARGET_SSRF_ALLOWLIST_ENV}"
+    )
 
 
 async def _screen_corpus_dial(url: str) -> None:
     """Fail closed unless *url* is an ``https`` public corpus destination.
 
     The connect-time enforcement point for both the search and the
-    readiness dial: requires ``https`` + a public host (allowlist-aware)
+    readiness dial: requires ``https`` + a public host (allowlist-aware;
+    an allowlisted host may also use ``http``, see :func:`corpus_endpoint_host`)
     and maps any rejection onto :class:`CorpusUnavailable` so the consuming
     route renders a 503. The message never echoes the resolved address (no
     internal-topology oracle — the guard's posture).

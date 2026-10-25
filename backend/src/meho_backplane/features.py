@@ -108,6 +108,9 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
+from cryptography.fernet import Fernet
+
+from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import Settings
 
 __all__ = [
@@ -247,6 +250,7 @@ _READY_ENTRY_FEATURE: dict[str, str] = {
     "ui_surface": "ui_console",
     "audit_replay": "audit",
     "approval_queue": "approvals",
+    "approval_custody": "approvals",
 }
 
 
@@ -430,6 +434,20 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
     running with the break-glass flag set, without grepping the
     values file. The field reports posture, not health — it never
     affects ``configured``.
+
+    ``delegated_decision_posture`` does the same for delegated decisions
+    (#3693): ``"production_own_hand_only"`` when
+    :attr:`Settings.approval_allow_delegated_decision` is ``False`` (the
+    default — a decision made on someone else's ``Instructed-by:``
+    instruction is refused), ``"lab_class_delegation_allowed"`` when
+    ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` is set.
+
+    ``sandbox_mode`` (#4622) is ``"on"`` or ``"off"``: whether a standing
+    grant made in the web console may cover a delete by a service
+    principal on this instance. Read from the process flag the boot sets
+    after it checks the stored mode (:mod:`meho_backplane.sandbox_mode`),
+    not from the settings object, so the value is the one MEHO enforces.
+    ``/ready`` repeats it at the top level for every caller.
     """
     agent_runtime = _agent_runtime_block(settings)
     return {
@@ -440,6 +458,46 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
             if settings.approval_allow_self_approval
             else "four_eyes_enforced"
         ),
+        "delegated_decision_posture": (
+            "lab_class_delegation_allowed"
+            if settings.approval_allow_delegated_decision
+            else "production_own_hand_only"
+        ),
+        "sandbox_mode": sandbox_mode_label(),
+    }
+
+
+def _approval_custody_block(settings: Settings) -> dict[str, Any]:
+    """Whether credential-write approvals can be parked (#3712).
+
+    Every ``credential_write`` operation that needs approval stores its
+    input encrypted under :attr:`Settings.approval_handoff_encryption_key`
+    (#3537). Without a valid Fernet key the dispatcher denies the
+    operation before it parks. This entry shows that state before the
+    first denial, not after it.
+
+    ``custody`` is ``"configured"``, ``"missing"`` (the env var is empty)
+    or ``"malformed"`` (set, but not a valid Fernet key). Both
+    ``"missing"`` and ``"malformed"`` list the env var in ``missing_env``,
+    because in both cases the operator must set a valid value. The key
+    value itself never appears in the block.
+    """
+    key = settings.approval_handoff_encryption_key
+    if not key:
+        custody = "missing"
+    else:
+        try:
+            Fernet(key.encode("ascii"))
+        except ValueError:
+            custody = "malformed"
+        else:
+            custody = "configured"
+    configured = custody == "configured"
+    return {
+        "configured": configured,
+        "custody": custody,
+        "missing_env": [] if configured else ["APPROVAL_HANDOFF_ENCRYPTION_KEY"],
+        "docs": "docs/codebase/approvals.md",
     }
 
 
@@ -452,10 +510,12 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     the attribute values under test and assert against the returned
     dict.
 
-    The five entries (``agent_runtime``, ``ui_surface``,
-    ``audit_replay``, ``approval_queue``, ``mcp``) match the gated
-    features the release ships plus the MCP-layer visibility block
-    (G0.14-T13 #1202). The block is **closed** by design: adding a new
+    The six entries (``agent_runtime``, ``ui_surface``,
+    ``audit_replay``, ``approval_queue``, ``approval_custody``, ``mcp``)
+    match the gated features the release ships plus the MCP-layer
+    visibility block (G0.14-T13 #1202). ``approval_custody`` (#3712)
+    reports whether the credential-write approval key is usable. The
+    block is **closed** by design: adding a new
     gated feature is an additive change to this function and the
     corresponding entry in the ``docs/RELEASING.md`` post-deploy
     enablement section; renaming one is a wire-compat break for
@@ -485,6 +545,10 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                              "effective_posture": "four_eyes_enforced" |
                                                   "single_operator_break_glass",
                              "maturity": "ga"},
+          "approval_custody": {"configured": <bool>,
+                               "custody": "configured" | "missing" | "malformed",
+                               "missing_env": [...], "docs": "docs/codebase/approvals.md",
+                               "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...", "missing_env": []}
         }
     """
@@ -493,6 +557,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
         "ui_surface": _ui_surface_block(settings),
         "audit_replay": _audit_replay_block(settings),
         "approval_queue": _approval_queue_block(settings),
+        "approval_custody": _approval_custody_block(settings),
         "mcp": _mcp_block(),
     }
     for entry_name, feature_key in _READY_ENTRY_FEATURE.items():

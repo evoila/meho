@@ -27,7 +27,7 @@ from uuid import UUID
 import structlog
 from jinja2 import Environment, PackageLoader, StrictUndefined, select_autoescape
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
@@ -43,6 +43,7 @@ __all__ = [
     "PASS2_MAX_OUTPUT_TOKENS",
     "PROPOSE_GROUPS_SYSTEM_PROMPT",
     "GroupAssignment",
+    "GroupMembership",
     "GroupProposal",
     "LlmClient",
     "LlmJsonResult",
@@ -52,6 +53,7 @@ __all__ = [
     "expected_llm_call_count",
     "extract_json_object",
     "load_existing_groups",
+    "load_group_membership",
     "load_unassigned_ops",
     "parse_assignment_response",
     "parse_proposal_response",
@@ -308,6 +310,15 @@ def _op_view(proto_or_row: Any) -> dict[str, Any]:
     }
 
 
+def _group_view(group: GroupProposal) -> dict[str, str]:
+    """Project a group into the dict shape the prompt templates iterate over."""
+    return {
+        "group_key": group.group_key,
+        "name": group.name,
+        "when_to_use": group.when_to_use,
+    }
+
+
 def render_propose_groups_prompt(
     *,
     connector_id: str,
@@ -317,8 +328,16 @@ def render_propose_groups_prompt(
     operations: Sequence[Any],
     min_groups: int = DEFAULT_MIN_GROUPS,
     max_groups: int = DEFAULT_MAX_GROUPS,
+    existing_groups: Sequence[GroupProposal] = (),
 ) -> str:
-    """Render the Pass-1 (propose-groups) prompt body as a string."""
+    """Render the Pass-1 (propose-groups) prompt body as a string.
+
+    With *existing_groups* set, the prompt switches to "extend" mode: it
+    lists the groups that already exist, tells the model the operations
+    did not fit any of them, and asks for at most *max_groups* NEW
+    groups (an empty array is a valid answer). *min_groups* is ignored
+    in that mode.
+    """
     env = _build_jinja_environment()
     template = env.get_template("propose_groups.md.j2")
     return template.render(
@@ -330,6 +349,7 @@ def render_propose_groups_prompt(
         operations=[_op_view(op) for op in operations],
         min_groups=min_groups,
         max_groups=max_groups,
+        existing_groups=[_group_view(g) for g in existing_groups],
     )
 
 
@@ -348,14 +368,7 @@ def render_assign_ops_prompt(
         connector_id=connector_id,
         product=product,
         version=version,
-        groups=[
-            {
-                "group_key": g.group_key,
-                "name": g.name,
-                "when_to_use": g.when_to_use,
-            }
-            for g in groups
-        ],
+        groups=[_group_view(g) for g in groups],
         operations=[_op_view(op) for op in operations],
     )
 
@@ -584,9 +597,9 @@ async def load_existing_groups(
 ) -> list[OperationGroup]:
     """Return every :class:`OperationGroup` row in the connector scope.
 
-    Drives the partial-regrouping branch: if existing groups are
-    present, we skip Pass 1 and use them as-is for Pass 2 over the
-    unassigned-op subset.
+    This includes groups created by typed registrars. The orchestrator
+    uses :func:`load_group_membership` to tell those apart and keeps
+    them out of the Pass-2 candidate list (#3713).
     """
     stmt = (
         select(OperationGroup)
@@ -603,6 +616,52 @@ async def load_existing_groups(
         stmt = stmt.where(OperationGroup.tenant_id == tenant_id)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+@dataclass(frozen=True, slots=True)
+class GroupMembership:
+    """How many typed, composite, and ingested operations sit in one group.
+
+    Each field counts the members with that ``source_kind``. Only
+    ``typed > 0`` means a typed registrar owns the group. Composites do
+    not: hand-written composites are filed into the shared semantic
+    groups (``vm``, ``storage``, ...), and those groups must still take
+    ingested ops.
+    """
+
+    typed: int = 0
+    composite: int = 0
+    ingested: int = 0
+
+
+async def load_group_membership(
+    session: AsyncSession,
+    *,
+    group_ids: Sequence[UUID],
+) -> dict[UUID, GroupMembership]:
+    """Count typed, composite, and ingested member ops for each group in *group_ids*.
+
+    One ``GROUP BY`` query. Groups with no members are absent from the
+    returned dict; callers treat a missing key as ``GroupMembership()``.
+    """
+    if not group_ids:
+        return {}
+    stmt = (
+        select(EndpointDescriptor.group_id, EndpointDescriptor.source_kind, func.count())
+        .where(EndpointDescriptor.group_id.in_(list(group_ids)))
+        .group_by(EndpointDescriptor.group_id, EndpointDescriptor.source_kind)
+    )
+    counts: dict[UUID, dict[str, int]] = {}
+    for group_id, source_kind, count in (await session.execute(stmt)).all():
+        counts.setdefault(group_id, {})[source_kind] = count
+    return {
+        group_id: GroupMembership(
+            typed=by_kind.get("typed", 0),
+            composite=by_kind.get("composite", 0),
+            ingested=by_kind.get("ingested", 0),
+        )
+        for group_id, by_kind in counts.items()
+    }
 
 
 def build_connector_id(product: str, version: str, impl_id: str) -> str:

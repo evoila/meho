@@ -14,13 +14,14 @@ The authoritative chart gate is ``.github/workflows/chart.yml`` (lint +
 ``helm template`` + ``kubeconform`` + the grep assertions added by this
 Task). This test mirrors the grep assertion at the unit layer so the
 regression is also catchable from ``pytest`` on any machine that has
-``helm`` installed; it skips cleanly where ``helm`` is absent (the
-backend unit-test sandbox does not ship it — the workflow gate covers
-that environment).
+``helm`` installed; it skips cleanly where ``helm`` is absent. CI's unit
+shards install ``helm`` and set ``MEHO_REQUIRE_HELM=1``, so there a
+missing ``helm`` fails instead.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -62,8 +63,8 @@ _BASE_OVERRIDES = [
 ]
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("helm") is None,
-    reason="helm not installed in this sandbox; chart.yml workflow gate covers CI",
+    shutil.which("helm") is None and os.environ.get("MEHO_REQUIRE_HELM") != "1",
+    reason="helm not installed; set MEHO_REQUIRE_HELM=1 to fail instead of skip",
 )
 
 
@@ -98,8 +99,30 @@ def test_explicit_mcp_resource_uri_overrides_derivation() -> None:
     assert 'MCP_RESOURCE_URI: "https://meho.test/api/mcp"' in rendered
 
 
-def test_no_mcp_env_keys_when_ingress_disabled_and_nothing_set() -> None:
-    """No Ingress + nothing set → keys omitted (backend startup guard fires)."""
-    rendered = _render("--set", "ingress.enabled=false")
-    assert "MCP_RESOURCE_URI:" not in rendered
-    assert "BACKPLANE_URL:" not in rendered
+def test_render_fails_when_ingress_disabled_and_nothing_set() -> None:
+    """No Ingress + nothing set → ``helm template`` refuses to render (#2394).
+
+    With no Ingress host and no ``config.backplaneUrl`` or
+    ``config.mcpResourceUri``, the MCP audience would be empty. The chart
+    stops at render time with a message that names the three ways to fix
+    it. Before that guard, the pod started and then crash-looped on the
+    backend startup check.
+    """
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "test",
+            str(_CHART_DIR),
+            *_BASE_OVERRIDES,
+            "--set",
+            "ingress.enabled=false",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "MCP resource URI is unresolvable" in result.stderr
+    for fix in ("config.backplaneUrl", "config.mcpResourceUri", "ingress.host"):
+        assert fix in result.stderr

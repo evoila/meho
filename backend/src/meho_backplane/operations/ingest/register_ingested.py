@@ -143,6 +143,7 @@ from meho_backplane.operations.ingest.exceptions import OpIdCollision
 from meho_backplane.operations.ingest.op_allowlist import DroppedOp, apply_op_allowlist
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+from meho_backplane.operations.ingest.spec_corrections import apply_spec_corrections
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 _log = structlog.get_logger(__name__)
@@ -285,10 +286,13 @@ def _prepare_ingested_operations(
     version: str,
     impl_id: str,
 ) -> tuple[EndpointDescriptorProto, ...]:
-    """Apply connector floors and reject duplicate natural keys before writes."""
+    """Apply connector corrections and floors, then reject duplicate natural keys."""
+    corrected = apply_spec_corrections(
+        product=product, version=version, impl_id=impl_id, protos=operations
+    )
     floored_operations = tuple(
         apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=operation)
-        for operation in operations
+        for operation in corrected
     )
     _detect_op_id_collisions(
         floored_operations,

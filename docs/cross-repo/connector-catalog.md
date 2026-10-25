@@ -62,6 +62,7 @@ Each entry is validated by `ConnectorSpecEntry`:
 | `sha256` | Advisory content hash MEHO smoke-tested against; optional, not enforced. |
 | `notes` | Operator context: sharp edges, version quirks, appliance-served vs portal-hosted, curation status. |
 | `catalog_ingest` | **Whether `meho connector ingest --catalog` actually works for this row.** `"supported"` (default) — the upstream serves an OpenAPI spec directly; `--catalog` runs end-to-end. `"spec-only"` — the upstream is an HTML developer-portal landing page or an fqdn-templated appliance URL the catalog can't dereference server-side; the operator must fetch the spec and pass via `--spec`. `GET /api/v1/connectors` reads this field to emit an honest `next_step` hint (G0.18-T8 #1361). See "Spec-only entries" below. |
+| `safety_overlay` | **Optional safety rules for this spec's ops.** Each rule raises the safety level of matching ingested ops and can turn on approval. See "Safety overlay" below. |
 
 ## Current entries
 
@@ -282,6 +283,51 @@ should ship `catalog_ingest: spec-only`. If a vendor later
 publishes the raw spec at a directly-fetchable URL, flip the
 field back to `supported` (or omit it; the default is
 `supported`) and update the `upstream` URL in the same commit.
+
+## Safety overlay (`safety_overlay`)
+
+The ingest gives each op a safety level from its HTTP method. Some specs
+hide risky actions behind `POST`. For example, the vCenter VI-JSON spec
+uses `POST /VirtualMachine/{moId}/PowerOnVM_Task` to power on a VM, so
+the op lands at `caution` with no approval. Use `safety_overlay` to make
+such ops stricter, without changing the ingest code.
+
+```yaml
+  - product: vmware
+    version: "9.0"
+    # ...
+    safety_overlay:
+      - method: POST
+        path: /VirtualMachine/{moId}/PowerOnVM_Task
+        safety_level: dangerous
+        requires_approval: true
+      - method: POST
+        path: /VirtualMachine/{moId}/*Snapshot*
+        safety_level: caution
+        requires_approval: true
+```
+
+Rules:
+
+- `method` must match exactly (case does not matter).
+- `path` is a glob on the spec path, without the query string. `*`
+  matches any text, also `/`. Matching is case-sensitive.
+- `safety_level` is one of `safe`, `caution`, `dangerous`,
+  `destructive`. `requires_approval` is optional and defaults to `false`.
+- A rule only raises. It never lowers a safety level, and it never
+  turns off approval. If the parser or a connector safety floor already
+  gives a stricter result, that result stays.
+- When several rules match one op, the strictest level wins, and
+  approval is on if any rule turns it on.
+- The overlay runs after the connector safety floor, at ingest time.
+  The dry-run ingest shows the same result.
+
+**Apply it with a re-ingest.** The overlay changes nothing in the
+database by itself. After you deploy a catalog change, run the next
+ingest of that connector (`meho connector ingest` or
+`POST /api/v1/connectors/ingest`). That ingest raises the stored ops.
+It never lowers an op that is already stricter, for example one an
+operator raised by hand.
 
 ## Adding or updating an entry
 

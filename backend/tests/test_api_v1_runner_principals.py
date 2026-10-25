@@ -36,7 +36,6 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
     KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
@@ -60,16 +59,6 @@ _TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 # A fake Keycloak internal UUID returned by our mock create_client.
 _KC_INTERNAL_ID = "cc000000-0000-0000-0000-000000000009"
-
-
-@pytest.fixture(autouse=True)
-def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence the broadcast publisher so tests don't time out on Valkey."""
-
-    async def _noop(*_a: object, **_kw: object) -> None:
-        pass
-
-    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)
@@ -298,6 +287,10 @@ async def test_revoke_writes_audit_trail(client: TestClient) -> None:
     assert row.method == "INTERNAL"
     assert row.tenant_id == _TENANT_A
     assert row.payload["runner"] == "edge-runner"
+    # #3757: the row names the operator who revoked and the request.
+    assert row.operator_sub == "op-admin"
+    assert row.actor_sub is None
+    assert row.request_id is not None
 
 
 @pytest.mark.asyncio

@@ -125,15 +125,47 @@ NSX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Shared parameter-schema fragments
+# Shared schema fragments
 # ---------------------------------------------------------------------------
 
-#: The empty parameter object shared by the no-argument reads.
+#: The empty parameter object shared by the no-argument reads. The one
+#: example is the empty call.
 _NO_PARAMS: dict[str, Any] = {
     "type": "object",
     "properties": {},
     "additionalProperties": False,
+    "examples": [{}],
 }
+
+
+def _field(type_: str | list[str], description: str) -> dict[str, Any]:
+    """Return one described response field."""
+    return {"type": type_, "description": description}
+
+
+def _results_envelope(item_fields: dict[str, Any], what: str) -> dict[str, Any]:
+    """Return the NSX ``{results: [...], result_count}`` list envelope schema."""
+    return {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "description": f"The {what}.",
+                "items": {
+                    "type": "object",
+                    "properties": item_fields,
+                    "additionalProperties": True,
+                },
+            },
+            "result_count": _field("integer", f"How many {what} NSX reports."),
+        },
+        "additionalProperties": True,
+    }
+
+
+_ID = _field("string", "The NSX id of the object.")
+_DISPLAY_NAME = _field("string", "The name shown in the NSX UI.")
+_PATH = _field("string", "The policy path of the object.")
 
 
 # ---------------------------------------------------------------------------
@@ -145,26 +177,37 @@ _NODE_STATUS = NsxTypedOp(
     handler_attr="node_status",
     summary="NSX Manager node identity, version, and build.",
     description=(
-        "Returns the NSX Manager node's identity and version via "
-        "GET /api/v1/node: node_version (the NSX build the manager runs), "
-        "kernel_version, node_uuid, hostname, and external_id. The probe / "
-        "sanity read to confirm which NSX build a target points at and that "
-        "the manager answers before any heavier policy read. Works with "
-        "zero catalog ingest. safety_level=safe, read-only."
+        "Reads the NSX Manager node (GET /api/v1/node): the NSX version, kernel "
+        "version, node UUID, host name and external id. Use it to check which NSX "
+        "build a target runs and that the manager answers. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema={
+        "type": "object",
+        "properties": {
+            "node_version": _field("string", "The NSX version the manager runs."),
+            "kernel_version": _field("string", "The kernel version of the node."),
+            "node_uuid": _field("string", "The UUID of the manager node."),
+            "hostname": _field("string", "The host name of the manager node."),
+            "external_id": _field("string", "The external id of the node."),
+        },
+        "additionalProperties": True,
+    },
     group_key=_GROUP_HEALTH,
     tags=("read-only", "nsx", "manager", "version"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call to identify the NSX Manager -- its build, version, node "
             "UUID, hostname -- as a probe before heavier reads or to confirm "
             "which NSX cluster the target points at."
         ),
-        "output_shape": ("{node_version, kernel_version, node_uuid, hostname, external_id}."),
+        "output_shape": "{node_version, kernel_version, node_uuid, hostname, external_id}.",
+        "next_step": (
+            "Call nsx.cluster.status to check that the manager cluster is healthy, "
+            "or nsx.alarm.list to see open faults."
+        ),
     },
 )
 
@@ -173,33 +216,80 @@ _NODE_STATUS = NsxTypedOp(
 # nsx.cluster.status
 # ---------------------------------------------------------------------------
 
+_HEALTH_FIELD_NOTE = "An NSX status code; the lowercase 'unknown' means NSX did not report it."
+
 _CLUSTER_STATUS = NsxTypedOp(
     op_id="nsx.cluster.status",
     handler_attr="cluster_status",
     summary="NSX management + control cluster health.",
     description=(
-        "Returns the NSX management-plane health via "
-        "GET /api/v1/cluster/status: mgmt_cluster_status (overall "
-        "management cluster state), control_cluster_status, and per-member "
-        "detail. The read an operator runs when a control-plane outage is "
-        "suspected. Works with zero catalog ingest. safety_level=safe, "
-        "read-only."
+        "Reads the NSX cluster health (GET /api/v1/cluster/status). Returns the NSX "
+        "body unchanged, plus flat fields MEHO adds: health_overall, health_mgmt, "
+        "health_control and group_status_counts. Read health_overall first. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema={
+        "type": "object",
+        "properties": {
+            "health_overall": _field(
+                "string",
+                "Added by MEHO: overall_status, else detailed_cluster_status."
+                f"overall_status (STABLE / DEGRADED / UNAVAILABLE). {_HEALTH_FIELD_NOTE}",
+            ),
+            "health_mgmt": _field(
+                "string",
+                "Added by MEHO: mgmt_cluster_status.status (deprecated by NSX). "
+                + _HEALTH_FIELD_NOTE,
+            ),
+            "health_control": _field(
+                "string",
+                "Added by MEHO: control_cluster_status.status (deprecated by NSX). "
+                + _HEALTH_FIELD_NOTE,
+            ),
+            "group_status_counts": {
+                "type": "object",
+                "description": (
+                    "Added by MEHO: how many cluster groups have each group_status "
+                    "(STABLE / DEGRADED / UNSTABLE / UNAVAILABLE / unknown)."
+                ),
+                "additionalProperties": {"type": "integer"},
+            },
+            "overall_status": _field("string", "The NSX overall cluster status."),
+            "detailed_cluster_status": _field(
+                "object", "NSX detail: overall_status and the groups list with group_status."
+            ),
+            "node_services_status": _field("object", "NSX status of the node services."),
+            "mgmt_cluster_status": _field("object", "NSX management cluster status (deprecated)."),
+            "control_cluster_status": _field("object", "NSX control cluster status (deprecated)."),
+        },
+        "additionalProperties": True,
+    },
     group_key=_GROUP_HEALTH,
     tags=("read-only", "nsx", "manager", "cluster"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call to confirm whether the NSX management plane is healthy and "
             "which members make up the cluster, e.g. when a control-plane "
             "outage is suspected."
         ),
         "output_shape": (
-            "{mgmt_cluster_status, control_cluster_status, detail: [...]}. "
-            "If unhealthy, surface the failing member's id."
+            "{health_overall, health_mgmt, health_control, "
+            "group_status_counts: {STATUS: count}, overall_status, "
+            "detailed_cluster_status: {overall_status, groups: [...]}, "
+            "node_services_status, mgmt_cluster_status, "
+            "control_cluster_status}. Read health_overall first; a value "
+            "other than STABLE, or any non-STABLE key in "
+            "group_status_counts, means unhealthy -- then surface the "
+            "failing group from detailed_cluster_status.groups. 'unknown' "
+            "means NSX did not report that field; never treat it as healthy. "
+            "A vendor uppercase UNKNOWN is passed through as is. Prefer "
+            "health_overall: the mgmt and control fields are deprecated by NSX."
+        ),
+        "next_step": (
+            "If a group is not STABLE, call nsx.alarm.list with status='OPEN' to "
+            "find the fault behind it."
         ),
     },
 )
@@ -214,28 +304,39 @@ _BACKUP_CONFIG = NsxTypedOp(
     handler_attr="backup_config",
     summary="NSX Manager automated-backup configuration (retention-relevant fields surfaced).",
     description=(
-        "Returns the NSX Manager automated-backup configuration via "
-        "GET /api/v1/cluster/backups/config, with the retention-relevant "
-        "fields surfaced and secret material scrubbed. backup_enabled is "
-        "hoisted for the at-a-glance answer; passphrase_configured reports "
-        "whether an encryption passphrase is set without returning it; the "
-        "config object preserves backup_schedule (the accumulation rate -- "
-        "a WeeklyBackupSchedule or IntervalBackupSchedule) and "
-        "remote_file_server (server / port / directory_path / protocol -- "
-        "where backups accumulate, with credentials masked), plus "
-        "inventory_summary_interval and after_inventory_update_interval. "
-        "The read for the disk-fill class of incident (Broadcom KB 442696 "
-        "shape) where a frequent schedule against a bounded remote server "
-        "fills the disk. Works with zero catalog ingest. safety_level=safe, "
-        "read-only."
+        "Reads the NSX Manager backup configuration (GET /api/v1/cluster/backups/"
+        "config): whether backup is on, the schedule, and the remote file server. "
+        "Passwords and the passphrase are masked. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
     response_schema={
         "type": "object",
         "properties": {
-            "backup_enabled": {"type": ["boolean", "null"]},
-            "passphrase_configured": {"type": "boolean"},
-            "config": {"type": "object"},
+            "backup_enabled": _field(
+                ["boolean", "null"], "Whether automated backup is on; null if NSX did not say."
+            ),
+            "passphrase_configured": _field(
+                "boolean", "Whether a backup passphrase is set. The passphrase is never returned."
+            ),
+            "config": {
+                "type": "object",
+                "description": "The NSX backup configuration, with secrets masked.",
+                "properties": {
+                    "backup_schedule": _field(
+                        "object", "How often backups run (weekly or interval schedule)."
+                    ),
+                    "remote_file_server": _field(
+                        "object", "Where backups go: server, port, directory_path, protocol."
+                    ),
+                    "inventory_summary_interval": _field(
+                        "integer", "Seconds between inventory summary backups."
+                    ),
+                    "after_inventory_update_interval": _field(
+                        "integer", "Seconds to wait after an inventory change before a backup."
+                    ),
+                },
+                "additionalProperties": True,
+            },
         },
         "additionalProperties": True,
     },
@@ -244,7 +345,7 @@ _BACKUP_CONFIG = NsxTypedOp(
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call to check whether NSX Manager backups are configured and how "
             "often they run, and to which remote server -- e.g. when "
             "diagnosing a missing-backup gap or a retention/schedule "
@@ -256,8 +357,10 @@ _BACKUP_CONFIG = NsxTypedOp(
             "after_inventory_update_interval, ...}}. The passphrase and any "
             "nested SFTP credential are masked as ***REDACTED***; read "
             "config.backup_schedule (frequency) against "
-            "config.remote_file_server.directory_path for the disk-fill risk."
+            "config.remote_file_server.directory_path for the disk-fill risk "
+            "(Broadcom KB 442696)."
         ),
+        "next_step": ("Call nsx.backup.status to see whether a backup is running now."),
     },
 )
 
@@ -271,29 +374,42 @@ _BACKUP_STATUS = NsxTypedOp(
     handler_attr="backup_status",
     summary="NSX Manager current backup operation status.",
     description=(
-        "Returns the current NSX Manager backup operation status via "
-        "GET /api/v1/cluster/backups/status: whether a backup is running, "
-        "the last operation's success/failure, and its timing "
-        "(current_backup_operation_status). Pairs with nsx.backup.config so "
-        "the operator sees both 'is backup configured (and how often)' and "
-        "'did the last backup actually succeed'. Works with zero catalog "
-        "ingest. safety_level=safe, read-only."
+        "Reads the status of the running NSX Manager backup (GET /api/v1/cluster/"
+        "backups/status): whether a backup runs now, its step and its times. Pairs "
+        "with nsx.backup.config. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema={
+        "type": "object",
+        "properties": {
+            "operation_type": _field(
+                "string", "NONE (no backup runs now; other fields are then empty) or BACKUP."
+            ),
+            "backup_id": _field("string", "The id of the running backup."),
+            "current_step": _field("string", "The step the running backup is on."),
+            "current_step_message": _field("string", "A readable note on the current step."),
+            "start_time": _field("integer", "When the backup started, in epoch milliseconds."),
+            "end_time": _field("integer", "When the backup ended, in epoch milliseconds."),
+        },
+        "additionalProperties": True,
+    },
     group_key=_GROUP_BACKUP,
     tags=("read-only", "nsx", "manager", "backup"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
-            "Call to confirm whether the last NSX Manager backup succeeded "
-            "and when, or whether one is running now -- alongside "
-            "nsx.backup.config for the schedule."
+        "when_to_call": (
+            "Call to see whether an NSX Manager backup is running now, and "
+            "which step it is on -- alongside nsx.backup.config for the schedule."
         ),
         "output_shape": (
-            "{current_backup_operation_status: {...}}. Surface the last "
-            "operation's success flag and timing."
+            "The NSX body unchanged: {operation_type, backup_id, current_step, "
+            "current_step_message, start_time, end_time}. operation_type NONE "
+            "means no backup runs now."
+        ),
+        "next_step": (
+            "If backups seem to be missing, call nsx.backup.config to check that "
+            "backup is on and how often it runs."
         ),
     },
 )
@@ -308,25 +424,38 @@ _TRANSPORT_ZONE_LIST = NsxTypedOp(
     handler_attr="transport_zone_list",
     summary="NSX transport zones under the default enforcement point.",
     description=(
-        "Lists NSX transport zones via "
-        "GET /policy/api/v1/infra/sites/default/enforcement-points/default/"
-        "transport-zones -- the scope segments and tier-gateways attach to. "
-        "Returns {results: [...]} where each zone carries id, display_name, "
-        "tz_type (OVERLAY / VLAN), and host_switch_name. Works with zero "
-        "catalog ingest. safety_level=safe, read-only."
+        "Lists the NSX transport zones under the default site and enforcement "
+        "point (policy API). Segments and gateways attach to these zones. Each "
+        "zone has id, display_name, path and tz_type (OVERLAY_BACKED or VLAN_BACKED). "
+        "Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=_results_envelope(
+        {
+            "id": _ID,
+            "display_name": _DISPLAY_NAME,
+            "path": _PATH,
+            "tz_type": _field(
+                "string",
+                "The zone type: OVERLAY_BACKED or VLAN_BACKED. Older NSX may send "
+                "OVERLAY_STANDARD or OVERLAY_ENS.",
+            ),
+        },
+        "transport zones",
+    ),
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "nsx", "policy", "transport-zone"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call to list transport zones under the default enforcement "
             "point -- the scope segments and tier-gateways attach to."
         ),
-        "output_shape": ("{results: [{id, display_name, tz_type, host_switch_name}, ...]}."),
+        "output_shape": "{results: [{id, display_name, path, tz_type}, ...]}.",
+        "next_step": (
+            "Call nsx.segment.list and match transport_zone_path to see which segments use a zone."
+        ),
     },
 )
 
@@ -340,28 +469,43 @@ _TIER1_LIST = NsxTypedOp(
     handler_attr="tier1_list",
     summary="NSX per-tenant tier-1 gateway inventory.",
     description=(
-        "Lists NSX tier-1 gateways via GET /policy/api/v1/infra/tier-1s -- "
-        "the per-tenant east-west routing surface attached under a tier-0. "
-        "Returns {results: [...]} where each tier-1 carries id, "
-        "display_name, tier0_path (its parent), route_advertisement_types, "
-        "and ha_mode. Read-only inventory: tier-1 gateway *create* is a "
-        "separate approval-gated write and is not registered here. Works "
-        "with zero catalog ingest. safety_level=safe, read-only."
+        "Lists the NSX tier-1 gateways (GET /policy/api/v1/infra/tier-1s): the "
+        "per-tenant routers under a tier-0. Each has id, display_name, tier0_path, "
+        "route_advertisement_types and ha_mode. Read-only; creating a tier-1 is "
+        "not offered here."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=_results_envelope(
+        {
+            "id": _ID,
+            "display_name": _DISPLAY_NAME,
+            "path": _PATH,
+            "tier0_path": _field("string", "The policy path of the parent tier-0 gateway."),
+            "route_advertisement_types": {
+                "type": "array",
+                "description": "The route types this tier-1 advertises.",
+                "items": {"type": "string"},
+            },
+            "ha_mode": _field("string", "The high-availability mode of the gateway."),
+        },
+        "tier-1 gateways",
+    ),
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "nsx", "policy", "tier1"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call to inspect per-tenant tier-1 gateways -- useful when "
             "mapping which tier-1 fronts a given segment or cross-referencing "
             "tier0_path against the tier-0 listing."
         ),
         "output_shape": (
             "{results: [{id, display_name, tier0_path, route_advertisement_types, ha_mode}, ...]}."
+        ),
+        "next_step": (
+            "Call nsx.segment.list to see the segments; a segment's "
+            "connectivity_path names the tier-1 it attaches to."
         ),
     },
 )
@@ -376,34 +520,62 @@ _SEGMENT_LIST = NsxTypedOp(
     handler_attr="segment_list",
     summary="NSX overlay/VLAN segment inventory with subnet/CIDR occupancy.",
     description=(
-        "Lists NSX segments via GET /policy/api/v1/infra/segments -- the "
-        "overlay/VLAN segments workloads attach to. Returns {results: [...]} "
-        "where each segment carries id, display_name, resource_type, "
-        "transport_zone_path (the transport zone it backs onto), and subnets "
-        "-- each subnet's gateway_address is the subnet/CIDR occupancy datum. "
-        "The pre-flight read before carving a new segment or attaching a "
-        "workload, to spot which CIDRs are already in use and avoid a "
-        "collision. The vendor {results, result_count} envelope passes "
-        "through unmodified. Read-only inventory: segment create/update/"
-        "delete is a separate approval-gated write and is not registered "
-        "here. Works with zero catalog ingest. safety_level=safe, read-only."
+        "Lists the NSX segments (GET /policy/api/v1/infra/segments) with their "
+        "transport zone and subnets. Use it before you create a segment, to see "
+        "which CIDRs are already in use. Read-only; creating a segment is not "
+        "offered here."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=_results_envelope(
+        {
+            "id": _ID,
+            "display_name": _DISPLAY_NAME,
+            "path": _PATH,
+            "resource_type": _field("string", "The NSX object type, for example Segment."),
+            "transport_zone_path": _field(
+                "string", "The policy path of the transport zone the segment uses."
+            ),
+            "connectivity_path": _field(
+                "string", "The policy path of the gateway the segment attaches to."
+            ),
+            "subnets": {
+                "type": "array",
+                "description": "The subnets of the segment.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "gateway_address": _field(
+                            "string",
+                            "The gateway address in CIDR form: the gateway IP, a slash, then "
+                            "the prefix length.",
+                        ),
+                        "network": _field("string", "The network address in CIDR form."),
+                    },
+                    "additionalProperties": True,
+                },
+            },
+        },
+        "segments",
+    ),
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "nsx", "policy", "segment"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call before carving a new NSX overlay segment or attaching a "
             "workload, to list existing segments and read which subnet/gateway "
             "CIDRs are already in use (avoid a CIDR collision)."
         ),
         "output_shape": (
             "{results: [{id, display_name, resource_type, transport_zone_path, "
-            "subnets: [{gateway_address}]}, ...]}. Read subnets[].gateway_address "
+            "subnets: [{gateway_address}]}, ...], result_count}. The NSX "
+            "envelope passes through unchanged. Read subnets[].gateway_address "
             "across segments for the CIDR occupancy the pre-flight needs."
+        ),
+        "next_step": (
+            "Call nsx.transport_zone.list to resolve transport_zone_path, or "
+            "nsx.tier1.list to resolve the gateway a segment attaches to."
         ),
     },
 )
@@ -418,26 +590,37 @@ _TRANSPORT_NODE_LIST = NsxTypedOp(
     handler_attr="transport_node_list",
     summary="NSX edge/host transport-node fabric inventory (state via nsx.transport_node.state).",
     description=(
-        "Lists NSX transport nodes via GET /api/v1/transport-nodes -- the "
-        "edge and host nodes that carry the overlay. Returns "
-        "{results: [...], result_count} where each node carries id, "
-        "display_name, and node_deployment_info.resource_type "
-        "(EdgeNode / EsxiNode -- what tells an edge node from a host node). "
-        "The list row does NOT carry live health: NSX exposes per-node "
-        "fabric/tunnel/realization state on the separate .../state "
-        "sub-resource, so pair this with nsx.transport_node.state to answer "
-        "'are the edges healthy' before a maintenance-mode or failover "
-        "action. The vendor envelope passes through unmodified. Works with "
-        "zero catalog ingest. safety_level=safe, read-only."
+        "Lists the NSX transport nodes (GET /api/v1/transport-nodes): the edge and "
+        "host nodes that carry the overlay. Each has id, display_name and "
+        "node_deployment_info.resource_type. The list has no health; use "
+        "nsx.transport_node.state for that. Read-only."
     ),
     parameter_schema=_NO_PARAMS,
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=_results_envelope(
+        {
+            "id": _ID,
+            "display_name": _DISPLAY_NAME,
+            "node_deployment_info": {
+                "type": "object",
+                "description": "How the node is deployed.",
+                "properties": {
+                    "resource_type": _field(
+                        "string",
+                        "EdgeNode for an edge node, HostNode for a host node, or "
+                        "PublicCloudGatewayNode.",
+                    ),
+                },
+                "additionalProperties": True,
+            },
+        },
+        "transport nodes",
+    ),
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "nsx", "manager", "transport-node"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call to list edge/host transport nodes and get their ids -- the "
             "entry point for the per-node health read nsx.transport_node.state. "
             "Tell edge from host nodes on node_deployment_info.resource_type."
@@ -446,6 +629,10 @@ _TRANSPORT_NODE_LIST = NsxTypedOp(
             "{results: [{id, display_name, node_deployment_info: "
             "{resource_type}}, ...], result_count}. The list carries no live "
             "state -- feed each id to nsx.transport_node.state for health."
+        ),
+        "next_step": (
+            "Call nsx.transport_node.state with a node id before a "
+            "maintenance-mode or failover action."
         ),
     },
 )
@@ -460,18 +647,9 @@ _TRANSPORT_NODE_STATE = NsxTypedOp(
     handler_attr="transport_node_state",
     summary="Realization + maintenance-mode + tunnel state of one NSX transport node.",
     description=(
-        "Reads one transport node's realization + fabric health via "
-        "GET /api/v1/transport-nodes/{transport-node-id}/state -- requires a node id from "
-        "nsx.transport_node.list. NSX's TransportNodeState carries state "
-        "(overall realization result), maintenance_mode_state (whether the "
-        "node is already draining -- the datum that says whether the "
-        "surviving edge can still take over), node_deployment_state, "
-        "deployment_progress_state, and host_switch_states (per-host-switch "
-        "tunnel/connectivity realization). The read an operator runs before "
-        "putting an edge into maintenance mode or relying on a tier-1 HA "
-        "failover, so a degraded surviving node does not cost the tier-1 its "
-        "HA. The vendor payload passes through unmodified. Works with zero "
-        "catalog ingest. safety_level=safe, read-only."
+        "Reads the state of one transport node (GET /api/v1/transport-nodes/"
+        "{transport-node-id}/state): its overall state, maintenance mode and "
+        "host-switch state. Needs a node id from nsx.transport_node.list. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -484,23 +662,48 @@ _TRANSPORT_NODE_STATE = NsxTypedOp(
         },
         "required": ["id"],
         "additionalProperties": False,
+        "examples": [{"id": "<transport-node-id>"}],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema={
+        "type": "object",
+        "properties": {
+            "transport_node_id": _field("string", "The id of the transport node."),
+            "state": _field("string", "The overall state of the node, for example success."),
+            "maintenance_mode_state": _field(
+                "string", "Whether the node is in, entering or out of maintenance mode."
+            ),
+            "node_deployment_state": _field("object", "The deployment state of the node."),
+            "deployment_progress_state": _field("object", "The progress of a running deployment."),
+            "host_switch_states": {
+                "type": "array",
+                "description": "The tunnel and connection state per host switch.",
+                "items": {"type": "object"},
+            },
+            "failure_message": _field("string", "Why the node failed, when it did."),
+        },
+        "additionalProperties": True,
+    },
     group_key=_GROUP_INVENTORY,
     tags=("read-only", "nsx", "manager", "transport-node", "health"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call with a transport-node id before a maintenance-mode or "
             "failover action, to confirm the node (and its HA peer) is "
-            "realized, not already in maintenance, and tunnel-healthy."
+            "realized, not already in maintenance, and tunnel-healthy. A "
+            "degraded surviving edge can cost a tier-1 gateway its HA."
         ),
         "parameter_hints": {"id": "The transport-node id from nsx.transport_node.list."},
         "output_shape": (
             "{state, maintenance_mode_state, node_deployment_state, "
-            "deployment_progress_state, host_switch_states: [...]}. Read "
-            "maintenance_mode_state + state before draining the peer edge."
+            "deployment_progress_state, host_switch_states: [...]}. The NSX "
+            "body passes through unchanged. Read maintenance_mode_state + "
+            "state before draining the peer edge."
+        ),
+        "next_step": (
+            "Read the same state for the HA peer edge. If a node is not "
+            "healthy, call nsx.alarm.list to find the fault."
         ),
     },
 )
@@ -515,14 +718,9 @@ _ALARM_LIST = NsxTypedOp(
     handler_attr="alarm_list",
     summary="NSX system alarms, optionally filtered by status/feature/severity.",
     description=(
-        "Lists NSX system alarms via GET /api/v1/alarms -- open faults and "
-        "capacity/health events across the manager. Optional status (OPEN / "
-        "ACKNOWLEDGED / SUPPRESSED / RESOLVED), feature_name (e.g. "
-        "manager_health), and severity (CRITICAL / HIGH / MEDIUM / LOW) "
-        "narrow the result to the actionable set. Returns {results: [...]} "
-        "where each alarm carries id, status, severity, feature_name, "
-        "event_type, node_id, last_reported_time, and description. Works "
-        "with zero catalog ingest. safety_level=safe, read-only."
+        "Lists NSX system alarms (GET /api/v1/alarms): open faults and health "
+        "events across the manager. You can filter by status, feature_name and "
+        "severity. Read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -546,14 +744,30 @@ _ALARM_LIST = NsxTypedOp(
             },
         },
         "additionalProperties": False,
+        "examples": [{"status": "OPEN", "severity": "CRITICAL"}],
     },
-    response_schema={"type": "object", "additionalProperties": True},
+    response_schema=_results_envelope(
+        {
+            "id": _ID,
+            "status": _field("string", "OPEN, ACKNOWLEDGED, SUPPRESSED or RESOLVED."),
+            "severity": _field("string", "CRITICAL, HIGH, MEDIUM or LOW."),
+            "feature_name": _field("string", "The NSX feature that raised the alarm."),
+            "event_type": _field("string", "The kind of event within the feature."),
+            "node_id": _field("string", "The id of the node the alarm is about."),
+            "last_reported_time": _field(
+                "integer", "When NSX last reported the alarm, in epoch milliseconds."
+            ),
+            "description": _field("string", "What the alarm means."),
+            "recommended_action": _field("string", "What NSX suggests you do."),
+        },
+        "alarms",
+    ),
     group_key=_GROUP_ALARMS,
     tags=("read-only", "nsx", "manager", "alarms"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
-        "when_to_use": (
+        "when_to_call": (
             "Call when the question is 'what is NSX complaining about right "
             "now?'. Narrow with status='OPEN' for active faults, or by "
             "feature_name / severity when the operator named one."
@@ -566,6 +780,10 @@ _ALARM_LIST = NsxTypedOp(
         "output_shape": (
             "{results: [{id, status, severity, feature_name, event_type, "
             "node_id, last_reported_time, description}, ...]}."
+        ),
+        "next_step": (
+            "For a cluster alarm call nsx.cluster.status; for an edge or host "
+            "alarm call nsx.transport_node.state with the node_id."
         ),
     },
 )

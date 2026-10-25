@@ -27,6 +27,9 @@
     csrf_token              -- str: the minted double-submit token
     op_class_options        -- tuple[str]: op_class dropdown vocabulary
     result_status_options   -- tuple[str]: result_status dropdown vocabulary
+    event_class_labels      -- dict[str, str]: event class value -> plain label
+                               (the event class dropdown, #3733 / #3747)
+    event_class_filter      -- str: the selected event class ("" = Any)
     *_filter                -- str: echoed filter values (keep form state)
     rows / next_cursor / has_more / duration_error / filter_error / page_size
                             -- the result context (see ``_results.html``)
@@ -81,7 +84,7 @@
       <span class="label-text mb-1 text-xs opacity-70">Principal</span>
       <input
         type="search" name="principal" value="{{ principal_filter }}"
-        placeholder="operator sub (partial match)"
+        placeholder="user id or name (partial match)"
         class="input input-bordered input-sm w-full"
         aria-label="Filter by principal" autocomplete="off"
       />
@@ -122,6 +125,21 @@
         {% for option in result_status_options %}
           <option value="{{ option }}"{% if option == result_status_filter %} selected{% endif %}>
             {{ option }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Record type</span>
+      <select
+        name="event_class" class="select select-bordered select-sm w-full"
+        aria-label="Filter by record type"
+      >
+        <option value=""{% if not event_class_filter %} selected{% endif %}>Any</option>
+        {% for value, label in event_class_labels.items() %}
+          <option value="{{ value }}"{% if value == event_class_filter %} selected{% endif %}>
+            {{ label }}
           </option>
         {% endfor %}
       </select>
@@ -184,7 +202,9 @@
               badge_class=drawer.badge_class, aggregate_only=drawer.aggregate_only,
               request_payload=drawer.request_payload,
               gated_op_classes=drawer.gated_op_classes,
-              references=drawer.references, trace=drawer.trace %}
+              references=drawer.references, trace=drawer.trace,
+              is_execution=drawer.is_execution,
+              event_class_label=drawer.event_class_label %}
         {% include "audit/_drawer.html" %}
       {% endwith %}
     {% else %}

@@ -289,10 +289,15 @@ _TARGETS_OP = PrometheusOp(
     summary="List scrape targets and their health.",
     description=(
         "Runs ``GET /api/v1/targets`` with an optional ``state`` filter "
-        "(``active`` / ``dropped`` / ``any``). Returns ``activeTargets`` "
-        "(each with ``health``, ``lastScrape``, ``lastError``, "
-        "``scrapeUrl``) and ``droppedTargets``. The first place to look "
-        "when a feed goes stale. Thanos Query exposes no scrape targets."
+        "(``active`` / ``dropped`` / ``any``). Returns the raw ``data`` "
+        "with ``activeTargets`` (each with ``health``, ``lastScrape``, "
+        "``lastError``, ``scrapeUrl``) and ``droppedTargets``. Also adds "
+        "``target_health_totals`` (``{up, down, unknown}`` counts) and "
+        "``target_health``: one flat row per active target with ``health`` "
+        "(up/down/unknown), ``job``, ``instance``, ``scrape_pool``, "
+        "``scrape_url``, ``last_scrape``, ``last_error`` and "
+        "``has_last_error``. The first place to look when a feed goes "
+        "stale. Thanos Query exposes no scrape targets."
     ),
     parameter_schema={
         "type": "object",
@@ -312,7 +317,22 @@ _TARGETS_OP = PrometheusOp(
     requires_approval=False,
     llm_instructions={
         "when_to_use": "Call to check scrape-target health -- up/down, last scrape, last error.",
-        "output_shape": "``{activeTargets: [...], droppedTargets: [...]}``.",
+        "output_shape": (
+            "``{status, data: {activeTargets: [...], droppedTargets: [...]}, "
+            "target_health: [{health, job, instance, scrape_pool, scrape_url, "
+            "last_scrape, last_error, has_last_error}], "
+            "target_health_totals: {up, down, unknown}}``. "
+            "``target_health_totals`` answers how many targets are up or down. "
+            "When the result comes back as a handle, ``target_health`` is the "
+            "stored row set: use ``result_query`` to filter "
+            "``health = 'down'`` or to count rows grouped by ``health`` or "
+            "``job``. Only the ``target_health`` rows are stored in the "
+            "handle: the raw ``data`` (``droppedTargets`` and the full labels "
+            "of each target) is not kept. To read dropped targets, call again "
+            "with ``state=dropped``. ``target_health`` is left out when there "
+            "are no active targets."
+        ),
+        "result_objects": {"objects": {"target_health_totals": ["up", "down", "unknown"]}},
     },
 )
 

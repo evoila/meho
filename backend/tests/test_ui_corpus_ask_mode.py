@@ -249,6 +249,30 @@ def test_corpus_index_renders_mode_toggle() -> None:
     assert "Ask" in body
 
 
+@pytest.mark.parametrize(("query", "carried"), [("?target=vcenter-01", True), ("", False)])
+def test_corpus_index_carries_a_target_in_the_form(query: str, carried: bool) -> None:
+    """``GET /ui/corpus?target=`` puts the target name on the form (#3920).
+
+    The search and the answer then default their version scope to that
+    target. Without the parameter the form has no target field.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/corpus{query}")
+
+    assert response.status_code == 200, response.text
+    normalised = " ".join(response.text.split())
+    hidden = '<input type="hidden" name="target" value="vcenter-01" />'
+    assert (hidden in normalised) is carried
+    assert ('name="target"' in normalised) is carried
+
+
 # ---------------------------------------------------------------------------
 # POST /ui/corpus/search mode=ask -- grounded answer success path
 # ---------------------------------------------------------------------------

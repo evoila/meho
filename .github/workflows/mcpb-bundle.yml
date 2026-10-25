@@ -23,6 +23,8 @@ on:
     branches: [main]
     paths:
       - 'clients/claude-desktop-mcpb/**'
+      # The login guard is shared with the plugin and packed into the bundle.
+      - 'clients/claude-code-plugin/lib/login-guard.mjs'
       - '.github/workflows/mcpb-bundle.yml'
 
 permissions:
@@ -46,7 +48,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
 
@@ -71,6 +73,19 @@ jobs:
         # suite stubs mcp-remote.
         run: node --test clients/claude-desktop-mcpb/test/index.test.mjs
 
+      - name: Vendor mcp-remote from the committed lock (for the login-guard end-to-end tests)
+        working-directory: clients/claude-desktop-mcpb
+        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+      - name: End-to-end test — login guard with the real pinned mcp-remote
+        # The launcher, the shared login guard (#4003) and the real
+        # mcp-remote from the committed lock, against a fake MEHO + Keycloak
+        # on 127.0.0.1 over https. MEHO_MCPB_E2E=1 makes a missing
+        # mcp-remote tree a failure instead of a skip.
+        env:
+          MEHO_MCPB_E2E: '1'
+        run: node --test clients/claude-desktop-mcpb/test/login-guard.test.mjs
+
       - name: Pack bundle (dry-run)
         # The PR number gives a valid pre-release semver so each dry-run
         # bundle is identifiable; the real version is the git tag on the
@@ -78,7 +93,7 @@ jobs:
         run: clients/claude-desktop-mcpb/build.sh "0.0.0-pr${{ github.event.number }}" dist
 
       - name: Upload bundle artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: meho-claude-desktop-mcpb
           path: dist/*.mcpb

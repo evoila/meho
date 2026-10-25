@@ -41,7 +41,7 @@ import (
 // the REST surface or wait for v0.2.next.
 //
 // Exit codes:
-//   - 0   entry created (201)
+//   - 0   entry created (201) or updated (200)
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected_response (incl. 422 invalid_slug / missing body)
@@ -72,7 +72,9 @@ func newAddCmd() *cobra.Command {
 			"The substrate's body-hash short-circuit means re-creating " +
 			"an entry with an unchanged body pays only an updated_at " +
 			"bump — `meho kb add` against an existing slug with the " +
-			"same body is effectively a no-op.",
+			"same body is effectively a no-op.\n\n" +
+			"Exit code 0 means the entry was created (HTTP 201) or " +
+			"updated (HTTP 200). The summary line says which one happened.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -131,24 +133,35 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if resp.StatusCode() != http.StatusCreated {
+	// The backplane answers 201 for a new slug and 200 when it
+	// overwrote an existing slug in place (#1845). Both are a
+	// successful write; only the summary wording differs.
+	var (
+		entry *api.KbEntry
+		verb  string
+	)
+	switch resp.StatusCode() {
+	case http.StatusCreated:
+		entry, verb = resp.JSON201, "created"
+	case http.StatusOK:
+		entry, verb = resp.JSON200, "updated"
+	default:
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	// Generated `ParseCreateKbApiV1KbPostResponse` only populates
-	// JSON201 when the response has Content-Type containing json AND
-	// status 201 (`cli/internal/api/client.gen.go`). A backplane /
-	// proxy that returns 201 with a missing or mistyped content-type
-	// leaves JSON201 nil; without this guard the verb would emit
-	// `null` in `--json` mode and silently no-op in summary mode
-	// (printAddSummary nil-guards). Mirrors the convention in
-	// `cli/internal/cmd/status.go:142`.
-	entry := resp.JSON201
+	// JSON200 / JSON201 when the response has Content-Type containing
+	// json AND the matching status (`cli/internal/api/client.gen.go`).
+	// A backplane / proxy that returns 200 or 201 with a missing or
+	// mistyped content-type leaves the field nil; without this guard
+	// the verb would emit `null` in `--json` mode and silently no-op
+	// in summary mode (printAddSummary nil-guards). Mirrors the
+	// convention in `cli/internal/cmd/status.go:142`.
 	if entry == nil {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"call %s: HTTP 201 without a kb entry payload",
-				backplaneURL,
+				"call %s: HTTP %d without a kb entry payload",
+				backplaneURL, resp.StatusCode(),
 			)),
 			opts.JSONOut,
 		)
@@ -156,7 +169,7 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
-	printAddSummary(cmd.OutOrStdout(), entry)
+	printAddSummary(cmd.OutOrStdout(), entry, verb)
 	return nil
 }
 
@@ -202,18 +215,20 @@ func postAdd(
 	)
 }
 
-// printAddSummary renders the created entry as a compact one-line
-// confirmation plus the round-tripped slug / timestamps. Operators
+// printAddSummary renders the written entry as a compact one-line
+// confirmation plus the round-tripped slug / timestamps. `verb` is
+// "created" (201) or "updated" (200) so the operator can tell an
+// overwrite from a fresh insert without reading timestamps. Operators
 // who want the full body should chase with `meho kb show <slug>`.
 // The timestamps come back as `time.Time` from the generated
 // `api.KbEntry`; we format with a UTC-ISO8601 shape so the output
 // stays operator-readable and matches the pre-migration string
 // rendering for the common always-UTC case.
-func printAddSummary(w io.Writer, e *api.KbEntry) {
+func printAddSummary(w io.Writer, e *api.KbEntry, verb string) {
 	if e == nil {
 		return
 	}
-	fmt.Fprintf(w, "created kb entry %q\n", e.Slug)
+	fmt.Fprintf(w, "%s kb entry %q\n", verb, e.Slug)
 	fmt.Fprintf(w, "%-14s %s\n", "id:", e.Id.String())
 	fmt.Fprintf(w, "%-14s %s\n", "tenant_id:", e.TenantId.String())
 	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))

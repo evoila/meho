@@ -26,10 +26,14 @@ is the single write path into the topology graph:
 
    Nodes are keyed by ``(kind, name)`` (the ``graph_node`` natural key
    within a tenant); edges by ``(from_kind, from_name, to_kind,
-   to_name, kind)``. Edge endpoints are mapped to ``graph_node.id`` via
-   the node key map built during the node pass, so an edge whose
-   endpoint the snapshot does not also carry as a node is skipped (a
-   well-formed connector always emits both).
+   to_name, kind)``. After the scope cut-over (#3749, ``scoped`` mode in
+   :mod:`meho_backplane.topology.identity_mode`) the reconcile only
+   loads rows in the scope each hint maps to, so ``(kind, name)`` stays
+   unique among the loaded rows; see :func:`_load_reconcile_candidate_nodes`.
+   Edge endpoints are mapped to ``graph_node.id`` via the node key map
+   built during the node pass, so an edge whose endpoint the snapshot
+   does not also carry as a node is skipped (a well-formed connector
+   always emits both).
 
 The entire reconcile runs in **one transaction**: any failure rolls the
 whole thing back, so a mid-reconcile crash never leaves the graph in a
@@ -52,18 +56,23 @@ from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import false, or_, select, tuple_
+from sqlalchemy import and_, false, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, GraphEdge, GraphHistoryChangeKind, GraphNode
-from meho_backplane.operations._audit import resolve_broadcast_lineage
+from meho_backplane.db.models import (
+    SOURCE_SCOPE_GLOBAL,
+    AuditEventClass,
+    AuditLog,
+    GraphEdge,
+    GraphHistoryChangeKind,
+    GraphNode,
+)
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
 )
@@ -73,6 +82,7 @@ from meho_backplane.topology.history import (
     record_edge_change,
     record_node_change,
 )
+from meho_backplane.topology.identity_mode import read_identity_mode, scope_for_discovered_node
 
 __all__ = ["RefreshResult", "refresh_target_topology"]
 
@@ -243,12 +253,27 @@ def _merge_edge_properties(
     return merged
 
 
+def _owned_by_target(row: GraphNode, target_id: uuid.UUID, *, scoped: bool) -> bool:
+    """Whether this target's refresh decides the row's soft-delete.
+
+    Legacy mode: the row's ``target_id`` names this target. Scoped mode
+    (#3749): the row is in this target's scope, or it is this target's
+    own ``global`` node (``kind='target'``) that this target last saw.
+    """
+    if not scoped:
+        return row.target_id == target_id
+    return row.source_scope == f"target:{target_id}" or (
+        row.source_scope == SOURCE_SCOPE_GLOBAL and row.target_id == target_id
+    )
+
+
 async def _load_reconcile_candidate_nodes(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     target_id: uuid.UUID,
     nodes: tuple[NodeHint, ...],
+    scoped: bool = False,
 ) -> list[GraphNode]:
     """Load every node a node-reconcile pass might touch, by natural key.
 
@@ -267,7 +292,18 @@ async def _load_reconcile_candidate_nodes(
     * rows already owned by *this* target — needed for the soft-delete
       pass, which must stay scoped to this target so a refresh never
       soft-deletes another target's node or a manual annotation.
+
+    In ``scoped`` mode (#3749) both sets are narrowed to scopes: a hint
+    only matches the row with the same ``(source_scope, kind, name)``
+    (scope from :func:`scope_for_discovered_node`), and "owned" means in
+    this target's scope. Rows of other targets, ``global`` operator
+    seeds and ``legacy:`` rows are never loaded, so they are never
+    adopted, changed or soft-deleted.
     """
+    if scoped:
+        return await _load_scoped_candidate_nodes(
+            session, tenant_id=tenant_id, target_id=target_id, nodes=nodes
+        )
     discovered_pairs = {(n.kind, n.name) for n in nodes}
     snapshot_predicate = (
         tuple_(GraphNode.kind, GraphNode.name).in_(sorted(discovered_pairs))
@@ -291,6 +327,44 @@ async def _load_reconcile_candidate_nodes(
     )
 
 
+async def _load_scoped_candidate_nodes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    nodes: tuple[NodeHint, ...],
+) -> list[GraphNode]:
+    """Scoped-mode half of :func:`_load_reconcile_candidate_nodes`."""
+    triples = sorted(
+        {(scope_for_discovered_node(target_id, n.kind), n.kind, n.name) for n in nodes}
+    )
+    snapshot_predicate = (
+        tuple_(GraphNode.source_scope, GraphNode.kind, GraphNode.name).in_(triples)
+        if triples
+        else false()
+    )
+    owned_predicate = or_(
+        GraphNode.source_scope == f"target:{target_id}",
+        and_(
+            GraphNode.source_scope == SOURCE_SCOPE_GLOBAL,
+            GraphNode.target_id == target_id,
+            GraphNode.kind == "target",
+        ),
+    )
+    return list(
+        (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    or_(snapshot_predicate, owned_predicate),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 def _insert_discovered_node(
     session: AsyncSession,
     *,
@@ -300,11 +374,14 @@ def _insert_discovered_node(
     discovered_by: str,
     now: datetime,
     audit_id: uuid.UUID,
+    scoped: bool = False,
 ) -> uuid.UUID:
     """Insert one fresh :class:`GraphNode` + emit its ``created`` history row.
 
     Returns the new node's id so the orchestrator can populate both
-    the live and all key maps.
+    the live and all key maps. In ``scoped`` mode the row gets its
+    ``source_scope`` (provenance ``refresh``); in legacy mode it stays
+    ``NULL`` as before the cut-over.
     """
     new_id = uuid.uuid4()
     new_node = GraphNode(
@@ -318,6 +395,8 @@ def _insert_discovered_node(
         discovered_by=discovered_by,
         first_seen=now,
         last_seen=now,
+        source_scope=scope_for_discovered_node(target_id, hint.kind) if scoped else None,
+        source_scope_provenance="refresh" if scoped else None,
     )
     session.add(new_node)
     # Same-transaction history row: a ``created`` change with
@@ -471,6 +550,7 @@ def _soft_delete_missing_nodes(
     target_id: uuid.UUID,
     now: datetime,
     audit_id: uuid.UUID,
+    scoped: bool = False,
 ) -> int:
     """Soft-delete this target's auto nodes absent from the snapshot.
 
@@ -497,7 +577,7 @@ def _soft_delete_missing_nodes(
             continue
         if row.source == "curated":
             continue
-        if row.target_id != target_id:
+        if not _owned_by_target(row, target_id, scoped=scoped):
             continue
         if row.last_seen is None:
             continue
@@ -521,6 +601,7 @@ async def _reconcile_nodes(
     nodes: tuple[NodeHint, ...],
     now: datetime,
     audit_id: uuid.UUID,
+    scoped: bool = False,
 ) -> tuple[
     int,
     int,
@@ -542,14 +623,11 @@ async def _reconcile_nodes(
       soft-delete it when it is not).
     """
     existing_rows = await _load_reconcile_candidate_nodes(
-        session, tenant_id=tenant_id, target_id=target_id, nodes=nodes
+        session, tenant_id=tenant_id, target_id=target_id, nodes=nodes, scoped=scoped
     )
     existing_by_key = {_node_key(r.kind, r.name): r for r in existing_rows}
 
-    discovered_by_key: dict[tuple[str, str], NodeHint] = {
-        _node_key(n.kind, n.name): n for n in nodes
-    }
-
+    discovered_by_key = {_node_key(n.kind, n.name): n for n in nodes}
     added = updated = 0
     live_key_to_id: dict[tuple[str, str], uuid.UUID] = {}
     all_key_to_id: dict[tuple[str, str], uuid.UUID] = {
@@ -567,6 +645,7 @@ async def _reconcile_nodes(
                 discovered_by=discovered_by,
                 now=now,
                 audit_id=audit_id,
+                scoped=scoped,
             )
             live_key_to_id[key] = new_id
             all_key_to_id[key] = new_id
@@ -607,6 +686,7 @@ async def _reconcile_nodes(
         target_id=target_id,
         now=now,
         audit_id=audit_id,
+        scoped=scoped,
     )
 
     return added, updated, removed, live_key_to_id, all_key_to_id
@@ -914,7 +994,7 @@ async def _reconcile_edges(
     return added, updated, removed
 
 
-async def _write_audit_and_broadcast(
+async def _write_audit(
     *,
     session: AsyncSession,
     audit_id: uuid.UUID,
@@ -922,13 +1002,12 @@ async def _write_audit_and_broadcast(
     target_id: uuid.UUID,
     result: RefreshResult,
 ) -> None:
-    """Write the audit row in the reconcile transaction; publish fail-open.
+    """Write the audit row in the reconcile transaction.
 
     The audit row is added to the **same** session as the reconcile so
     the spec's "no success without a committed audit row" invariant
-    holds: if the audit insert fails the whole refresh rolls back. The
-    broadcast publish is fail-open per :func:`publish_event`'s contract
-    and is issued by the caller *after* the transaction commits.
+    holds: if the audit insert fails the whole refresh rolls back. No
+    Broadcast event is published (#3758).
     """
     counts = {
         "added_nodes": result.added_nodes,
@@ -941,6 +1020,7 @@ async def _write_audit_and_broadcast(
     session.add(
         AuditLog(
             id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
@@ -958,49 +1038,6 @@ async def _write_audit_and_broadcast(
             },
         )
     )
-
-
-async def _publish_refresh_event(
-    *,
-    audit_id: uuid.UUID,
-    operator: Operator,
-    target_name: str,
-    result: RefreshResult,
-) -> None:
-    """Emit the per-refresh broadcast event. Fail-open by contract.
-
-    The payload is aggregate-only counts plus the op metadata — no node
-    or edge names — so the read-class default holds without a redactor
-    pass (Initiative #363 item 11).
-    """
-    lineage = resolve_broadcast_lineage()
-    event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime.now(UTC),
-        tenant_id=operator.tenant_id,
-        principal_sub=operator.sub,
-        principal_name=operator.name,
-        target_name=target_name,
-        op_id=_REFRESH_OP_ID,
-        op_class=_REFRESH_OP_CLASS,
-        result_status="ok",
-        audit_id=audit_id,
-        payload={
-            "op_class": _REFRESH_OP_CLASS,
-            "result_status": "ok",
-            "target_id": str(result.target_id),
-            "added_nodes": result.added_nodes,
-            "added_edges": result.added_edges,
-            "updated_nodes": result.updated_nodes,
-            "updated_edges": result.updated_edges,
-            "removed_nodes": result.removed_nodes,
-            "removed_edges": result.removed_edges,
-        },
-        actor_sub=lineage.actor_sub,
-        agent_session_id=lineage.agent_session_id,
-        work_ref=lineage.work_ref,
-    )
-    await publish_event(event)
 
 
 async def _apply_reconcile(
@@ -1031,6 +1068,9 @@ async def _apply_reconcile(
     tenant_id = operator.tenant_id
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
+        # Shared lock on the identity-mode row (#3749): the scope
+        # cut-over cannot switch modes while this reconcile runs.
+        scoped = await read_identity_mode(session, lock=True) == "scoped"
         now = datetime.now(UTC)
         (
             added_nodes,
@@ -1046,6 +1086,7 @@ async def _apply_reconcile(
             nodes=hints.nodes,
             now=now,
             audit_id=audit_id,
+            scoped=scoped,
         )
         added_edges, updated_edges, removed_edges = await _reconcile_edges(
             session,
@@ -1069,7 +1110,7 @@ async def _apply_reconcile(
             no_populator_for_product=no_populator_for_product,
             populated_products=populated_products,
         )
-        await _write_audit_and_broadcast(
+        await _write_audit(
             session=session,
             audit_id=audit_id,
             operator=operator,
@@ -1192,7 +1233,6 @@ async def refresh_target_topology(
     """
     started = time.perf_counter()
     target_id: uuid.UUID = target.id
-    target_name: str = getattr(target, "name", str(target_id))
     discovered_by = getattr(target, "product", "unknown")
     tenant_id = operator.tenant_id
 
@@ -1223,21 +1263,6 @@ async def refresh_target_topology(
         no_populator_for_product=no_populator_for_product,
         populated_products=populated_products,
     )
-
-    # Transaction committed (audit row included). Broadcast is fail-open.
-    try:
-        await _publish_refresh_event(
-            audit_id=audit_id,
-            operator=operator,
-            target_name=target_name,
-            result=result,
-        )
-    except Exception:
-        _log.exception(
-            "topology_refresh_broadcast_failed",
-            target_id=str(target_id),
-            tenant_id=str(tenant_id),
-        )
 
     _log.info(
         "topology_refresh_applied",

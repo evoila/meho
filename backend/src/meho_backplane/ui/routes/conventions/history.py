@@ -66,6 +66,8 @@ async def render_history_panel(
             "actor_sub": entry.actor_sub,
             "ts": entry.ts,
             "audit_id": str(entry.audit_id) if entry.audit_id is not None else None,
+            "request_id": str(entry.request_id) if entry.request_id is not None else None,
+            "change_kind": entry.change_kind,
             "is_create": entry.body_before is None,
         }
         for entry in entries

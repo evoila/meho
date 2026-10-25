@@ -35,7 +35,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST
@@ -403,6 +403,7 @@ async def test_write_mcp_audit_row_persists_every_field() -> None:
     payload = {"op_id": "test.tool", "params_hash": "abc123", "op_class": "read"}
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/test.tool",
@@ -646,6 +647,7 @@ async def test_write_helper_leaves_agent_session_id_null_without_contextvar() ->
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/test.tool",
@@ -703,6 +705,7 @@ async def test_principal_name_and_email_merged_from_operator() -> None:
     )
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -749,6 +752,7 @@ async def test_operator_without_name_or_email_writes_no_principal_keys() -> None
     )
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -788,6 +792,7 @@ async def test_explicit_payload_principal_name_wins_over_operator() -> None:
     )
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -826,6 +831,7 @@ async def test_target_id_and_name_hoisted_from_contextvars() -> None:
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/call_operation",
@@ -859,6 +865,7 @@ async def test_target_id_malformed_contextvar_logs_and_falls_back_to_null() -> N
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/call_operation",
@@ -887,6 +894,7 @@ async def test_no_target_contextvar_leaves_target_id_null_and_no_name() -> None:
     op = build_operator()
 
     await write_mcp_audit_row(
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=op,
         method="MCP",
         path="/mcp/tools/call/meho_status",
@@ -1002,24 +1010,3 @@ async def test_initialize_issued_session_id_round_trips_to_audit_row(
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 1
     assert mcp_rows[0].agent_session_id == session_uuid
-
-
-# ---------------------------------------------------------------------------
-# #1481: broadcast classification of the corrected post-gate status
-# ---------------------------------------------------------------------------
-
-
-def test_classify_mcp_status_403_is_denied_not_error() -> None:
-    """#1481: the 403 a post-gate rejection now records classifies "denied".
-
-    Locks the broadcast half of the fix — once the audit ``status_code``
-    is corrected from the init 500 to 403, ``_classify_mcp_status`` maps
-    it to ``"denied"`` (not ``"error"``), so the live feed event
-    reflects a policy rejection rather than a fake server crash. 500
-    stays ``"error"`` so a genuine handler fault is still surfaced.
-    """
-    from meho_backplane.mcp.handlers import _classify_mcp_status
-
-    assert _classify_mcp_status(403) == "denied"
-    assert _classify_mcp_status(500) == "error"
-    assert _classify_mcp_status(200) == "ok"

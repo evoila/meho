@@ -138,8 +138,15 @@ class ServiceGrantRead(BaseModel):
     """Row shape every accessor returns.
 
     ``from_attributes=True`` allows direct construction from an ORM row.
-    Exposes ``revoked_at`` / ``revoked_by_sub`` so callers can tell a live
-    grant from a revoked one in the history.
+    Exposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so
+    callers can tell a live grant from a revoked one in the history, and why
+    it was revoked.
+
+    ``orphaned`` / ``orphan_remediation`` are filled in by the service when
+    it reads the grant (see
+    :func:`~meho_backplane.operations.service_grants.classify_orphaned_grants`);
+    building the shape straight from an ORM row leaves them at the
+    not-orphaned default.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -160,6 +167,18 @@ class ServiceGrantRead(BaseModel):
     expires_at: datetime | None
     revoked_at: datetime | None
     revoked_by_sub: str | None
+    revoked_reason: str | None
+    # Read-time classification (#3430), not a stored column. True when the
+    # grant is not revoked and its concrete ``target_id`` no longer points at
+    # a live target (the target was deleted, or registered again under a new
+    # id). Such a grant can never match a dispatch. MEHO never revokes it by
+    # itself; ``orphan_remediation`` tells the operator what to do.
+    orphaned: bool = False
+    orphan_remediation: str | None = None
+    # True for a delete grant (sandbox mode, #4622): a grant stored in the
+    # ``sandbox_delete_grant`` table, which covers an operation with a
+    # delete sign. False for every ordinary grant.
+    delete_grant: bool = False
 
 
 class ServiceGrantListResponse(BaseModel):

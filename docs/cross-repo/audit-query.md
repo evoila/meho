@@ -59,7 +59,7 @@ If you are auditing someone else's activity:
 meho audit query --principal damir --since 24h
 ```
 
-`--principal` is a partial-match on `audit_log.operator_sub` (case-insensitive `ILIKE %damir%`). The pre-canned `my-recent` infers the principal from your own JWT subject and never accepts a `--principal` override — it always reports on you.
+`--principal` is a partial, case-insensitive match on the user id (`audit_log.operator_sub`) **or** on the name the row stores (`principal_name`), so `--principal damir` finds the rows of a person named Damir as well as rows whose user id contains `damir`. The pre-canned `my-recent` matches your own JWT subject exactly and never accepts a `--principal` override — it always reports on you.
 
 ### "All denied operations across the tenant in the last week"
 
@@ -97,7 +97,7 @@ meho audit query --session-id 11111111-1111-1111-1111-111111111111 --result-stat
 
 For the full parent/child **session-graph tree** (lineage between composite operations, not just a flat list) use [`meho audit replay <session-id>`](./audit-replay.md) — the G8.2 replay surface that the substrate's `parent_audit_id` recursive-CTE traversal builds on. Replay is a `tenant_admin` forensic act on every surface (#1843); see the [replay runbook](./audit-replay.md) for the role posture and the 10000-row cap.
 
-> Note: a *different* filter, `parent_audit_id`, is still **not** supported as a flat filter in v0.2 — the substrate raises `UnsupportedFilterError` (HTTP 400 / `-32602`) for it. The column itself is populated and is what the replay CTE walks; only the standalone flat filter is gated (see the [filter table](#filter-semantics) below).
+> Note: a *different* filter, `parent_audit_id`, is also a supported flat filter (since #4030). Pass `--parent-audit-id <uuid>` on the CLI, or `parent_audit_id` in the REST body / the MCP `query_audit` tool. It is an exact match and returns only the **direct children** of that one row, not grandchildren. To see the whole tree, use [`meho audit replay`](./audit-replay.md). See the [filter table](#filter-semantics) below.
 
 ## Filter semantics
 
@@ -107,10 +107,10 @@ For the full parent/child **session-graph tree** (lineage between composite oper
 | `--principal` | string | Substring `ILIKE` match on `operator_sub`. Empty string is treated as no filter. |
 | `--op-id` | glob | `*` → SQL `%`. Literal `%` / `_` escaped. Matches both `payload->>'op_id'` (MCP / typed) and `http.{method}:{path}` (chassis). |
 | `--op-class` | enum | One of `read` / `write` / `credential_read` / `audit_query` / `other`. Exact match against `payload->>'op_class'`. |
-| `--result-status` | enum | One of `ok` / `error` / `denied`. Maps to status-code ranges. |
+| `--result-status` | enum | One of `ok` / `error` / `denied` / `pending`. Maps to status-code ranges. `pending` is history: the run stopped to wait for approval, and the row stays `pending` after the decision. To see what waits now, use `meho approvals list`. |
 | `--since` / `--until` | duration shorthand or ISO-8601 | Shorthand grammar: `<N><unit>` where unit ∈ `{s, m, h, d, w}` and N ≤ 9999. ISO-8601 accepted via `datetime.fromisoformat` (Python 3.11+, including the `Z` suffix). |
 | `--audit-id` | UUID | Exact-id lookup. Combined with the tenant boundary, produces 0 or 1 row. |
-| `--parent-audit-id` | UUID | Composite-op subtree filter. **Returns `-32602` in v0.2** — the column lands with G0.6-T7. |
+| `--parent-audit-id` | UUID | Exact match on `parent_audit_id`. Returns the direct children of one row, for example the decision row and the run row of an approval request. |
 | `--limit` | int 1..1000 | Default 100, max 1000. |
 | `--cursor` | string (opaque) | Forward-only base64 cursor from a prior page's `next_cursor`. Tampered cursors return 400. |
 
@@ -170,7 +170,6 @@ The MCP tool's input schema, full description, and RBAC posture are documented i
 |---|---|---|
 | `audit row not found` on a row you know exists | Row belongs to another tenant — the 404 is a deliberate cross-tenant probe defence. | Use the operator JWT for the tenant that owns the row. |
 | `unrecognised duration '<value>': expected '<N>{s\|m\|h\|d\|w}' or an ISO-8601 datetime` | `--since` / `--until` shorthand failed to parse. | Use one of the grammars above (`24h`, `7d`, `2026-04-01T00:00:00Z`). |
-| `parent_audit_id filter not supported in v0.2` | The column lands with G0.6-T7. | Drop the flag; if you need composite-op-tree traversal today, wait for [G8.2](https://github.com/evoila/meho/issues/377). |
 | `cursor` returns 400 | The cursor was tampered with, truncated, or copy-pasted across queries with incompatible filter shapes. | Re-run the query without `--cursor` to get a fresh page-1 cursor. |
 | Empty result on a filter you know should match | Filter ANDs with the tenant boundary first. A row in another tenant won't appear under any filter. Also check `--since` — the default is **no** time bound for `meho audit query`, but each pre-canned shortcut defaults `since=24h`. | Widen `--since` (`--since 7d`); confirm the tenant matches; if `--op-id` is involved, double-check the glob (literal segment boundaries matter — `vsphere.vm.*` does not match `vsphere.vmware.foo`). |
 

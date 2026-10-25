@@ -176,8 +176,11 @@ _APP_LIST = ArgoCdOp(
         "filtered by one or more projects and/or a Kubernetes label selector. "
         "Each item carries the app's spec (source repo/path/target revision, "
         "destination cluster/namespace) plus its status — most usefully "
-        "status.sync.status (Synced / OutOfSync) and status.health.status "
-        "(Healthy / Degraded / Progressing / Missing). Use as the entry point "
+        "status.sync.status (Synced / OutOfSync / Unknown) and "
+        "status.health.status (Healthy / Progressing / Degraded / Suspended / "
+        "Missing / Unknown). Each item also carries flat copies of these as "
+        "top-level health_status, sync_status and name columns, so "
+        "result_query can COUNT and GROUP BY them. Use as the entry point "
         "for any 'which apps are out of sync / unhealthy?' question. "
         "safety_level=safe, read-only."
     ),
@@ -206,7 +209,18 @@ _APP_LIST = ArgoCdOp(
     response_schema={
         "type": "object",
         "properties": {
-            "items": {"type": ["array", "null"]},
+            "items": {
+                "type": ["array", "null"],
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "health_status": {"type": "string"},
+                        "sync_status": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+            },
             "metadata": {"type": "object"},
         },
         "additionalProperties": True,
@@ -227,9 +241,12 @@ _APP_LIST = ArgoCdOp(
             "selector": "Kubernetes label selector string; omit for no label filter.",
         },
         "output_shape": (
-            "{items: [Application, ...], metadata: {...}}. Read each item's "
-            "status.sync.status and status.health.status for the at-a-glance "
-            "state; metadata.name identifies the app for follow-up ops."
+            "{items: [Application, ...], metadata: {...}}. Each item keeps the "
+            "raw fields and adds flat health_status (status.health.status), "
+            "sync_status (status.sync.status) and name (metadata.name); a "
+            "missing value is 'unknown', ArgoCD's own 'Unknown' is kept. To "
+            "count apps per state, call result_query on the result handle "
+            "with aggregate COUNT and group_by ['health_status']."
         ),
     },
 )

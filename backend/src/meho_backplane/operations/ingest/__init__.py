@@ -31,6 +31,7 @@ from meho_backplane.operations.ingest.api_schemas import (
     EditOpWarning,
     EnableReadsResponse,
     GroupingResultModel,
+    GroupSummaryModel,
     IngestionResultModel,
     IngestJobHandle,
     IngestJobStatusResponse,
@@ -111,6 +112,7 @@ from meho_backplane.operations.ingest.llm_groups import (
     DEFAULT_GROUPING_BATCH_SIZE,
     GroupingResult,
     GroupProposal,
+    GroupSummary,
     LlmClient,
     LlmJsonResult,
     StructuredJsonLlmClient,
@@ -125,6 +127,7 @@ from meho_backplane.operations.ingest.openapi import (
 )
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.payload import (
+    ConnectorReviewDeleteOp,
     ConnectorReviewGroup,
     ConnectorReviewOp,
     ConnectorReviewPayload,
@@ -161,6 +164,7 @@ __all__ = [
     "ConnectorListItem",
     "ConnectorListResponse",
     "ConnectorNotFoundError",
+    "ConnectorReviewDeleteOp",
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
@@ -179,6 +183,8 @@ __all__ = [
     "EndpointDescriptorProto",
     "GenericRestConnector",
     "GroupProposal",
+    "GroupSummary",
+    "GroupSummaryModel",
     "GroupingResult",
     "GroupingResultModel",
     "IngestJob",

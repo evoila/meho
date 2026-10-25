@@ -19,13 +19,14 @@ import (
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "client",
-		Short:        "Keycloak client sub-verbs (list, get, create, update)",
+		Short:        "Keycloak client sub-verbs (list, get, create, update, delete)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newClientListCmd())
 	cmd.AddCommand(newClientGetCmd())
 	cmd.AddCommand(newClientCreateCmd())
 	cmd.AddCommand(newClientUpdateCmd())
+	cmd.AddCommand(newClientDeleteCmd())
 	return cmd
 }
 

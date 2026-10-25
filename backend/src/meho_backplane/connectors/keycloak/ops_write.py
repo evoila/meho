@@ -21,7 +21,11 @@ op_id                               safety       Admin REST API
 ``keycloak.user.create``            caution      ``POST .../realms/{realm}/users``
 ``keycloak.user.reset_password``    caution      ``PUT .../users/{id}/reset-password``
 ``keycloak.role_mapping.assign``    dangerous    ``POST .../users/{id}/role-mappings/realm``
+``keycloak.user.logout``            caution      ``POST .../users/{id}/logout``
 ==================================  ===========  ===========================================
+
+``keycloak.user.logout`` (#3851) came later. It ends every live session of
+one user, so their refresh tokens stop working at once.
 
 ``keycloak.idp.create`` (identity-provider federation) is **deliberately
 deferred**: the issue (#1406) notes it is "not exercised by current
@@ -98,8 +102,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from meho_backplane.connectors._shared.vault_creds import (
-    load_vault_secret_data,
+    load_param_secret_data,
     strip_credential_value,
 )
 from meho_backplane.connectors.keycloak._paths import (
@@ -109,11 +115,13 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_PROTOCOL_MAPPERS_PATH,
     _CLIENT_SCOPES_PATH,
     _CLIENTS_PATH,
+    _USER_LOGOUT_PATH,
     _USER_RESET_PASSWORD_PATH,
     _USER_ROLE_MAPPINGS_REALM_PATH,
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
@@ -135,6 +143,7 @@ __all__ = [
     "keycloak_realm_update",
     "keycloak_role_mapping_assign",
     "keycloak_user_create",
+    "keycloak_user_logout",
     "keycloak_user_reset_password",
 ]
 
@@ -212,15 +221,20 @@ async def _read_password_from_vault(
     reader no longer opens hvac directly.
 
     Raises :exc:`KeycloakPasswordSecretError` when the requested key is
-    absent or its value is not a non-empty string.
+    absent or its value is not a non-empty string, and
+    :exc:`~meho_backplane.connectors._shared.vault_creds.SecretRefReadError`
+    when Vault refuses or cannot serve the read (#3864).
     """
     secret_ref = str(params["password_secret_ref"]).strip()
     mount = str(params.get("password_secret_mount") or _DEFAULT_PASSWORD_MOUNT).strip()
     key = str(params.get("password_secret_key") or _DEFAULT_PASSWORD_KEY).strip()
 
-    secret_data = await load_vault_secret_data(
+    # #3864: a denied or missing password ref raises SecretRefReadError, so
+    # the write fails with a clear error about this ref, not the target's.
+    secret_data = await load_param_secret_data(
         _PasswordSecretTarget(name=target.name, host=target.host, secret_ref=secret_ref),
         operator,
+        param="password_secret_ref",
         mount=mount,
     )
     value = secret_data.get(key) if isinstance(secret_data, dict) else None
@@ -293,21 +307,24 @@ async def keycloak_realm_update(
 
     Op-id: ``keycloak.realm.update``. Defaults to the target's managed
     realm; ``realm`` overrides it. ``representation`` is the partial
-    RealmRepresentation to merge. Returns a value-free confirmation.
+    RealmRepresentation. The handler reads the realm, puts the given fields
+    on top, and PUTs the full realm back, so fields the caller did not send
+    stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
+    value-free confirmation plus the read-back check.
     """
     realms = resolve_realm_config(target)
     realm_name = str(params.get("realm") or realms.managed_realm).strip()
     representation = dict(params["representation"])
-    representation.setdefault("realm", realm_name)
-    await self._write_admin(
+    new_name = _opt_str(representation.get("realm")) or realm_name
+    check = await read_merge_write(
+        self,
+        operator,
         target,
-        "PUT",
-        fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
-        operator=operator,
-        json=representation,
-        idempotent_conflict=False,
+        path=fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
+        requested=representation,
+        read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": new_name}),
     )
-    return {"realm": realm_name, "updated": True}
+    return {"realm": realm_name, "updated": True, **check}
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +384,10 @@ async def keycloak_client_update(
     Op-id: ``keycloak.client.update``. Keys on the client's internal UUID;
     pass it directly via ``id``, or pass ``client_id`` (the human clientId)
     and the handler resolves the UUID via ``?clientId=`` lookup.
-    ``representation`` is the partial ClientRepresentation. Raises
+    ``representation`` is the partial ClientRepresentation. The handler
+    reads the client, puts the given fields on top, and PUTs the full
+    client back, so fields the caller did not send (and every protocol
+    mapper) stay as they are (#3941, see :mod:`.ops_write_merge`). Raises
     :exc:`KeycloakUserNotFoundError`'s sibling — a clear error — when the
     clientId resolves to no client.
     """
@@ -385,20 +405,17 @@ async def keycloak_client_update(
                 f"keycloak.client.update: no client with clientId={client_id!r} in realm "
                 f"{realms.managed_realm!r}"
             )
-    representation = dict(params["representation"])
-    representation.setdefault("id", uuid)
-    await self._write_admin(
+    check = await read_merge_write(
+        self,
+        operator,
         target,
-        "PUT",
-        fill_path(
+        path=fill_path(
             _CLIENT_PATH,
             {"realm": realms.managed_realm, "client-uuid": quote_segment(uuid)},
         ),
-        operator=operator,
-        json=representation,
-        idempotent_conflict=False,
+        requested=dict(params["representation"]),
     )
-    return {"id": uuid, "client_id": client_id, "updated": True}
+    return {"id": uuid, "client_id": client_id, "updated": True, **check}
 
 
 async def keycloak_client_scope_create(
@@ -578,6 +595,52 @@ async def keycloak_user_reset_password(
         idempotent_conflict=False,
     )
     return {"id": uuid, "username": username, "password_reset": True}
+
+
+async def keycloak_user_logout(
+    self: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """End every live session of one user (``POST .../users/{id}/logout``).
+
+    Op-id: ``keycloak.user.logout``. Keys on the user's internal UUID; pass
+    it via ``id`` or pass ``username`` for name→UUID resolution. Keycloak
+    answers 204 whether or not the user had sessions, so a second run is a
+    success too. A user that does not exist raises
+    :exc:`KeycloakUserNotFoundError`. The op reads and returns no credential.
+    """
+    realms = resolve_realm_config(target)
+    uuid = _opt_str(params.get("id"))
+    username = _opt_str(params.get("username"))
+    if uuid is None:
+        if username is None:
+            raise ValueError("keycloak.user.logout requires either 'id' (UUID) or 'username'")
+        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
+        if uuid is None:
+            raise KeycloakUserNotFoundError(
+                f"keycloak.user.logout: no user with username={username!r} in realm "
+                f"{realms.managed_realm!r}"
+            )
+    try:
+        await self._write_admin(
+            target,
+            "POST",
+            fill_path(
+                _USER_LOGOUT_PATH,
+                {"realm": realms.managed_realm, "user-id": quote_segment(uuid)},
+            ),
+            operator=operator,
+            idempotent_conflict=False,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise KeycloakUserNotFoundError(
+                f"keycloak.user.logout: no user with id={uuid!r} in realm {realms.managed_realm!r}"
+            ) from exc
+        raise
+    return {"id": uuid, "username": username, "logged_out": True}
 
 
 # ---------------------------------------------------------------------------

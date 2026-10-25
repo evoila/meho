@@ -51,6 +51,13 @@ The session id is the `Mcp-Session-Id` header the MCP client established on its 
 
 `agent_session_id` is populated **only on MCP-originated rows** — the MCP audit writer ([`mcp/audit.py`](../../backend/src/meho_backplane/mcp/audit.py)) reads the bound `Mcp-Session-Id` and writes it onto the row. Plain HTTP requests through the chassis middleware ([`audit.py`](../../backend/src/meho_backplane/audit.py)) do **not** carry an MCP session, so those rows have `agent_session_id = NULL` by design. A session id you can replay therefore always traces back to an MCP-originated row. CLI verbs themselves dispatch over HTTP, so a `meho audit ...` invocation's own audit row has no session id.
 
+There is one exception for plain HTTP. When a **client-credential service principal** (a service account, for example an automation add-on) calls `call_operation` over REST with a `work_ref`, MEHO gives that run a session id. The first call for a `work_ref` writes one start row (`method=ORCHESTRATION`). Every call for the same `work_ref` carries the same session id and sits under that start row. So the run replays as one tree. To replay it:
+
+1. Find the session id: `meho audit query --work-ref <ref> --json` (or `GET /api/v1/audit/by-work-ref/{ref}`). The rows show `agent_session_id`. Use `--json`: the default table does not print that column.
+2. Replay it: `meho audit replay <session-id>`.
+
+A service principal call **without** a `work_ref` still has no session id. Send a `work_ref` (the `work_ref` field on `call_operation`, or the `Meho-Work-Ref` header on REST or MCP) on every call of a run you want to replay. See [`docs/codebase/audit_query.md`](../codebase/audit_query.md#client-credential-runs-3446).
+
 ## CLI usage
 
 `meho audit replay` is the sixth verb under `meho audit ...`, alongside the five query verbs documented in [`audit-query.md`](./audit-query.md). It wraps the [G8.2-T4 REST route](../../backend/src/meho_backplane/api/v1/audit.py) `GET /api/v1/audit/sessions/{session_id}/replay`.
@@ -133,8 +140,8 @@ There are two MCP entry points for replay, split by role and scope. The split is
 
 | Tool | Role | Scope | Shape |
 |---|---|---|---|
-| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count, excluded_null_session_count}` |
-| `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count, excluded_null_session_count}` |
+| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}` |
+| `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}` |
 
 ### `query_audit` with `shape:"tree"` (operator, self-session-only)
 
@@ -186,7 +193,8 @@ Both tree paths reject an over-cap session with `-32602` (`session_too_large`) �
   "session_id": "11111111-1111-1111-1111-111111111111",
   "tenant_id": "22222222-2222-2222-2222-222222222222",
   "row_count": 4,
-  "excluded_null_session_count": 0
+  "excluded_null_session_count": 0,
+  "loose_row_count": 0
 }
 ```
 
@@ -262,13 +270,16 @@ A worked `--json` tree (truncated to the rendering-relevant fields; every `Audit
   "session_id": "11111111-1111-1111-1111-111111111111",
   "tenant_id": "22222222-2222-2222-2222-222222222222",
   "row_count": 4,
-  "excluded_null_session_count": 0
+  "excluded_null_session_count": 0,
+  "loose_row_count": 0
 }
 ```
 
 > **`row_count` semantics.** On the **CLI / REST** envelope, `row_count` is the count of *anchor* rows in the session (rows whose `agent_session_id` equals `session_id`). It is the same number the 413 guard evaluates — NULL-session lineage children pulled into the tree are present but not counted. On the **MCP** tools, `row_count` is the total *assembled node count* (post depth-cap), so it reflects what the caller actually receives. Both are documented on the surfaces above; use `row_count` as a session-size signal, not a strict tree-node count across surfaces.
 
 > **`excluded_null_session_count` (all replay surfaces, #2700 / #2776).** Every replay envelope carries `excluded_null_session_count`: a tenant-wide tally of `method=MCP` audit rows whose `agent_session_id` is NULL — calls from clients that reached `/mcp` without negotiating a session via the `initialize` handshake. Those rows record real operations but can never anchor or be walked by *any* session replay, so a `row_count=0` response with a non-zero `excluded_null_session_count` tells an investigator the empty forest is **not** an empty history: there is un-negotiated MCP traffic this surface structurally cannot see. It is independent of `session_id` (the un-negotiated rows belong to no session) and mirrors the honest `when_negotiated` capture label the deploy's `/status` reports — see [`docs/codebase/error-message-shape.md`](../codebase/error-message-shape.md) signal 11. The field landed first on CLI / REST (#2700) and now carries at parity on the MCP `meho_audit_replay` and `query_audit` (`shape="tree"`) forensic tools (#2776).
+
+> **`loose_row_count` (all replay surfaces, #4670).** Every replay envelope also carries `loose_row_count`: the nodes in the returned tree whose `parent_audit_id` names a row that does not exist in the tenant. A multi-step operation saves its own row last, so such a node belongs to an operation that is still running, or to one that stopped before that save (see [`docs/decisions/composite-audit-when-a-step-waits.md`](../decisions/composite-audit-when-a-step-waits.md)). In the second case the step rows and the approval request stay, their parent never gets a row, and MEHO writes no repair row. Such a node renders as a root, so without the count it looks like a real start of a chain. A root whose parent exists in another session is not counted. The CLI prints one note after the tree when the count is above zero; the console shows a badge above the tree. The tenant-wide view is the `audit.loose_rows` operation and its sensor template (`docs/codebase/audit_query.md`, "Loose rows: the standing check").
 
 ### Forward-compat contract
 

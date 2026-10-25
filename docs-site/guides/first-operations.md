@@ -104,7 +104,7 @@ meho operation search k8s-1.x "pods that are not running" --group workload
 Each hit carries the fields that matter before you call anything:
 
 - **`op_id`** — the handle you pass to call, e.g. `k8s.pod.list`.
-- **`safety_level`** — `safe`, `caution`, or `dangerous`.
+- **`safety_level`** — `safe`, `caution`, `dangerous`, or `destructive`.
 - **`requires_approval`** — whether a call parks for a second pair of
   eyes instead of executing.
 
@@ -125,7 +125,15 @@ Two honest limits:
 - It covers **spec-ingested HTTP operations**. A typed or composite
   operation (like the Kubernetes ops here) has no single literal HTTP
   request, so preview returns `status: "unavailable"` — that is the
-  expected answer, not a failure.
+  expected answer, not a failure. The exception is a destructive or
+  approval-gated typed or composite operation. Its preview returns
+  `status: "ok"` with the params and a `preview_hash`. It shows the plan
+  (`proposed_effect`) only when the plan does not need the target. When
+  the plan needs the target, `plan_shown` is `false` and `plan_note`
+  says the plan is shown on the approval request. An approval-gated
+  operation that writes a credential (for example `vault.kv.put`) is
+  not previewable. It stays `status: "unavailable"`, so its secret
+  params never surface.
 - It is available over MCP, REST (`POST /api/v1/operations/preview`),
   and the CLI (`meho operation preview <connector_id> <op_id>`).
 
@@ -240,6 +248,12 @@ waiting. You poll the handle for progress, or cancel it, and the
 completed result is persisted on the run so it survives a dropped
 response.
 
+An agent on MCP gets the same mode from the `call_operation` tool. Pass
+`async: true` and you get `status="pending"` and a `run_id` at once. Then
+call `call_operation` again with the same `connector_id`, `op_id` and that
+`run_id` to check it. While it runs you see `running` and the start time;
+when it is done you get the normal result.
+
 Synchronous mode stays the default and is byte-for-byte identical to
 the path without `async` — nothing changes unless you ask for it.
 
@@ -285,6 +299,12 @@ By default you cannot approve your own request (the four-eyes rule),
 and parked requests expire on a TTL. The full story — including the
 audited single-operator break-glass — is the
 [approvals & break-glass guide](approvals-and-break-glass.md).
+
+`safety_level` works differently: what happens depends on who calls. For
+example, an agent's `caution` call waits for approval, but a person's
+`caution` call runs at once. The table in the
+[agent permission model](https://github.com/evoila/meho/blob/main/docs/codebase/agent-permission-model.md#safety-levels-at-a-glance)
+shows each safety level for agents, people and service accounts.
 
 Before approving *any* fan-out write: open the approval payload and
 verify the resolved object list first. An unconstrained filter is how

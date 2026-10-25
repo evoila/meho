@@ -337,6 +337,8 @@ real operator through the same loader.
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
+| `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
+| `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
 | `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
@@ -485,11 +487,34 @@ value).
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real
-apply. Note: the dispatcher / approval-queue substrate has **no per-op
-`proposed_effect` builder hook**, so the dry-run result is not
-auto-populated into the approval row at queue time today; the dry-run is
-expressible + returned by the op, and queue-time auto-population is a
-follow-up that needs a dispatcher hook.
+apply. When the op waits for approval, the `k8s.apply` preview builder in
+`operations/_preview.py` runs this dry-run and stores the result on the
+approval row (see `approvals.md`).
+
+**`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
+calls the API with `_preload_content=False`, and kubernetes_asyncio only
+raises `ApiException` for a non-2xx answer when `_preload_content` is
+true. So the library hands back a rejection (an admission webhook 403, a
+422 invalid object, a 409 field conflict) as a normal response with a
+`Status` failure body. `_apply_one` therefore calls `server_side_apply`
+with `serialize=False`, checks the HTTP status itself, and raises
+`ApplyRejectedError` (a `ConnectorUpstreamError`) for any non-2xx answer,
+on the real apply and on the dry-run. The result is `error` with
+`extras.http_status` and the API server's `message` in
+`extras.upstream_message`. The approval preview shows the rejection
+(`preview_unavailable` with the message in `preview_error`) instead of a
+clean-looking summary with no `resourceVersion` and no `uid`. The preview
+message is redacted before it is stored, like `extras.upstream_message`,
+so a denial that quotes a credential does not put it into the approval
+row.
+`ApplyNotPersistedError` is now only raised for a 2xx real apply with no
+`resourceVersion`. `k8s.apply` is the only op that uses `DynamicClient`.
+The other ops use the generated API classes, which raise `ApiException`
+on a non-2xx answer (`k8s.exec` opens a websocket; a refused upgrade
+raises from aiohttp). The discovery reads that
+`DynamicClient` makes before the apply go through the same unchecked
+path, but a denied discovery read still ends in an error (usually
+`ResourceNotFoundError`), not a false success.
 
 ### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
 
@@ -547,6 +572,20 @@ FastAPI-coupled, so the connector-appropriate reuse is the shared guard
 it wraps). The derived path is inside the operator's tenant subtree by
 construction.
 
+**Vault write check before approval (#3844).** The op is approval-gated
+and its preview is hidden (it is a credential op), so on its own the
+approver could not tell that Vault will refuse the write. The op
+therefore registers a permission preflight
+(`operations/_preview.py::_k8s_secret_read_to_ref_preflight`). At park
+time it builds the same path the handler writes to
+(`tenant_secret_ref(operator.tenant_id, register_as)` on the `secret`
+mount) and runs the `vault.kv.put` capability check there
+(`sys/capabilities-self`, capability names only, no secret value). It
+uses `target=None`, like the handler's write, so the check uses the same
+Vault role. If the identity lacks `create` + `update`, MEHO refuses the
+park with `write_capability_denied` (#3542) and nobody approves a write
+that would fail.
+
 **Supervisor case: no server rewrite (corpus-verified).** A VKS guest
 kubeconfig's `clusters[].cluster.server` already points at the guest
 cluster's own LoadBalancer API-server VIP and is used as-is, so **no**
@@ -563,7 +602,7 @@ and nothing is written to Vault on failure.
 ### Shared list-op request shape (`ops_listparams.py`)
 
 Every namespaced list op on this connector
-(`k8s.pod.list`, `k8s.deployment.list`, `k8s.event.list`,
+(`k8s.pod.list`, `k8s.deployment.list`, `k8s.job.list`, `k8s.event.list`,
 `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list`) shares
 the same input-parameter shape via the building blocks in
 [`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
@@ -576,7 +615,7 @@ the same input-parameter shape via the building blocks in
 - `label_selector` -- forwarded server-side; same K8s selector syntax
   for every op.
 
-Pod / deployment list additionally use the full base via
+Pod / deployment / job list additionally use the full base via
 `LIST_BASE_PROPERTIES`, which adds `field_selector` + `limit` +
 `continue_token`. The operator passes `limit=N` plus optional
 `continue_token=<cursor>` on each call; the response carries
@@ -603,10 +642,11 @@ See [`docs/codebase/api-shape-conventions.md`](api-shape-conventions.md)
 list-op request-shape parity); the rule applies across connectors
 once siblings adopt the pattern.
 
-### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info`)
+### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info` / `k8s.job.info`)
 
-Both `info` ops accept an exact name or a unique prefix within the
-namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`):
+All three `info` ops accept an exact name or a unique prefix within the
+namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`,
+reused by `resolve_job_name` in `ops_job.py`):
 
 1. Exact match wins -- `foo-bar` resolves to the literal `foo-bar`
    pod even when `foo-bar-x` also exists.
@@ -619,12 +659,100 @@ namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`):
    hint without parsing the error string.
 
 The resolver pages via `list_namespaced_pod` /
-`list_namespaced_deployment` without server-side pagination -- the
+`list_namespaced_deployment` / `list_namespaced_job` without server-side pagination -- the
 operator-facing namespaces are typically O(10..100) objects which
 fits in one unpaginated response. Heavy-tenancy namespaces with
 hundreds of workload objects are not the prefix-resolver's target
 audience; the agent typically reaches them via the list path with
 explicit pagination.
+
+### Container status detail in `k8s.pod.info` (#4828)
+
+Each entry of `container_statuses` and `init_container_statuses` is
+built by `container_status_row()` in `ops_workload.py`:
+
+| field | source | meaning |
+| --- | --- | --- |
+| `name`, `image`, `ready`, `restart_count` | top-level `V1ContainerStatus` | `image` is the image the pod asked for. |
+| `image_id` | `imageID` | Digest of the image the container really runs (`repo@sha256:...`). Empty until the image is pulled. Compare it with the pinned digest after an upgrade. |
+| `state`, `last_state` | populated branch of the `V1ContainerState` union | One word: `running`, `waiting` or `terminated`; `None` when absent. |
+| `reason`, `message` | `state.waiting` or `state.terminated` | Why the container waits (`ImagePullBackOff`, `ErrImagePull`, `CrashLoopBackOff`, `CreateContainerConfigError`) or stopped (`OOMKilled`, `Error`), with the error text. `None` while running. |
+| `exit_code` | `state.terminated.exitCode` | Set only when the current state is `terminated`. |
+| `last_reason`, `last_exit_code` | `last_state` | Why the container stopped the last time. For a `CrashLoopBackOff` container this is the real cause (e.g. `OOMKilled` / 137). |
+
+The reason fields matter because `k8s.event.list` is the only other
+place the reason shows up, and Kubernetes drops events after one
+hour by default. The container status keeps the reason for as long as
+the pod exists. The change is additive: `state` and `last_state` keep
+their one-word shape.
+
+### Environment variable sources in `k8s.pod.info` and `k8s.deployment.info` (#4890)
+
+A variable that takes its value from a Secret or a ConfigMap has no
+literal value in the pod definition. Before #4890 both ops showed it
+as `{"name": ..., "value": null}`, the same as an empty variable. Now
+each `containers[].env` and `init_containers[].env` entry built by
+`_env_var_row()` in `ops_workload.py` keeps `name` and `value`, and
+adds `value_from` when the entry has a source:
+
+| `value_from` key | source in the pod spec | fields shown |
+| --- | --- | --- |
+| `secret_key_ref` | `valueFrom.secretKeyRef` | `name` (the Secret), `key`, `optional` |
+| `config_map_key_ref` | `valueFrom.configMapKeyRef` | `name` (the ConfigMap), `key`, `optional` |
+| `field_ref` | `valueFrom.fieldRef` | `field_path` (for example `status.podIP`) |
+| `resource_field_ref` | `valueFrom.resourceFieldRef` | `container_name`, `resource` (for example `limits.memory`) |
+| `file_key_ref` | `valueFrom.fileKeyRef` | `volume_name`, `path`, `key`, `optional` |
+
+A literal entry has no `value_from` key, so its shape is unchanged.
+
+Each container also gets `env_from` (`_env_from_row()`): one row per
+`envFrom` source with `kind` (`secret_ref` or `config_map_ref`), the
+object `name`, `optional` and `prefix`. `envFrom` loads every key of
+the object as a variable, so the row names the object only.
+
+MEHO does not read the Secret or the ConfigMap for this. The ops still
+make one `list_namespaced_pod` / `list_namespaced_deployment` call and
+copy the names, keys and field paths already written in the pod
+definition. No secret value can appear in the result. The main use is
+a container waiting with `CreateContainerConfigError`: the status row
+says the container cannot start, and `value_from` / `env_from` say
+which Secret and key it asks for.
+
+### Job reads (`ops_job.py`)
+
+`k8s.job.list` and `k8s.job.info` answer "did the Job finish, and did it
+work?" for migration, backup and one-off batch Jobs. Both are safe reads
+in the `workload` group over `BatchV1Api`.
+
+- `state` is one word from the Job's conditions, in this order: `failed`
+  when the `Failed` condition is true, `complete` when `Complete` is
+  true, `suspended` when `Suspended` is true, else `running`. `failed`
+  wins so a Job that failed after a partial success reads as failed.
+- `pods_active` / `pods_succeeded` / `pods_failed` come from `status`;
+  `completions` from `spec` (`null` = any one success completes the
+  Job). `start_time` and `completion_time` are UTC ISO 8601 strings;
+  `completion_time` is set only when the Job succeeded.
+- `k8s.job.info` adds `conditions` (`type` / `status` / `reason` /
+  `message` / `last_transition_time` -- a failed Job says
+  `BackoffLimitExceeded` or `DeadlineExceeded` here), `backoff_limit`,
+  `active_deadline_seconds`, the template `containers` (name + image),
+  `pod_selector` and `pods`.
+- `pod_selector` is the Job's own `spec.selector` rendered as a selector
+  string (`label_selector_string`). The API server sets that field on
+  every stored Job; when it is missing the Job-name label
+  `batch.kubernetes.io/job-name=<name>` is the fallback, so `pods` is
+  never silently empty.
+- `pods` are found with one `CoreV1Api.list_namespaced_pod` call using
+  that selector, projected through `pod_row` (the `k8s.pod.list` row
+  shape), ordered newest first and cut at `JOB_INFO_MAX_PODS` (50).
+  `pods_truncated: true` says the list was cut; `k8s.pod.list` with
+  `label_selector=<pod_selector>` returns all of them.
+- The op declares `llm_instructions.result_scalars` so the state and
+  the counts stay inline if the JSONFlux reducer ever spills the pod
+  list to a handle.
+
+Not covered: CronJob reads, and `k8s.ls /<namespace>` does not count
+Jobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
 
 ### ConfigMap privacy split
 
@@ -781,6 +909,65 @@ conditional on a versioned entry being present.
    #750) — large row lists materialize into a `ResultHandle`, small
    ones pass through — writes the audit row, fires the broadcast event,
    and wraps the result in `OperationResult.status="ok"`.
+
+### Flight-recorder span per API request (`_wire_span.py`, #3841)
+
+When the flight recorder captures a dispatch, every Kubernetes API HTTP
+request now gets its own `vendor_call` span under the op's `typed` span.
+Before, the trace showed only the `typed` span, so a "200 but nothing
+happened" apply could not be explained from the trace.
+
+- `instrument_api_client()` wraps `RESTClientObject.request` on each
+  cached `ApiClient` once, when `_get_api_client` builds it. All typed
+  `CoreV1Api` / `AppsV1Api` calls and the `DynamicClient` used by
+  `k8s.apply` pass through that one method.
+- The span holds: method, path (no query), the query with values kept
+  only for safe switches (`dryRun`, `fieldManager`, `force`, selectors,
+  ...; `continue` is masked), status, request and response headers
+  through the header allowlist (`content-type`, `server`, `via`,
+  `warning`, `audit-id` survive), bodies through the normal body
+  redaction, and `response_object`: `kind`, `apiVersion`, `name`,
+  `namespace`, `uid`, `resourceVersion`, `creationTimestamp`,
+  `generation`, and a `managedFields` summary (manager, operation,
+  apiVersion, time, subresource). Annotations, labels and `fieldsV1`
+  are never copied into `response_object`.
+- `response_object` is read from the response body **after** redaction,
+  never from the raw response. So a field a body-path rule removed, or
+  a credential shape the scrub replaced, shows the same marker in both
+  places. When the body is not recorded (a secret-bearing op such as
+  `k8s.secret.create`, a body over the 64 KiB cap, or a body that is
+  not JSON) there is no `response_object`.
+- A response body over the 64 KiB span cap is not recorded at all. The
+  shared redactor cuts an oversized body at the cap, and a cut body can
+  still parse as JSON (when only a trailing newline was cut), so Secret
+  data in it would have been stored. The hook hands over no body; the
+  span stores the omission marker plus a reason, and the trace is marked
+  uncertain (operator-only). Request bodies are masked whole before
+  the cap applies.
+- Secret payloads are masked before capture. Every JSON request and
+  response body first goes through the connector's structural Secret
+  redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
+  `data` / `stringData` value of a `kind: Secret` object, and its
+  `last-applied-configuration` annotation, is replaced by a placeholder
+  plus a digest; key names stay. This covers a `k8s.apply` of a Secret
+  manifest, a `k8s.cr.info` read of one, and the items of a
+  `SecretList` (which carry no `kind` of their own). The normal body
+  redaction then runs over the masked body.
+- Non-2xx (`ApiException`) and transport errors are recorded
+  (`status` = HTTP code or `error:<ExceptionClass>`) and re-raised
+  unchanged. With `_preload_content=False` the wrapper reads the body
+  first; `aiohttp` caches it, so the caller's later `json()` still
+  works. A `watch` / `follow` stream is never read. When that read
+  fails (a timeout, a connection dropped mid-body), the span is still
+  recorded with the request, the HTTP status, and the response headers;
+  only the body is missing. The caller's own read raises the same
+  error.
+- When capture is off the wrapper costs one contextvar read.
+- Not covered: `k8s.exec` over `WsApiClient` (websocket transport).
+
+The shared recorder is
+`flight_recorder/sdk_http.py::record_sdk_vendor_call`; it reuses the
+generic-connector redaction path so both span sources look the same.
 
 ### Topology discovery (`discover_topology`)
 

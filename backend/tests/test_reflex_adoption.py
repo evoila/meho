@@ -55,11 +55,13 @@ from meho_backplane.reflex.adoption import (
 )
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._request_usage_helpers import seed_usage_event
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS cache fixtures (mirrors test_retrieval_usage.py)
@@ -271,6 +273,57 @@ async def test_read_before_act_scores_first_call_vs_broadcast_recent() -> None:
     assert agent.read_before_act_sessions == 4
     assert agent.read_before_act_read_first == 2
     assert agent.read_before_act_pct == 50.0
+
+
+@pytest.mark.asyncio
+async def test_meta_tool_metrics_aggregate_from_request_usage_events() -> None:
+    """#3734: ``source="request_usage"`` reads the meta-tool calls from usage events.
+
+    * ``u1`` broadcast_recent then call_operation → read-first.
+    * ``u2`` call_operation only, plus one add_to_memory.
+    * A failed call event and audit envelope rows are ignored.
+    * Dispatch rows still come from ``audit_log`` (execution records).
+    """
+    await _seed_tenant(_TENANT_A)
+    u1, u2 = uuid.uuid4(), uuid.uuid4()
+    recent = f"tool:{BROADCAST_RECENT_TOOL}"
+    call = f"tool:{CALL_OPERATION_TOOL}"
+    for route, at, session in (
+        (recent, 10, u1),
+        (call, 20, u1),
+        (call, 30, u2),
+        (f"tool:{ADD_TOOLS[1]}", 40, u2),
+    ):
+        await seed_usage_event(
+            tenant_id=_TENANT_A, route=route, occurred_at=_at(at), session_id=session
+        )
+    await seed_usage_event(
+        tenant_id=_TENANT_A, route=call, occurred_at=_at(5), session_id=u1, outcome="denied"
+    )
+    await _seed_audit(
+        tenant_id=_TENANT_A, path=_CALL_PATH, occurred_at=_at(50), agent_session_id=u1
+    )
+    await _seed_dispatch(
+        tenant_id=_TENANT_A, op_id=_WRITE_OP, occurred_at=_at(60), agent_session_id=u1
+    )
+    await _seed_announce(tenant_id=_TENANT_A, run_id=u1, created_at=_at(1))
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        report = await compute_reflex_report(
+            session=session,
+            since=_SINCE,
+            until=_UNTIL,
+            tenant_id=_TENANT_A,
+            source="request_usage",
+        )
+    agent = _surface(report, "agent")
+    assert agent.read_before_act_sessions == 2
+    assert agent.read_before_act_read_first == 1
+    assert agent.write_back_call_operations == 2
+    assert agent.write_back_add_calls == 1
+    assert agent.announce_coverage_write_ops == 1
+    assert agent.announce_coverage_announced == 1
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +576,46 @@ def test_route_malformed_since_returns_400(client: TestClient) -> None:
         )
     assert resp.status_code == 400
     assert "whenever" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_route_reads_request_usage_events_not_wrapper_rows(client: TestClient) -> None:
+    """The route counts meta-tool calls from usage events, not wrapper rows (#3747).
+
+    A read-first session exists only as audit envelope rows; another one
+    exists only as usage events. The route reports the usage-event session
+    and ignores the wrapper rows.
+    """
+    tenant = uuid.UUID(_DEFAULT_TENANT_ID)
+    await _seed_tenant(tenant)
+    base = datetime.now(UTC) - timedelta(hours=2)
+    wrapper_sid, usage_sid = uuid.uuid4(), uuid.uuid4()
+    await _seed_audit(
+        tenant_id=tenant, path=_RECENT_PATH, occurred_at=base, agent_session_id=wrapper_sid
+    )
+    await _seed_audit(
+        tenant_id=tenant,
+        path=_CALL_PATH,
+        occurred_at=base + timedelta(minutes=1),
+        agent_session_id=wrapper_sid,
+    )
+    await seed_usage_event(
+        tenant_id=tenant,
+        route=f"tool:{CALL_OPERATION_TOOL}",
+        occurred_at=base + timedelta(minutes=2),
+        session_id=usage_sid,
+    )
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-1", tenant_role=TenantRole.OPERATOR.value)
+    with respx.mock as router:
+        _mock_discovery_and_jwks(router, _public_jwks(key))
+        resp = client.get("/api/v1/audit/reflex", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    agent = resp.json()["surfaces"][0]
+    assert agent["surface"] == "agent"
+    assert agent["read_before_act_sessions"] == 1
+    assert agent["read_before_act_read_first"] == 0
+    assert agent["write_back_call_operations"] == 1
 
 
 def test_route_default_returns_200_zero_report(client: TestClient) -> None:

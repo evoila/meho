@@ -4,8 +4,8 @@
 // Package memory hosts the top-level cobra commands `meho remember`,
 // `meho recall`, `meho forget`, `meho list`, and `meho promote` for
 // G5.1-T4 (#424) + G5.2-T4 (#627) of Initiative #332. The five verbs
-// wrap the REST routes shipped by G5.1-T2 (#422) plus the G0.4-T5
-// `/api/v1/retrieve` route for the `meho recall --query` retrieval
+// wrap the REST routes shipped by G5.1-T2 (#422) plus the
+// `/api/v1/memory/search` route for the `meho recall --query` search
 // form:
 //
 //   - `meho remember "body" [--scope SCOPE] [--slug SLUG]
@@ -15,7 +15,9 @@
 //   - `meho recall <scope>/<slug> [--target NAME] [--json]` —
 //     GET /api/v1/memory/{scope}/{slug}.
 //   - `meho recall --query "search terms" [--scope SCOPE] [--limit N]
-//     [--json]` — POST /api/v1/retrieve with source="memory".
+//     [--json]` — POST /api/v1/memory/search
+//     (MemoryService.search_memories). The server drops memories the
+//     caller may not see and expired memories before it ranks results.
 //   - `meho forget <scope>/<slug> [--target NAME] [--confirm]
 //     [--json]` — DELETE /api/v1/memory/{scope}/{slug}.
 //   - `meho list [--scope SCOPE] [--tag T] [--include-expired]

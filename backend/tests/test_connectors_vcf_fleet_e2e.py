@@ -48,7 +48,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -135,34 +134,17 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
 
 
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire.
-
-    Required for the same reason as every other DB-backed dispatcher
-    test: the real broadcast bus tries to write to a Redis stream that
-    doesn't exist in the unit-test environment.
-    """
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 # ---------------------------------------------------------------------------
 # Setup helpers
 # ---------------------------------------------------------------------------
 
 
-# Under the "modern default" dual-impl split (#3033 / #3037), a fleet target
-# fingerprinted at 9.0 resolves to the modern ``fleet-lcm`` impl by
-# most-specific-version. This E2E exercises the legacy ``fleet-rest`` ``/lcm/*``
-# dispatch surface with the full connector registry present (fleet-lcm is
-# eagerly imported), so it seeds an **8.x** fingerprint — ``fleet-rest``'s
-# domain (``>=8.0,<10.0``) — so the dispatcher's target-fingerprint resolution
+# Under the dual-impl split (#3033 / #4442), a fleet target fingerprinted at
+# 9.1 or newer resolves to the modern ``fleet-lcm`` impl. This E2E exercises
+# the legacy ``fleet-rest`` ``/lcm/*`` dispatch surface with the full
+# connector registry present (fleet-lcm is eagerly imported), so it seeds
+# an **8.x** fingerprint — ``fleet-rest``'s
+# domain (``>=8.0,<9.1``) — so the dispatcher's target-fingerprint resolution
 # (``dispatcher.py`` ``_resolve_executing_connector``) binds ``fleet-rest``
 # (whose stub credentials loader is injected in ``_resolve_connector``), not
 # ``fleet-lcm`` (whose default loader would hit Vault → ``VaultUnreachableError``).
@@ -232,7 +214,7 @@ class _FleetE2EBundle:
 
 
 @pytest.fixture
-async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2EBundle]:
+async def fleet_e2e_canary() -> AsyncIterator[_FleetE2EBundle]:
     """Dispatcher-ready Fleet setup over a respx-mocked appliance (happy-path).
 
     Lifecycle:

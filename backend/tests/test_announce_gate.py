@@ -34,12 +34,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
-    BroadcastEvent,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.broadcast.announce_gate import (
@@ -51,7 +49,7 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
@@ -344,17 +342,6 @@ def _reset_dispatch_state() -> Iterator[None]:
 
 
 @pytest.fixture
-def _quiet_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
-@pytest.fixture
 def stub_embedding_service() -> AsyncMock:
     service = AsyncMock()
     service.encode_one.return_value = [0.1] * 384
@@ -386,7 +373,6 @@ async def _register_op(
 async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     session: UUID | None,
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """Enabled tenant + caution write + no claim -> denied, both surfaces.
 
@@ -414,11 +400,20 @@ async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     assert result.status == "denied"
     assert result.extras["error_code"] == "announce_required"
     assert "meho_broadcast_announce" in result.error
+    # #4669: the refused call answers with the id of its own denied row.
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.delete")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "denied"
+    assert result.audit_id == rows[0].id
 
 
 async def test_dispatch_executes_when_gate_disabled(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """A disabled tenant runs the same op unaffected."""
     await _seed_tenant(enabled=False)
@@ -437,7 +432,6 @@ async def test_dispatch_executes_when_gate_disabled(
 
 async def test_dispatch_executes_when_claim_present(
     stub_embedding_service: AsyncMock,
-    _quiet_broadcast: list[BroadcastEvent],
 ) -> None:
     """An enabled tenant with a covering claim runs the op."""
     await _seed_tenant(enabled=True)

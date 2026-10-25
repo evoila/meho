@@ -21,15 +21,17 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
 __all__ = [
     "ConnectorReviewGroup",
+    "ConnectorReviewGroupAdvisory",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
     "ConnectorReviewProvenance",
+    "GroupSafetyDistribution",
 ]
 
 
@@ -101,6 +103,71 @@ class ConnectorReviewOp(BaseModel):
     needs_reingest: bool = False
 
 
+class ConnectorReviewDeleteOp(BaseModel):
+    """One stored ingested delete that sits below the ``destructive`` risk level (#3827).
+
+    The review report for stored deletes. Rows persisted by an earlier
+    ingest keep their old ``safety_level`` / ``requires_approval`` until the
+    connector is ingested again, so a guard test on the spec cannot show an
+    operator which stored rows still run without approval. Each row carries
+    what is stored next to what a fresh ingest of the same ``(method, path)``
+    would assign today (parser default, then the connector floor, then the
+    catalog overlay). ``needs_correction`` is ``True`` when the stored row is
+    weaker than that; ``reason`` says why in plain words.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    op_id: str
+    method: str
+    safety_level: str
+    requires_approval: bool
+    is_enabled: bool
+    expected_safety_level: str
+    expected_requires_approval: bool
+    needs_correction: bool
+    reason: str
+
+
+class GroupSafetyDistribution(BaseModel):
+    """Risk levels of the enabled ops in one group (#3671).
+
+    Counts only ops with ``is_enabled=True``. One count per value of the
+    closed ``safety_level`` set, plus how many of those ops need approval
+    and how many ops are enabled in total. Disabled ops are not counted.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled_op_count: int = 0
+    safe: int = 0
+    caution: int = 0
+    dangerous: int = 0
+    destructive: int = 0
+    requires_approval_count: int = 0
+
+
+class ConnectorReviewGroupAdvisory(BaseModel):
+    """Advice for the operator who reviews one group (#3671).
+
+    ``distribution`` is what the group's enabled ops really do.
+    ``flags`` lists short, plain notes where the group's ``when_to_use``
+    text does not match those ops (for example the text says
+    "read-only" but some ops need approval). Empty when nothing looks
+    wrong.
+
+    This is advice only. It never blocks a dispatch, an ingest, or the
+    move from ``staged`` to ``enabled``. Dispatch keeps using each op's
+    own ``safety_level``, ``requires_approval``, and policy; the group
+    label and its text are never part of that decision.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    distribution: GroupSafetyDistribution = Field(default_factory=GroupSafetyDistribution)
+    flags: list[str] = Field(default_factory=list)
+
+
 class ConnectorReviewGroup(BaseModel):
     """One group within the review payload.
 
@@ -120,6 +187,10 @@ class ConnectorReviewGroup(BaseModel):
     review_status: str
     op_count: int
     ops: list[ConnectorReviewOp]
+    # #3671: advice that compares ``when_to_use`` with the enabled ops.
+    # Additive with a default so existing construction call sites keep
+    # working; the service always sets it.
+    advisory: ConnectorReviewGroupAdvisory = Field(default_factory=ConnectorReviewGroupAdvisory)
 
 
 class ConnectorReviewPayload(BaseModel):
@@ -171,6 +242,14 @@ class ConnectorReviewPayload(BaseModel):
     # every op is grouped (the common case). Additive; defaults to ``0`` so
     # existing construction call sites keep working.
     ungrouped_op_count: int = 0
+    # #3870: the ops counted by ``ungrouped_op_count``, one entry each,
+    # sorted by ``op_id``, with the same per-op fields as a group's
+    # ``ops`` (enabled state, safety level, approval flag). Dispatch
+    # serves an enabled ungrouped op like any other, so the review lists
+    # them too: ``groups`` plus ``ungrouped_ops`` is the full op set.
+    # Additive with a default so existing construction call sites keep
+    # working; the service always sets it.
+    ungrouped_ops: list[ConnectorReviewOp] = []
     kind: ConnectorAuthoringKind = "ingested-shim"
     dispatchable: bool = False
     # #2291: one entry per spec ingested under this connector scope,
@@ -188,3 +267,13 @@ class ConnectorReviewPayload(BaseModel):
     # and operator curation are preserved by the upsert). Additive with
     # a default so existing construction call sites keep working.
     needs_reingest_op_count: int = 0
+    # #3827: every stored ingested delete-shaped op (``DELETE`` verb, or a
+    # write the connector floor treats as a removal) whose ``safety_level``
+    # is below ``destructive``, with the posture a fresh ingest would give.
+    # Counted over the full descriptor universe (group or not). Additive
+    # with a default so existing construction call sites keep working.
+    delete_ops_below_destructive: list[ConnectorReviewDeleteOp] = []
+    # How many of those rows are weaker than a fresh ingest would make them
+    # (``needs_correction``). ``> 0`` means an operator must ingest the
+    # connector again or correct the rows with ``edit-op``.
+    delete_ops_needing_correction_count: int = 0

@@ -693,10 +693,9 @@ Each sub-call writes its own audit row, all carrying the same
 composite parent row. `meho audit query --op-id 'gh.composite.*' --json`
 returns the composite rows; `meho audit replay <session-id>` then
 renders the parent + sub-call fan-out as a nested tree. The G8.2
-audit-replay surface is the supported way to inspect the linkage
-today; flat per-parent filtering on the CLI lands in a later release
-(the `--parent-audit-id` flag exists on `meho audit query` but the v0.2
-backend rejects it with HTTP 400 pending the recursive-CTE endpoint).
+audit-replay surface shows the whole tree. To list only the direct
+sub-calls of one composite row, run
+`meho audit query --parent-audit-id <composite-row-id>`.
 
 ## Common failure modes
 

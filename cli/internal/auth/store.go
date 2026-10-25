@@ -572,18 +572,24 @@ func (s *fallbackStore) Load(service, user string) (StoredToken, error) {
 // timestamps from pre-#3320 CLIs — resolve to the primary, preserving
 // the keyring's status as the canonical backend.
 func preferUsable(primary, secondary StoredToken) StoredToken {
-	primaryRenewable := primary.RefreshToken != ""
-	secondaryRenewable := secondary.RefreshToken != ""
-	if primaryRenewable != secondaryRenewable {
-		if primaryRenewable {
-			return primary
-		}
-		return secondary
-	}
-	if secondary.SavedAt.After(primary.SavedAt) {
+	if SecondaryWins(primary, secondary) {
 		return secondary
 	}
 	return primary
+}
+
+// SecondaryWins is the rule preferUsable applies, exposed so a
+// diagnostic such as `meho doctor` can say which store the CLI will
+// read without copying the rule: the entry with a refresh_token wins;
+// when both or neither have one, the more recently saved entry wins;
+// a tie goes to the primary (the keyring).
+func SecondaryWins(primary, secondary StoredToken) bool {
+	primaryRenewable := primary.RefreshToken != ""
+	secondaryRenewable := secondary.RefreshToken != ""
+	if primaryRenewable != secondaryRenewable {
+		return secondaryRenewable
+	}
+	return secondary.SavedAt.After(primary.SavedAt)
 }
 
 // Delete clears the entry from BOTH backends so no copy can be

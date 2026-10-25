@@ -26,7 +26,8 @@ Provider plane (``/cloudapi/1.0.0/*`` — Basic-auth →
 ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` JWT session):
 
 * ``vcfa.provider.org.list`` — ``GET /cloudapi/1.0.0/orgs``
-* ``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions``
+* ``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions`` on 9.0,
+  ``GET /cloudapi/v1/regions`` on 9.1 and newer (:func:`provider_regions_path`)
 * ``vcfa.provider.health`` — authenticated ``GET /cloudapi/1.0.0/orgs``
   (``pageSize=1``) plus the unauthenticated ``GET /iaas/api/about`` API
   version read, returned as one structured health object. Both paths serve
@@ -80,11 +81,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
+from packaging.version import InvalidVersion, Version
+
+from meho_backplane.connectors.resolver import resolve_target_version
+from meho_backplane.connectors.vcf_automation._op_schemas import (
+    ABOUT_RESPONSE,
+    IAAS_DEPLOYMENT_FIELDS,
+    IAAS_PROJECT_FIELDS,
+    ORG_FIELDS,
+    REGION_FIELDS,
+    cloudapi_page,
+    field,
+    guidance,
+    iaas_page,
+    obj,
+)
 from meho_backplane.connectors.vcf_automation._routing import Plane, plane_for_path
+from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
 __all__ = [
     "PROVIDER_ORGS_PATH",
     "PROVIDER_REGIONS_PATH",
+    "PROVIDER_REGIONS_V1_PATH",
     "TENANT_ABOUT_PATH",
     "TENANT_DEPLOYMENTS_PATH",
     "TENANT_DEPLOYMENT_DETAIL_PATH",
@@ -92,6 +110,7 @@ __all__ = [
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
     "VcfaTypedOp",
+    "provider_regions_path",
     "validate_typed_ops",
 ]
 
@@ -109,6 +128,11 @@ PROVIDER_ORGS_PATH: Final[str] = "/cloudapi/1.0.0/orgs"
 #: serving (consumer kb ``vcf-automation-9.0-provider-object-model.md``,
 #: probes 2026-05-16 / 2026-07-21).
 PROVIDER_REGIONS_PATH: Final[str] = "/cloudapi/vcf/regions"
+#: VCFA 9.1 and 9.1.1 document Region only under the ``v1/`` cloudapi
+#: prefix ("Query Regions"); their API references show no ``vcf/`` path
+#: at all (evoila/meho#4604). A 9.1 appliance still answers the 9.0 path,
+#: but that path is undocumented there.
+PROVIDER_REGIONS_V1_PATH: Final[str] = "/cloudapi/v1/regions"
 TENANT_PROJECTS_PATH: Final[str] = "/iaas/api/projects"
 TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
 #: Path template for the per-id deployment detail read. The ``{id}``
@@ -117,6 +141,34 @@ TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
 #: so the declared plane is validated before any substitution happens.
 TENANT_DEPLOYMENT_DETAIL_PATH: Final[str] = "/iaas/api/deployments/{id}"
 TENANT_ABOUT_PATH: Final[str] = "/iaas/api/about"
+
+#: First VCF Automation release whose API reference shows
+#: :data:`PROVIDER_REGIONS_V1_PATH` instead of :data:`PROVIDER_REGIONS_PATH`.
+_REGIONS_V1_MIN_VERSION: Final = Version("9.1")
+#: Upper guard so a date-shaped label that happens to parse (``2021.07``)
+#: is not taken for a product release (same guard as the 9.1 login pick).
+_PRODUCT_VERSION_CEILING: Final = Version("100")
+
+
+def provider_regions_path(target: VcfAutomationTargetLike) -> str:
+    """Return the region list path the API reference shows for *target*'s version.
+
+    9.1 and newer get :data:`PROVIDER_REGIONS_V1_PATH`. Anything else --
+    9.0, no version, or a label that is not a product version (the
+    fingerprint can record the ``2021-07-15`` API date) -- gets
+    :data:`PROVIDER_REGIONS_PATH`, which 9.0 documents and 9.1 still
+    answers. Same version rule as the 9.1 login pick in ``._auth``.
+    """
+    raw = resolve_target_version(target)
+    if raw is None:
+        return PROVIDER_REGIONS_PATH
+    try:
+        version = Version(raw)
+    except InvalidVersion:
+        return PROVIDER_REGIONS_PATH
+    if _REGIONS_V1_MIN_VERSION <= version < _PRODUCT_VERSION_CEILING:
+        return PROVIDER_REGIONS_V1_PATH
+    return PROVIDER_REGIONS_PATH
 
 
 @dataclass(frozen=True)
@@ -155,63 +207,64 @@ class VcfaTypedOp:
     llm_instructions: dict[str, Any] | None
 
 
-#: Curated ``when_to_use`` blurb per group. ``register_typed_operation``
-#: requires a non-empty string whenever ``group_key`` is set (#731); the
-#: registrar looks each op's ``group_key`` up here. Two groups, one per
-#: plane — every blurb names its plane so the agent's group-selection
-#: step never collapses a tenant question onto the provider group (or
-#: vice versa). Group keys are deliberately distinct from the ingested
-#: browse-group keys (``provider-orgs`` etc.) so the typed OperationGroup
-#: rows never collide with an ingested group's row on the
-#: ``(product, version, impl_id, group_key)`` natural key.
+#: Short text per group. The agent reads it through ``list_operation_groups``
+#: to pick a group, so it names the plane and the ops each group holds.
+#: ``register_typed_operation`` requires a non-empty string whenever
+#: ``group_key`` is set. The group keys differ from the ingested browse-group
+#: keys (``provider-orgs`` etc.) so the typed group rows never collide with an
+#: ingested group's row on ``(product, version, impl_id, group_key)``.
 VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
     "vcfa-provider-reads": (
-        "Use on the VCFA **provider (management) plane** to read the "
-        "cross-tenant appliance view a system administrator sees: list "
-        "organizations on the appliance (vcfa.provider.org.list), list "
-        "regions — the VCFA 9 evolution of the vCloud-Director provider "
-        "VDC, each backing compute/network under an NSX domain "
-        "(vcfa.provider.region.list), or run a provider-plane health check "
-        "(authenticated reachability + API version) before heavier reads "
-        "(vcfa.provider.health), or look up rights (vcfa.provider.right.list) "
-        "and global / per-org roles (vcfa.provider.role.list) before building a "
-        "custom role or a user. Provider-plane ops authenticate with the "
-        "admin@System (or equivalent) Basic-auth session and never "
-        "succeed against a tenant token. For per-tenant project / "
-        "deployment reads switch to the tenant-plane group."
+        "Reads on the VCF Automation provider plane: the view of the system "
+        "administrator across all tenants. List orgs (vcfa.provider.org.list) "
+        "and regions (vcfa.provider.region.list), check that the provider login "
+        "works (vcfa.provider.health), and look up rights "
+        "(vcfa.provider.right.list) and roles (vcfa.provider.role.list) before "
+        "you build a role or a user. These ops use the provider login; a tenant "
+        "token does not work here. All reads; nothing here changes anything."
     ),
     "vcfa-tenant-reads": (
-        "Use on the VCFA **tenant plane** to read within one tenant "
-        "organization: list projects, the deployment-scoping construct "
-        "every deployment belongs to (vcfa.tenant.project.list), list "
-        "deployments — which exist, which failed, which are stuck "
-        "in-progress, narrowable with a status $filter "
-        "(vcfa.tenant.deployment.list), read one deployment's detail by "
-        "id (vcfa.tenant.deployment.get), or read "
-        "the IaaS API self-describe surface — supported API versions + "
-        "latest version — as a tenant-plane reachability/version probe "
-        "(vcfa.tenant.about), or test only the tenant login -- does the "
-        "target's API token authenticate? -- with no data call "
-        "(vcfa.tenant.login.test). Tenant-plane ops authenticate with the "
-        "tenant org login (POST /iaas/api/login) and never succeed "
-        "against the provider JWT. For the cross-tenant org/region view "
-        "switch to the provider-plane group."
+        "Reads on the VCF Automation tenant plane, inside one tenant org: list "
+        "projects (vcfa.tenant.project.list) and deployments "
+        "(vcfa.tenant.deployment.list), read one deployment "
+        "(vcfa.tenant.deployment.get), read the API versions "
+        "(vcfa.tenant.about), or test only the tenant login "
+        "(vcfa.tenant.login.test). Also list what VCF Automation knows from "
+        "vCenter: vSphere networks (vcfa.tenant.fabric_network.list), computes "
+        "(vcfa.tenant.fabric_compute.list), regions (vcfa.tenant.region.list) and "
+        "cloud zones (vcfa.tenant.zone.list), and read a deploy request until it "
+        "ends (vcfa.tenant.blueprint_request.get). These ops use the tenant login; "
+        "the provider login does not work here. All reads."
     ),
     "vcfa-provider-writes": (
-        "Use on the VCFA **provider plane** to bootstrap a tenant: create a "
-        "tenant organization (vcfa.provider.org.create), a custom global role "
-        "from a base role plus extra rights and publish it to the org "
-        "(vcfa.provider.role.create), a local org user holding that role with "
-        "its password read from Vault (vcfa.provider.user.create), and mint "
-        "that user's API token straight into Vault -- never returned -- "
-        "(vcfa.provider.api_token.create) or revoke it "
-        "(vcfa.provider.api_token.revoke). All approval-gated; creates are "
-        "idempotent on name and answer 'unchanged' when the object exists."
+        "Changes on the VCF Automation provider plane that set up a tenant: "
+        "create an org (vcfa.provider.org.create), a custom role "
+        "(vcfa.provider.role.create) and a local user "
+        "(vcfa.provider.user.create), then create that user's API token and "
+        "store it in Vault (vcfa.provider.api_token.create), or revoke it "
+        "(vcfa.provider.api_token.revoke). A person must approve each call. A "
+        "create is safe to run twice: when the object exists, it answers "
+        "'unchanged'."
     ),
     "vcfa-tenant-writes": (
-        "Use on the VCFA **tenant plane** to create a project in the tenant "
-        "organization (vcfa.tenant.project.create), authenticated by the "
-        "target's tenant login. Approval-gated; idempotent on name."
+        "Changes on the VCF Automation tenant plane, to give a team its own "
+        "project, network and first deployment: set the address settings and "
+        "tags of a vSphere network (vcfa.tenant.fabric_network.update), create a "
+        "network profile (vcfa.tenant.network_profile.create), create a project "
+        "with a quota and a network rule (vcfa.tenant.project.create), deploy "
+        "from a cloud template or only plan it "
+        "(vcfa.tenant.blueprint_request.create), and delete a deployment "
+        "(vcfa.tenant.deployment.delete). A person must approve each call. Safe "
+        "to run twice: an object that exists answers 'unchanged'."
+    ),
+    "vcfa-tenant-images": (
+        "Image names of the tenant org (image profiles), on the tenant plane. A cloud "
+        "template asks for an image by name, for example 'RHEL 9'; the profile of each "
+        "region maps the name to a vCenter template. Read the names and their templates "
+        "(vcfa.tenant.image_profile.list) and the templates VCF Automation knows "
+        "(vcfa.tenant.fabric_image.list), make it read new vCenter templates now "
+        "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
+        "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
     ),
 }
 
@@ -220,20 +273,52 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
 # Shared parameter-schema fragments
 # ---------------------------------------------------------------------------
 
-#: The cloudapi provider-plane pagination query params (FIQL-style
-#: ``page`` / ``pageSize``) shared by org.list + region.list.
+#: The cloudapi provider-plane pagination query params (``page`` /
+#: ``pageSize``) shared by org.list + region.list.
 _PROVIDER_PAGINATION_PROPERTIES: dict[str, Any] = {
     "page": {
         "type": "integer",
         "minimum": 1,
-        "description": "1-based page number for the provider-plane result set. Omit for page 1.",
+        "description": "The page number, starting at 1. Omit for page 1.",
     },
     "pageSize": {
         "type": "integer",
         "minimum": 1,
         "maximum": 128,
-        "description": "Page size (max 128). Omit for the appliance default.",
+        "description": "Items per page (at most 128). Omit for the appliance default.",
     },
+}
+
+#: The tenant-plane OData query params shared by project.list +
+#: deployment.list.
+_TENANT_ODATA_PROPERTIES: dict[str, Any] = {
+    "$filter": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Optional OData filter, for example \"name eq '<name>'\".",
+    },
+    "$orderby": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Optional OData sort order, for example 'name asc'.",
+    },
+    "$top": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Optional number of items to return (page size).",
+    },
+    "$skip": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Optional number of items to skip (offset).",
+    },
+}
+
+_NO_PARAMS_WITH_EXAMPLE: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+    "examples": [{}],
 }
 
 
@@ -246,50 +331,37 @@ _PROVIDER_ORG_LIST = VcfaTypedOp(
     handler_attr="provider_org_list",
     plane="provider",
     path=PROVIDER_ORGS_PATH,
-    summary="List VCFA organizations on the appliance (provider plane).",
+    summary="List the organizations (tenants) on the VCF Automation appliance.",
     description=(
-        "Lists organizations on the VCFA appliance via "
-        "GET /cloudapi/1.0.0/orgs on the provider (management) plane — the "
-        "cross-tenant inventory a system administrator sees (every tenant "
-        "appears here). Supports FIQL-style 'page' / 'pageSize' pagination. "
-        "Returns a 'values' array; each entry carries id, name, displayName, "
-        "description, isEnabled, and orgVdcCount, plus 'resultTotal' for "
-        "pagination. safety_level=safe, read-only."
+        "Lists every org on the appliance with GET /cloudapi/1.0.0/orgs on the "
+        "provider plane. Each tenant is one org. Supports 'page' and 'pageSize'."
     ),
     parameter_schema={
         "type": "object",
         "properties": dict(_PROVIDER_PAGINATION_PROPERTIES),
         "additionalProperties": False,
+        "examples": [{"pageSize": 25}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "values": {"type": ["array", "null"]},
-            "resultTotal": {"type": ["integer", "null"]},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=cloudapi_page("orgs", ORG_FIELDS),
     group_key="vcfa-provider-reads",
     tags=("read-only", "vcfa", "provider"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call on the provider plane to enumerate the organizations "
-            "(tenants) on a VCFA appliance — the system-admin inventory "
-            "entry point. Paginate with 'page' / 'pageSize' on large "
-            "appliances."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call on the provider plane to list the orgs (tenants) on a VCF "
+            "Automation appliance. Use 'page' and 'pageSize' on a large appliance."
         ),
-        "output_shape": (
-            "{values: [Org, ...], resultTotal: int}. Each Org carries id, "
-            "name, displayName, isEnabled, orgVdcCount."
+        output_shape=(
+            "{values: [Org], resultTotal, pageCount, page, pageSize}. Each Org has "
+            "id, name, displayName, isEnabled, isClassicTenant and counts such as "
+            "orgVdcCount and userCount."
         ),
-        "next_step": (
-            "Switch to the tenant plane (vcfa.tenant.project.list) for "
-            "per-org reads, or vcfa.provider.region.list for the compute "
-            "inventory backing those orgs."
+        next_step=(
+            "Use vcfa.tenant.project.list for reads inside one org, or "
+            "vcfa.provider.region.list for the regions behind the orgs."
         ),
-    },
+    ),
 )
 
 _PROVIDER_REGION_LIST = VcfaTypedOp(
@@ -297,49 +369,40 @@ _PROVIDER_REGION_LIST = VcfaTypedOp(
     handler_attr="provider_region_list",
     plane="provider",
     path=PROVIDER_REGIONS_PATH,
-    summary="List VCFA regions on the appliance (provider plane).",
+    summary="List the regions on the VCF Automation appliance (provider plane).",
     description=(
-        "Lists VCFA regions via GET /cloudapi/vcf/regions on the provider "
-        "plane — the VCFA 9 evolution of the vCloud-Director provider VDC. "
-        "Each region groups compute/memory/networking under one NSX domain, "
-        "typically backed by one or more VCF workload domains. Supports "
-        "'page' / 'pageSize' pagination. Returns a 'values' array; each "
-        "entry carries id, name, description, nsxManager, supervisors, and "
-        "isEnabled, plus 'resultTotal'. Use to answer 'what compute capacity "
-        "does this appliance offer' or 'which region backs tenant X'. "
-        "safety_level=safe, read-only."
+        "Lists the regions on the provider plane: GET /cloudapi/vcf/regions on "
+        "VCF Automation 9.0, GET /cloudapi/v1/regions on 9.1 and newer. "
+        "A region groups compute, memory and networking under one NSX Manager, "
+        "with its vSphere Supervisors. Supports 'page' and 'pageSize'."
     ),
     parameter_schema={
         "type": "object",
         "properties": dict(_PROVIDER_PAGINATION_PROPERTIES),
         "additionalProperties": False,
+        "examples": [{"page": 1, "pageSize": 25}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "values": {"type": ["array", "null"]},
-            "resultTotal": {"type": ["integer", "null"]},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=cloudapi_page("regions", REGION_FIELDS),
     group_key="vcfa-provider-reads",
     tags=("read-only", "vcfa", "provider"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call on the provider plane to list the appliance's regions and "
-            "the compute/network capacity each offers."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call on the provider plane to list the regions and the capacity each "
+            "one offers, for example 'what compute does this appliance have'."
         ),
-        "output_shape": (
-            "{values: [Region, ...], resultTotal: int}. Each Region carries "
-            "id, name, nsxManager, supervisors, isEnabled."
+        output_shape=(
+            "{values: [Region], resultTotal, pageCount, page, pageSize}. Each Region "
+            "has id, name, status (READY, NOT_READY, ERROR, FAILED), nsxManager "
+            "{name, id}, supervisors [{name, id}], cpuCapacityMHz, "
+            "memoryCapacityMiB and storagePolicies."
         ),
-        "next_step": (
-            "Cross-reference a region id against tenant-plane deployment "
-            "reads to map workloads to regions."
+        next_step=(
+            "Check that the region you need has status READY, then read the "
+            "tenant side with vcfa.tenant.project.list."
         ),
-    },
+    ),
 )
 
 _PROVIDER_HEALTH = VcfaTypedOp(
@@ -350,30 +413,41 @@ _PROVIDER_HEALTH = VcfaTypedOp(
     # a path verified to serve GET on both VCFA 9.0 and 9.1. The former
     # ``GET /cloudapi/1.0.0/site`` answers 405 on 9.1 (evoila/meho#3865).
     path=PROVIDER_ORGS_PATH,
-    summary="Check VCFA provider-plane health: authenticated reachability + API version.",
+    summary="Check that the VCF Automation provider login works, and read the API version.",
     description=(
-        "Provider-plane health check for a VCFA appliance. Establishes (or "
-        "reuses) the provider session and reads GET /cloudapi/1.0.0/orgs "
-        "with pageSize=1 to prove the provider plane answers an "
-        "authenticated request, then reads the unauthenticated "
-        "GET /iaas/api/about for the appliance's IaaS API versions. Returns "
-        "{provider_plane: {reachable, authenticated, check, org_count}, "
-        "api: {reachable, latestApiVersion, supportedApiVersions} or "
-        "{reachable: false, error}}. A provider-plane failure (bad "
-        "credential, appliance down) surfaces as the op's error; an about "
-        "failure is reported inside 'api' without failing the check. "
-        "safety_level=safe, read-only."
+        "Logs in on the provider plane and reads GET /cloudapi/1.0.0/orgs with "
+        "pageSize=1, then reads GET /iaas/api/about without a login for the API "
+        "versions. A failed provider login fails the op; a failed about read is "
+        "reported in 'api'."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    parameter_schema=dict(_NO_PARAMS_WITH_EXAMPLE),
     response_schema={
         "type": "object",
         "properties": {
-            "provider_plane": {"type": "object"},
-            "api": {"type": "object"},
+            "provider_plane": obj(
+                "The result of the logged-in provider read.",
+                {
+                    "reachable": field("boolean", "Always true in a returned result."),
+                    "authenticated": field("boolean", "Always true in a returned result."),
+                    "check": field("string", "The request that was made."),
+                    "org_count": field(["integer", "null"], "The number of orgs on the appliance."),
+                },
+            ),
+            "api": obj(
+                "The result of the about read, made without a login.",
+                {
+                    "reachable": field("boolean", "False when the about read failed."),
+                    "latestApiVersion": field(
+                        ["string", "null"], "The newest API version, as a date."
+                    ),
+                    "supportedApiVersions": {
+                        "type": "array",
+                        "description": "Every supported API version, as dates.",
+                        "items": {"type": "string"},
+                    },
+                    "error": field("string", "Only when reachable is false: the error kind."),
+                },
+            ),
         },
         "required": ["provider_plane", "api"],
         "additionalProperties": True,
@@ -382,22 +456,23 @@ _PROVIDER_HEALTH = VcfaTypedOp(
     tags=("read-only", "vcfa", "provider", "health"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call as a pre-flight provider-plane probe: confirm the "
-            "appliance answers an authenticated provider request and read "
-            "its API version before heavier provider reads, or as a "
-            "post-deploy health check."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call first, to check that the appliance answers a logged-in provider "
+            "request and to read its API version, or as a health check after a "
+            "deploy."
         ),
-        "output_shape": (
-            "{provider_plane: {reachable, authenticated, check, org_count}, "
-            "api: {reachable, latestApiVersion, supportedApiVersions}}."
+        output_shape=(
+            "{provider_plane: {reachable, authenticated, check, org_count}, api: "
+            "{reachable, latestApiVersion, supportedApiVersions} or {reachable: "
+            "false, error}}. A bad credential or a down appliance is an op error, "
+            "not a result."
         ),
-        "next_step": (
-            "Proceed to vcfa.provider.org.list or vcfa.provider.region.list; "
-            "use vcfa.tenant.about to check the tenant-plane session."
+        next_step=(
+            "Go on with vcfa.provider.org.list or vcfa.provider.region.list; use "
+            "vcfa.tenant.about to check the tenant plane."
         ),
-    },
+    ),
 )
 
 
@@ -410,68 +485,35 @@ _TENANT_PROJECT_LIST = VcfaTypedOp(
     handler_attr="tenant_project_list",
     plane="tenant",
     path=TENANT_PROJECTS_PATH,
-    summary="List projects within the tenant organization (tenant plane).",
+    summary="List the projects in the tenant organization (tenant plane).",
     description=(
-        "Lists projects within the tenant organization via "
-        "GET /iaas/api/projects on the tenant plane. Projects are the "
-        "deployment-scoping construct — every deployment belongs to exactly "
-        "one project. Supports OData-style $filter / $orderby / $top / $skip "
-        "query params. Returns a 'content' array; each entry carries id, "
-        "name, description, organizationId, administrators[], members[], and "
-        "operationTimeout, plus totalElements / totalPages page metadata. "
-        "safety_level=safe, read-only."
+        "Lists the projects of the tenant org with GET /iaas/api/projects. Every "
+        "deployment belongs to exactly one project. Supports the OData params "
+        "$filter, $orderby, $top and $skip."
     ),
     parameter_schema={
         "type": "object",
-        "properties": {
-            "$filter": {
-                "type": "string",
-                "minLength": 1,
-                "description": ("Optional OData filter expression (e.g. \"name eq 'prod'\")."),
-            },
-            "$orderby": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional OData order-by expression.",
-            },
-            "$top": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "Optional page size (OData $top).",
-            },
-            "$skip": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Optional offset (OData $skip).",
-            },
-        },
+        "properties": dict(_TENANT_ODATA_PROPERTIES),
         "additionalProperties": False,
+        "examples": [{"$filter": "name eq '<project-name>'", "$top": 25}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "content": {"type": ["array", "null"]},
-            "totalElements": {"type": ["integer", "null"]},
-            "totalPages": {"type": ["integer", "null"]},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=iaas_page("projects", IAAS_PROJECT_FIELDS),
     group_key="vcfa-tenant-reads",
     tags=("read-only", "vcfa", "tenant"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call on the tenant plane to list projects in the tenant org — "
-            "the scoping construct for deployments and blueprint access. "
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call on the tenant plane to list the projects of the tenant org. "
             "Narrow with $filter when the operator named a project."
         ),
-        "output_shape": (
-            "{content: [Project, ...], totalElements, totalPages}. Each "
-            "Project carries id, name, organizationId, administrators[]."
+        output_shape=(
+            "{content: [Project], numberOfElements, totalElements}. Each Project "
+            "has id, name, description, orgId, administrators / members / viewers "
+            "[{email, type}], zones [{zoneId, priority}] and operationTimeout."
         ),
-        "next_step": ("Use a project id as the $filter scope for a follow-up deployment read."),
-    },
+        next_step="Use a project id to find its deployments with vcfa.tenant.deployment.list.",
+    ),
 )
 
 _TENANT_DEPLOYMENT_LIST = VcfaTypedOp(
@@ -479,80 +521,41 @@ _TENANT_DEPLOYMENT_LIST = VcfaTypedOp(
     handler_attr="tenant_deployment_list",
     plane="tenant",
     path=TENANT_DEPLOYMENTS_PATH,
-    summary="List deployments within the tenant organization (tenant plane).",
+    summary="List the deployments in the tenant organization (tenant plane).",
     description=(
-        "Lists deployments within the tenant organization via "
-        "GET /iaas/api/deployments on the tenant plane — the tenant-plane "
-        "inventory answer to 'which deployments exist, which failed, which "
-        "are stuck in-progress'; typically the first read when a tenant "
-        "reports 'my deployment didn't come up'. Supports OData-style "
-        "$filter / $orderby / $top / $skip query params; narrow to failures "
-        "with a status filter (e.g. \"status eq 'CREATE_FAILED'\"). Returns a "
-        "'content' array; each entry carries id, name, description, status, "
-        "projectId, blueprintId, ownedBy, createdAt, lastUpdatedAt, and "
-        "resources[], plus totalElements / totalPages page metadata. "
-        "safety_level=safe, read-only."
+        "Lists the deployments of the tenant org with GET /iaas/api/deployments: "
+        "which deployments exist and in which project. Usually the first read "
+        "when a tenant says 'my deployment did not come up'. Supports $filter, "
+        "$orderby, $top and $skip."
     ),
     parameter_schema={
         "type": "object",
-        "properties": {
-            "$filter": {
-                "type": "string",
-                "minLength": 1,
-                "description": (
-                    "Optional OData filter expression (e.g. \"status eq 'CREATE_FAILED'\")."
-                ),
-            },
-            "$orderby": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional OData order-by expression.",
-            },
-            "$top": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "Optional page size (OData $top).",
-            },
-            "$skip": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Optional offset (OData $skip).",
-            },
-        },
+        "properties": dict(_TENANT_ODATA_PROPERTIES),
         "additionalProperties": False,
+        "examples": [{"$filter": "name eq '<deployment-name>'", "$top": 25}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "content": {"type": ["array", "null"]},
-            "totalElements": {"type": ["integer", "null"]},
-            "totalPages": {"type": ["integer", "null"]},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=iaas_page("deployments", IAAS_DEPLOYMENT_FIELDS),
     group_key="vcfa-tenant-reads",
     tags=("read-only", "vcfa", "tenant"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call on the tenant plane to list deployments in the tenant org — "
-            "the first read when a tenant asks 'which deployments exist' or "
-            "reports 'my deployment didn't come up'. Narrow with a status "
-            "$filter (e.g. \"status eq 'CREATE_FAILED'\") to isolate failed or "
-            "in-progress deployments."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call on the tenant plane to list the deployments of the tenant org, "
+            "for example when a tenant asks which deployments exist or says one "
+            "did not come up. Narrow with $filter, for example on the name."
         ),
-        "output_shape": (
-            "{content: [Deployment, ...], totalElements, totalPages}. Each "
-            "Deployment carries id, name, status, projectId, blueprintId, "
-            "ownedBy, createdAt, lastUpdatedAt, resources[]."
+        output_shape=(
+            "{content: [Deployment], numberOfElements, totalElements}. The vendor "
+            "IaaS spec lists id, name, description, projectId, orgId, owner, "
+            "ownerType, createdAt and updatedAt for each Deployment; an appliance "
+            "may add more fields, such as status."
         ),
-        "next_step": (
-            "Drill into one deployment's full detail with "
-            "vcfa.tenant.deployment.get, or cross-reference projectId "
-            "against vcfa.tenant.project.list."
+        next_step=(
+            "Read one deployment with vcfa.tenant.deployment.get, or match "
+            "projectId against vcfa.tenant.project.list."
         ),
-    },
+    ),
 )
 
 _TENANT_DEPLOYMENT_GET = VcfaTypedOp(
@@ -560,17 +563,11 @@ _TENANT_DEPLOYMENT_GET = VcfaTypedOp(
     handler_attr="tenant_deployment_get",
     plane="tenant",
     path=TENANT_DEPLOYMENT_DETAIL_PATH,
-    summary="Read one deployment by id within the tenant organization (tenant plane).",
+    summary="Read one deployment by id in the tenant organization (tenant plane).",
     description=(
-        "Reads one deployment's detail via GET /iaas/api/deployments/{id} "
-        "on the tenant plane — the drill-down after "
-        "vcfa.tenant.deployment.list surfaced a deployment worth "
-        "inspecting (a failure to triage, a stuck in-progress create). "
-        "Requires the deployment id (from vcfa.tenant.deployment.list). "
-        "Returns the single deployment object: id, name, description, "
-        "status, projectId, blueprintId, ownedBy, createdAt, "
-        "lastUpdatedAt, and resources[] — the same shape as one "
-        "'content' entry of the list op. safety_level=safe, read-only."
+        "Reads one deployment with GET /iaas/api/deployments/{id} on the tenant "
+        "plane: the next step after vcfa.tenant.deployment.list found a "
+        "deployment to look at. Needs the deployment id."
     ),
     parameter_schema={
         "type": "object",
@@ -583,40 +580,26 @@ _TENANT_DEPLOYMENT_GET = VcfaTypedOp(
         },
         "required": ["id"],
         "additionalProperties": False,
+        "examples": [{"id": "<deployment-id>"}],
     },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "id": {"type": ["string", "null"]},
-            "name": {"type": ["string", "null"]},
-            "status": {"type": ["string", "null"]},
-            "projectId": {"type": ["string", "null"]},
-            "resources": {"type": ["array", "null"]},
-        },
-        "additionalProperties": True,
-    },
+    response_schema=obj("One deployment.", dict(IAAS_DEPLOYMENT_FIELDS)),
     group_key="vcfa-tenant-reads",
     tags=("read-only", "vcfa", "tenant"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call on the tenant plane with a deployment id to read one "
-            "deployment's full detail — the drill-down after "
-            "vcfa.tenant.deployment.list surfaced a failed or stuck "
-            "deployment worth inspecting."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call on the tenant plane with a deployment id to read that one "
+            "deployment, after vcfa.tenant.deployment.list found one to look at."
         ),
-        "output_shape": (
-            "{id, name, status, projectId, blueprintId, ownedBy, "
-            "createdAt, lastUpdatedAt, resources: [...]}. One deployment "
-            "object — the same shape as one 'content' entry of the list op."
+        output_shape=(
+            "One Deployment, the same shape as one 'content' entry of the list op: "
+            "id, name, description, projectId, orgId, owner, ownerType, createdAt, "
+            "updatedAt, plus any fields the appliance adds."
         ),
-        "next_step": (
-            "Inspect status and resources[] to triage the deployment, or "
-            "cross-reference projectId against vcfa.tenant.project.list."
-        ),
-        "parameter_hints": {"id": "The deployment id from vcfa.tenant.deployment.list."},
-    },
+        next_step="Match projectId against vcfa.tenant.project.list to find the project.",
+        parameter_hints={"id": "The deployment id from vcfa.tenant.deployment.list."},
+    ),
 )
 
 _TENANT_ABOUT = VcfaTypedOp(
@@ -624,44 +607,29 @@ _TENANT_ABOUT = VcfaTypedOp(
     handler_attr="tenant_about",
     plane="tenant",
     path=TENANT_ABOUT_PATH,
-    summary="Read the tenant IaaS API self-describe surface (tenant plane).",
+    summary="Read the API versions of the tenant plane (tenant plane).",
     description=(
-        "Reads the tenant IaaS API self-describe surface via "
-        "GET /iaas/api/about on the tenant plane — supportedApis[] (each "
-        "with an apiVersion + documentation URL) and latestApiVersion. A "
-        "2xx here confirms tenant-plane reachability and version "
-        "negotiation; it is the tenant-plane analogue of the provider-plane "
-        "vcfa.provider.health probe. safety_level=safe, read-only."
+        "Reads GET /iaas/api/about on the tenant plane: the supported API versions "
+        "and the newest one. An answer shows that the tenant plane works; it is "
+        "the tenant-side partner of vcfa.provider.health."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "latestApiVersion": {"type": ["string", "null"]},
-            "supportedApis": {"type": ["array", "null"]},
-        },
-        "additionalProperties": True,
-    },
+    parameter_schema=dict(_NO_PARAMS_WITH_EXAMPLE),
+    response_schema=ABOUT_RESPONSE,
     group_key="vcfa-tenant-reads",
     tags=("read-only", "vcfa", "tenant", "health"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions={
-        "when_to_call": (
-            "Call as a tenant-plane probe: confirm the IaaS API answers and "
-            "read the latest supported API version before tenant catalog "
-            "reads, or as a post-deploy health check."
+    llm_instructions=guidance(
+        when_to_call=(
+            "Call to check that the tenant plane answers and to read its newest API "
+            "version, before tenant reads or as a health check after a deploy."
         ),
-        "output_shape": ("{supportedApis: [{apiVersion, ...}], latestApiVersion}."),
-        "next_step": (
-            "Confirm latestApiVersion is in the supported range, then "
-            "proceed to vcfa.tenant.project.list."
+        output_shape=(
+            "{latestApiVersion, supportedApis: [{apiVersion, documentationLink, "
+            "deprecationPolicy}]}. The versions are dates, not product versions."
         ),
-    },
+        next_step="Go on with vcfa.tenant.project.list.",
+    ),
 )
 
 

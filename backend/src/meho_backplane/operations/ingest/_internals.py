@@ -33,7 +33,8 @@ import structlog
 from sqlalchemy import CursorResult, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
 from meho_backplane.operations.ingest.connector_registration import (
     resolved_auto_shim_class,
@@ -45,6 +46,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "AUDIT_METHOD",
+    "OP_CROSS_TENANT_INGEST",
     "OP_DELETE_CONNECTOR",
     "OP_DISABLE_CONNECTOR",
     "OP_EDIT_GROUP",
@@ -66,8 +68,11 @@ __all__ = [
     "load_groups",
     "load_op",
     "load_ops_in_groups",
+    "load_ops_outside_groups",
     "operator_disabled_op_ids",
     "scope_has_groups",
+    "scope_has_rows",
+    "select_groups",
     "ungrouped_op_ids",
     "validate_edit_op_args",
     "write_audit_row",
@@ -94,6 +99,10 @@ OP_LLM_GROUPING: Final[str] = "meho_connector_llm_grouping"
 #: ``is_enabled=False`` / ``review_status='staged'`` behind the review gate.
 #: The audit row makes the dispatchability change durable and attributable.
 OP_PROFILE_STAMP: Final[str] = "meho_connector_profile_stamp"
+#: Audit op-id for a ``platform_admin`` ingest into another tenant (#3800).
+#: The row is attributed to the acting operator; the payload names the
+#: target tenant.
+OP_CROSS_TENANT_INGEST: Final[str] = "meho_connector_ingest_cross_tenant"
 
 #: HTTP methods that classify an ingested op as *read-class*. The
 #: bulk read-class enable path (G0.25-T7 #1749) flips ``is_enabled``
@@ -162,14 +171,16 @@ class ConnectorScope:
 # ---------------------------------------------------------------------------
 
 
-async def load_groups(
+async def select_groups(
     session: AsyncSession,
     scope: ConnectorScope,
-    connector_id: str,
 ) -> list[OperationGroup]:
     """Return every :class:`OperationGroup` row in *scope* sorted by ``group_key``.
 
-    Empty result → :class:`ConnectorNotFoundError`. The "is_None"
+    Returns ``[]`` when the scope has no group rows: the review render
+    uses this so a connector whose grouping pass produced no buckets
+    still lists its ops as ``ungrouped_ops`` (#3870). Callers that need
+    "no groups" to be an error use :func:`load_groups`. The "is_None"
     guard matches the SQL semantics SQLAlchemy emits
     (``tenant_id IS NULL`` vs ``tenant_id = :tid``). The deterministic
     sort makes review payloads round-trippable across calls and
@@ -186,7 +197,21 @@ async def load_groups(
         stmt = stmt.where(OperationGroup.tenant_id == scope.tenant_id)
     stmt = stmt.order_by(OperationGroup.group_key)
     result = await session.execute(stmt)
-    groups = list(result.scalars().all())
+    return list(result.scalars().all())
+
+
+async def load_groups(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    connector_id: str,
+) -> list[OperationGroup]:
+    """Return every :class:`OperationGroup` row in *scope*, or raise when there are none.
+
+    :func:`select_groups` plus the empty-result guard: an empty result
+    → :class:`ConnectorNotFoundError`. The group transition paths use
+    this because they have nothing to act on without group rows.
+    """
+    groups = await select_groups(session, scope)
     if not groups:
         raise ConnectorNotFoundError(
             connector_id=connector_id,
@@ -227,6 +252,41 @@ async def scope_has_groups(
         stmt = stmt.where(OperationGroup.tenant_id.is_(None))
     else:
         stmt = stmt.where(OperationGroup.tenant_id == scope.tenant_id)
+    stmt = stmt.limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
+
+
+async def scope_has_rows(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> bool:
+    """Return whether *scope* holds any group row **or** any descriptor row.
+
+    The existence probe behind the shared read / enable-reads resolver
+    (:meth:`~meho_backplane.operations.ingest.service.ReviewService._resolve_existing_scope`).
+    A connector whose grouping pass failed has descriptor rows but no
+    group rows, and dispatch still serves its enabled ops, so the review
+    must find it (#3870). :func:`scope_has_groups` alone would miss it.
+    The group probe runs first because it is the common case; the
+    descriptor probe is the same ``SELECT 1 ... LIMIT 1`` shape over
+    ``endpoint_descriptor`` with the same scope predicate.
+    """
+    if await scope_has_groups(session, scope):
+        return True
+    stmt = (
+        select(literal(1))
+        .select_from(EndpointDescriptor)
+        .where(
+            EndpointDescriptor.product == scope.product,
+            EndpointDescriptor.version == scope.version,
+            EndpointDescriptor.impl_id == scope.impl_id,
+        )
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
     stmt = stmt.limit(1)
     result = await session.execute(stmt)
     return result.scalar_one_or_none() is not None
@@ -321,6 +381,39 @@ async def load_ops_in_groups(
     return list(result.scalars().all())
 
 
+async def load_ops_outside_groups(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    group_ids: list[UUID],
+) -> list[EndpointDescriptor]:
+    """Return *scope*'s descriptors that are not in any of *group_ids*.
+
+    The complement of :func:`load_ops_in_groups` over the same scope:
+    ops with ``group_id IS NULL`` plus any op whose group is not in
+    *group_ids*. The review payload lists these as ``ungrouped_ops`` so
+    the review shows every op dispatch can serve (#3870). Same
+    universe as :func:`count_ops_in_scope` minus the grouped ops, so
+    the list length equals the payload's ``ungrouped_op_count``. Sorted
+    by ``op_id``.
+    """
+    stmt = select(EndpointDescriptor).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+    )
+    if group_ids:
+        stmt = stmt.where(
+            EndpointDescriptor.group_id.is_(None) | EndpointDescriptor.group_id.notin_(group_ids)
+        )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    stmt = stmt.order_by(EndpointDescriptor.op_id)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def count_ops_in_scope(session: AsyncSession, scope: ConnectorScope) -> int:
     """Count **every** :class:`EndpointDescriptor` row for *scope*, group or not.
 
@@ -370,6 +463,36 @@ async def count_needs_reingest_in_scope(session: AsyncSession, scope: ConnectorS
     return int(await session.scalar(stmt) or 0)
 
 
+async def load_ingested_writes_in_scope(
+    session: AsyncSession, scope: ConnectorScope
+) -> list[EndpointDescriptor]:
+    """Return *scope*'s ingested write rows that sit below ``destructive`` (#3827).
+
+    The input of the review report for stored deletes. Same full-universe
+    predicate as :func:`count_ops_in_scope` (group or not), narrowed to
+    ``source_kind='ingested'`` rows with a mutating verb and a
+    ``safety_level`` other than ``destructive``. Reads are never
+    delete-shaped and a ``destructive`` row is already at the top level,
+    so neither can appear on the report. Sorted by ``op_id`` so the report
+    is stable across calls.
+    """
+    stmt = select(EndpointDescriptor).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+        EndpointDescriptor.source_kind == "ingested",
+        EndpointDescriptor.method.in_(("POST", "PUT", "PATCH", "DELETE")),
+        EndpointDescriptor.safety_level != "destructive",
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    stmt = stmt.order_by(EndpointDescriptor.op_id)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 # ---------------------------------------------------------------------------
 # Audit emission
 # ---------------------------------------------------------------------------
@@ -404,10 +527,28 @@ async def write_audit_row(
     :func:`~meho_backplane.audit._write_audit_row` so SQLAlchemy's
     ``Numeric`` adapter sees the same input across every audit
     writer in the codebase.
+
+    ``work_ref`` is read off
+    :data:`~meho_backplane.operations._audit.work_ref_var`. The audit
+    middleware binds the request's ``Meho-Work-Ref`` header there for
+    the whole request (#3804), so a connector action made with
+    ``meho --work-ref ...`` is found by ``meho audit query --work-ref``
+    together with its HTTP request row. ``None`` when no reference
+    was supplied.
+
+    ``agent_session_id`` comes from
+    :func:`~meho_backplane.operations._audit.resolve_agent_session_id`:
+    the agent run's session when the action runs inside an agent loop,
+    else the MCP session the client sent. It is set here, on every
+    service-level row, so a session search finds the action whether or
+    not ``AUDIT_WRAPPER_ROWS_RETIRED`` is on (the cutover listener only
+    fills lineage when that setting is on). ``None`` for a plain REST
+    request without a session.
     """
     audit_id = uuid.uuid4()
     row = AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator_sub,
         tenant_id=operator_tenant_id,
@@ -416,6 +557,8 @@ async def write_audit_row(
         status_code=200,
         request_id=None,
         duration_ms=Decimal("0"),
+        agent_session_id=resolve_agent_session_id(),
+        work_ref=work_ref_var.get(),
         payload=payload,
     )
     session.add(row)

@@ -40,15 +40,17 @@ import jsonschema
 import pytest
 from fastapi.testclient import TestClient
 
+import meho_backplane.operations.meta_tools as meta_tools
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledWindow
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.operations._errors import result_rate_limited
 from meho_backplane.operations.addon_capability import AddonCapabilityService
 from meho_backplane.operations.addon_capability_schemas import (
     CapabilityDeclaration,
@@ -58,7 +60,13 @@ from meho_backplane.operations.addon_capability_schemas import (
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import BACKPLANE_CONTRACT_VERSION
 from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.meta_tools import SEARCH_OUTCOMES
+from meho_backplane.retrieval.retriever import RetrievalHit
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
+from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
+from tests._result_store_helpers import MemoryResultStore
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
@@ -70,12 +78,6 @@ from tests.mcp_test_fixtures import (
 )
 
 _DOCS_CAPABILITY = "meho-docs"
-
-#: Patch sites for the fail-open broadcast publishers inside the
-#: topology write services (the writes themselves are real).
-_PUBLISH_ANNOTATE = "meho_backplane.topology.annotate.publish_event"
-_PUBLISH_NODES = "meho_backplane.topology.nodes.publish_event"
-_PUBLISH_DELETE = "meho_backplane.topology.node_delete.publish_event"
 
 #: Tools covered by a scenario in this file. Compared against the live
 #: registry by :func:`test_every_declaring_tool_has_a_conformance_scenario`.
@@ -100,6 +102,7 @@ _COVERED_TOOLS: frozenset[str] = frozenset(
         "query_audit",
         "query_topology",
         "result_query",
+        "search_memory",
         "search_operations",
     }
 )
@@ -130,7 +133,7 @@ def _call(
     )
 
 
-def _assert_conforms(tool_name: str, response: Any) -> dict[str, Any]:
+def _assert_conforms(tool_name: str, response: Any, *, is_error: bool = False) -> dict[str, Any]:
     """Assert a successful tools/call response conforms to the declared schema.
 
     Returns the ``structuredContent`` payload for scenario-specific
@@ -138,12 +141,17 @@ def _assert_conforms(tool_name: str, response: Any) -> dict[str, Any]:
     Draft 2020-12 validator + format checker the input side uses
     (``handlers.handle_tools_call``), so ``format: uuid`` in a declared
     schema is load-bearing here too.
+
+    ``is_error`` is the expected MCP ``isError`` flag. It is ``True`` only
+    for an ``OperationResult`` envelope whose status is ``error``,
+    ``denied`` or ``rate_limited`` (MCP 2025-06-18 §Tools/Error Handling).
+    The structured result must conform to the schema either way.
     """
     assert response.status_code == 200
     body = response.json()
     assert "error" not in body, body
     result = body["result"]
-    assert result["isError"] is False, result
+    assert result["isError"] is is_error, result
     assert "structuredContent" in result, (
         f"{tool_name}: declaring tool emitted no structuredContent (#2774)"
     )
@@ -472,37 +480,51 @@ def test_result_query_conforms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Window read-back over a stubbed store; handler shaping is real."""
-    client, _op = client_with_operator
+    client, op = client_with_operator
     handle_id = uuid.uuid4()
-    rows = [{"i": i} for i in range(8)]
-
-    class _StubStore:
-        async def fetch_window(
-            self,
-            *,
-            tenant_id: uuid.UUID,
-            operator_sub: str,
-            handle_id: uuid.UUID,
-            offset: int,
-            limit: int,
-        ) -> SpilledWindow:
-            window = rows[offset : offset + limit]
-            return SpilledWindow(
-                rows=window,
-                total_rows=len(rows),
-                stored_rows=len(rows),
-                truncated=False,
-            )
+    store = MemoryResultStore()
+    store.seed(
+        tenant_id=op.tenant_id,
+        operator_sub=op.sub,
+        handle_id=handle_id,
+        rows=[{"i": i} for i in range(8)],
+    )
 
     # Patch the shared core's store getter — the windowed read moved there in
     # #3179 and the MCP handler now delegates to it.
-    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: _StubStore())
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     payload = _assert_conforms(
         "result_query",
         _call(client, "result_query", {"handle_id": str(handle_id), "limit": 5}),
     )
     assert payload["returned_rows"] == 5
     assert payload["total_rows"] == 8
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize(("path", "value_type"), [("/items", "array"), ("/name", "string")])
+def test_result_query_path_read_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    value_type: str,
+) -> None:
+    """A document ``path`` read (#3633) fits the same output schema."""
+    client, op = client_with_operator
+    handle_id = uuid.uuid4()
+    store = MemoryResultStore()
+    store.seed_document(
+        tenant_id=op.tenant_id,
+        operator_sub=op.sub,
+        handle_id=handle_id,
+        document={"name": "doc", "items": [1, {"k": 2}]},
+    )
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    payload = _assert_conforms(
+        "result_query",
+        _call(client, "result_query", {"handle_id": str(handle_id), "query": {"path": path}}),
+    )
+    assert payload["value_type"] == value_type
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +573,64 @@ def test_search_operations_conforms(
         ),
     )
     assert isinstance(payload["hits"], list)
+    assert payload["outcome"] in SEARCH_OUTCOMES
+    # #3668: an operator's ranked hits are slim even when scores are asked for.
+    slim = _assert_conforms(
+        "search_operations",
+        _call(
+            client,
+            "search_operations",
+            {"connector_id": "vault-1.x", "query": "health", "include_scores": True},
+            req_id=2,
+        ),
+    )
+    assert slim["hits"], slim
+    for hit in slim["hits"]:
+        assert not {"fused_score", "bm25_score", "cosine_score"} & set(hit)
+    # #3668: exact-op mode returns one call contract that conforms too.
+    exact = _assert_conforms(
+        "search_operations",
+        _call(
+            client,
+            "search_operations",
+            {"connector_id": "vault-1.x", "op_id": "vault.sys.health"},
+            req_id=3,
+        ),
+    )
+    assert "hits" not in exact
+    assert exact["operation"]["op_id"] == "vault.sys.health"
+    assert exact["operation"]["target"]["resolves_by"] == "name"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_search_operations_admin_scores_conform(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3668: the tenant_admin ``include_scores`` opt-in adds the scores."""
+    client, _op = client_with_operator
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+
+    def _fake_get_embedding_service() -> Any:
+        return service
+
+    monkeypatch.setattr(
+        "meho_backplane.operations._search.get_embedding_service",
+        _fake_get_embedding_service,
+    )
+    payload = _assert_conforms(
+        "search_operations",
+        _call(
+            client,
+            "search_operations",
+            {"connector_id": "vault-1.x", "query": "health", "include_scores": True},
+        ),
+    )
+    assert payload["hits"], payload
+    assert all("fused_score" in hit for hit in payload["hits"])
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
@@ -562,16 +642,15 @@ def test_call_operation_ok_envelope_conforms(
     (including the always-present ``handle`` key the pre-#2774 schema
     omitted)."""
     client, _op = client_with_operator
-    with patch(_PUBLISH_NODES, new=AsyncMock()):
-        response = _call(
-            client,
-            "call_operation",
-            {
-                "connector_id": "topology-graph-1.x",
-                "op_id": "topology.create_node",
-                "params": {"kind": "vault-role", "name": "conf-call-op"},
-            },
-        )
+    response = _call(
+        client,
+        "call_operation",
+        {
+            "connector_id": "topology-graph-1.x",
+            "op_id": "topology.create_node",
+            "params": {"kind": "vault-role", "name": "conf-call-op"},
+        },
+    )
     payload = _assert_conforms("call_operation", response)
     assert payload["status"] == "ok", payload
     assert "handle" in payload
@@ -581,6 +660,141 @@ def test_call_operation_ok_envelope_conforms(
     # their declared UUID / enum shapes against the real dispatcher path.
     assert uuid.UUID(payload["audit_id"])
     assert payload["delivery"] == "complete"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_call_operation_over_wire_ceiling_keeps_completed_status(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed write over the response wire ceiling stays ``ok`` (#3641).
+
+    The ceiling is set to its floor, the smallest value ``Settings`` accepts.
+    The real dispatch runs and its result is padded past that floor on the
+    way back, because this op's own response is far below it. The write ran
+    and its audit row committed, so the envelope keeps ``status="ok"`` and
+    the ``audit_id`` receipt, drops the inline result, and says
+    ``delivery="unavailable"`` (this op mints no handle). It still conforms
+    to the declared ``outputSchema`` and fits the ceiling.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES",
+        str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES),
+    )
+    get_settings.cache_clear()
+    client, _op = client_with_operator
+    real_dispatch = meta_tools.dispatch
+
+    async def padded_dispatch(*args: Any, **kwargs: Any) -> OperationResult:
+        result = await real_dispatch(*args, **kwargs)
+        assert isinstance(result.result, dict)
+        padding = {"padding": "x" * (2 * RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)}
+        return result.model_copy(update={"result": {**result.result, **padding}})
+
+    with (
+        patch.object(meta_tools, "dispatch", new=padded_dispatch),
+    ):
+        response = _call(
+            client,
+            "call_operation",
+            {
+                "connector_id": "topology-graph-1.x",
+                "op_id": "topology.create_node",
+                "params": {"kind": "vault-role", "name": "conf-call-op-over-ceiling"},
+            },
+        )
+    payload = _assert_conforms("call_operation", response)
+    assert payload["status"] == "ok", payload
+    assert payload["status"] not in {"error", "connector_error"}
+    assert "connector_error" not in json.dumps(payload)
+    assert payload["delivery"] == "unavailable"
+    assert uuid.UUID(payload["audit_id"])
+    assert "handle" in payload and payload["handle"] is None
+    assert payload["result"] is None
+    assert "Do not re-invoke" in payload["extras"]["remediation"]
+    assert payload["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert measure_delivered_wire_bytes(payload) <= RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_call_operation_refuses_undeliverable_receipt_before_dispatch(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An op_id whose receipt cannot fit the wire ceiling is refused, not run (#3641).
+
+    The ceiling is set to its floor. A 256-character non-ASCII op_id is
+    escaped twice in the ``tools/call`` text block, so even the receipt of
+    a completed run would be over the ceiling. ``call_operation`` returns
+    the ``receipt_too_large`` error envelope before dispatch: no run, no
+    audit row. The envelope still conforms to the declared ``outputSchema``.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES",
+        str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES),
+    )
+    get_settings.cache_clear()
+    client, _op = client_with_operator
+    dispatch_mock = AsyncMock()
+    with patch.object(meta_tools, "dispatch", new=dispatch_mock):
+        response = _call(
+            client,
+            "call_operation",
+            {
+                "connector_id": "topology-graph-1.x",
+                "op_id": "\u00e9" * 256,
+                "params": {"kind": "vault-role", "name": "conf-call-op-refused"},
+            },
+        )
+    payload = _assert_conforms("call_operation", response, is_error=True)
+    assert payload["status"] == "error", payload
+    assert payload["extras"]["error_code"] == "receipt_too_large"
+    assert payload["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert payload["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert payload["audit_id"] is None
+    assert payload["result"] is None
+    assert "did not run" in payload["error"]
+    dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_call_operation_rate_limited_envelope_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A rate-limited call is a tool execution error that still conforms (#3500).
+
+    The dispatcher refuses a caller over its rate or concurrency cap with
+    ``status="rate_limited"``. A client that checks the structured result
+    against the declared ``outputSchema`` must accept it, and the MCP
+    ``isError`` flag is ``true`` (MCP 2025-06-18 §Tools/Error Handling).
+    The envelope keeps ``extras.retry_after_seconds`` so the agent knows
+    how long to wait.
+    """
+    client, _op = client_with_operator
+    dispatch_mock = AsyncMock(
+        return_value=result_rate_limited(
+            "topology.create_node",
+            kind="rate",
+            limit=60,
+            retry_after_seconds=7,
+            duration_ms=1.0,
+        )
+    )
+    with patch.object(meta_tools, "dispatch", new=dispatch_mock):
+        response = _call(
+            client,
+            "call_operation",
+            {
+                "connector_id": "topology-graph-1.x",
+                "op_id": "topology.create_node",
+                "params": {"kind": "vault-role", "name": "conf-call-op-rate-limited"},
+            },
+        )
+    payload = _assert_conforms("call_operation", response, is_error=True)
+    assert payload["status"] == "rate_limited", payload
+    assert payload["extras"]["error_code"] == "rate_limited"
+    assert payload["extras"]["retry_after_seconds"] == 7
+    dispatch_mock.assert_awaited_once()
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -614,12 +828,21 @@ def test_preview_operation_unavailable_envelope_conforms(
 def test_query_topology_untracked_closure_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """Closure kind on an untracked anchor: the ``node_untracked`` envelope."""
+    """Closure kind on an untracked anchor: the ``node_untracked`` envelope.
+
+    The bounded closure substrate is PG-only from its first statement
+    (one-snapshot transaction, statement timeout), so like the edges
+    facet below it is stubbed at the tool's import site; the envelope the
+    handler builds from ``NodeNotFoundError`` is what this scenario pins.
+    ``tests/integration/test_topology_query.py`` covers the real lookup.
+    """
     client, _op = client_with_operator
-    payload = _assert_conforms(
-        "query_topology",
-        _call(client, "query_topology", {"kind": "dependents", "target": "ghost"}),
-    )
+    untracked = AsyncMock(side_effect=NodeNotFoundError("ghost"))
+    with patch("meho_backplane.mcp.tools.topology.bounded_closure", new=untracked):
+        payload = _assert_conforms(
+            "query_topology",
+            _call(client, "query_topology", {"kind": "dependents", "target": "ghost"}),
+        )
     assert payload["status"] == "node_untracked"
     assert payload["nodes"] == []
 
@@ -656,6 +879,68 @@ def test_query_topology_edges_conforms(
         )
     assert payload["kind"] == "edges"
     assert payload["edges"][0]["kind"] == "depends-on"
+
+
+def _memory_retrieval_hit(
+    op: Operator, kind: str, slug: str, metadata: dict[str, Any], rank: int
+) -> RetrievalHit:
+    ts = datetime(2026, 9, 1, 8, 0, 0, tzinfo=UTC)
+    return RetrievalHit(
+        document_id=uuid.uuid4(),
+        tenant_id=op.tenant_id,
+        source="memory",
+        source_id=f"stub:{slug}",
+        kind=kind,
+        body="disk pressure on the backup node " * 40,
+        doc_metadata=metadata,
+        created_at=ts,
+        updated_at=ts,
+        fused_score=1.0 / (60 + rank),
+        bm25_score=0.2,
+        cosine_score=0.8,
+        bm25_rank=rank,
+        cosine_rank=rank,
+    )
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("max_bytes", [None, 3 * RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES])
+def test_search_memory_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    max_bytes: int | None,
+) -> None:
+    """Bounded Memory hits conform, both complete and partial (#3751)."""
+    if max_bytes is not None:
+        monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(max_bytes))
+        get_settings.cache_clear()
+    client, op = client_with_operator
+    hits = [
+        _memory_retrieval_hit(
+            op, "memory-user", f"own-{i}", {"user_sub": op.sub, "expires_at": None}, i + 1
+        )
+        for i in range(8)
+    ]
+    hits.append(
+        _memory_retrieval_hit(
+            op,
+            "memory-target",
+            "shared",
+            {"target_name": "infra-1", "expires_at": "2099-01-01T00:00:00+00:00"},
+            9,
+        )
+    )
+    with patch("meho_backplane.memory.service.retrieve", new=AsyncMock(return_value=hits)):
+        payload = _assert_conforms(
+            "search_memory", _call(client, "search_memory", {"query": "disk"})
+        )
+    if max_bytes is None:
+        assert payload["delivery"] == "complete"
+        assert len(payload["hits"]) == len(hits)
+        assert payload["hits"][-1]["expiry_state"] == "scheduled"
+    else:
+        assert payload["delivery"] == "partial"
+        assert payload["omitted_hits"] == len(hits) - len(payload["hits"])
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -753,25 +1038,24 @@ async def test_topology_annotate_and_unannotate_conform(
     await _seed_tenant()
     await _seed_node(kind="service", name="svc-x")
     await _seed_node(kind="database", name="db-y")
-    with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-        annotated = _assert_conforms(
+    annotated = _assert_conforms(
+        "meho_topology_annotate",
+        _call(
+            client,
             "meho_topology_annotate",
-            _call(
-                client,
-                "meho_topology_annotate",
-                {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"},
-            ),
-        )
-        assert annotated["source"] == "curated"
-        removed = _assert_conforms(
+            {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"},
+        ),
+    )
+    assert annotated["source"] == "curated"
+    removed = _assert_conforms(
+        "meho_topology_unannotate",
+        _call(
+            client,
             "meho_topology_unannotate",
-            _call(
-                client,
-                "meho_topology_unannotate",
-                {"edge_id": annotated["edge_id"]},
-                req_id=2,
-            ),
-        )
+            {"edge_id": annotated["edge_id"]},
+            req_id=2,
+        ),
+    )
     assert removed == {"edge_id": annotated["edge_id"]}
 
 
@@ -780,15 +1064,14 @@ def test_topology_create_node_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
     client, _op = client_with_operator
-    with patch(_PUBLISH_NODES, new=AsyncMock()):
-        payload = _assert_conforms(
+    payload = _assert_conforms(
+        "meho_topology_create_node",
+        _call(
+            client,
             "meho_topology_create_node",
-            _call(
-                client,
-                "meho_topology_create_node",
-                {"kind": "vault-role", "name": "conf-node"},
-            ),
-        )
+            {"kind": "vault-role", "name": "conf-node"},
+        ),
+    )
     assert payload["was_created"] is True
     assert payload["source"] == "curated"
 
@@ -800,11 +1083,10 @@ async def test_topology_delete_node_conforms(
     client, _op = client_with_operator
     await _seed_tenant()
     node_id = await _seed_node(kind="vault-role", name="doomed", source="curated")
-    with patch(_PUBLISH_DELETE, new=AsyncMock()):
-        payload = _assert_conforms(
-            "meho_topology_delete_node",
-            _call(client, "meho_topology_delete_node", {"node_id": str(node_id)}),
-        )
+    payload = _assert_conforms(
+        "meho_topology_delete_node",
+        _call(client, "meho_topology_delete_node", {"node_id": str(node_id)}),
+    )
     assert payload == {"node_id": str(node_id), "kind": "vault-role", "name": "doomed"}
 
 
@@ -826,16 +1108,15 @@ async def test_topology_bulk_import_dry_run_and_apply_conform(
     assert plan["dry_run"] is True
     assert plan["rows"][0]["edge_id"] is None
 
-    with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
-        applied = _assert_conforms(
+    applied = _assert_conforms(
+        "meho_topology_bulk_import",
+        _call(
+            client,
             "meho_topology_bulk_import",
-            _call(
-                client,
-                "meho_topology_bulk_import",
-                {"rows": rows, "dry_run": False},
-                req_id=2,
-            ),
-        )
+            {"rows": rows, "dry_run": False},
+            req_id=2,
+        ),
+    )
     assert applied["dry_run"] is False
     assert applied["created"] == 1
 

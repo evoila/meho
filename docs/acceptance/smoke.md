@@ -15,18 +15,18 @@ Copyright (c) 2026 evoila Group
 > This document codifies **what "passing" looks like** for the
 > federation-chain end-to-end smoke. The actual smoke run executes on
 > the consumer side
-> ([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc));
+> (`evoila-bosnia/claude-rdc-hetzner-dc`);
 > the producer (this repo) owns the acceptance bar + the verifier the
 > consumer's wrapper invokes as its last step.
 
 ## Tracking issue
 
 This contract closes
-[`evoila-bosnia/meho-internal#56`](https://github.com/evoila-bosnia/meho-internal/issues/56)
+`evoila-bosnia/meho-internal#56`
 (parent Initiative
-[#54](https://github.com/evoila-bosnia/meho-internal/issues/54),
+#54,
 parent Goal
-[#11](https://github.com/evoila-bosnia/meho-internal/issues/11)).
+#11).
 
 ## Why this lives in `evoila/meho`
 
@@ -48,11 +48,11 @@ the federation chain depends on:
 
 | # | Leg | What it proves end-to-end | Predecessor task |
 | --- | --- | --- | --- |
-| 1 | **login** | `meho login <backplane>` (device-code flow) succeeds; the resulting access token is persisted in the OS keyring (or a 0600-mode file on headless hosts) and is usable by subsequent CLI calls. Verifies the Keycloak → CLI → token-store chain. | [`#44`](https://github.com/evoila-bosnia/meho-internal/issues/44) — `meho login` (G2.6-T2) / [`#42`](https://github.com/evoila-bosnia/meho-internal/issues/42) — CLI binary (G2.6) |
-| 2 | **status** | `meho status --json` (or the equivalent `curl -H "Authorization: Bearer ..." /api/v1/health`) returns 200 and the JSON response carries `operator.sub`, `vault.reachable=true`, `vault.read_ok=true`, `db.migrated=true`. Verifies the Status API + JWT middleware + the federation summary surface. | [`#45`](https://github.com/evoila-bosnia/meho-internal/issues/45) — `meho status` (G2.6-T3) |
-| 3 | **audit-row** | An authenticated `GET /api/v1/health` writes a synchronous row to `audit_log` (operator_sub, method=GET, path=/api/v1/health, status_code=200) before the response returns. Verifies the audit middleware's "row-before-response" contract end-to-end. | [`#28`](https://github.com/evoila-bosnia/meho-internal/issues/28) — audit middleware (G2.3-T2) |
-| 4 | **Vault** | The same `/api/v1/health` call exercises a Vault JWT/OIDC round-trip — the backplane forwards the operator's JWT to Vault, Vault verifies against the configured Keycloak trust, returns a Vault token bound to the operator, and the backplane reads `secret/meho/test/federation` under that token. Verifies the federation chain. | [`#25`](https://github.com/evoila-bosnia/meho-internal/issues/25) — Vault JWT federation (G2.2) |
-| 5 | **DB-migration state** | The chassis's `db_migration_probe()` reports `alembic_version == head`. Optional cluster-side cross-check: `kubectl get job -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>` shows `succeeded=1`, OR the helm release status is `deployed` (when the Job was GC'd by the hook-succeeded delete-policy). Verifies the migration-runner contract. | [`#29`](https://github.com/evoila-bosnia/meho-internal/issues/29) — migration runner + CI guard (G2.3-T3) |
+| 1 | **login** | `meho login <backplane>` (device-code flow) succeeds; the resulting access token is persisted in the OS keyring (or a 0600-mode file on headless hosts) and is usable by subsequent CLI calls. Verifies the Keycloak → CLI → token-store chain. | `#44` — `meho login` (G2.6-T2) / `#42` — CLI binary (G2.6) |
+| 2 | **status** | `meho status --json` (or the equivalent `curl -H "Authorization: Bearer ..." /api/v1/health`) returns 200 and the JSON response carries `operator.sub`, `vault.reachable=true`, `vault.read_ok=true`, `db.migrated=true`. Verifies the Status API + JWT middleware + the federation summary surface. | `#45` — `meho status` (G2.6-T3) |
+| 3 | **audit-row** | An authenticated `GET /api/v1/health` writes a synchronous row to `audit_log` (operator_sub, method=GET, path=/api/v1/health, status_code=200) before the response returns. Verifies the audit middleware's "row-before-response" contract end-to-end. | `#28` — audit middleware (G2.3-T2) |
+| 4 | **Vault** | The same `/api/v1/health` call exercises a Vault JWT/OIDC round-trip — the backplane forwards the operator's JWT to Vault, Vault verifies against the configured Keycloak trust, returns a Vault token bound to the operator, and the backplane reads `secret/meho/test/federation` under that token. Verifies the federation chain. | `#25` — Vault JWT federation (G2.2) |
+| 5 | **DB-migration state** | The chassis's `db_migration_probe()` reports `alembic_version == head`. Optional cluster-side cross-check: `kubectl get job -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>` shows `succeeded=1`, OR the helm release status is `deployed` (when the Job was GC'd by the hook-succeeded delete-policy). Verifies the migration-runner contract. | `#29` — migration runner + CI guard (G2.3-T3) |
 
 **Role requirement.** `GET /api/v1/health` is gated at
 `TenantRole.OPERATOR` (least-privilege hardening: every call
@@ -292,7 +292,7 @@ closing-comment artefact on issue #56.
 ## Acceptance-criteria status
 
 The full set of acceptance criteria on
-[issue #56](https://github.com/evoila-bosnia/meho-internal/issues/56)
+issue #56
 and where each lands:
 
 | AC | Status at PR-time | Evidence path |
@@ -335,24 +335,24 @@ explode under the operator's hand.
 ## References
 
 - Parent Goal:
-  [#11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11)
+  #11 — Deployable v0.1
   (DoD bullet 2)
 - Parent Initiative:
-  [#54 — G2.8 Acceptance / dogfood proof](https://github.com/evoila-bosnia/meho-internal/issues/54)
+  #54 — G2.8 Acceptance / dogfood proof
 - This task:
-  [#56 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state)](https://github.com/evoila-bosnia/meho-internal/issues/56)
+  #56 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state)
 - Predecessors:
-  - [Task #42](https://github.com/evoila-bosnia/meho-internal/issues/42) — CLI binary (G2.6)
-  - [Task #44](https://github.com/evoila-bosnia/meho-internal/issues/44) — `meho login` device-code flow (G2.6-T2)
-  - [Task #45](https://github.com/evoila-bosnia/meho-internal/issues/45) — `meho status` (G2.6-T3)
-  - [Task #25](https://github.com/evoila-bosnia/meho-internal/issues/25) — Vault JWT federation (G2.2)
-  - [Task #28](https://github.com/evoila-bosnia/meho-internal/issues/28) — audit middleware (G2.3-T2)
-  - [Task #29](https://github.com/evoila-bosnia/meho-internal/issues/29) — migration runner entrypoint (G2.3-T3)
-  - [Task #55](https://github.com/evoila-bosnia/meho-internal/issues/55) (closed) — `install.sh` cold-deploy contract
+  - Task #42 — CLI binary (G2.6)
+  - Task #44 — `meho login` device-code flow (G2.6-T2)
+  - Task #45 — `meho status` (G2.6-T3)
+  - Task #25 — Vault JWT federation (G2.2)
+  - Task #28 — audit middleware (G2.3-T2)
+  - Task #29 — migration runner entrypoint (G2.3-T3)
+  - Task #55 (closed) — `install.sh` cold-deploy contract
 - Sibling acceptance tasks:
-  [#55](https://github.com/evoila-bosnia/meho-internal/issues/55) (closed),
-  [#57](https://github.com/evoila-bosnia/meho-internal/issues/57) (closed),
-  [#58](https://github.com/evoila-bosnia/meho-internal/issues/58)
+  #55 (closed),
+  #57 (closed),
+  #58
 - Producer artefacts the smoke uses:
   - CLI: [`https://github.com/evoila/meho/releases`](https://github.com/evoila/meho/releases) (`meho login`, `meho status`)
   - Authenticated health: [`backend/src/meho_backplane/api/v1/health.py`](../../backend/src/meho_backplane/api/v1/health.py)

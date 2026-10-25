@@ -64,19 +64,21 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
     KIND_SLUG_MAX_LENGTH,
     KIND_SLUG_MIN_LENGTH,
     KIND_SLUG_PATTERN,
+    SOURCE_SCOPE_GLOBAL,
     WELL_KNOWN_NODE_KINDS,
+    AuditEventClass,
     AuditLog,
     GraphHistoryChangeKind,
     GraphNode,
     is_valid_kind_slug,
 )
-from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.topology.history import node_snapshot, record_node_change
+from meho_backplane.topology.identity_mode import NOT_LEGACY_SCOPE, read_identity_mode
+from meho_backplane.topology.resolvers import AmbiguousNodeError
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -222,6 +224,7 @@ def _build_audit_row(
     """
     return AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         actor_sub=resolve_actor_sub(),
@@ -267,49 +270,42 @@ def _create_node_is_meaningful(*, before: dict[str, Any] | None, after: dict[str
     return _strip(before) != _strip(after)
 
 
-async def _publish(
-    *,
-    audit_id: uuid.UUID,
-    operator: Operator,
-    node_name: str,
-    payload: dict[str, Any],
-) -> None:
-    """Fail-open broadcast publish.
+async def _find_seed_target(
+    session: AsyncSession, *, tenant_id: uuid.UUID, kind: str, name: str
+) -> GraphNode | None:
+    """The row a seed of ``(kind, name)`` merges into, or ``None`` to insert.
 
-    Same shape as :func:`annotate._publish` — emits the broadcast event
-    and swallows publisher failure so a broken stream never rolls back
-    a successful create_or_get.
+    ``legacy:`` rows are skipped: they were set aside by the #3749 scope
+    cut-over and must not be revived by a seed. After the cut-over the
+    same ``(kind, name)`` can exist in several scopes; then the seed
+    cannot know which one is meant and raises
+    :class:`~meho_backplane.topology.resolvers.AmbiguousNodeError`.
     """
-    try:
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=operator.tenant_id,
-            principal_sub=operator.sub,
-            principal_name=operator.name,
-            target_name=node_name,
-            op_id=_CREATE_NODE_OP_ID,
-            op_class=_OP_CLASS,
-            result_status="ok",
-            audit_id=audit_id,
-            payload=payload,
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
+    rows = list(
+        (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    GraphNode.kind == kind,
+                    GraphNode.name == name,
+                    NOT_LEGACY_SCOPE,
+                )
+            )
         )
-        await publish_event(event)
-    except Exception:
-        _log.exception(
-            "topology_create_node_broadcast_failed",
-            op_id=_CREATE_NODE_OP_ID,
-            tenant_id=str(operator.tenant_id),
+        .scalars()
+        .all()
+    )
+    if len(rows) > 1:
+        raise AmbiguousNodeError(
+            name, [kind], scopes=sorted(r.source_scope or "unresolved" for r in rows)
         )
+    return rows[0] if rows else None
 
 
-# code-quality-allow: pre-existing >100-line function (210 lines on
-# main, ~140 of them contract docstring); #2536 adds only the
-# source='curated' stamp + promotion flip.
+# Pre-existing >100-line function (210 lines on main, ~140 of them
+# contract docstring); #2536 adds only the source='curated' stamp +
+# promotion flip; #3749 adds the identity-mode read and scoped insert.
+# code-quality-allow: long contract docstring, see the note above.
 async def create_or_get_node(
     session: AsyncSession,
     operator: Operator,
@@ -413,12 +409,10 @@ async def create_or_get_node(
     audit_id = uuid.uuid4()
 
     async with session.begin():
-        existing_stmt = select(GraphNode).where(
-            GraphNode.tenant_id == operator.tenant_id,
-            GraphNode.kind == canonical_kind,
-            GraphNode.name == name,
+        scoped = await read_identity_mode(session, lock=True) == "scoped"
+        existing = await _find_seed_target(
+            session, tenant_id=operator.tenant_id, kind=canonical_kind, name=name
         )
-        existing = (await session.execute(existing_stmt)).scalar_one_or_none()
 
         now = datetime.now(UTC)
         seed_props: dict[str, Any] = {
@@ -440,6 +434,10 @@ async def create_or_get_node(
                 discovered_by=operator.sub,
                 first_seen=now,
                 last_seen=now,
+                # Scoped mode (#3749): an operator seed names a thing for
+                # the whole tenant. Legacy mode keeps NULL, as before.
+                source_scope=SOURCE_SCOPE_GLOBAL if scoped else None,
+                source_scope_provenance="curated" if scoped else None,
             )
             session.add(node)
             await session.flush()
@@ -518,10 +516,4 @@ async def create_or_get_node(
             )
         )
 
-    await _publish(
-        audit_id=audit_id,
-        operator=operator,
-        node_name=node.name,
-        payload=payload,
-    )
     return CreateNodeResult(node=node, was_created=was_created)

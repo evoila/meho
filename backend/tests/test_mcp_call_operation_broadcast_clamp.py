@@ -1,34 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Regression tests for #93: ``call_operation`` envelope broadcast clamping.
+"""Regression tests for #93: ``call_operation`` keeps agent secrets out of audit.
 
-Bug: ``handle_tools_call`` called ``compute_effective_broadcast_detail``
-with ``op_id=audit_name`` (the literal string ``"call_operation"``).
-``classify_op("call_operation")`` falls through to ``"other"`` →
-``_default_detail("other")`` returns ``"full"`` → the broadcast event's
-``payload`` contained ``params`` with the raw agent arguments, including
-secret-bearing fields (``vault.kv.put``'s ``params.data``,
-``vault.auth.userpass.write``'s ``params.password``).
+Bug (#93): ``handle_tools_call`` classified the wrapper tool by its own
+name (``"call_operation"``), which falls through to ``"other"`` and so
+treated secret-bearing arguments (``vault.kv.put``'s ``params.data``,
+``vault.auth.userpass.write``'s ``params.password``) as routine detail.
 
 Fix (#93): when ``audit_name == "call_operation"`` and ``arguments``
-carries a non-empty string ``op_id``, the resolver is called with the
-inner op_id so ``classify_op`` sees the real operation and clamps
-credential classes to aggregate-only — matching the inner DISPATCH row's
-precedent at ``operations/_audit.py:443``.
+carries a non-empty string ``op_id``, the inner op id drives the
+sensitivity classification, so credential classes are clamped.
 
-Coverage matrix (per issue #93 acceptance criteria):
+A tool call publishes no Broadcast event (#3758): the wrapper audit row
+is the record. These tests drive the real MCP transport with the inner
+dispatch stubbed, then read the stored ``audit_log`` rows back:
 
-* AC#1 / AC#2: every op_id in the credential-bearing classes
-  (``credential_write``, ``credential_mint``, ``credential_read``) dispatched
-  via ``call_operation`` produces an envelope ``BroadcastEvent`` whose
-  ``payload`` is ``{op_class, result_status}`` with **no** ``params`` key
-  and no secret string anywhere in the serialised payload.
-* AC#3: a non-secret inner op (``k8s.node.list`` → ``read``) still
-  broadcasts at full detail — the envelope ``payload`` contains a ``params``
-  key so the fix does not over-clamp non-secret ops.
-* AC#5 / AC#6: the existing MCP audit-row tests for ``call_operation`` pass
-  unmodified; the envelope's ``op_id`` and audit ``path`` are unchanged.
+* AC#1 / AC#2: for every op in the credential-bearing classes
+  (``credential_write``, ``credential_mint``, ``credential_read``) the
+  secret in the ``call_operation`` params reaches **no** audit row, and
+  no row carries a raw ``params`` key.
+* AC#5: the wrapper row keeps ``op_id == "call_operation"`` (and the
+  ``/mcp/tools/call/call_operation`` path) so ``meho audit query``
+  cardinality and path-based correlations are unchanged.
 """
 
 from __future__ import annotations
@@ -40,21 +34,27 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
+from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
 )
 
 # ---------------------------------------------------------------------------
-# Canary secret value — asserted to NEVER appear in broadcast payloads
+# Canary secret value — asserted to NEVER appear in a stored audit row
 # ---------------------------------------------------------------------------
 
-_SECRET_TOKEN = "s3cr3t-canary-must-not-leak-onto-feed"
+_SECRET_TOKEN = "s3cr3t-canary-must-not-leak-into-audit"
+
+_WRAPPER_PATH = "/mcp/tools/call/call_operation"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -86,46 +86,24 @@ def _dummy_dispatch_result(op_id: str) -> dict[str, Any]:
     return {"status": "ok", "op_id": op_id, "duration_ms": 1.0, "result": {}}
 
 
+async def _audit_rows() -> list[AuditLog]:
+    """Every ``audit_log`` row the request wrote, oldest first.
+
+    Excludes the boot-profile stamp row the app lifespan writes on
+    startup (#2288); it is unrelated to the request under test.
+    """
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            select(AuditLog)
+            .where(AuditLog.operator_sub != BOOT_STAMP_OPERATOR_SUB)
+            .order_by(AuditLog.occurred_at)
+        )
+        return list(result.scalars().all())
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def captured_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Intercept ``publish_event`` in the MCP handlers module.
-
-    ``publish_event`` is imported into ``meho_backplane.mcp.handlers``
-    at module load time, so the patch target is the name as bound in
-    that module's namespace, not the canonical module where the symbol
-    lives.  This mirrors the pattern in
-    :mod:`tests.test_connectors_vcf_automation_credread`.
-    """
-    import meho_backplane.mcp.handlers as handlers_module
-
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(handlers_module, "publish_event", _capture)
-    return events
-
-
-@pytest.fixture
-def stub_audit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub out ``write_mcp_audit_row`` so tests don't need a real DB write.
-
-    The audit contract (row shape, fail-closed semantics) is covered by
-    :mod:`tests.test_mcp_audit`; these tests focus exclusively on the
-    broadcast-payload content.
-    """
-    import meho_backplane.mcp.handlers as handlers_module
-
-    async def _noop(**_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr(handlers_module, "write_mcp_audit_row", _noop)
 
 
 @pytest.fixture
@@ -134,8 +112,9 @@ def stub_call_operation() -> Iterator[AsyncMock]:
 
     Patches the name as bound in ``meho_backplane.mcp.tools.operations``
     (the module that registers the ``call_operation`` MCP tool and calls
-    this function from ``_call_operation_handler``).  Returns a mock that
-    echoes the ``op_id`` from the arguments so callers can introspect it.
+    this function from ``_call_operation_handler``). With the inner
+    dispatch stubbed, the only audit row a call can write is the
+    wrapper row ``handle_tools_call`` commits.
     """
     with patch(
         "meho_backplane.mcp.tools.operations.call_operation",
@@ -150,7 +129,7 @@ def stub_call_operation() -> Iterator[AsyncMock]:
 
 
 # ---------------------------------------------------------------------------
-# AC#1 + AC#2: credential-bearing ops → aggregate-only envelope payload
+# AC#1 + AC#2: credential-bearing ops → the secret reaches no audit row
 # ---------------------------------------------------------------------------
 
 _CREDENTIAL_WRITE_OPS = [
@@ -166,14 +145,14 @@ _CREDENTIAL_WRITE_OPS = [
 ]
 
 _CREDENTIAL_MINT_OPS = [
-    ("vault.token.create", {"policies": ["default"]}),
-    ("vault.auth.approle.generate_secret_id", {"role_name": "my-role"}),
-    ("harbor.robot.create", {"name": "ci-bot", "permissions": []}),
+    ("vault.token.create", {"policies": ["default"], "note": _SECRET_TOKEN}),
+    ("vault.auth.approle.generate_secret_id", {"role_name": "my-role", "note": _SECRET_TOKEN}),
+    ("harbor.robot.create", {"name": "ci-bot", "permissions": [], "note": _SECRET_TOKEN}),
 ]
 
 _CREDENTIAL_READ_OPS = [
-    ("vault.kv.read", {"path": "secret/app"}),
-    ("vault.kv.list", {"path": "secret/"}),
+    ("vault.kv.read", {"path": "secret/app", "note": _SECRET_TOKEN}),
+    ("vault.kv.list", {"path": "secret/", "note": _SECRET_TOKEN}),
 ]
 
 _ALL_CREDENTIAL_OPS = _CREDENTIAL_WRITE_OPS + _CREDENTIAL_MINT_OPS + _CREDENTIAL_READ_OPS
@@ -186,21 +165,19 @@ _ALL_CREDENTIAL_OPS = _CREDENTIAL_WRITE_OPS + _CREDENTIAL_MINT_OPS + _CREDENTIAL
 )
 @pytest.mark.parametrize("inner_op_id,op_params", _ALL_CREDENTIAL_OPS)
 @pytest.mark.asyncio
-async def test_call_operation_credential_inner_op_broadcasts_aggregate_only(
+async def test_call_operation_credential_inner_op_secret_reaches_no_audit_row(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    captured_broadcast: list[BroadcastEvent],
-    stub_audit: None,
+    seeded_operator_tenant: None,  # noqa: F811
     stub_call_operation: AsyncMock,
     inner_op_id: str,
     op_params: dict[str, Any],
 ) -> None:
-    """AC#1 + AC#2: a credential-class inner op via ``call_operation`` never
-    ships ``params`` on the broadcast feed.
+    """AC#1 + AC#2: a secret in the ``call_operation`` params is stored nowhere.
 
-    Asserts both the structural absence of ``"params"`` in the envelope
-    ``BroadcastEvent.payload`` AND the full absence of the canary secret
-    string from the serialised payload, so a future shape change that
-    embeds the params under a different key doesn't quietly regress.
+    Asserts both the structural absence of a raw ``params`` key on every
+    stored row AND the absence of the canary secret string from every
+    serialised row payload, so a future shape change that embeds the
+    params under a different key doesn't quietly regress.
     """
     client, _op = client_with_operator
 
@@ -213,31 +190,20 @@ async def test_call_operation_credential_inner_op_broadcasts_aggregate_only(
     assert "error" not in body, f"unexpected MCP error for {inner_op_id}: {body}"
     assert body["result"]["isError"] is False
 
-    # Exactly one broadcast event should have been published.
-    assert len(captured_broadcast) == 1, (
-        f"expected 1 broadcast event for {inner_op_id}, got {len(captured_broadcast)}"
-    )
-    event = captured_broadcast[0]
-
-    # The payload must be the aggregate shape: {op_class, result_status}.
-    assert "params" not in event.payload, (
-        f"credential inner op {inner_op_id!r} leaked params onto the feed: {event.payload}"
-    )
-
-    # Belt-and-suspenders: the canary secret must not appear anywhere in
-    # the serialised event, even if the shape changes under a new key.
-    serialised = json.dumps(event.payload)
-    assert _SECRET_TOKEN not in serialised, (
-        f"canary secret found in broadcast payload for {inner_op_id!r}: {serialised}"
-    )
-
-    # The result_status field must be present (aggregate-only contract).
-    assert "result_status" in event.payload
-    assert "op_class" in event.payload
+    rows = await _audit_rows()
+    assert len(rows) == 1, f"expected one wrapper audit row for {inner_op_id}, got {len(rows)}"
+    for row in rows:
+        assert "params" not in row.payload, (
+            f"credential inner op {inner_op_id!r} stored raw params: {row.payload}"
+        )
+        serialised = json.dumps(row.payload, default=str)
+        assert _SECRET_TOKEN not in serialised, (
+            f"canary secret found in audit row for {inner_op_id!r}: {serialised}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# AC#3: non-secret inner op → full-detail envelope payload
+# AC#5: the wrapper row keeps op_id + path of the wrapper tool
 # ---------------------------------------------------------------------------
 
 
@@ -247,63 +213,16 @@ async def test_call_operation_credential_inner_op_broadcasts_aggregate_only(
     indirect=True,
 )
 @pytest.mark.asyncio
-async def test_call_operation_non_secret_inner_op_broadcasts_full_detail(
+async def test_call_operation_wrapper_row_keeps_wrapper_op_id(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    captured_broadcast: list[BroadcastEvent],
-    stub_audit: None,
+    seeded_operator_tenant: None,  # noqa: F811
     stub_call_operation: AsyncMock,
 ) -> None:
-    """AC#3: a non-secret inner op (``k8s.node.list``) keeps full-detail broadcast.
+    """AC#5: the wrapper audit row's ``op_id`` stays ``"call_operation"``.
 
-    The fix must not over-clamp: operators still see request params on the
-    feed for routine, non-credential operations so the team-coordination
-    signal remains useful.
-    """
-    client, _op = client_with_operator
-    inner_op_id = "k8s.node.list"
-    op_params = {"namespace": "kube-system"}
-
-    response = post_mcp(
-        client,
-        _tools_call_envelope(inner_op_id=inner_op_id, params=op_params),
-    )
-    body = response.json()
-    assert "error" not in body, f"unexpected MCP error for {inner_op_id}: {body}"
-    assert body["result"]["isError"] is False
-
-    assert len(captured_broadcast) == 1
-    event = captured_broadcast[0]
-
-    # Full-detail shape: payload must contain a ``params`` key with the
-    # request arguments visible to the feed subscriber.
-    assert "params" in event.payload, (
-        f"non-secret inner op {inner_op_id!r} was over-clamped — "
-        f"'params' missing from broadcast payload: {event.payload}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# AC#5: audit op_id + path are unchanged (envelope uses wrapper tool name)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-@pytest.mark.asyncio
-async def test_call_operation_broadcast_event_op_id_is_wrapper_name(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    captured_broadcast: list[BroadcastEvent],
-    stub_audit: None,
-    stub_call_operation: AsyncMock,
-) -> None:
-    """AC#5: the envelope ``BroadcastEvent.op_id`` stays ``"call_operation"``.
-
-    Only the broadcast *detail* (payload shape) changes; the event's
-    identifying ``op_id`` field must remain the wrapper tool name so
-    ``meho audit query`` cardinality and path-based correlations are
+    Only the sensitivity classification follows the inner op; the row's
+    identifying ``op_id`` and ``path`` must remain the wrapper tool name
+    so ``meho audit query`` cardinality and path-based correlations are
     unchanged.
     """
     client, _op = client_with_operator
@@ -317,8 +236,10 @@ async def test_call_operation_broadcast_event_op_id_is_wrapper_name(
     )
     assert "error" not in response.json()
 
-    assert len(captured_broadcast) == 1
-    event = captured_broadcast[0]
-
-    # The event's op_id is the MCP tool name, not the inner op.
-    assert event.op_id == "call_operation"
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.path == _WRAPPER_PATH
+    assert row.payload["op_id"] == "call_operation"
+    assert row.payload["op_class"] == "tool_call"
+    assert _SECRET_TOKEN not in json.dumps(row.payload, default=str)

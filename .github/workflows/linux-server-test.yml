@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Tests of the form-2 scripts in deploy/linux-server/: the install script
+# (#4733) and the scripts that build and check the download (#4734).
+#
+# shellcheck checks every shell script there: the *.sh files and any file
+# that starts with a shell shebang, so a script without an extension (for
+# example meho-host) is checked too. The unit tests are Python unittest
+# suites. They run install.sh against a fake machine (stub commands on PATH
+# and a temporary root folder), and the functions of packaging/ against
+# stub registry tools and small image archives built in Python. They need
+# no root, no RKE2 and no network. One step checks that the upstream
+# local-path manifest the tests compare against is the real v0.0.37 file.
+#
+# The chart's values files are a trigger too: a test checks that every
+# image repository of the chart has a licence line for the download
+# (deploy/linux-server/packaging/image-sources.txt).
+#
+# Advisory (non-required) and path-scoped, like plugin-test.yml: a required
+# check would need the `changes`-job + job-`if:` shape ci.yml uses.
+
+name: linux-server-test
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/linux-server/**'
+      - 'deploy/charts/meho/values.yaml'
+      - 'deploy/charts/meho/charts/*/values.yaml'
+      - '.github/workflows/linux-server-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-server-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run shellcheck and the install script tests
+    # Untrusted-PR runner isolation (F06, meho-internal#268). The job runs
+    # PR-controlled scripts. It needs no internal route, deployment
+    # credential or build cache, so a fork PR runs on a disposable
+    # GitHub-hosted runner, and same-repo PRs stay on the internal pool.
+    # See docs/codebase/devops.md "Untrusted pull-request isolation".
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install shellcheck
+        # Pinned version and checksum. The checksum is the sha256 digest that
+        # GitHub records for the release file. The install target is
+        # $HOME/.local/bin because the meho-runners-ci pool runs as a
+        # non-root user (same pattern as kubeconform in chart.yml).
+        run: |
+          set -euo pipefail
+          SC_VER=v0.11.0
+          SC_SHA=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+          SC_TAR="${RUNNER_TEMP}/shellcheck.tar.gz"
+          curl -fsSL -o "${SC_TAR}" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.gz"
+          echo "${SC_SHA}  ${SC_TAR}" | sha256sum -c -
+          tar -xzf "${SC_TAR}" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" "${HOME}/.local/bin/shellcheck"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          "${HOME}/.local/bin/shellcheck" --version
+
+      - name: Run shellcheck on every script
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(
+            {
+              find deploy/linux-server -type f -name '*.sh'
+              grep -rlE --exclude-dir=tests '^#!(/usr/bin/env |/bin/)(ba)?sh' deploy/linux-server || true
+            } | sort -u
+          )
+          printf 'checking %s\n' "${scripts[@]}"
+          shellcheck "${scripts[@]}"
+
+      - name: Check that the test fixture is the upstream local-path manifest
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml \
+            | cmp - deploy/linux-server/tests/fixtures/local-path-storage-v0.0.37.yaml
+
+      - name: Run the unit tests
+        run: python -m unittest discover -s deploy/linux-server/tests -v

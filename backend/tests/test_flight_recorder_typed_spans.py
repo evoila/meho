@@ -36,9 +36,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.base import Connector
@@ -459,11 +457,13 @@ async def test_ssh_span_capture_off_is_noop() -> None:
 _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
     {
         "argocd-api",
+        "audit-integrity",
         "bind9-ssh",
         "fleet-lcm",
         "fleet-rest",
         "gcloud-rest",
         "harbor-rest",
+        "hcx-rest",
         "holodeck-ssh",
         "hyperv-ssh",
         "installer-rest",
@@ -486,6 +486,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "sddc-rest",
         "sddc-vcf5",
         "secret-broker",
+        "srm-rest",
         "targets-registry",
         "tempo-api",
         "topology-graph",
@@ -494,10 +495,12 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "vcfa-rest",
         "vcfa-vra8",
         "vmware-rest",
+        "vr-rest",
         "vrli-rest",
         "vrli-vrli8",
         "vrops-rest",
         "vrops-vrops8",
+        "vro-rest",
         "windns-ssh",
         "winsrv-ssh",
         "wsfc-ssh",
@@ -644,17 +647,6 @@ def _reset_dispatch_state() -> Iterator[None]:
     clear_registry()
 
 
-@pytest.fixture
-def _capture_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
-
-
 class _NoOpVaultConnector(Connector):
     product = "vault"
     version = "1.x"
@@ -778,7 +770,6 @@ async def test_composite_children_span_but_composite_does_not_double_record(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     _reset_dispatch_state: None,
-    _capture_broadcast: list[BroadcastEvent],
 ) -> None:
     """A composite's typed children each get a ``typed`` span; the composite
     parent (routed via ``dispatch_composite``) records only its

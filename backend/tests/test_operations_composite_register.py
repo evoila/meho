@@ -60,9 +60,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -125,18 +123,6 @@ async def session() -> AsyncIterator[AsyncSession]:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as s:
         yield s
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Replace :func:`publish_event` with a recording stub for the e2e test."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 def _make_operator(*, sub: str = "op-composite-register") -> Operator:
@@ -893,7 +879,6 @@ async def test_register_composite_caller_session_does_not_commit(
 @pytest.mark.asyncio
 async def test_register_composite_dispatches_end_to_end_with_parent_audit(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """Composite registered via the new helper dispatches; sub-op audit row links to parent.
 

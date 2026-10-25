@@ -68,7 +68,7 @@ from typing import Any
 import structlog
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 
 __all__ = ["write_internal_audit_row"]
 
@@ -88,8 +88,11 @@ INTERNAL_METHOD: str = "INTERNAL"
 MEMORY_EXPIRE_PATH: str = "memory.expire"
 
 
+# code-quality-allow: was 113 lines on main before #3733 (mostly docstring);
+# the required event_class argument adds a few lines. Splitting is out of scope.
 async def write_internal_audit_row(
     *,
+    event_class: AuditEventClass,
     operator_sub: str,
     tenant_id: uuid.UUID,
     method: str,
@@ -98,6 +101,7 @@ async def write_internal_audit_row(
     duration_ms: float,
     payload: dict[str, Any],
     request_id: uuid.UUID | None = None,
+    actor_sub: str | None = None,
     audit_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Commit one ``AuditLog`` row for a system-driven internal operation.
@@ -112,6 +116,10 @@ async def write_internal_audit_row(
 
     Parameters
     ----------
+    event_class:
+        What kind of accountable event the row records (#3733). The caller
+        knows it: ``operation_execution`` for a sweep, expiry or reaper
+        action, ``security_event`` for a security alarm.
     operator_sub:
         Synthetic identity for the background job. Use
         :data:`SYSTEM_OPERATOR_SUB` (``"system"``) for the memory
@@ -147,6 +155,10 @@ async def write_internal_audit_row(
         Optional request-id for back-correlation. Background-job rows
         typically have no request id; the column is nullable so passing
         ``None`` is the supported shape.
+    actor_sub:
+        The delegated actor behind ``operator_sub`` (RFC 8693), when a
+        request-path writer records a caller's action through this helper
+        (#3757). Background-job rows leave it ``None``.
     audit_id:
         Optional pre-generated id. The G6.1-T3 publish-on-write hook
         pre-generates the id at the dispatch call site so the broadcast
@@ -175,7 +187,9 @@ async def write_internal_audit_row(
             id=audit_id,
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
+            actor_sub=actor_sub,
             tenant_id=tenant_id,
+            event_class=event_class,
             method=method,
             path=path,
             status_code=status_code,

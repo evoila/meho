@@ -94,13 +94,24 @@ from meho_backplane.connectors._shared.credential_backend import (
     resolve_credential_backend,
     split_credential_ref,
 )
-from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.db.migrations import DbMigrationStatus, db_migration_status
+from meho_backplane.features import build_features_block
+from meho_backplane.health import readiness_snapshot
+from meho_backplane.mcp.registry import (
+    ToolSurface,
+    all_tools_for,
+    get_tool,
+    has_addon_gated_tools,
+    registered_tool_names,
+    surface_visible,
+)
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
+from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
 
 __all__ = ["build_health_response", "router"]
@@ -201,11 +212,86 @@ class DbStatus(BaseModel):
     ``bool | None`` for forward compatibility with response decoders
     that were generated against the chassis-stage shape, but the
     handler now always populates it from the probe.
+
+    ``revision``, ``head`` and ``detail`` (#4830) carry the probe's
+    values, so an operator can confirm an upgrade from ``meho status``
+    without a shell into the pod: ``revision`` is the revision stamped
+    in the database, ``head`` the revision this build expects, and
+    ``detail`` the same text ``/ready`` shows for the ``db`` check.
+    ``revision`` is ``None`` when the database has no revision or could
+    not be read; ``head`` is ``None`` when the migration scripts could
+    not be loaded. After a rollback ``revision`` is newer than ``head``
+    while ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,
+    "Rollback contract"). The defaults keep older response decoders
+    working.
     """
 
     model_config = ConfigDict(frozen=True)
 
     migrated: bool | None
+    revision: str | None = None
+    head: str | None = None
+    detail: str | None = None
+
+
+class ReadinessCheck(BaseModel):
+    """One readiness check, as ``/ready`` reports it (#4830)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    ok: bool
+    detail: str = ""
+
+
+class ReadinessStatus(BaseModel):
+    """The ``/ready`` verdict and its checks (#4830).
+
+    Built from :func:`meho_backplane.health.readiness_snapshot`, the
+    helper the web console's dashboard already uses, so ``meho status``
+    and ``meho_status`` show the same checks as ``/ready`` — which a
+    deployment may block at its ingress, and which hides its
+    ``features`` block from callers without the metrics token.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    ready: bool
+    checks: list[ReadinessCheck] = []
+
+
+class ApprovalsStatus(BaseModel):
+    """The approval settings in force (#4830).
+
+    ``custody`` is the state of the approval key: ``configured``,
+    ``missing`` or ``malformed``. ``effective_posture`` says whether a
+    second person must approve (``four_eyes_enforced``) or one operator
+    may approve their own request (``single_operator_break_glass``).
+    ``delegated_decision_posture`` says whether a decision made on
+    someone else's instruction is allowed. The three values come from
+    :func:`meho_backplane.features.build_features_block`; they are state
+    words only, never a key value.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    custody: str
+    effective_posture: str
+    delegated_decision_posture: str
+
+
+class FeatureStatus(BaseModel):
+    """One gated feature from ``/ready``'s ``features`` block (#4830).
+
+    ``configured`` is the feature's state; ``missing_env`` lists the
+    names of the settings it still needs. Names only, never values.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    configured: bool
+    missing_env: list[str] = []
 
 
 class SensorRunnerStatus(BaseModel):
@@ -262,6 +348,30 @@ class PairingHealth(BaseModel):
     last_seen: datetime | None
 
 
+class SurfaceSummary(BaseModel):
+    """Which working-surface MCP tools this session should see, and which it does.
+
+    ``expected_working_tools`` is every tool the server registers on the
+    working surface, sorted. ``listed_working_tools`` is the part of that
+    set this session's ``tools/list`` returns. ``missing_working_tools`` is
+    the difference: tools hidden from this session by its tenant role, a
+    tenant capability it lacks, or an add-on that is not paired.
+    ``operator_surface_listed`` is ``True`` when the session also sees the
+    operator planes (its token carries the ``mcp:admin`` scope).
+
+    A client compares its own ``tools/list`` result against
+    ``listed_working_tools``. A tool the server lists but the client does not
+    see is a gap on the client side (``meho doctor`` reports it).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    expected_working_tools: list[str] = []
+    listed_working_tools: list[str] = []
+    missing_working_tools: list[str] = []
+    operator_surface_listed: bool = False
+
+
 class HealthResponse(BaseModel):
     """``GET /api/v1/health`` response body.
 
@@ -314,6 +424,27 @@ class HealthResponse(BaseModel):
     contract-compatible with this backplane build, and its last liveness
     heartbeat. The list is empty when nothing is paired; the empty-default
     keeps response decoders generated against the pre-#3025 shape working.
+
+    ``granted_scopes`` (#3666) lists the OAuth scope names on the caller's
+    token, sorted. It carries scope names only, never token material.
+    ``surface_summary`` (#3666) compares the working-surface tools the
+    server registers with the ones this session lists
+    (:class:`SurfaceSummary`). Both have empty defaults so older response
+    decoders keep working; the handler always fills them.
+
+    ``sandbox_mode`` (#4622) is ``"on"`` or ``"off"``: whether this
+    instance lets a standing grant made in the web console cover a delete
+    by a service principal. ``meho status`` prints one line when it is on.
+    The default ``"off"`` keeps older response decoders working.
+
+    ``readiness``, ``approvals`` and ``features`` (#4830) let an operator
+    confirm an upgrade through MEHO: the same checks ``/ready`` returns
+    (:class:`ReadinessStatus`), the approval settings in force
+    (:class:`ApprovalsStatus`) and the gated features with the names of
+    the settings they still need (:class:`FeatureStatus`). The route is
+    OPERATOR-gated, so unlike ``/ready`` no metrics token is needed.
+    ``None`` / empty defaults keep older response decoders working; the
+    handler always fills them.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -325,6 +456,12 @@ class HealthResponse(BaseModel):
     mcp_protocol_version: str = PROTOCOL_VERSION
     sensor_runner: SensorRunnerStatus | None = None
     pairings: list[PairingHealth] = []
+    granted_scopes: list[str] = []
+    surface_summary: SurfaceSummary = SurfaceSummary()
+    sandbox_mode: str = "off"
+    readiness: ReadinessStatus | None = None
+    approvals: ApprovalsStatus | None = None
+    features: list[FeatureStatus] = []
 
 
 class LivenessResponse(BaseModel):
@@ -347,6 +484,9 @@ class LivenessResponse(BaseModel):
     and write an audit row per poll. The facet honours this handler's
     constraints — an in-memory clock read; no connector, no credential,
     no secret.
+
+    ``db`` shares :class:`DbStatus` with the deep check, so it carries
+    the migration revision too (#4830). It still never touches Vault.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -613,6 +753,82 @@ async def _pairing_health(tenant_id: UUID) -> list[PairingHealth]:
     ]
 
 
+async def _surface_summary(operator: Operator) -> SurfaceSummary:
+    """Compare the registered working surface with what *operator* lists.
+
+    Uses the same gates as ``tools/list``
+    (:func:`~meho_backplane.mcp.registry.all_tools_for`), so the listed set
+    matches what this session's ``tools/list`` returns. The add-on family
+    read only runs when an add-on-gated tool is registered, like the
+    listing handler. The import is function-local for the same reason as
+    in :mod:`meho_backplane.mcp.handlers`: the capability plane imports
+    the agent chain, which would form an import cycle at module load.
+    """
+    active_families: frozenset[str] = frozenset()
+    if has_addon_gated_tools():
+        from meho_backplane.operations.addon_capability import AddonCapabilityService
+
+        active_families = await AddonCapabilityService().active_meta_tool_families(
+            operator.tenant_id
+        )
+    expected = sorted(
+        name
+        for name in registered_tool_names()
+        if (entry := get_tool(name)) is not None and entry[0].surface is ToolSurface.WORKING
+    )
+    listed = sorted(
+        defn.name
+        for defn in all_tools_for(operator, active_addon_families=active_families)
+        if defn.surface is ToolSurface.WORKING
+    )
+    listed_set = set(listed)
+    return SurfaceSummary(
+        expected_working_tools=expected,
+        listed_working_tools=listed,
+        missing_working_tools=[name for name in expected if name not in listed_set],
+        operator_surface_listed=surface_visible(operator, ToolSurface.OPERATOR),
+    )
+
+
+def _db_status(state: DbMigrationStatus) -> DbStatus:
+    """Project the probe's structured result onto the wire model."""
+    return DbStatus(
+        migrated=state.probe.ok,
+        revision=state.revision,
+        head=state.head,
+        detail=state.probe.detail,
+    )
+
+
+async def _readiness_status() -> ReadinessStatus:
+    """The ``/ready`` verdict and checks, from the shared cached snapshot."""
+    return ReadinessStatus.model_validate(await readiness_snapshot())
+
+
+def _approvals_and_features() -> tuple[ApprovalsStatus, list[FeatureStatus]]:
+    """Read the approval settings and the gated features from the features block.
+
+    Both come from the same :func:`build_features_block` call that
+    ``/ready`` uses. Only state words and setting *names* leave this
+    function; the block itself never carries a key value.
+    """
+    block = build_features_block(get_settings())
+    approvals = ApprovalsStatus(
+        custody=block["approval_custody"]["custody"],
+        effective_posture=block["approval_queue"]["effective_posture"],
+        delegated_decision_posture=block["approval_queue"]["delegated_decision_posture"],
+    )
+    features = [
+        FeatureStatus(
+            name=name,
+            configured=bool(entry["configured"]),
+            missing_env=list(entry.get("missing_env", [])),
+        )
+        for name, entry in block.items()
+    ]
+    return approvals, features
+
+
 async def build_health_response(operator: Operator) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
@@ -627,7 +843,8 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     """
     log = structlog.get_logger()
     vault_status = await _probe_federation(operator, log)
-    db_probe_result = await db_migration_probe()
+    db_state = await db_migration_status()
+    approvals, features = _approvals_and_features()
     return HealthResponse(
         operator=OperatorIdentity(
             sub=operator.sub,
@@ -637,11 +854,17 @@ async def build_health_response(operator: Operator) -> HealthResponse:
             tenant_role=operator.tenant_role,
         ),
         vault=vault_status,
-        db=DbStatus(migrated=db_probe_result.ok),
+        db=_db_status(db_state),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
         mcp_protocol_version=PROTOCOL_VERSION,
         sensor_runner=_sensor_runner_status(),
         pairings=await _pairing_health(operator.tenant_id),
+        granted_scopes=sorted(operator.scopes),
+        surface_summary=await _surface_summary(operator),
+        sandbox_mode=sandbox_mode_label(),
+        readiness=await _readiness_status(),
+        approvals=approvals,
+        features=features,
     )
 
 
@@ -661,7 +884,7 @@ async def liveness(
     proof belongs to :func:`authenticated_health` behind the OPERATOR
     gate.
     """
-    db_probe_result = await db_migration_probe()
+    db_state = await db_migration_status()
     return LivenessResponse(
         operator=OperatorIdentity(
             sub=operator.sub,
@@ -670,7 +893,7 @@ async def liveness(
             tenant_id=operator.tenant_id,
             tenant_role=operator.tenant_role,
         ),
-        db=DbStatus(migrated=db_probe_result.ok),
+        db=_db_status(db_state),
         sensor_runner=_sensor_runner_status(),
     )
 

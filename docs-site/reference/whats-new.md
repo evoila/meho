@@ -9,6 +9,144 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.37.0](https://github.com/evoila/meho/releases/tag/v0.37.0) — 2026-10-24
+
+- **Security fix: deployment passwords in traces.** For tenants with the
+  flight recorder on, MEHO kept the full request and answer of seven
+  deployment and depot operations in its traces. They hold deployment
+  passwords and licence keys. MEHO now leaves them out. Traces written
+  before the upgrade keep them until they expire: check your trace
+  retention, and change those passwords and keys if needed.
+- **More VMware work through MEHO.** VM snapshots, a VM's hardware and
+  CD drives, vSphere licences, the vCenter appliance's local accounts
+  and vCenter alarms. Every change waits for approval. A second person
+  approves snapshot deletes, licence assignments and appliance password
+  changes.
+- **Licence keys stay masked.** The vSphere, SDDC Manager and VCF
+  Operations licence reads show only the last 5 characters of a key.
+  `sddc.license.list` now returns `key_masked` instead of `key`, so
+  scripts that read `key` must change.
+- **New connectors and reads.** Site Recovery Manager, eight HCX reads,
+  GitHub repository create and view, VCF Automation operations for
+  networks, deployments and image names, and a VCF Operations property
+  read.
+- **Two 0.36.0 problems fixed.** A `vault.kv.patch` with the right Vault
+  rights waits for approval again, and sensors check their rule against
+  the full result, so they no longer turn `unknown` when an answer is
+  shortened.
+- **Before you upgrade.** No database migration. If you come from
+  0.35.x, do the 0.36.0 steps first.
+
+## [v0.36.0](https://github.com/evoila/meho/releases/tag/v0.36.0) — 2026-10-23
+
+- **Security fixes: logins, grants and secrets.** Everyone who used the
+  shared CLI and MCP logins was an admin. Now each person's role comes
+  from one Keycloak login group. Agent and service logins could create
+  standing grants; now only a person can. Approval requests and some
+  SDDC Manager and BIND reads showed passwords and keys. Now MEHO hides
+  them, and these reads wait for approval.
+- **Security fixes in the image and the CLI.** The image gets newer
+  `certifi` and `aiohttp` versions, and the CLI is built with Go
+  1.26.10. The image still has 27 known Pillow findings. MEHO never
+  opens image files, and the image scan skips these findings until 30
+  November 2026, while the fix is prepared.
+- **More risky work waits for a second person.** A VM move that copies
+  disks, every delete loaded from a vendor API file, and the delete of a
+  content-library item now wait until a second person approves. After
+  the upgrade, load the vCenter connectors again, so their stored
+  operations get the new rules.
+- **Only registered agents post announcements.** Broadcast now carries
+  agent announcements only. A person's own login can still read them.
+  The audit log stays the record of operations, approvals and checks.
+- **A clearer audit log.** Every audit record now says what kind of
+  event it is. A multi-step operation that waits or is refused, and
+  every tool call of a hosted agent, now leave a record.
+- **Short, citable evidence from knowledge and memory.** Knowledge base
+  entries keep their earlier texts, and search returns the matching
+  passages with a link to the exact text. Memory search returns short
+  snippets with a link to the full entry.
+- **The AI knows more about each operation.** Many vCenter, SDDC
+  Manager, NSX, VCF Automation, Holodeck and other operations now say
+  what they take and return, with an example call. `search_operations`
+  can show what one operation needs.
+- **New connector and reads.** A new HCX connector, VCF Installer 9.0
+  support, three new VCF Installer reads, `vmware.tasks.history` for
+  older vCenter tasks, and new Keycloak and pfSense operations.
+- **Before you upgrade.** The upgrade runs 12 database steps, so back up
+  the database first. Several changes can break scripts; read Breaking
+  changes in the full notes. The Helm chart can now also run its own
+  PostgreSQL, Keycloak and OpenBao, all off by default.
+
+## [v0.35.22](https://github.com/evoila/meho/releases/tag/v0.35.22) — 2026-10-13
+
+- **Security fix: the audit clean-up now runs on time.** MEHO keeps
+  each connector's answer before redaction in the audit log, and that
+  answer can hold secrets. A weekly job empties old answers. Before,
+  every restart of MEHO started the job's week again. So on a
+  deployment that restarted often, the job never ran, and old answers
+  stayed past the retention window. Now the job counts from its last
+  run. After this update, its first run comes about one minute after
+  MEHO starts.
+- **Delete Keycloak users, groups and clients.** The new
+  `keycloak.user.delete`, `keycloak.group.delete` and
+  `keycloak.client.delete` remove one object from a Keycloak realm. A
+  second person must approve every call, after seeing what goes on the
+  approval card. MEHO refuses to delete Keycloak's built-in clients and
+  the account MEHO itself logs in with.
+- **DRS operations work on vCenter 8.0.** Four DRS operations failed at
+  once on vCenter 8.0.x: the DRS recommendations read, the two rule
+  creates and the rule delete. They now read the cluster settings in a
+  way vCenter 8.0.x accepts.
+
+## [v0.35.21](https://github.com/evoila/meho/releases/tag/v0.35.21) — 2026-10-13
+
+- **Security fix: PowerShell connectors.** This release fixes a
+  critical command injection in the PowerShell-based connectors:
+  `msad`, `winsrv`, `wsfc`, `hyperv`, `windows_dns` and `holodeck`.
+  A value with a typographic single quote could end a quoted
+  PowerShell string early, and the rest of the value ran as PowerShell
+  on the target host. MEHO now handles all five single-quote
+  characters. Please upgrade. Advisory: GHSA-v2v2-4gh2-m4q8.
+- **Security fixes in the client packages.** The Claude Code plugin and
+  the Claude Desktop bundle get newer `proxy-addr` and `undici`
+  versions that fix known vulnerabilities.
+- **Fully remove a Vault secret.** The new `vault.kv.metadata.delete`
+  deletes every version of a Vault secret and its metadata. This
+  cannot be undone, so a second person must approve every call. The
+  approver sees the path, never the secret value.
+- **Delete a vCenter DRS rule.** The new
+  `vmware.composite.cluster.drs_rule.delete` removes one DRS rule from
+  a cluster. A second person must approve every call, after seeing the
+  rule on the approval card.
+- **Longer logins, and no hanging calls.** The Claude Code plugin and
+  the Claude Desktop bundle now keep their login up to the limit your
+  Keycloak realm sets (48 hours is recommended), not about 30 minutes.
+  In Claude Code, a MEHO call no longer hangs while a login waits in
+  the browser: it fails with a clear message, or stops after 5
+  minutes. Run `claude plugin update meho@meho`, restart Claude Code,
+  and log in once.
+
+## [v0.35.20](https://github.com/evoila/meho/releases/tag/v0.35.20) — 2026-10-12
+
+- **Security fix: the CLI is built with a newer Go.** The `meho` CLI
+  binaries are now built with Go 1.26.9. This fixes nine known flaws in
+  the network and TLS code of Go's standard library, which the v0.35.19
+  CLI still had. Install the new CLI to get the fixes. These Go flaws
+  do not affect the container image or the Helm chart.
+- **Security fix in the container image.** The pydantic-ai library is
+  updated to a version that fixes a known vulnerability. Agent requests
+  stay the same.
+- **Read more around a docs hit.** The new `read_docs` tool, the
+  `meho docs read` command and a "Read around this hit" button in the
+  console show the text before and after a docs search hit, its whole
+  page, or its section. It is off until an operator turns it on for a
+  docs collection, and the documentation service must offer reads.
+- **Two safe pfSense reads.** `pfsense.user.list` lists the firewall's
+  local users, and `pfsense.route.static.list` lists its static routes.
+  They need no approval. They return only a fixed set of fields, so
+  password hashes and keys are never part of the answer. You no longer
+  need the whole config file to check a user or a route.
+
 ## [v0.35.19](https://github.com/evoila/meho/releases/tag/v0.35.19) — 2026-10-07
 
 - **Security fix: the pfSense config read no longer shows secrets.**

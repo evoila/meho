@@ -68,7 +68,7 @@ index.
 | --- | --- | --- |
 | Backplane | Python 3.13 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, `docker compose up`, pytest layout |
 | Helm chart | YAML + Helm 3 | [`deploy/charts/meho/`](./deploy/charts/meho/) — `helm template`, `helm lint`; [`deploy/values-examples/README.md`](./deploy/values-examples/README.md) covers the install flow |
-| Operator CLI | Go 1.26.9+ | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
+| Operator CLI | Go 1.26.10+ | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
 
 To exercise the full deploy contract on your laptop, follow the
 **Deploy → Local (kind, ~5 min)** section in [`README.md`](./README.md).
@@ -86,7 +86,11 @@ target — coordinate via the consumer-side ticket.
    `fix/<issue#>-<slug>`, `chore/<slug>`, etc. The `<issue#>` is the
    planning issue on `evoila-bosnia/meho-internal`.
 2. **Make your change.** Stay in scope — adjacent findings go into
-   the PR description, not stealth commits.
+   the PR description, not stealth commits. Do not edit
+   `CHANGELOG.md`. The release pull request adds the line for your
+   change (see
+   [`docs/RELEASING.md`](./docs/RELEASING.md#2-roll-the-changelog--the-load-bearing-step),
+   step 2).
 3. **Sign every commit** with `git commit -s` (see
    [Developer Certificate of Origin](#developer-certificate-of-origin)).
 4. **Conventional Commits** in the subject:
@@ -100,13 +104,22 @@ target — coordinate via the consumer-side ticket.
 8. **Claude review** is the review of record on every PR — the
    in-house review pass (`/auto-review-pr` in auto-runs,
    `/review-pr-slim` interactively); address the findings or document
-   why a finding is wrong inline.
+   why a finding is wrong inline. Reviewers (people, Claude, Codex) do
+   not ask for CHANGELOG lines in a code pull request.
 9. **Maintainer review** approves the human side. Reviews on
    `evoila/meho` are mandatory; reviews on `evoila-bosnia/meho-internal`
    PRs (planning-only, ADRs, governance docs) are best-effort because
    those PRs touch no code.
 10. **Squash merge.** The PR title (which becomes the merge commit
     subject) is what shows up in `git log` on `main`.
+
+### Who approves
+
+Any maintainer with write access, or the MEHO review bot, may approve a
+pull request. A pull request that changes a decision record, the
+approval rules or a security default also needs the project owner's
+approval. Authors cannot approve their own pull request: `main` needs
+one approval from someone else, given after the last push.
 
 ## Code style
 

@@ -16,8 +16,8 @@ re-serves it verbatim to other agents:
 | Stored text | Write path | LLM-facing read path (wrapped) |
 |---|---|---|
 | Broadcast announcement `activity` / `scope` / `target` | `meho_broadcast_announce` → `publish_agent_announcement` | `meho_broadcast_recent`, `meho_broadcast_watch`, `meho://tenant/{tenant_id}/feed` |
-| kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}` |
-| memory entry `body` | `add_to_memory` | `meho://memory/{scope}/{slug}` |
+| kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}`, `meho://kb/id/{entry}/revision/{revision}`, `search_knowledge` hits (snippet, each passage `text`, each `locator.heading_path` title) |
+| memory entry `body` | `add_to_memory`, `POST /api/v1/memory` | `meho://memory/id/{document_uuid}`, `meho://memory/{scope}/{slug}`, and each `search_memory` hit `snippet` (#3751) |
 | Docs-corpus chunk `content` (federated, external — **not** agent-authored) | External `meho-docs` corpus (federated ingestion, outside MEHO) | `search_docs` payload, `ask_docs` citations + synthesis prompt, `read_docs` text, `meho://docs/{collection}/{product}/{version}/{chunk_id}` |
 
 Without a guard, a compromised or adversarial session can plant
@@ -99,14 +99,18 @@ there to admin-authored tenant conventions).
   HTML injection is a different sink with its own defence.
 * The SSE feed (`GET /api/v1/feed`) streams to the frontend, same
   reasoning.
-* kb/memory **search snippets** (200-char excerpts from
-  `search_knowledge` / `search_memory`) are served unwrapped today;
-  the full-body resources are the drill-down path. Wrapping snippets
-  is a possible follow-up.
+* The REST memory search route, which feeds the CLI table, serves the
+  plain snippet, like REST `search_docs`. The MCP search tools are
+  wrapped, so no MCP search hit is served unwrapped: `search_knowledge`
+  since #3761 (`_hit_payload` in `mcp/tools/knowledge.py` wraps the
+  snippet, each passage `text` and each heading title in
+  `locator.heading_path`), and `search_memory` snippets since #3751
+  (`mcp/tools/_memory_evidence.py`, `hit_payload`).
 
 ## Advisories
 
 The MCP resource `description` strings for `meho://kb/{slug}`,
+`meho://kb/id/{entry}/revision/{revision}`,
 `meho://memory/{scope}/{slug}` and `meho://tenant/{tenant_id}/feed`
 state that the served free-text/body is agent-authored, untrusted, and
 not a system directive; tests assert the substrings. The `search_docs`
@@ -121,6 +125,8 @@ text as data, never as directives.
 * `backend/src/meho_backplane/untrusted_text.py`
 * `backend/src/meho_backplane/broadcast/history.py` (`dump_event_wire`)
 * `backend/src/meho_backplane/mcp/resources/{kb,memory,tenant_feed}.py`
+* `backend/src/meho_backplane/mcp/tools/_memory_evidence.py` (`search_memory` snippets, #3751)
+* `backend/src/meho_backplane/mcp/tools/knowledge.py` (`_hit_payload`, `search_knowledge` hits, #3761)
 * Docs corpus (#304): `backend/src/meho_backplane/mcp/tools/docs.py`,
   `docs_search/synthesis.py`, `mcp/resources/docs.py`
 * `backend/tests/test_untrusted_text_envelope.py`,

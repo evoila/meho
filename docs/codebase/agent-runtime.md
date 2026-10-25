@@ -36,7 +36,9 @@ All public types are re-exported from `meho_backplane.agent`
   `agent/toolset.py`) — the toolset resolver + handler-to-agent-tool adapter.
   `resolve_agent_tools(toolset, operator)` returns the `pydantic_ai.Tool`
   list to register: (spec allow-list) ∩ (meta-tools the operator's role
-  admits). See "Tools" below.
+  admits). `resolve_agent_toolset` returns the same tools inside a
+  `ToolsetResolution` that also lists `missing` and `disabled` names. See
+  "Tools" below.
 - **`AgentRun`** — the runtime-checkable Protocol every consumer depends
   on: `start(definition, operator, inputs) -> AgentRunHandle`,
   `poll(handle) -> AgentRunStatus`, `result(handle) -> AgentRunResult`,
@@ -68,11 +70,15 @@ All public types are re-exported from `meho_backplane.agent`
 
 1. A caller constructs an `AgentDefinition` and a `PydanticAgentRun`
    (injecting a `ModelFactory`; the default builds a real Anthropic model).
-2. `start(definition, operator, inputs)` builds a framework `Agent` from the
-   definition, resolves its tools (`resolve_agent_tools` when the definition
-   carries a `toolset`, else the default two meta-tools), and launches the
-   bounded loop as an `asyncio.Task`. It returns immediately with an
-   `AgentRunHandle`.
+2. `start(definition, operator, inputs, run_id=None)` builds a framework
+   `Agent` from the definition, resolves its tools (`resolve_agent_tools`
+   when the definition carries a `toolset`, else the default two
+   meta-tools), and launches the bounded loop as an `asyncio.Task`. It
+   returns immediately with an `AgentRunHandle`. `AgentInvoker` passes the
+   durable `agent_run` row id as `run_id`, so the handle, the logs, and a
+   failure message (`agent run <id> failed: ...`) name the same id that
+   `meho agent run` and `run-status` show (#4232). Without `run_id` the seam
+   makes a fresh id.
 3. The loop runs: the model emits tool calls, each tool dispatches through
    `call_operation` / `list_operation_groups` under the injected operator,
    tool results return to the model, and the loop repeats until the model
@@ -83,6 +89,24 @@ All public types are re-exported from `meho_backplane.agent`
 The **turn budget** maps onto `UsageLimits(request_limit=...)`. When the
 loop would exceed it, the framework raises `UsageLimitExceeded`, which the
 seam converts to `AgentRunError("turn budget exhausted: ...")`.
+
+**Tool errors versus run failures (#4232).** A tool that raises a plain
+exception ends the whole run: pydantic-ai does not send it to the model. So
+model mistakes must be turned into something the model sees:
+
+- A wrong `connector_id` (unknown, or registered but not ingested) from
+  `list_operation_groups`, `search_operations`, or any other meta-tool
+  handler is turned into `pydantic_ai.ToolFailed` by
+  `connector_errors_reach_model` in `agent/meta_tool.py`. The model gets a
+  failed tool result with the same text the MCP surface returns, and can try
+  another id. `ToolFailed` does not use the tool's retry budget (default 1),
+  so a few wrong guesses do not end the run; the turn budget bounds them.
+- `call_operation` and `preview_operation` already report an unknown op,
+  bad params, or a bad connector inside their result envelope
+  (`status="error"`), so the model sees those too.
+- Gate refusals (role below the floor, connector outside the allow-list)
+  use `ModelRetry`.
+- Anything else is a real fault and fails the run.
 
 The **operator** travels as the framework dependency (`deps_type=Operator`);
 inside each tool the operator is read from `ctx.deps` and passed to the
@@ -121,7 +145,9 @@ carries a `toolset` (passing the resolved `Tool` objects via the framework's
 `tools=` constructor argument). A definition with `toolset is None` falls
 back to `_register_default_meta_tools` — the original two hand-wired
 meta-tools (`call_operation` + `list_operation_groups`) — so a definition
-constructed without a toolset still runs.
+constructed without a toolset still runs. Stored definitions never hit this
+path: the `agent_definition.toolset` column is not nullable and defaults to
+`{}`, so every hosted run resolves through the toolset spec.
 
 ### Toolset spec shape
 
@@ -135,11 +161,13 @@ JSON-shaped (so it can grow without a migration):
 ```
 
 - `meta_tools` — allow-list of meta-tool names. Omitted / `null` means "all
-  meta-tools the role admits"; `[]` registers nothing. The catalog of known
+  meta-tools the role admits", except the opt-in context tools (#3759, see
+  below); `[]` registers nothing. The catalog of known
   meta-tools is `META_TOOL_NAMES`; an unknown name in the list is ignored
   with a warning (forward-compat).
 - `connectors` — optional allow-list of `connector_id` values the agent may
-  reach through `call_operation`. Omitted / `null` means "no connector-level
+  reach through `call_operation` (and inspect through `preview_operation`).
+  Omitted / `null` means "no connector-level
   restriction beyond what dispatch already enforces" (the tenant boundary +
   per-op RBAC still apply); `[]` forbids every connector. A `call_operation`
   to a connector outside the list is rejected with a `ModelRetry` — a
@@ -158,17 +186,18 @@ other.
 
 Beyond the connector-execution tools, the catalog carries three broadcast
 coordination tools so a hosted run is a first-class reader and writer on the
-tenant's shared feed (`meho:feed:{tenant_id}`) rather than a mute
+tenant's shared announcement feed rather than a mute
 participant:
 
 - `broadcast_announce` — publish intent / progress / completion.
-- `broadcast_recent` — read recent feed events (peer announcements + audit
-  events).
-- `broadcast_watch` — a single bounded long-poll (≤30s) for new events; no
-  background subscription.
+- `broadcast_recent` — read recent stored agent announcements (since #3748
+  it does not return operation, approval or check events; those are in
+  `query_audit`).
+- `broadcast_watch` — a single bounded long-poll (≤30s) for new agent
+  announcements; no background subscription.
 
-These do **not** re-implement the feed. `_build_broadcast_meta_tools` in
-`toolset.py` resolves the `(inputSchema, handler)` pairs the MCP surface
+These do **not** re-implement the feed. `build_broadcast_meta_tools` in
+`toolset_broadcast.py` resolves the `(inputSchema, handler)` pairs the MCP surface
 already registered for `meho_broadcast_{announce,recent,watch}` (via the
 registry's `get_tool`) and reuses the handlers verbatim, so the agent's wire
 shape — the #2544 structured claims, the #2545 actor/work_ref lineage, the
@@ -176,10 +205,12 @@ shape — the #2544 structured claims, the #2545 actor/work_ref lineage, the
 (`dump_event_wire`) on reads — is identical to every other surface's. The
 read tools publish the MCP tool's **wire** schema (`ToolDefinition.to_wire()`,
 not the registered `inputSchema`) unchanged; `broadcast_announce` publishes
-it minus `run_id` / `work_ref`, which the wrapper stamps from the ambient run
-context (`current_agent_run_id_var` + `work_ref_var`, the same ContextVars the
-audit writers and `approval_wait` read) so announcements auto-group under the
-run without the model self-reporting a spoofable id. Publishing the wire copy
+it minus `run_id` / `work_ref`. The announce handler itself stamps those from
+the checked hosted run (#3736): it reads the run id from
+`current_agent_run_id_var`, loads the live `agent_run` row, and takes the work
+reference from that row, so the model never self-reports a spoofable id. This
+ambient run is also what lets a hosted run publish at all: only a trusted agent
+may announce (see `broadcast.md` § Who can publish). Publishing the wire copy
 rather than the registered schema is load-bearing (#2644): `to_wire()` strips
 the top-level `oneOf` / `allOf` / `anyOf` the Anthropic Messages API rejects
 on a tool's `input_schema`, and because that API validates the whole `tools`
@@ -195,6 +226,16 @@ publishers so a future bridged tool cannot regress it. Handler-side errors
 `ModelRetry` so a bad argument or a rate-limit hands feedback to the model
 instead of aborting the run.
 
+`broadcast_recent` adds one field to the MCP answer: `server_time`, the
+server's current UTC time in ISO-8601 form (#4236). A hosted model does not
+know today's date. When a user asked for "the last 24 hours", the model had
+to guess a `cursor` time, and a guess that was too early read from the start
+of the stream. With no `cursor` the tool reads the same default window as
+`meho_broadcast_recent` and `meho broadcast recent` (the last 30 minutes,
+`DEFAULT_WINDOW_MINUTES`). For a longer window the tool description tells the
+model to subtract from `server_time` and pass the result as `cursor`. The
+input schema stays the MCP wire schema; only the result gains the field.
+
 All three carry an `OPERATOR` floor (matching the MCP tools' `required_role`)
 and register only when a definition's `toolset` admits them — the same
 `spec ∩ identity-permissions` intersection as every other meta-tool. A
@@ -202,6 +243,247 @@ definition with `toolset is None` uses the legacy `_register_default_meta_tools`
 fallback (the original two tools) and does not gain the broadcast surface; a
 definition wanting coordination lists them (or omits `meta_tools` to take the
 whole catalog).
+
+### Governed discovery and result-handle tools (#3737)
+
+Configured definitions also get four tools from the MCP working surface, under
+the same names:
+
+- `meho_connector_list` — the connectors the tenant can use.
+- `list_targets` — the tenant's managed targets. A page over the JSONFlux
+  threshold comes back as a result handle, as on MCP.
+- `preview_operation` — the request `call_operation` would send, without
+  sending it.
+- `result_query` — read rows back from a JSONFlux result handle.
+
+`agent/toolset_discovery.py` builds them the same way the broadcast bridge
+does: it looks up the MCP `(definition, handler)` with `get_tool`, reuses the
+handler, publishes the MCP wire schema (`to_wire()`), and keeps the MCP
+`required_role` as the floor. So tenant scoping, target authorization (the
+cross-tenant `platform_admin` check in `list_targets`), the preview rate
+limit, and the result-handle owner check are the same code on both surfaces.
+
+The MCP `tools/call` handler runs some gates before the tool handler. The
+agent loop does not, so `_governed_handler` repeats them on every call:
+
+- role and capability, read from the operator of that call;
+- the registered `inputSchema`, with the same Draft 2020-12 validator and
+  format checker. This matters: `list_targets` and `result_query` rely on the
+  schema for their `limit` bounds, and `Tool.from_schema` does not validate
+  arguments.
+
+A failed gate, an `McpInvalidParamsError`, or an `McpRateLimitedError` reaches
+the model as `ModelRetry`. On top of that, `_make_meta_tool` re-checks every
+catalog tool's role floor against `ctx.deps` at call time, and checks the
+`connectors` allow-list for both `call_operation` and `preview_operation`.
+
+The empty spec `{}` resolves, in order: `list_operation_groups`,
+`search_operations`, `call_operation`, `meho_status`, `meho_connector_list`,
+`list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
+`broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
+keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
+out of the catalog on purpose; this is not full parity with the MCP working surface.
+
+Hosted calls to these four tools do not write the per-call MCP audit row
+(`mcp/audit.py`); that row belongs to the MCP transport. They write the
+agent tool call row instead (see [Audit of agent tool calls](#audit-of-agent-tool-calls-4234)).
+`call_operation` still writes its dispatch audit row as before.
+
+### Backplane health and connector discovery (#4233)
+
+A hosted agent whose prompt names no `connector_id` must still find one. Two
+pieces make that work:
+
+- `meho_status` — the backplane health check. It uses the same payload builder
+  as the MCP tool and `GET /api/v1/health` (`build_health_response`), then
+  drops the fields that only describe an MCP session:
+  `mcp_session_id_capture`, `mcp_protocol_version`, `granted_scopes`, and
+  `surface_summary` (that one lists MCP tools, which a hosted run does not
+  have). It keeps `operator`, `vault`, `db`, `sensor_runner`, and `pairings`.
+  The hosted floor is `OPERATOR`, like the REST route, because the check reads
+  a credential through Vault. It takes no arguments. It is not built with
+  `_bridge`: the MCP module imports the agent package, so it is not registered
+  yet when the catalog is built, and the handler imports the health module
+  inside the function for the same reason.
+- `meho_connector_list` follows the spec's `connectors` allow-list. When the
+  list is set, `_make_meta_tool` keeps only the rows whose `connector_id` is
+  in it, so the agent is shown only connectors it may call. With no list, all
+  rows come back.
+
+Both are in the default `{}` surface. The usual flow is: `meho_connector_list`
+→ `list_operation_groups` / `search_operations` → `call_operation`.
+
+**Missing versus disabled.** `resolve_agent_toolset` reports two different
+outcomes, and `agent_toolset_resolved` logs both:
+
+- `missing` — the spec names a tool this runtime does not ship.
+- `disabled` — a catalog tool that was not registered, with a reason:
+  `not_in_allow_list` (the spec's `meta_tools` leaves it out) or
+  `role_below_floor` (the run's role is too low).
+
+Neither kind is registered, so the model never sees it.
+
+### Opt-in context tools and hosted context (#3759)
+
+A configured definition can also get four context tools. They return stored
+tenant text, so they are **opt-in**: they register only when the spec's
+`meta_tools` list names them (`OPT_IN_META_TOOL_NAMES`). An omitted
+`meta_tools` does not add them, so existing definitions keep their surface;
+`resolve_agent_toolset` reports them as `not_in_allow_list`.
+
+- `query_topology`, `search_memory`, `search_knowledge` — bridged from the MCP
+  working surface by `build_retrieval_meta_tools` in `toolset_discovery.py`,
+  with the same `_bridge` and `_governed_handler` as the #3737 tools. So the
+  MCP handler, the MCP wire schema, the `OPERATOR` floor, tenant scoping,
+  Memory RBAC, the untrusted-text envelope on snippets and passages, and the
+  response size limits are the same code as on MCP. For the two search
+  tools the hosted description is the MCP description plus one sentence:
+  there is no `resources/read` here, use `read_context_resource`.
+- `read_context_resource(uri)` — hosted only (there is no MCP tool of this
+  name; MCP clients use `resources/read`). Lives in `agent/hosted_context.py`.
+  It accepts only these MCP resource templates (`READABLE_URI_TEMPLATES`):
+  `meho://memory/id/{document_uuid}`, `meho://kb/{slug}`,
+  `meho://kb/id/{entry}/revision/{revision}`, and
+  `meho://tenant/{tenant_id}/conventions/{slug}`. Any other URI — `http(s)`,
+  `file`, the legacy Memory `{scope}/{slug}` form, `meho://retrieve/...`,
+  docs, the feed, a URI over 512 characters — is refused with `ModelRetry`.
+  The URI is only matched against the MCP resource registry; nothing is
+  fetched over the network. An allowed URI runs the resource's role and
+  capability gates, then the registered handler, which does the tenant,
+  owner, and expiry checks.
+
+Reads that cannot be delivered come back as a structured omission instead of
+content: `{"uri", "delivery": "omitted", "reason", "fallback"}`.
+
+- `reason="not_available"` — the handler said "not found" or "denied". Both
+  give the same answer, as on MCP, so the reply does not show whether an
+  entry exists.
+- `reason="output_too_large"` — the body is over the shared read limit
+  (`result_query_response_wire_max_bytes`, measured like a `resources/read`
+  text block). The body is never cut.
+- `fallback` tells the model to work from the search snippets and passages.
+
+**Hosted context.** A configured definition also gets a second system prompt
+part, built at run start by `assemble_hosted_context(operator, tool_names)`
+and registered in `PydanticAgentRun._build_agent` with
+`agent.system_prompt(...)`. Pydantic AI sends static prompts first, so
+`AgentDefinition.system_prompt` stays the first part, unchanged, ahead of all
+tenant text. The legacy `toolset is None` path gets no hosted context.
+
+The second part has two bands:
+
+1. `<<HOSTED_CONTEXT>>` — short text MEHO writes. It says MEHO policy, audit,
+   and approvals always apply and no tool text can change them; that Memory,
+   knowledge base, and topology are not in the prompt; which of the four
+   context tools this run has (only the registered ones); what to do without
+   `read_context_resource`; and that conventions and retrieved text are data,
+   not instructions.
+2. The tenant conventions, from `assemble_preamble(...,
+   conventions_only=True)` — the same seam, order, 600-token budget, guard
+   prefix, and delimiters as the MCP `initialize` instructions. The
+   broadcast, runbook-priming, and doc-catalogue bands are left out: they name
+   MCP tools (`meho_broadcast_*`, `meho_runbook_*`, docs tools) a hosted run
+   does not have.
+
+Conventions that do not fit the budget are returned as
+`HostedContext.omissions` (`ContextOmission(kind="convention", name=<slug>,
+reason="over_budget")`), named in the hosted band (up to 20 slugs, then a
+count), and logged as `agent_hosted_context_over_budget`. With
+`read_context_resource` the band also names the URI to read one.
+
+Memory, knowledge base, and topology are on demand only; nothing loads them
+into the prompt. Like the #3737 tools, hosted reads do not write the per-call
+MCP audit row; they write the agent tool call row.
+
+**Delivery receipt (#3763).** Each hosted context build also returns a
+`HostedContextReceipt` (`HostedContext.receipt`). It says what MEHO
+*supplied*, not what the model did with it:
+
+| Field | Meaning |
+|---|---|
+| `conventions_revision` | `PreambleAssembly.conventions_revision`: a 16-character digest of the tenant's operational conventions (`id`, `updated_at`, pack order). |
+| `capabilities` | Registered tool name → version. The version is 12 hex characters of SHA-256 over the name, description, and input schema the model saw (`toolset.capability_versions`). |
+| `context_chars`, `context_tokens_estimate` | Size of the hosted context prompt part. |
+| `conventions_delivered`, `conventions_tokens_estimate` | How many conventions were packed, and the size of their band. |
+| `omissions` | Ids only: conventions over the budget (`over_budget`), requested tools the role may not use (`kind="capability"`, `role_below_floor`), and requested tools this runtime does not ship (`unsupported`). Tools the spec did not ask for are not listed. |
+| `correlation_id` | The id of the matching `context_selected` request usage event, or `None` when no event was recorded. |
+
+The model is `extra="forbid"`: it has no field for convention or retrieved
+text, prompts, or any claim that the model followed the context. Every id in
+it belongs to the run's own tenant.
+
+Where it goes:
+
+- **Run trace.** `PydanticAgentRun._build_agent` logs it as
+  `agent_hosted_context_delivered` every time the hosted context is built,
+  child runs included. The line carries the agent name, operator, tenant,
+  and `run_id`. The `run_id` is the durable `agent_run` id bound for the
+  run by the invocation layer; a recorded child run logs its own id. A run
+  with no bound id (the runtime used on its own) logs the id of its
+  `AgentRunHandle`. So two runs of the same agent stay apart in the log
+  even when usage collection is off and the receipt has no
+  `correlation_id`. A run started with `start()` also returns the receipt
+  on `AgentRunResult.context_receipt`. A legacy run (`toolset is None`)
+  has no hosted context, so no log line and `context_receipt=None`.
+- **Request usage sink (#3734).** `assemble_hosted_context` calls
+  `note_context_selected()`. When usage collection is on and the run started
+  inside an open request, that request stores one `context_selected` event
+  with the receipt's `correlation_id`. The usage schema only holds ids, so
+  the sizes and revision stay in the trace; the correlation id joins the
+  two. Scheduled runs and runs that outlive their request get
+  `correlation_id=None`.
+- **Never `audit_log`.** A receipt is telemetry, not an accountable action.
+
+Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
+`None`, granted-versus-denied capability, budget-overflow, usage-link, and
+run-id (two concurrent runs, a bound durable id, a parent and its child)
+cases.
+
+### Audit of agent tool calls (#4234)
+
+Every tool call a hosted agent makes leaves one `audit_log` row, keyed by
+`agent_session_id` = the run id. This covers discovery calls, broadcast
+reads, refused calls, calls that fail, and calls to a tool name the run
+cannot use. A run that fails before it reaches the dispatcher still shows
+what the agent tried. For a child run started by `invoke_agent`, the rows
+carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstructable)).
+
+- **Where.** `agent/tool_audit.py`. `ToolCallAudit` is a Pydantic AI
+  capability. `PydanticAgentRun._build_agent` passes it to every agent it
+  builds (`Agent(..., capabilities=[ToolCallAudit()])`), so its
+  `wrap_tool_execute` hook wraps every function tool: the catalog tools,
+  the legacy two-tool surface, and `invoke_agent`. Its
+  `on_tool_validate_error` hook records a call whose arguments failed
+  validation. Its `after_model_request` hook records a call to a tool name
+  the run cannot use: Pydantic AI rejects such a name before any tool hook
+  runs, so the hook reads the attempt from the model's response. The tool
+  is not enabled; the model still gets the framework's retry message.
+- **One row per call.** The hook opens the same classified record scope the
+  REST and MCP wrappers use (`audit_cutover.open_classified_record_scope`).
+  If the call already committed its own classified row for the caller (a
+  dispatch through `call_operation`), no second row is written. Each row
+  the hook writes gets its own scope, so a child run's row (for example a
+  child's unknown-tool or bad-arguments row after the cutover) never counts
+  as the record of the parent's `invoke_agent` call.
+- **Row shape.** `method="AGENT"`, `path="/agent/tools/call/<tool>"`. The
+  payload holds `op_id` (the tool name), `params_hash`, `op_class`,
+  `error_type` on a failure, and the agent model and provider. Arguments and
+  error text are never stored.
+- **Status.** 200 success, 403 a call the toolset refused (role floor or
+  connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
+  arguments, a retry the tool asked for, or a call to a tool name the run
+  cannot use (`error_type` is `UnknownToolError`), 500 an error. Pydantic AI wraps
+  a tool's `ModelRetry` in `ToolRetryError`; the hook reads the tool's own
+  exception from `__cause__`.
+- **Event class.** `legacy_request` while `AUDIT_WRAPPER_ROWS_RETIRED` is
+  off. With it on, a refusal is `policy_decision` and any other call is
+  `operation_execution`. An agent run has no request usage event, so its
+  routine calls keep their audit row after the cutover.
+- **Fail-closed.** The row commits before the result goes back to the
+  model. If the write fails, the tool call raises and the run fails.
+
+The run row records its end time in `ended_at` for every end state
+(succeeded, failed, cancelled); `operations/agent_run.transition` stamps it.
 
 ## Invocation surface (T4 #811)
 
@@ -234,6 +516,44 @@ persisted definition (T2 `AgentDefinitionService`), and the durable run row
   `stream_events` inline (one connection = one run's lifetime), yielding
   `(run_id, AgentRunEvent)` and recording the terminal outcome on the run
   row so a streamed run is still poll-able afterward.
+
+### Whose identity a direct run uses (#4237)
+
+A run is either **direct** (a person starts it over REST, MCP, CLI or the
+console, through `run` or `stream_events`) or **scheduled** (the scheduler
+starts it, through `run_scheduled`). The two use identity like this:
+
+| | Direct run | Scheduled run |
+|---|---|---|
+| Who calls the backplane | the person, with their own token | the agent, with its own `client_credentials` token |
+| `agent_run.identity_sub` | the person | the agent |
+| `agent_run.identity_act` | the agent (`identity_ref`, `agent:<name>`) | null |
+| Audit row `operator_sub` / `actor_sub` | person / agent | agent / null |
+| Broadcast `principal_sub` / `actor_sub` | person / agent | agent / null |
+| Grants that limit each call | the person's **and** the agent's (stricter wins) | the agent's |
+
+A direct run works "on behalf of" the person: the person stays the subject
+and the agent is the actor (RFC 8693 `sub` + `act`). `run` and
+`stream_events` bind the agent with `auth/delegation.py::actor_delegation`
+for the whole run. Every audit row, broadcast event and approval request the
+run makes reads that binding, so they all name both identities and carry the
+run id as `agent_session_id`.
+
+The policy gate (`operations/_validate.py::policy_gate`) also reads the
+binding. It works out the agent's verdict from its `agent:<name>` grants
+and the person's own verdict, and the stricter one wins. So the agent's
+grants limit a direct run the same way they limit a scheduled one: an op the
+agent's grants deny is denied, even when the person could run it alone. The
+caller may also be another agent (an `agent`-kind token). Then the caller's
+own grants and the hosted agent's grants both apply, and the stricter wins:
+a caller deny grant refuses the call even when the hosted agent would only
+wait for approval. A call that must wait for approval follows the normal approval rules (the
+person who asked cannot approve their own request, unless the deploy allows it). See
+`agent-permission-model.md`.
+
+MEHO does not swap the person's token for the agent's on a direct run. That
+would need a token exchange the identity provider does not offer, and it
+would make the agent, not the person, the one who asked for each approval.
 
 **Why a run store.** The seam's `AgentRunHandle` wraps an in-memory
 `asyncio.Task`. A FastAPI request's task tree is torn down when the request
@@ -337,6 +657,16 @@ a raised exception across the boundary, and never a launched loop.
   misses degrades to the old behaviour; a phrasing it catches turns a
   fabricated success into an honest typed failure.
 
+  The check runs at the start of every run, so it is kept fast. It
+  reads only the first 16,384 characters (16 KiB) of each text
+  (`_MAX_SCANNED_CHARS`), and its time grows in line with the length it
+  reads. So it takes at most a few milliseconds for any prompt. A
+  runbook instruction after the first 16 KiB of a longer text is not seen.
+  When a text is cut, a hit that the cut reaches is not used either: the
+  words after the cut could change what it means ("use the runbooks page"
+  cut to "use the runbook"). So the cut can make the check miss an
+  instruction, but it never refuses a run that the full text allows.
+
   Capability (`toolset_admits_runbook_execution` in `agent/toolset.py`)
   is intersected explicitly: `RUNBOOK_EXECUTION_META_TOOL_NAMES` is an
   (intentionally empty) subset of the meta-tool catalog. A future
@@ -356,6 +686,46 @@ bounds how long a sync run holds the HTTP connection. `run` awaits
 `asyncio.wait_for(asyncio.shield(task), timeout)` — the shield means the
 timeout abandons the *wait*, not the run, so a long run degrades to a
 pollable async run rather than being cancelled.
+
+### Output limit per answer (`AGENT_MAX_OUTPUT_TOKENS`)
+
+Each model request carries `max_tokens`: the most output tokens the
+model may write back in one answer. The setting
+`agent_max_output_tokens` (env `AGENT_MAX_OUTPUT_TOKENS`, Helm
+`agent.maxOutputTokens`) sets it.
+
+- Default 4096. This is the value MEHO has always sent, so an install
+  that does not set it sees no change.
+- Allowed range 1 to 128000. A value outside the range stops the
+  backplane at start with an error that names
+  `agent_max_output_tokens`. The chart schema checks the same range at
+  `helm template` time.
+- Both Anthropic builders read it: `anthropic_backend_builder`
+  (`agent/models.py`, used through the tier resolver) and
+  `default_model_factory` (`agent/run.py`). They send it as
+  `AnthropicModelSettings(max_tokens=...)`.
+- The Bedrock and OpenAI-compatible backends do **not** use it. They
+  send no output limit, so the model's own default applies, as before.
+  Applying the setting there would change their requests on upgrade,
+  and this setting must not change anything by default.
+
+Why the builders always send a value: since pydantic-ai 2.52, an unset
+`max_tokens` means the model's maximum (128,000 for
+`claude-sonnet-4-6`), and pydantic-ai then sends the request as a
+stream.
+
+What a higher value costs:
+
+- **Money.** A longer answer uses more output tokens, and output
+  tokens are the most expensive part of a request.
+- **Time.** One answer can take much longer. A sync run still converts
+  to async at `AGENT_SYNC_TIMEOUT_SECONDS`, but the loop holds the
+  model call for the whole answer.
+- **Streaming.** The `anthropic` SDK refuses a non-streamed request it
+  expects to take more than 10 minutes. With the SDK's default timeout
+  that is any `max_tokens` above about 21,333. pydantic-ai then sends
+  the request as a stream instead. The agent still gets the same
+  result, but the request on the wire is different.
 
 ## Composition — agent invokes agent (T5 #812)
 
@@ -421,8 +791,12 @@ The child run is recorded as a child of the parent in two parallel lineages:
   is nothing for the finalizer to close).
 - **Session lineage** — `current_agent_run_id_var` carries the current run's id
   for the duration of a child invocation, so a nested `invoke_agent` reads it as
-  the next child's `parent_run_id` and per-tool-call audit rows correlate to
-  their run.
+  the next child's `parent_run_id`. `agent_session_id_var` (the audit session
+  id) is bound to the child's run id for the same span (#4234), so every audit
+  row the child writes, including the dispatcher's rows, carries the child's
+  run id. The parent's own `invoke_agent` row is written after the child loop
+  ends and keeps the parent's run id. A query by either run id finds that
+  run's calls.
 
 ### Why a tool factory, not a standalone service
 
@@ -453,23 +827,45 @@ could approve, but the agent run never found out.
 The agent runtime closes that gap with a wrapped `call_operation`. On
 `status="awaiting_approval"`, the wrapper:
 
-1. **Subscribes** to the per-tenant Valkey stream (`meho:feed:{tenant_id}`)
-   via `XREAD BLOCK`, filtered to the request's own `approval_request_id`.
-   The wait is in `meho_backplane/agent/approval_wait.py`; the per-tenant
-   stream is the same one the SSE feed and `meho_broadcast_watch` read.
+1. **Waits** for the decision in `meho_backplane/agent/approval_wait.py`.
+   The stored approval row is the only source (#3732, #3758):
+   - It reads the stored row first (tenant-scoped, through `get_request`).
+     A decision made before the wait started is returned at once.
+   - While the row is `pending`, it reads the row again every
+     `_POLL_SECONDS` (2 seconds). That is one primary-key read per
+     interval, only while an agent waits.
+   - It does not read Valkey at all. Broadcast carries deliberate agent
+     announcements only, so no approval event is published there, and a
+     Valkey outage cannot delay or hide a decision.
+   - A failed row read (database error, row not visible to this tenant) is
+     logged and treated as "no decision seen yet"; the wait keeps reading
+     until the deadline.
+   - It reads the row once more before it gives up at the deadline.
 2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
    original in-memory `params` (passed through `call_operation_with_approval`
    in `operations/meta_tools.py`). The dispatcher's gate-bypass path skips
    the policy gate; the durable approval-decision row is the authorization.
+   If the waiting row is a composite sub-op (`resume_parent` set), the waiter
+   runs the parent composite again with the approved sub-op cleared, through
+   the same helper the operator surface uses. That re-run uses the target the
+   row saved by id, not the target name from the original call, so a renamed
+   or re-created target never receives the approved write (#3421; see
+   `docs/codebase/approvals.md`, "Both resume surfaces read `resume_parent`").
 3. **On rejection** — returns the original `awaiting_approval` envelope to
    the model annotated with `extras["error_code"] = "approval_rejected"`
    and `extras["decision"] = "rejected"` plus a rewritten `error` message,
    so the agent's model sees a structured tool result it can reason about.
-4. **On timeout / broadcast outage** — returns the envelope annotated with
-   `extras["error_code"] = "awaiting_approval_timeout"` so the model can
-   distinguish "still pending, timed out" from "decision happened". The
-   durable decision row remains the source of truth; the agent can query
-   approval status or re-issue.
+   **On expiry** the same shape carries `"approval_expired"` /
+   `"expired"`. Neither case runs the operation.
+4. **On timeout** — returns the envelope annotated with
+   `extras["error_code"] = "awaiting_approval_timeout"`. This happens only
+   when the last read still found the row `pending`, or could not read it.
+
+Approval is not proof that the operation worked. On approval the waiter
+still has to win `claim_resume` (one resume per request), and the result the
+agent sees is the dispatcher's own envelope: success, error, or an
+uncertain outcome. If the agent run is cancelled while it waits, the
+cancel propagates and nothing retries later.
 
 The wait cap is `Settings.agent_approval_wait_timeout_seconds` (default
 1800s = 30 min, env `AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS`). It bounds how
@@ -930,6 +1326,11 @@ the architecture grounding it links back to.
 
 ## Testing
 
+- `backend/tests/test_agent_tool_audit.py` — one audit row per agent tool
+  call (#4234): a succeeding run, a run that fails before any dispatch,
+  arguments that fail validation, the classes after the wrapper cutover,
+  fail-closed on an audit write failure, and `ended_at` on succeeded,
+  failed and cancelled runs.
 - `backend/tests/test_agent_run.py` — unit tests against a deterministic
   `FunctionModel` (no network): the loop calls `call_operation` against a
   seeded typed op, the turn budget caps a runaway loop, `output_type` is
@@ -954,11 +1355,20 @@ the architecture grounding it links back to.
   but routes through a PrivateLink-flagged sibling registration
   cleanly; a tenant policy can split tiers across Anthropic + Bedrock
   by layering both default registrations.
+- Output limit (#3997) — `test_agent_run.py` and
+  `test_agent_model_resolver.py` each send one real request through the
+  `anthropic` SDK with only the HTTP transport replaced
+  (`tests/_anthropic_request_capture.py`). They check that both
+  Anthropic builders send `max_tokens == 4096` by default, not
+  streamed, and that `AGENT_MAX_OUTPUT_TOKENS=8192` reaches the
+  request. `test_settings.py` checks the default, an override, and that
+  a value outside [1, 128000] stops the start.
 - `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
   tests for the OpenAI-compat builder, per-vendor profile dispatch
   (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,
   the settings-driven default builder's host-hint heuristic, and
-  fail-closed posture without `OPENAI_API_KEY`.
+  fail-closed posture without `OPENAI_API_KEY`. One test sends a real
+  openai SDK request and checks its URL, `Authorization` header and body.
 - `backend/tests/test_agent_vcf_paif_backend.py` (G11.5-T4) — unit tests
   for the VCF PAIF builder and the bundled OIDC token provider: the
   vLLM-equivalent profile flips strict-tool-def off; the `client_credentials`
@@ -968,12 +1378,37 @@ the architecture grounding it links back to.
   the air-gapped tenant resolves all three tiers to PAIF with **zero**
   SaaS-host traffic; a mis-flagged `is_saas_egress=True` PAIF registration
   still fails closed for an air-gapped tenant; the settings-driven default
-  fails closed naming every missing setting.
+  fails closed naming every missing setting. The zero-traffic check uses
+  two guards: `respx` for plain `httpx` (the token fetch) and
+  `no_httpx2_egress` for `httpx2` (the openai SDK). A self-test proves the
+  `httpx2` guard catches an SDK request. Other tests send one real SDK
+  request (base URL plus IdP token) and check that the SDK client trusts
+  the CA file named by `SSL_CERT_FILE`.
+- `backend/tests/_httpx2_capture.py` — shared test helpers. The `anthropic`
+  1.x and `openai` 3.x SDKs send with `httpx2`, which `respx` cannot see.
+  The helpers patch `httpx2.AsyncHTTPTransport` to capture the request the
+  real SDK built, or to fail a test that sends one. They also read the SSL
+  context an SDK client uses. `test_operations_ingest_anthropic_client.py`
+  uses them to check that the spec-ingest client really sends our
+  `max_tokens`, uses the 120-second timeout, and retries exactly once.
 - `backend/tests/test_agent_toolset.py` — unit tests for the resolver /
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input
   schemas reflecting the meta-tool schemas, the connector allow-list yielding
-  a `ModelRetry`, and spec validation.
+  a `ModelRetry`, and spec validation. The #3737 tests pin the `{}` surface
+  and the legacy `None` two-tool surface, and cover missing versus disabled
+  outcomes, the call-time role re-check, MCP schema enforcement, MCP handler
+  reuse, and JSONFlux handles passing through unchanged. The #3759 tests
+  cover the opt-in context tools (schema, role floor, the run's tenant
+  reaching the real MCP handlers, refused URIs, tenant- and owner-scoped
+  reads, `not_available` and `output_too_large` omissions) and the hosted
+  context (tool-aware band, conventions through the preamble seam,
+  over-budget omissions, system prompt kept first, legacy runs unchanged).
+- `backend/tests/test_agent_toolset_discovery.py` (#4233) — the connector
+  list follows the `connectors` allow-list; `meho_status` drops the
+  MCP-session fields, refuses arguments, and needs `OPERATOR`; an agent run
+  with no connector id in its prompt lists the connectors, picks
+  `linux-ssh-1.x`, and calls `linux.about`.
 - `backend/tests/integration/test_agent_run_anthropic.py` — opt-in
   real-Anthropic loop (skipped unless `ANTHROPIC_API_KEY` is set; marked
   `slow`). Proves the seam drives a live model that calls a real operation

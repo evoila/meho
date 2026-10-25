@@ -67,6 +67,8 @@
                              render the actionable guidance, not the bare error (#2669)
     operator_sub          -- str: the reviewing operator's subject
     status_pill_class     -- dict[str, str]: status -> DaisyUI badge modifier
+    result_state_pill     -- dict[str, tuple[str, str]]: run state of an
+                             approved request -> (label, badge modifier)
     csrf_token            -- str: minted double-submit token
     error_status          -- int | None: a failed-decision HTTP status
     error_message         -- str | None: a failed-decision human detail
@@ -166,7 +168,11 @@
     {% if request.status != "pending" %}
       {# Decided row (#1827): a read-only banner naming the outcome + who/when.
          Approve/Deny are not rendered below -- there is nothing to act on. #}
-      {% if request.status == "approved" %}
+      {% if request.status == "approved" and request.result_state == "failed" %}
+        {#- Approved, but the run failed (#3543): not a success banner. -#}
+        {% set decision_alert = "alert-error" %}
+        {% set decision_verb = "Approved" %}
+      {% elif request.status == "approved" %}
         {% set decision_alert = "alert-success" %}
         {% set decision_verb = "Approved" %}
       {% elif request.status == "rejected" %}
@@ -190,6 +196,50 @@
             <p class="text-sm opacity-90">
               <time datetime="{{ decision_ts }}" class="font-mono text-xs">{{ decision_ts }}</time>
             </p>
+          {% endif %}
+          {#- What happened when the approved request ran (#3543), read off
+              the stored result. The result body stays on the owner-only
+              /result read. -#}
+          {% if request.result_state == "failed" %}
+            <p class="text-sm font-semibold">The approved operation ran, but it did not succeed. Open the audit row to see why.</p>
+          {% endif %}
+          {% if request.result_state %}
+            {% set run_label, run_class = result_state_pill.get(request.result_state, (request.result_state, "badge-ghost")) %}
+            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
+              <dt class="opacity-70">Run</dt>
+              <dd><span class="badge badge-sm {{ run_class }}" data-result-state="{{ request.result_state }}">{{ run_label }}</span></dd>
+              {% if request.outcome %}
+                {% if request.outcome.resumed_at %}
+                  <dt class="opacity-70">Run started</dt>
+                  <dd><time datetime="{{ request.outcome.resumed_at }}" class="font-mono text-xs">{{ request.outcome.resumed_at }}</time></dd>
+                {% endif %}
+                {% if request.outcome.result_status %}
+                  <dt class="opacity-70">Result status</dt>
+                  <dd class="font-mono">{{ request.outcome.result_status }}</dd>
+                {% endif %}
+                {% if request.outcome.error_code %}
+                  <dt class="opacity-70">Error code</dt>
+                  <dd class="font-mono [overflow-wrap:anywhere]">{{ request.outcome.error_code }}</dd>
+                {% endif %}
+                {% if request.outcome.audit_href %}
+                  <dt class="opacity-70">Audit</dt>
+                  <dd><a class="link font-mono text-xs" href="{{ request.outcome.audit_href }}">{{ request.outcome.audit_id }}</a></dd>
+                {% endif %}
+              {% endif %}
+            </dl>
+          {% endif %}
+          {#- Delegated decision (#3692): the approver acted on another human's
+              written instruction. Read off the decision audit row; absent for an
+              ordinary decision. -#}
+          {% if request.delegation %}
+            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-delegation">
+              <dt class="opacity-70">Instructed by</dt>
+              <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.instructed_by }}</dd>
+              <dt class="opacity-70">Instruction</dt>
+              <dd class="[overflow-wrap:anywhere]">&ldquo;{{ request.delegation.instruction }}&rdquo;</dd>
+              <dt class="opacity-70">Refs</dt>
+              <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.refs | join(", ") }}</dd>
+            </dl>
           {% endif %}
         </div>
       </div>
@@ -509,19 +559,22 @@
         the shared reason via ``hx-include``, and disables itself during dispatch
         exactly as the single-click form did before (#1693 / #1754). -#}
     <div class="modal-action mt-4 flex-col items-stretch gap-3" x-data="{ armed: '' }">
-      <label class="form-control w-full max-w-xs self-start">
+      <label class="form-control w-full max-w-md self-start">
         <span class="label-text text-xs">Reason <span class="opacity-60">(optional)</span></span>
-        {# Single shared reason input; each confirm form pulls it via
-           hx-include so the operator types it once. #}
-        <input
-          type="text"
+        {# Single shared reason field; each confirm form pulls it via
+           hx-include so the operator types it once. A textarea, not a text
+           input: the delegated-decision trailer (``Instructed-by:`` /
+           ``Instruction:`` / ``Refs:``) is one line per field
+           and a text input drops the line breaks on paste. #}
+        <textarea
           id="meho-approval-reason"
           name="reason"
+          rows="3"
           maxlength="2000"
-          class="input input-bordered input-sm"
+          class="textarea textarea-bordered textarea-sm"
           placeholder="Recorded on the decision audit row"
           aria-label="Decision reason"
-        />
+        ></textarea>
       </label>
 
       {# Phase 1 -- resting armers. ``type="button"``: the first click only sets

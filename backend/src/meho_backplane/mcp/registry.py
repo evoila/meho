@@ -97,6 +97,8 @@ __all__ = [
     "has_addon_gated_tools",
     "register_mcp_resource",
     "register_mcp_tool",
+    "registered_resource_templates",
+    "registered_tool_names",
     "role_at_least",
     "surface_visible",
 ]
@@ -112,9 +114,9 @@ _log = structlog.get_logger(__name__)
 #: A tool handler receives the validated operator and the
 #: jsonschema-validated arguments dict, and returns a JSON-serialisable dict
 #: that the :func:`~meho_backplane.mcp.handlers.handle_tools_call` wrapper
-#: packs into the MCP ``content`` array. Returning ``isError`` semantics
-#: (tool-execution errors per MCP spec §Error Handling) is currently
-#: out of scope for the registry; T4 reference tools wire it.
+#: packs into the MCP ``content`` array. The wrapper sets ``isError``
+#: (tool-execution errors per MCP spec §Error Handling) from the
+#: ``status`` of an ``OperationResult`` envelope; handlers never set it.
 ToolHandler = Callable[[Operator, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 #: A resource handler receives the operator and the URI-template variables
@@ -673,6 +675,16 @@ def register_mcp_resource(
 def get_tool(name: str) -> tuple[ToolDefinition, ToolHandler] | None:
     """Return ``(definition, handler)`` for *name*, or ``None`` if unregistered."""
     return _TOOLS.get(name)
+
+
+def registered_tool_names() -> frozenset[str]:
+    """Return the name of every registered tool (request usage route catalog, #3734)."""
+    return frozenset(_TOOLS)
+
+
+def registered_resource_templates() -> frozenset[str]:
+    """Return every registered resource ``uriTemplate`` (request usage route catalog, #3734)."""
+    return frozenset(_RESOURCES)
 
 
 def get_resource_for_uri(

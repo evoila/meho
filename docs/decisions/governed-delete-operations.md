@@ -24,6 +24,7 @@ design home (design review → this decision → implementation Tasks)
 >    self-approval, no autonomous-session approval. This reuses the approvals
 >    plane's existing human-only line (v0.1-spec §7); it does not invent a second
 >    approval mechanism.
+>    No standing grant applies — except on an instance in sandbox mode; see [sandbox-mode.md](sandbox-mode.md).
 > 2. **Mandatory preview.** Dispatch is refused unless a `preview_operation` of the
 >    same `(connector_id, op_id, target, params)` was executed and **its result
 >    hash** is presented with the approval — the approver sees precisely what dies.
@@ -321,3 +322,49 @@ new, orthogonal conformance sweep
 `destructive` descriptor from the real typed-op registrars (every connector, both
 source kinds) and fails the build if any resolves no registered proposed-effect
 builder. A promotion without a builder now fails CI, not first use.
+
+## Amendment (2026-10-16) — who may propose a destructive op (#3478)
+
+This amendment states shipped behaviour. It changes no gate. Some
+integrators read requirement 1 as "destructive means automation is denied".
+That is only true for agent principals. A paired add-on that signs in as a
+**service principal** can propose a delete, and a human then decides.
+
+### Who may propose
+
+- **Any principal may start a destructive op.** Starting it does not run it.
+  The call waits for a human to approve.
+- **Agent principals** (`principal_kind=agent`) are the one exception. For
+  them the tier is DENY. The call does not wait for approval; it is refused
+  (`auth/permissions.py` `_SAFETY_DEFAULT` and `_SAFETY_CEILING` map
+  `destructive` to DENY, applied on the agent branch of
+  `operations/_validate.py::policy_gate`).
+- **Service and user principals** always wait for approval
+  (`NEEDS_APPROVAL`). They are never denied by the tier, and they never run
+  without approval (`operations/_validate.py::_non_agent_verdict`, the
+  `safety_level == "destructive"` branch).
+- **No standing grant can approve it in advance.** The grant lookup refuses
+  the tier before it reads any grant row
+  (`operations/service_grants.py::consult_and_record_grant`), and a grant
+  for a delete-shaped op cannot be created at all.
+- **The call must carry the preview hash.** The proposer runs
+  `preview_operation` first and sends its `preview_hash` on
+  `call_operation` (`CallOperationBody.preview_hash`,
+  `operations/meta_tools.py`). The blast-radius statement is built when the
+  call is parked and is stored on the parked row's `proposed_effect`. It is
+  not part of the preview reply.
+- **Approval runs the op under the approver.** A different human approves
+  (no self-approval, not even with break-glass). The op then runs with the
+  approver's identity
+  (`operations/approval_queue.py::resume_dispatch_after_approval`), and the
+  audit row names the approver.
+- **The proposer reads the result back.** Only the principal that parked
+  the op can read the result, with `GET /api/v1/approvals/{id}/result`
+  (`api/v1/approvals.py::get_approval_result`). It returns `result: null`
+  until the op has run, so the proposer polls.
+
+The full step-by-step flow, with the code seams, is in
+[`docs/codebase/approvals.md`](../codebase/approvals.md#an-add-on-proposes-a-governed-destroy-3478).
+The conformance test
+`tests/test_connectors_harbor_robot_delete.py::test_service_principal_proposes_destroy_and_adopts_result`
+pins the whole flow for a service principal.

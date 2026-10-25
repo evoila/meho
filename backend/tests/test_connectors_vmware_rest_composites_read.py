@@ -22,7 +22,7 @@ Coverage matrix (carried over from G3.1-T5 / #508, mechanism swapped):
   dispatch-mechanism swap.
 * Envelope tolerance: ``{"value": [...]}`` (legacy) and bare lists
   (modern) both parse correctly.
-* Filter pass-through: ``filter_names`` / ``filter_dvs`` / ``moId`` /
+* Filter pass-through: ``filter_names`` / ``moId`` /
   ``entity_moid`` flow into the sub-op query / path / body.
 * Error fan-out: a load-bearing sub-op raising ``httpx.HTTPStatusError``
   propagates out of the handler (the dispatcher's outer branch wraps it
@@ -41,6 +41,7 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.vmware_rest import vim_retrieve
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
@@ -50,6 +51,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     performance_summary_composite,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
+from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -151,15 +153,20 @@ class _RecordingConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         # #2466: vmomi POST sub-ops route through the connector's VI-JSON
         # mount seam, NOT mount_op_path. The handler passes the
         # spec-relative path; the fake re-applies mount_prefix so the
         # recorded wire path + response keys keep the pre-#2466 form.
+        del promote_managed_object_not_found, session_used, session_token
         mounted = f"{self._mount_prefix}{path}"
         self.calls.append(
             {"method": "POST", "path": mounted, "query": None, "body": json, "vmomi": True}
         )
+        reject_config_ex_member_paths(json)
         return self._serve(mounted)
 
     def _serve(self, path: str) -> Any:
@@ -252,11 +259,18 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
     mount.
     """
     cluster_payload = {"name": "Cluster-A", "drs_enabled": True}
-    drs_config = {"enabled": True, "defaultVmBehavior": "fullyAutomated", "vmotionRate": 3}
+    drs_config = {
+        "_typeName": "ClusterDrsConfigInfo",
+        "enabled": True,
+        "defaultVmBehavior": "fullyAutomated",
+        "vmotionRate": 3,
+    }
     conn = _RecordingConnector(
         {
             "/api/vcenter/cluster/domain-c123": cluster_payload,
-            _RETRIEVE_PROPERTIES_PATH: _retrieve_result({"configurationEx.drsConfig": drs_config}),
+            _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
+                {"configurationEx": cluster_config_ex(drs_config=drs_config)}
+            ),
         }
     )
 
@@ -276,7 +290,8 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
     assert conn.mount_calls == ["/vcenter/cluster/domain-c123"]
     assert conn.calls[1]["vmomi"] is True
     # The filter spec scopes one PropertyFilterSpec to the cluster MoRef
-    # and reads only the DRS config (no history requested).
+    # and reads the whole configurationEx (vCenter 8.0.x rejects the path
+    # configurationEx.drsConfig); no history requested.
     body = conn.calls[1]["body"]
     assert body == {
         "specSet": [
@@ -286,7 +301,7 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
                     {
                         "_typeName": "PropertySpec",
                         "type": "ClusterComputeResource",
-                        "pathSet": ["configurationEx.drsConfig"],
+                        "pathSet": ["configurationEx"],
                     }
                 ],
                 "objectSet": [
@@ -319,7 +334,7 @@ async def test_cluster_drs_recommendations_history_flag_widens_read_and_surfaces
             "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
             _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
                 {
-                    "configurationEx.drsConfig": {"enabled": True},
+                    "configurationEx": cluster_config_ex(drs_config={"enabled": True}),
                     "drsRecommendation": {
                         "_typeName": "ArrayOfClusterDrsRecommendation",
                         "_value": recs,
@@ -337,7 +352,7 @@ async def test_cluster_drs_recommendations_history_flag_widens_read_and_surfaces
     # The flag widens the same RetrievePropertiesEx read -- no extra call.
     assert len(conn.calls) == 2
     path_set = conn.calls[1]["body"]["specSet"][0]["propSet"][0]["pathSet"]
-    assert path_set == ["configurationEx.drsConfig", "drsRecommendation"]
+    assert path_set == ["configurationEx", "drsRecommendation"]
     assert out["drs"] == {"enabled": True}
     assert out["recommendations_history"] == recs
 
@@ -349,7 +364,7 @@ async def test_cluster_drs_recommendations_history_flag_default_omits_key() -> N
         {
             "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
             _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
-                {"configurationEx.drsConfig": {"enabled": False}}
+                {"configurationEx": cluster_config_ex(drs_config={"enabled": False})}
             ),
         }
     )
@@ -416,105 +431,263 @@ async def test_cluster_drs_recommendations_propagates_load_bearing_error() -> No
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_event_tail_reads_query_events_with_default_mo_id() -> None:
-    """Default ``moId='EventManager'`` rides the path; ``max_events=100`` applied."""
-    events_payload = [{"id": f"evt-{n}", "summary": f"event {n}"} for n in range(5)]
-    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": events_payload})
-    out = await event_tail_composite(
+_QUERY_EVENTS_PATH = "/api/EventManager/EventManager/QueryEvents"
+
+
+async def _run_event_tail(conn: _RecordingConnector, params: dict[str, Any]) -> dict[str, Any]:
+    return await event_tail_composite(
         operator=_make_operator(),
         target=object(),
-        params={},
+        params=params,
         connector=conn,  # type: ignore[arg-type]
     )
+
+
+@pytest.mark.asyncio
+async def test_event_tail_unfiltered_sends_a_tagged_filter_spec_body() -> None:
+    """No params still sends a non-empty ``EventFilterSpec`` (8.0.x 500s on an empty body)."""
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: []})
+    out = await _run_event_tail(conn, {})
     assert len(conn.calls) == 1
     only = conn.calls[0]
     assert only["method"] == "POST"
-    assert only["path"] == "/api/EventManager/EventManager/QueryEvents"
-    # QueryEvents carries no method-arg body (parity: the pre-migration
-    # dispatch passed only the moId path param).
-    assert only["body"] is None
-    assert out["events"] == events_payload
-    assert out["count"] == 5
-    assert out["moId"] == "EventManager"
-    assert out["max_events_applied"] == 100
+    assert only["vmomi"] is True
+    assert only["path"] == _QUERY_EVENTS_PATH
+    assert only["body"] == {
+        "filter": {
+            "_typeName": "EventFilterSpec",
+            "disableFullMessage": False,
+            "maxCount": 100,
+        }
+    }
+    assert out == {"events": [], "count": 0, "moId": "EventManager", "max_count_applied": 100}
 
 
 @pytest.mark.asyncio
-async def test_event_tail_caps_results_to_max_events() -> None:
-    """The handler caps client-side to ``max_events``."""
-    events_payload = [{"id": f"evt-{n}"} for n in range(200)]
-    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": events_payload})
-    out = await event_tail_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"max_events": 7},
-        connector=conn,  # type: ignore[arg-type]
+async def test_event_tail_maps_every_filter_param_onto_the_filter_spec() -> None:
+    """``begin_time`` / ``end_time`` / ``event_type_ids`` / ``entity`` / ``max_count`` land."""
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: []})
+    await _run_event_tail(
+        conn,
+        {
+            "begin_time": "2026-10-19T08:00:00Z",
+            "end_time": "2026-10-19T09:30:00+02:00",
+            "event_type_ids": ["esx.problem.storage.apd.start", "NASDatastoreEvent"],
+            "entity": {"moId": "datastore-12", "type": "Datastore", "recursion": "self"},
+            "max_count": 250,
+        },
     )
+    assert conn.calls[0]["body"] == {
+        "filter": {
+            "_typeName": "EventFilterSpec",
+            "entity": {
+                "_typeName": "EventFilterSpecByEntity",
+                "entity": vim_moref("Datastore", "datastore-12"),
+                "recursion": "self",
+            },
+            "time": {
+                "_typeName": "EventFilterSpecByTime",
+                "beginTime": "2026-10-19T08:00:00Z",
+                "endTime": "2026-10-19T09:30:00+02:00",
+            },
+            "disableFullMessage": False,
+            "eventTypeId": ["esx.problem.storage.apd.start", "NASDatastoreEvent"],
+            "maxCount": 250,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_event_tail_entity_recursion_defaults_to_all_and_time_may_be_one_sided() -> None:
+    """``recursion`` defaults to ``all``; a lone ``begin_time`` sends only ``beginTime``."""
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: []})
+    await _run_event_tail(
+        conn,
+        {
+            "begin_time": "2026-10-19T08:00:00Z",
+            "entity": {"moId": "domain-c8", "type": "ClusterComputeResource"},
+        },
+    )
+    spec = conn.calls[0]["body"]["filter"]
+    assert spec["entity"]["recursion"] == "all"
+    assert spec["time"] == {
+        "_typeName": "EventFilterSpecByTime",
+        "beginTime": "2026-10-19T08:00:00Z",
+    }
+    assert "eventTypeId" not in spec
+
+
+@pytest.mark.asyncio
+async def test_event_tail_reduces_each_event_to_a_short_row() -> None:
+    """Classic, ``EventEx`` and ``ExtendedEvent`` events project to the four-key row."""
+    events_payload = [
+        {
+            "_typeName": "VmPoweredOnEvent",
+            "key": 101,
+            "createdTime": "2026-10-19T08:01:00Z",
+            "fullFormattedMessage": "web-01 on esx-1 is powered on",
+            "host": {
+                "_typeName": "HostEventArgument",
+                "name": "esx-1",
+                "host": vim_moref("HostSystem", "host-9"),
+            },
+            "vm": {
+                "_typeName": "VmEventArgument",
+                "name": "web-01",
+                "vm": vim_moref("VirtualMachine", "vm-42"),
+            },
+        },
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T08:02:00Z",
+            "eventTypeId": "esx.problem.storage.apd.start",
+            "fullFormattedMessage": "Device entered the all paths down state.",
+            "objectId": "datastore-12",
+            "objectType": "Datastore",
+            "objectName": "nfs-01",
+        },
+        {
+            "_typeName": "ExtendedEvent",
+            "createdTime": "2026-10-19T08:03:00Z",
+            "eventTypeId": "com.example.extension.event",
+            "managedObject": vim_moref("HostSystem", "host-9"),
+        },
+        {"_typeName": "GeneralUserEvent", "createdTime": "2026-10-19T08:04:00Z"},
+    ]
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: events_payload})
+    out = await _run_event_tail(conn, {})
+    assert out["count"] == 4
+    assert out["events"] == [
+        {
+            "createdTime": "2026-10-19T08:01:00Z",
+            "eventTypeId": "VmPoweredOnEvent",
+            "fullFormattedMessage": "web-01 on esx-1 is powered on",
+            "entity": {"type": "VirtualMachine", "moId": "vm-42", "name": "web-01"},
+        },
+        {
+            "createdTime": "2026-10-19T08:02:00Z",
+            "eventTypeId": "esx.problem.storage.apd.start",
+            "fullFormattedMessage": "Device entered the all paths down state.",
+            "entity": {"type": "Datastore", "moId": "datastore-12", "name": "nfs-01"},
+        },
+        {
+            "createdTime": "2026-10-19T08:03:00Z",
+            "eventTypeId": "com.example.extension.event",
+            "fullFormattedMessage": None,
+            "entity": {"type": "HostSystem", "moId": "host-9", "name": None},
+        },
+        {
+            "createdTime": "2026-10-19T08:04:00Z",
+            "eventTypeId": "GeneralUserEvent",
+            "fullFormattedMessage": None,
+            "entity": None,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_event_tail_prefers_the_event_own_object_over_its_context() -> None:
+    """``objectId`` / ``managedObject`` win over inherited ``Event`` context members.
+
+    Both ``EventEx`` and ``ExtendedEvent`` inherit ``datacenter`` / ``host`` /
+    ``ds`` / ... from ``Event``. A row must name the object the event is about,
+    not the surrounding datacenter or host.
+    """
+    events_payload = [
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T09:01:00Z",
+            "eventTypeId": "esx.problem.storage.apd.start",
+            "datacenter": {
+                "_typeName": "DatacenterEventArgument",
+                "name": "dc-01",
+                "datacenter": vim_moref("Datacenter", "datacenter-2"),
+            },
+            "ds": {
+                "_typeName": "DatastoreEventArgument",
+                "name": "nfs-01",
+                "datastore": vim_moref("Datastore", "datastore-12"),
+            },
+            "objectId": "datastore-12",
+            "objectType": "Datastore",
+            "objectName": "nfs-01",
+        },
+        {
+            "_typeName": "ExtendedEvent",
+            "createdTime": "2026-10-19T09:02:00Z",
+            "eventTypeId": "com.example.extension.event",
+            "host": {
+                "_typeName": "HostEventArgument",
+                "name": "esx-1",
+                "host": vim_moref("HostSystem", "host-9"),
+            },
+            "managedObject": vim_moref("VirtualMachine", "vm-42"),
+        },
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T09:03:00Z",
+            "eventTypeId": "com.example.no.object",
+            "datacenter": {
+                "_typeName": "DatacenterEventArgument",
+                "name": "dc-01",
+                "datacenter": vim_moref("Datacenter", "datacenter-2"),
+            },
+        },
+    ]
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: events_payload})
+    out = await _run_event_tail(conn, {})
+    assert [row["entity"] for row in out["events"]] == [
+        {"type": "Datastore", "moId": "datastore-12", "name": "nfs-01"},
+        {"type": "VirtualMachine", "moId": "vm-42", "name": None},
+        {"type": "Datacenter", "moId": "datacenter-2", "name": "dc-01"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_event_tail_cuts_to_max_count_when_the_server_ignores_it() -> None:
+    """A server that returns more than ``maxCount`` is cut to ``max_count`` rows."""
+    events_payload = [{"_typeName": "Event", "key": n} for n in range(200)]
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: events_payload})
+    out = await _run_event_tail(conn, {"max_count": 7})
+    assert conn.calls[0]["body"]["filter"]["maxCount"] == 7
     assert len(out["events"]) == 7
     assert out["count"] == 7
-    assert out["max_events_applied"] == 7
+    assert out["max_count_applied"] == 7
 
 
 @pytest.mark.asyncio
 async def test_event_tail_custom_mo_id_rides_the_path() -> None:
     """A per-call ``moId`` override lands in the mounted path segment."""
     conn = _RecordingConnector({"/api/EventManager/em-2/QueryEvents": []})
-    await event_tail_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"moId": "em-2"},
-        connector=conn,  # type: ignore[arg-type]
-    )
+    await _run_event_tail(conn, {"moId": "em-2"})
     assert conn.calls[0]["path"] == "/api/EventManager/em-2/QueryEvents"
 
 
 @pytest.mark.asyncio
-async def test_event_tail_tolerates_legacy_value_envelope() -> None:
-    """A ``{"value": [...]}`` envelope on the sub-op response unwraps cleanly."""
-    conn = _RecordingConnector(
-        {
-            "/api/EventManager/EventManager/QueryEvents": {
-                "value": [{"id": "evt-1"}, {"id": "evt-2"}]
-            }
-        }
-    )
-    out = await event_tail_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={},
-        connector=conn,  # type: ignore[arg-type]
-    )
+async def test_event_tail_tolerates_legacy_value_envelope_and_null() -> None:
+    """A ``{"value": [...]}`` envelope unwraps; a ``null`` answer is no events."""
+    conn = _RecordingConnector([{"value": [{"_typeName": "Event"}, {"_typeName": "Event"}]}, None])
+    out = await _run_event_tail(conn, {})
     assert out["count"] == 2
-    assert out["events"] == [{"id": "evt-1"}, {"id": "evt-2"}]
+    out = await _run_event_tail(conn, {})
+    assert out["count"] == 0
+    assert out["events"] == []
 
 
 @pytest.mark.asyncio
 async def test_event_tail_raises_on_non_list_payload() -> None:
     """Non-list payload from QueryEvents raises ``RuntimeError`` (audit-visible)."""
-    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": {"not": "a list"}})
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: {"not": "a list"}})
     with pytest.raises(RuntimeError, match="expected list"):
-        await event_tail_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={},
-            connector=conn,  # type: ignore[arg-type]
-        )
+        await _run_event_tail(conn, {})
 
 
 @pytest.mark.asyncio
 async def test_event_tail_propagates_load_bearing_error() -> None:
     """QueryEvents transport failure propagates (no aggregation)."""
-    conn = _RecordingConnector(
-        [_http_error(400, "https://vc/api/EventManager/EventManager/QueryEvents")]
-    )
+    conn = _RecordingConnector([_http_error(400, f"https://vc{_QUERY_EVENTS_PATH}")])
     with pytest.raises(httpx.HTTPStatusError):
-        await event_tail_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={},
-            connector=conn,  # type: ignore[arg-type]
-        )
+        await _run_event_tail(conn, {})
 
 
 # ---------------------------------------------------------------------------
@@ -550,9 +723,20 @@ async def test_performance_summary_reads_two_sub_ops_in_order() -> None:
         "/api/PerformanceManager/PerfMgr/QueryPerf",
     ]
     # The vi-json method arguments become the flat JSON request body; the
-    # PerfMgr singleton rides the path.
-    assert conn.calls[0]["body"] == {"entity": "vm-1234"}
-    assert conn.calls[1]["body"] == {"entity": "vm-1234", "interval_seconds": 20}
+    # PerfMgr singleton rides the path. ``entity`` is an annotated MoRef and
+    # QueryPerf takes a PerfQuerySpec list (#4038).
+    entity = vim_moref("VirtualMachine", "vm-1234")
+    assert conn.calls[0]["body"] == {"entity": entity, "intervalId": 20}
+    assert conn.calls[1]["body"] == {
+        "querySpec": [
+            {
+                "_typeName": "PerfQuerySpec",
+                "entity": entity,
+                "intervalId": 20,
+                "maxSample": 60,
+            }
+        ]
+    }
     assert out == {
         "entity_moid": "vm-1234",
         "perf_manager_moid": "PerfMgr",
@@ -603,9 +787,64 @@ async def test_performance_summary_passes_through_interval_and_custom_perf_mgr()
         },
         connector=conn,  # type: ignore[arg-type]
     )
-    # AltPerfMgr rides the path; the interval rides the QueryPerf body.
+    # AltPerfMgr rides the path; the interval rides both bodies as intervalId.
     assert conn.calls[1]["path"] == "/api/PerformanceManager/AltPerfMgr/QueryPerf"
-    assert conn.calls[1]["body"] == {"entity": "vm-99", "interval_seconds": 300}
+    assert conn.calls[0]["body"]["intervalId"] == 300
+    assert conn.calls[1]["body"]["querySpec"][0]["intervalId"] == 300
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entity_moid", "mo_type"),
+    [
+        ("host-5678", "HostSystem"),
+        ("vm-12", "VirtualMachine"),
+        ("domain-c9", "ClusterComputeResource"),
+    ],
+)
+async def test_performance_summary_entity_type_from_moid_prefix(
+    entity_moid: str, mo_type: str
+) -> None:
+    """The moid prefix picks the MoRef type; vCenter 8.0.3 rejects a bare string (#4038)."""
+    conn = _RecordingConnector([[], []])
+    await performance_summary_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"entity_moid": entity_moid},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    expected = {"_typeName": "ManagedObjectReference", "type": mo_type, "value": entity_moid}
+    assert conn.calls[0]["body"]["entity"] == expected
+    assert conn.calls[1]["body"]["querySpec"][0]["entity"] == expected
+
+
+@pytest.mark.asyncio
+async def test_performance_summary_entity_type_overrides_prefix() -> None:
+    """An explicit ``entity_type`` wins, so other entity kinds work too."""
+    conn = _RecordingConnector([[], []])
+    await performance_summary_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"entity_moid": "resgroup-4", "entity_type": "ResourcePool"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    expected = vim_moref("ResourcePool", "resgroup-4")
+    assert conn.calls[0]["body"]["entity"] == expected
+    assert conn.calls[1]["body"]["querySpec"][0]["entity"] == expected
+
+
+@pytest.mark.asyncio
+async def test_performance_summary_unknown_prefix_without_type_raises() -> None:
+    """An unknown prefix and no ``entity_type`` fails before any call."""
+    conn = _RecordingConnector([[], []])
+    with pytest.raises(ValueError, match="entity_type"):
+        await performance_summary_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"entity_moid": "resgroup-4"},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert conn.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -1170,106 +1409,464 @@ async def test_datastore_usage_detail_error_propagates() -> None:
 # vmware.composite.network.portgroup.audit
 # ---------------------------------------------------------------------------
 
+_DVPG_TYPE = "DistributedVirtualPortgroup"
+_VDS_TYPE = "VmwareDistributedVirtualSwitch"
+_VM_TYPE = "VirtualMachine"
+_DEEP_VLAN_PATH = "config.defaultPortConfig.vlan"
 
-@pytest.mark.asyncio
-async def test_network_portgroup_audit_reads_two_phases() -> None:
-    """Portgroup listing + per-portgroup VM listings aggregate to the expected shape.
 
-    Two phases post-#2970: the DVS-listing step was dropped (the pinned
-    vcenter.yaml serves no DVS list resource), so ``dvs_name`` is always
-    ``None`` and ``dvs`` is the pg row's own best-effort field.
-    """
-    pg_listing = [
-        {"network": "pg-1", "name": "PG-A", "vds": "dvs-1", "type": "DISTRIBUTED_PORTGROUP"},
-        {"network": "pg-2", "name": "PG-B", "type": "DISTRIBUTED_PORTGROUP"},
-    ]
-    vms_per_pg = {
-        "pg-1": [{"name": "vm-pg1-a"}, {"name": "vm-pg1-b"}],
-        "pg-2": [],
+def _boxed(value: Any) -> Any:
+    """Box a primitive the way live VI-JSON puts it in ``DynamicProperty.val``."""
+    if isinstance(value, str):
+        return {"_typeName": "string", "_value": value}
+    return value
+
+
+def _moref_array(mo_type: str, moids: list[str]) -> dict[str, Any]:
+    return {
+        "_typeName": "ArrayOfManagedObjectReference",
+        "_value": [vim_moref(mo_type, moid) for moid in moids],
     }
-    sequence: list[Any] = [pg_listing]
-    for pg in pg_listing:
-        sequence.append(vms_per_pg[pg["network"]])
-    conn = _RecordingConnector(sequence)
 
-    out = await network_portgroup_audit_composite(
+
+def _access_port_config(vlan_id: int) -> dict[str, Any]:
+    return {
+        "_typeName": "VMwareDVSPortSetting",
+        "vlan": {
+            "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+            "inherited": False,
+            "vlanId": vlan_id,
+        },
+    }
+
+
+def _trunk_port_config(ranges: list[tuple[int, int]]) -> dict[str, Any]:
+    return {
+        "_typeName": "VMwareDVSPortSetting",
+        "vlan": {
+            "_typeName": "VmwareDistributedVirtualSwitchTrunkVlanSpec",
+            "inherited": False,
+            "vlanId": [
+                {"_typeName": "NumericRange", "start": start, "end": end} for start, end in ranges
+            ],
+        },
+    }
+
+
+# Two portgroups on two switches, with disjoint VLANs and disjoint VMs,
+# except ``vm-5`` which has one NIC on each portgroup. ``vm-4`` is
+# powered off. ``vm-9`` exists but sits on neither portgroup.
+_PG_INVENTORY: dict[str, dict[str, dict[str, Any]]] = {
+    _DVPG_TYPE: {
+        "dvportgroup-11": {
+            "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-1"),
+            "config.defaultPortConfig": _access_port_config(110),
+            "vm": _moref_array(_VM_TYPE, ["vm-1", "vm-2", "vm-5"]),
+        },
+        "dvportgroup-12": {
+            "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-2"),
+            "config.defaultPortConfig": _trunk_port_config([(300, 300), (200, 210)]),
+            "vm": _moref_array(_VM_TYPE, ["vm-3", "vm-4", "vm-5"]),
+        },
+    },
+    _VDS_TYPE: {
+        "dvs-1": {"name": "DSwitch-Prod"},
+        "dvs-2": {"name": "DSwitch-Lab"},
+    },
+    _VM_TYPE: {
+        "vm-1": {"name": "web-01", "runtime.powerState": "poweredOn"},
+        "vm-2": {"name": "web-02", "runtime.powerState": "poweredOn"},
+        "vm-3": {"name": "db-01", "runtime.powerState": "poweredOn"},
+        "vm-4": {"name": "db-02", "runtime.powerState": "poweredOff"},
+        "vm-5": {"name": "router-01", "runtime.powerState": "poweredOn"},
+        "vm-9": {"name": "unrelated-01", "runtime.powerState": "poweredOn"},
+    },
+}
+
+_PG_LISTING = [
+    {"network": "dvportgroup-11", "name": "PG-Prod", "type": "DISTRIBUTED_PORTGROUP"},
+    {"network": "dvportgroup-12", "name": "PG-Lab", "type": "DISTRIBUTED_PORTGROUP"},
+]
+
+
+class _InventoryConnector(_RecordingConnector):
+    """Fake that answers each PropertyCollector read from ``_PG_INVENTORY``.
+
+    The answer depends on the object type, the moids and the property
+    paths in the request body -- not on call order -- so a handler that
+    reads the wrong object gets the wrong data back. The one GET (the
+    portgroup listing) is served from *listing*. Like vCenter 8.0.x, the
+    fake fails a request for the deep ``config.defaultPortConfig.vlan``
+    path.
+    """
+
+    def __init__(
+        self,
+        listing: Any,
+        *,
+        mount_prefix: str = "/api",
+        inventory: dict[str, dict[str, dict[str, Any]]] = _PG_INVENTORY,
+        paged_type: str | None = None,
+        unreadable: tuple[str, str, str, Any] | None = None,
+    ) -> None:
+        super().__init__([listing], mount_prefix=mount_prefix)
+        self._inventory = inventory
+        # When set, every read of this object type answers with a ``token``,
+        # the way vCenter does when it pages a result.
+        self._paged_type = paged_type
+        # ``(mo_type, moid, path, fault)``: the call succeeds, but this one
+        # property lands in the object's ``missingSet`` with that fault,
+        # the way vCenter reports a property it could not read.
+        self._unreadable = unreadable
+
+    async def _post_vmomi_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
+        mounted = f"{self._mount_prefix}{path}"
+        self.calls.append(
+            {"method": "POST", "path": mounted, "query": None, "body": json, "vmomi": True}
+        )
+        assert json is not None
+        spec = json["specSet"][0]
+        mo_type = spec["propSet"][0]["type"]
+        path_set = spec["propSet"][0]["pathSet"]
+        if _DEEP_VLAN_PATH in path_set:
+            raise _http_error(500, mounted)
+        objects = []
+        for obj_spec in spec["objectSet"]:
+            moid = obj_spec["obj"]["value"]
+            props = self._inventory[mo_type][moid]
+            missing: list[dict[str, Any]] = []
+            if self._unreadable and self._unreadable[:2] == (mo_type, moid):
+                _, _, bad_path, fault = self._unreadable
+                if bad_path in path_set:
+                    props = {name: val for name, val in props.items() if name != bad_path}
+                    missing.append(
+                        {"_typeName": "MissingProperty", "path": bad_path, "fault": fault}
+                    )
+            objects.append(
+                {
+                    "obj": vim_moref(mo_type, moid),
+                    "propSet": [
+                        {"name": name, "val": _boxed(props[name])}
+                        for name in path_set
+                        if name in props
+                    ],
+                    "missingSet": missing,
+                }
+            )
+        result: dict[str, Any] = {"_typeName": "RetrieveResult", "objects": objects}
+        if mo_type == self._paged_type:
+            result["token"] = "1"
+        return result
+
+
+def _read_targets(conn: _RecordingConnector) -> list[tuple[str, list[str], list[str]]]:
+    """``(type, moids, pathSet)`` of every PropertyCollector call, in order."""
+    targets = []
+    for call in conn.calls:
+        if call["method"] != "POST":
+            continue
+        spec = call["body"]["specSet"][0]
+        targets.append(
+            (
+                spec["propSet"][0]["type"],
+                [o["obj"]["value"] for o in spec["objectSet"]],
+                spec["propSet"][0]["pathSet"],
+            )
+        )
+    return targets
+
+
+async def _run_audit(conn: _RecordingConnector, params: dict[str, Any]) -> dict[str, Any]:
+    return await network_portgroup_audit_composite(
         operator=_make_operator(),
         target=object(),
-        params={},
+        params=params,
         connector=conn,  # type: ignore[arg-type]
     )
 
-    # 1 + 2 portgroups = 3 calls (no DVS listing -- #2970).
-    assert len(conn.calls) == 3
-    # Portgroups come from the generic network resource, type-filtered.
-    # On the modern /api mount the filter params are sent bare (#2298).
-    assert conn.calls[0]["path"] == "/api/vcenter/network"
-    assert conn.calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
-    # Per-PG VM call filters by network + power state, bare on /api.
-    assert conn.calls[1]["path"] == "/api/vcenter/vm"
-    assert conn.calls[1]["query"] == {
-        "networks": ["pg-1"],
-        "power_states": ["POWERED_ON"],
-    }
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_rows_carry_only_their_own_vms_vlan_and_switch() -> None:
+    """#3802: each row gets only its own VMs, its own VLAN and its own switch.
+
+    Two portgroups with disjoint VM sets and VLANs. The fake answers by
+    the requested object, so any cross-portgroup bleed (the old
+    whole-inventory VM list on every row) shows up as a wrong row.
+    """
+    conn = _InventoryConnector(_PG_LISTING)
+
+    out = await _run_audit(conn, {})
+
     assert out["portgroups"] == [
         {
-            "id": "pg-1",
-            "name": "PG-A",
+            "id": "dvportgroup-11",
+            "name": "PG-Prod",
             "dvs": "dvs-1",
-            "dvs_name": None,
+            "dvs_name": "DSwitch-Prod",
             "type": "DISTRIBUTED_PORTGROUP",
-            "vm_count": 2,
-            "vm_names": ["vm-pg1-a", "vm-pg1-b"],
+            "vlan": {"mode": "access", "vlan_id": 110},
+            "vm_count": 3,
+            "vm_names": ["web-01", "web-02", "router-01"],
         },
         {
-            "id": "pg-2",
-            "name": "PG-B",
+            "id": "dvportgroup-12",
+            "name": "PG-Lab",
+            "dvs": "dvs-2",
+            "dvs_name": "DSwitch-Lab",
+            "type": "DISTRIBUTED_PORTGROUP",
+            "vlan": {
+                "mode": "trunk",
+                "ranges": [{"start": 200, "end": 210}, {"start": 300, "end": 300}],
+            },
+            # vm-4 is powered off, so it is left out by default.
+            "vm_count": 2,
+            "vm_names": ["db-01", "router-01"],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_reads_portgroup_objects_not_the_vm_list() -> None:
+    """The audit lists portgroups once, then reads vim properties in batches.
+
+    No ``GET /vcenter/vm`` call is made (it has no ``networks`` filter),
+    and the port config is read whole, never the deep VLAN path.
+    """
+    conn = _InventoryConnector(_PG_LISTING)
+
+    await _run_audit(conn, {})
+
+    get_calls = [c for c in conn.calls if c["method"] == "GET"]
+    assert [c["path"] for c in get_calls] == ["/api/vcenter/network"]
+    assert get_calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
+    assert all(
+        c["path"] == "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        for c in conn.calls
+        if c["method"] == "POST"
+    )
+    assert _read_targets(conn) == [
+        (
+            _DVPG_TYPE,
+            ["dvportgroup-11", "dvportgroup-12"],
+            ["config.distributedVirtualSwitch", "config.defaultPortConfig", "vm"],
+        ),
+        (_VDS_TYPE, ["dvs-1", "dvs-2"], ["name"]),
+        (_VM_TYPE, ["vm-1", "vm-2", "vm-5", "vm-3", "vm-4"], ["name", "runtime.powerState"]),
+    ]
+    for _, _, path_set in _read_targets(conn):
+        assert _DEEP_VLAN_PATH not in path_set
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_include_disconnected_keeps_powered_off_vms() -> None:
+    """``include_disconnected_vms=True`` keeps VMs that are not powered on."""
+    conn = _InventoryConnector(_PG_LISTING)
+
+    out = await _run_audit(conn, {"include_disconnected_vms": True})
+
+    lab = out["portgroups"][1]
+    assert lab["vm_names"] == ["db-01", "db-02", "router-01"]
+    assert lab["vm_count"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filter_dvs", ["dvs-2", "DSwitch-Lab"])
+async def test_network_portgroup_audit_filter_dvs_keeps_matching_switch_only(
+    filter_dvs: str,
+) -> None:
+    """``filter_dvs`` matches the parent switch moid or name; VMs of other rows are not read."""
+    conn = _InventoryConnector(_PG_LISTING)
+
+    out = await _run_audit(conn, {"filter_dvs": filter_dvs})
+
+    assert [row["id"] for row in out["portgroups"]] == ["dvportgroup-12"]
+    assert _read_targets(conn)[-1][1] == ["vm-3", "vm-4", "vm-5"]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_empty_listing_makes_one_call() -> None:
+    """No distributed portgroups -> only the listing call, no vim reads."""
+    conn = _InventoryConnector([])
+
+    out = await _run_audit(conn, {})
+
+    assert out == {"portgroups": []}
+    assert len(conn.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_tolerates_unset_properties() -> None:
+    """A portgroup without a reported switch, VLAN or VMs gets null / empty fields.
+
+    vim leaves unset properties out of ``propSet``; the row must not
+    crash or borrow another portgroup's data.
+    """
+    conn = _InventoryConnector(
+        [{"network": "dvportgroup-99", "name": "PG-Bare", "type": "DISTRIBUTED_PORTGROUP"}],
+        inventory={_DVPG_TYPE: {"dvportgroup-99": {}}},
+    )
+
+    out = await _run_audit(conn, {})
+
+    assert out["portgroups"] == [
+        {
+            "id": "dvportgroup-99",
+            "name": "PG-Bare",
             "dvs": None,
             "dvs_name": None,
             "type": "DISTRIBUTED_PORTGROUP",
+            "vlan": None,
             "vm_count": 0,
             "vm_names": [],
-        },
+        }
     ]
+    # Only the portgroup read runs: no switch or VM to resolve.
+    assert len(_read_targets(conn)) == 1
 
 
 @pytest.mark.asyncio
-async def test_network_portgroup_audit_filter_dvs_is_inert() -> None:
-    """``filter_dvs`` is accepted but changes nothing (#2970 degradation).
+@pytest.mark.parametrize("paged_type", [_DVPG_TYPE, _VM_TYPE])
+async def test_network_portgroup_audit_fails_on_a_paged_answer(paged_type: str) -> None:
+    """A paged vim answer (a ``token``) fails the audit; it never returns short rows.
 
-    It only ever scoped the dropped DVS listing; the portgroup call stays
-    type-filtered only, and no extra sub-op fires.
+    vCenter may return part of the objects plus a ``token`` for the rest.
+    The audit does not follow the token, so it must raise instead of
+    returning rows with missing VMs or portgroups.
     """
-    sequence: list[Any] = [[]]
-    conn = _RecordingConnector(sequence)
-    await network_portgroup_audit_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"filter_dvs": "dvs-prod"},
-        connector=conn,  # type: ignore[arg-type]
-    )
-    assert len(conn.calls) == 1
-    # Portgroup call is type-filtered only -- no vdses filter anywhere.
-    assert conn.calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
+    conn = _InventoryConnector(_PG_LISTING, paged_type=paged_type)
+
+    with pytest.raises(RuntimeError, match="paged"):
+        await _run_audit(conn, {})
+
+
+# The two VI-JSON shapes of a ``missingSet`` fault: 9.x wraps the concrete
+# fault in a ``LocalizedMethodFault``; 8.0.x flattens it onto ``fault``.
+_NO_PERMISSION_NESTED = {
+    "_typeName": "LocalizedMethodFault",
+    "fault": {"_typeName": "NoPermission", "object": vim_moref(_VM_TYPE, "vm-1")},
+    "localizedMessage": "Permission to perform this operation was denied.",
+}
+_NO_PERMISSION_FLAT = {"_typeName": "NoPermission", "object": vim_moref(_VM_TYPE, "vm-1")}
 
 
 @pytest.mark.asyncio
-async def test_network_portgroup_audit_include_disconnected_drops_power_filter() -> None:
-    """``include_disconnected_vms=True`` removes the ``POWERED_ON`` filter on the VM call."""
-    sequence = [
-        [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}],
-        [],
-    ]
-    conn = _RecordingConnector(sequence)
-    await network_portgroup_audit_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"include_disconnected_vms": True},
-        connector=conn,  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    ("mo_type", "moid", "path"),
+    [
+        (_VM_TYPE, "vm-1", "name"),
+        (_VM_TYPE, "vm-5", "runtime.powerState"),
+        (_VDS_TYPE, "dvs-2", "name"),
+        (_DVPG_TYPE, "dvportgroup-11", "vm"),
+        (_DVPG_TYPE, "dvportgroup-12", "config.distributedVirtualSwitch"),
+    ],
+)
+async def test_network_portgroup_audit_fails_when_a_property_cannot_be_read(
+    mo_type: str, moid: str, path: str
+) -> None:
+    """A property vCenter could not read fails the audit; it never shrinks a count.
+
+    The HTTP call succeeds, but one object answers with the property in
+    ``missingSet`` and a ``NoPermission`` fault. Dropping that VM, switch
+    or portgroup would report a wrong VM count or a null switch, so the
+    audit raises instead. The message names the path and the fault type,
+    never the fault text.
+    """
+    conn = _InventoryConnector(_PG_LISTING, unreadable=(mo_type, moid, path, _NO_PERMISSION_NESTED))
+
+    with pytest.raises(RuntimeError, match="could not read") as excinfo:
+        await _run_audit(conn, {"include_disconnected_vms": True})
+
+    message = str(excinfo.value)
+    assert mo_type in message
+    assert f"{path} (NoPermission)" in message
+    assert "denied" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fault", "expected"),
+    [
+        (_NO_PERMISSION_FLAT, "name (NoPermission)"),
+        ({"_typeName": "SystemError", "reason": "boom"}, "name (SystemError)"),
+        (None, "name (unknown fault)"),
+    ],
+)
+async def test_network_portgroup_audit_reads_the_fault_type_of_an_unreadable_vm(
+    fault: Any, expected: str
+) -> None:
+    """The 8.0.x flat fault shape and a fault without a type name also fail the audit."""
+    conn = _InventoryConnector(_PG_LISTING, unreadable=(_VM_TYPE, "vm-2", "name", fault))
+
+    with pytest.raises(RuntimeError, match="could not read") as excinfo:
+        await _run_audit(conn, {})
+
+    assert expected in str(excinfo.value)
+    assert "boom" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_unreadable_vm_in_a_later_chunk_still_fails() -> None:
+    """An unreadable VM in the third chunk of 50 fails the audit, after the first chunks passed."""
+    vm_moids = [f"vm-{n}" for n in range(1, 121)]
+    inventory: dict[str, dict[str, dict[str, Any]]] = {
+        _DVPG_TYPE: {
+            "dvportgroup-11": {
+                "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-1"),
+                "config.defaultPortConfig": _access_port_config(110),
+                "vm": _moref_array(_VM_TYPE, vm_moids),
+            },
+        },
+        _VDS_TYPE: {"dvs-1": {"name": "DSwitch-Prod"}},
+        _VM_TYPE: {
+            moid: {"name": f"name-{moid}", "runtime.powerState": "poweredOn"} for moid in vm_moids
+        },
+    }
+    conn = _InventoryConnector(
+        _PG_LISTING[:1],
+        inventory=inventory,
+        unreadable=(_VM_TYPE, "vm-111", "runtime.powerState", _NO_PERMISSION_NESTED),
     )
-    vm_call = conn.calls[1]
-    assert "networks" in vm_call["query"]
-    assert "power_states" not in vm_call["query"]
+
+    with pytest.raises(RuntimeError, match=r"runtime\.powerState \(NoPermission\)"):
+        await _run_audit(conn, {})
+
+    vm_reads = [moids for mo_type, moids, _ in _read_targets(conn) if mo_type == _VM_TYPE]
+    assert vm_reads == [vm_moids[0:50], vm_moids[50:100], vm_moids[100:120]]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_reads_many_vms_in_chunks_of_50() -> None:
+    """More than 50 VMs are read in chunks of 50 and the chunks are merged."""
+    vm_moids = [f"vm-{n}" for n in range(1, 121)]
+    inventory: dict[str, dict[str, dict[str, Any]]] = {
+        _DVPG_TYPE: {
+            "dvportgroup-11": {
+                "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-1"),
+                "config.defaultPortConfig": _access_port_config(110),
+                "vm": _moref_array(_VM_TYPE, vm_moids),
+            },
+        },
+        _VDS_TYPE: {"dvs-1": {"name": "DSwitch-Prod"}},
+        _VM_TYPE: {
+            moid: {"name": f"name-{moid}", "runtime.powerState": "poweredOn"} for moid in vm_moids
+        },
+    }
+    conn = _InventoryConnector(_PG_LISTING[:1], inventory=inventory)
+
+    out = await _run_audit(conn, {})
+
+    row = out["portgroups"][0]
+    assert row["vm_count"] == 120
+    assert row["vm_names"] == [f"name-{moid}" for moid in vm_moids]
+    vm_reads = [moids for mo_type, moids, _ in _read_targets(conn) if mo_type == _VM_TYPE]
+    assert vm_reads == [vm_moids[0:50], vm_moids[50:100], vm_moids[100:120]]
 
 
 # ---------------------------------------------------------------------------
@@ -1308,26 +1905,13 @@ async def test_portgroup_audit_keeps_filter_prefix_on_legacy_mount() -> None:
     """Legacy/vcsim ``/rest`` portgroup audit keeps the ``filter.*`` param style (#2298).
 
     Regression pin for the mount-flavor split: the same request that sends
-    bare params on modern ``/api`` must still send ``filter.types`` /
-    ``filter.networks`` / ``filter.power_states`` on the legacy mount vcsim
-    serves, or the existing vcsim fixtures break.
+    bare params on modern ``/api`` must still send ``filter.types`` on the
+    legacy mount vcsim serves, or the existing vcsim fixtures break.
     """
-    pg_listing = [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}]
-    conn = _RecordingConnector(
-        [pg_listing, [{"name": "vm-a"}]],
-        mount_prefix="/rest",
-    )
-    await network_portgroup_audit_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={},
-        connector=conn,  # type: ignore[arg-type]
-    )
+    conn = _InventoryConnector(_PG_LISTING, mount_prefix="/rest")
+    await _run_audit(conn, {})
+    assert conn.calls[0]["path"] == "/rest/vcenter/network"
     assert conn.calls[0]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
-    assert conn.calls[1]["query"] == {
-        "filter.networks": ["pg-1"],
-        "filter.power_states": ["POWERED_ON"],
-    }
 
 
 @pytest.mark.asyncio
@@ -1373,3 +1957,112 @@ async def test_every_read_composite_dispatches_directly_on_the_session() -> None
         assert all(c["vmomi"] for c in conn.calls if c["method"] == "POST"), (
             f"{handler.__qualname__} vmomi sub-op bypassed _post_vmomi_json"
         )
+
+
+# ---------------------------------------------------------------------------
+# vmware.composite.datastore.usage -- paged placement read (#4862)
+# ---------------------------------------------------------------------------
+
+_CONTINUE_RETRIEVE_PATH = "/api/PropertyCollector/propertyCollector/ContinueRetrievePropertiesEx"
+_DS_USAGE_LISTING = [
+    {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+    {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+]
+_DS_USAGE_VMS = [
+    {"vm": "vm-1", "name": "vm-a"},
+    {"vm": "vm-2", "name": "vm-b"},
+    {"vm": "vm-3", "name": "vm-c"},
+]
+
+
+def _ds_usage_sequence(*placement_pages: Any) -> list[Any]:
+    return [
+        _DS_USAGE_LISTING,
+        {"capacity": 100, "free_space": 40, "type": "VMFS"},
+        {"capacity": 500, "free_space": 250, "type": "NFS"},
+        _DS_USAGE_VMS,
+        *placement_pages,
+    ]
+
+
+async def _ds_usage(conn: _RecordingConnector) -> dict[str, Any]:
+    return await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_placement_read_follows_every_page() -> None:
+    """VMs on a later page of the placement answer count on their datastore."""
+    first_page = {
+        **_retrieve_result_multi(
+            {
+                ("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])},
+                ("VirtualMachine", "vm-2"): {"datastore": _vm_placement(["datastore-1"])},
+            }
+        ),
+        "token": "<token-1>",
+    }
+    second_page = _retrieve_result_multi(
+        {("VirtualMachine", "vm-3"): {"datastore": _vm_placement(["datastore-2"])}}
+    )
+    conn = _RecordingConnector(_ds_usage_sequence(first_page, second_page))
+
+    out = await _ds_usage(conn)
+
+    assert len(conn.calls) == 6
+    assert conn.calls[5]["path"] == _CONTINUE_RETRIEVE_PATH
+    assert conn.calls[5]["body"] == {"token": "<token-1>"}
+    rows = out["datastores"]
+    assert (rows[0]["vm_count"], rows[0]["vm_names"]) == (2, ["vm-a", "vm-b"])
+    assert (rows[1]["vm_count"], rows[1]["vm_names"]) == (1, ["vm-c"])
+    assert "enrichment_note" not in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_failed_placement_page_is_best_effort() -> None:
+    """A lost page nulls vm_count/vm_names on every row and keeps the capacity data."""
+    first_page = {
+        **_retrieve_result_multi(
+            {("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])}}
+        ),
+        "token": "<token-1>",
+    }
+    conn = _RecordingConnector(
+        _ds_usage_sequence(first_page, _http_error(503, "https://vc" + _CONTINUE_RETRIEVE_PATH))
+    )
+
+    out = await _ds_usage(conn)
+
+    rows = out["datastores"]
+    for row, cap in ((rows[0], 100), (rows[1], 500)):
+        assert row["capacity"] == cap
+        assert row["vm_count"] is None
+        assert row["vm_names"] is None
+        assert "placement read failed" in row["enrichment_note"]
+        assert "503" in row["enrichment_note"]
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_endless_placement_answer_is_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper's page-limit error is handled like any failed placement read."""
+    monkeypatch.setattr(vim_retrieve, "_MAX_PAGES", 2)
+    page = {
+        **_retrieve_result_multi(
+            {("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])}}
+        ),
+        "token": "<token-1>",
+    }
+    conn = _RecordingConnector(_ds_usage_sequence(page, page, page))
+
+    out = await _ds_usage(conn)
+
+    rows = out["datastores"]
+    assert all(row["vm_count"] is None and row["vm_names"] is None for row in rows)
+    assert "TooManyPagesError" in rows[0]["enrichment_note"]
+    assert "had not ended after 2 pages" in rows[0]["enrichment_note"]

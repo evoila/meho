@@ -17,6 +17,62 @@ Every command accepts the global flags below.
 
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
 - `--verbose`, `-v` — enable verbose output.
+- `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Some commands have their own `--work-ref` flag (for example `operation call`, or the filter on `audit query`). On those commands the flag means what that command says, and only `$MEHO_WORK_REF` is sent as the header.
+
+## `meho addon`
+
+Manage add-on pairings (pair / list / show / unpair)
+
+```
+meho addon
+```
+
+### `meho addon list`
+
+List the add-on pairings of your tenant (operator)
+
+```
+meho addon list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw PairedAddonListResponse JSON instead of the human table
+
+### `meho addon pair`
+
+Pair an add-on with MEHO (tenant_admin)
+
+```
+meho addon pair <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--contract-version` — contract version the add-on speaks (required; MEHO speaks version 1 today)
+- `--json` — emit the whole PairAddonResult JSON, with client_secret, instead of the human summary
+- `--min-backplane-version` — oldest MEHO contract version the add-on accepts (required)
+- `--owner-sub` — OIDC sub of the pairing's owner (defaults to the caller)
+
+### `meho addon show`
+
+Show one add-on pairing by name (operator)
+
+```
+meho addon show <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw PairedAddonRead JSON instead of the human summary
+
+### `meho addon unpair`
+
+Remove an add-on pairing (tenant_admin)
+
+```
+meho addon unpair <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit a {"name","unpaired"} JSON object instead of the human summary
 
 ## `meho admin`
 
@@ -42,9 +98,8 @@ Idempotently provision the public CLI + MCP clients in a Keycloak realm
 meho admin keycloak bootstrap-clients [flags]
 ```
 
-- `--admin-group-name` — top-level group the admin user joins (drives group-gated tools)
 - `--admin-user-email` — optional email for the new admin user
-- `--admin-user-username` — username of the admin user to provision (required unless --skip-user-provisioning)
+- `--admin-user-username` — username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
@@ -54,13 +109,13 @@ meho admin keycloak bootstrap-clients [flags]
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
 - `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive
 - `--mcp-client-id` — public client_id for the MCP browser-flow client
+- `--mcp-offline-session-idle` — how many seconds an unused MCP login stays valid: sets the `client.offline.session.idle.timeout` attribute on the MCP browser-flow client. Default 48h. Without it the realm's Offline Session Idle applies (30 days by default)
 - `--mcp-redirect-uri` — redirect URI(s) for the MCP browser-flow client (default: loopback localhost + <ip>, any port/path)
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
 - `--mcp-web-origin` — CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)
 - `--realm` — target realm name (NOT the master realm — that's where the admin token is minted)
-- `--skip-user-provisioning` — skip the group + user creation steps (use when users are externally-managed via federation / SCIM)
-- `--tenant-id` — hardcoded value for the `tenant_id` claim mapper (UUID; the lab convention is one tenant per realm)
-- `--tenant-role` — hardcoded value for the `tenant_role` claim mapper (one of tenant_admin / operator / read_only)
+- `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
+- `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
 
 ## `meho agent`
 
@@ -84,8 +139,8 @@ meho agent create <name> [flags]
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — logical model tier: standard | fast | deep
 - `--output-schema` — optional structured-output JSON Schema as a JSON object: inline JSON, @<path>, or @-
-- `--system-prompt` — the agent's system prompt
-- `--toolset` — allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {})
+- `--system-prompt` — the agent's standing rules, the same for every run; the task for one run goes in the --input flag of meho agent run (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--toolset` — allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {}); fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — max model turns the runtime allows (1..1000)
 
 ### `meho agent delete`
@@ -115,8 +170,8 @@ meho agent edit <name> [flags]
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — new model tier: standard | fast | deep
 - `--output-schema` — new output schema as a JSON object: inline JSON, @<path>, or @-
-- `--system-prompt` — new system prompt
-- `--toolset` — new toolset spec as a JSON object: inline JSON, @<path>, or @-
+- `--system-prompt` — new system prompt: the agent's standing rules (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--toolset` — new toolset spec as a JSON object: inline JSON, @<path>, or @-; fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — new turn budget (1..1000)
 
 ### `meho agent grant`
@@ -606,7 +661,7 @@ meho argocd repo list [flags]
 
 ## `meho audit`
 
-Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex)
+Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)
 
 ```
 meho audit
@@ -640,9 +695,9 @@ meho audit query [flags]
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
 - `--op-id` — narrow to one op-id (glob with * wildcards)
-- `--parent-audit-id` — narrow to the composite-op subtree under this audit-id
-- `--principal` — narrow to one operator (JWT subject; partial-match supported)
-- `--result-status` — narrow to one result-status (ok|error|denied)
+- `--parent-audit-id` — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request
+- `--principal` — narrow to one operator (part of the user id or the name; case does not matter)
+- `--result-status` — narrow to one result-status (ok|error|denied|pending); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
@@ -697,6 +752,42 @@ meho audit show <audit-id> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+
+### `meho audit trace`
+
+List the operation runs that have a stored flight-recorder trace, or read one trace
+
+```
+meho audit trace
+```
+
+#### `meho audit trace list`
+
+List the operation runs that still have a stored trace
+
+```
+meho audit trace list [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
+- `--json` — print the route's AuditQueryResult JSON unchanged instead of the table
+- `--limit` — max rows per page (1..1000, server default 100 when omitted)
+- `--op-id` — narrow to one op-id (glob with * wildcards, e.g. 'vmware.*')
+- `--since` — earliest run time; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
+- `--target` — narrow to one target (name or alias; server-side resolution)
+- `--until` — latest run time; accepts the same shorthand as --since
+
+#### `meho audit trace show`
+
+Print the stored flight-recorder trace of one operation run
+
+```
+meho audit trace show <audit-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the route's AuditTraceResult JSON unchanged (includes redacted headers and bodies)
 
 ### `meho audit who-touched`
 
@@ -859,7 +950,7 @@ meho bind9 record get <fqdn> [flags]
 
 #### `meho bind9 record remove`
 
-Remove the A/AAAA records at an FQDN (atomic-apply)
+Remove the A/AAAA records at an FQDN (a second person must approve)
 
 ```
 meho bind9 record remove <fqdn> [flags]
@@ -920,10 +1011,12 @@ meho broadcast announce <activity> [flags]
 ```
 
 - `--backplane` — backplane URL
+- `--claim-id` — claim UUID returned by the start (needed for update and completion)
+- `--idempotency-key` — retry key for this step (needed for update and completion)
 - `--json` — emit JSON
 - `--phase` — start, update, or completion
 - `--planned-op-class` — declared operation class
-- `--run-id` — agent run UUID
+- `--run-id` — deprecated: the server sets the agent run
 - `--scope` — announcement scope
 - `--target` — target name
 - `--targets` — target names
@@ -978,7 +1071,7 @@ meho broadcast overrides set [flags]
 
 ### `meho broadcast recent`
 
-Read recent broadcast events for the operator's tenant
+Read recent agent announcements for the operator's tenant
 
 ```
 meho broadcast recent [flags]
@@ -987,7 +1080,7 @@ meho broadcast recent [flags]
 - `--active-only` — exclude expired TTL claims
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
-- `--cursor` — forward cursor (ISO-8601 timestamp or stream id)
+- `--cursor` — ISO-8601 window start, or next_cursor from a previous page
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
@@ -1101,6 +1194,7 @@ meho connector enable-reads <connector_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--confirm` — skip the interactive confirmation prompt
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant or builtin (default: stop with an error that asks you to pick one)
 
 ### `meho connector ingest`
 
@@ -1121,7 +1215,7 @@ meho connector ingest [flags]
 - `--product` — product name (e.g. vmware, kubernetes); manual mode (required with --version/--impl/--spec)
 - `--spec` — spec URI; repeat for multi-spec merge under one connector_id; manual mode
 - `--spec-info-versions-compatible` — manual mode: declare that the spec's info.version is compatible with --version even when they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set (>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is rejected; mutually exclusive with --catalog (the catalog row carries its own band)
-- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403)
+- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
 - `--version` — product version (e.g. 9.0, 1.x); manual mode
 
 ### `meho connector ingest-status`
@@ -1158,6 +1252,7 @@ meho connector review <connector_id> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human render
+- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant or builtin (default: stop with an error that asks you to pick one)
 
 ## `meho conventions`
 
@@ -1449,6 +1544,19 @@ meho docs search <query> [flags]
 - `--limit` — max chunks to return (1..50, server default 10 when omitted)
 - `--product` — optional vendor-product refinement within a single collection
 - `--version` — optional product-version refinement within a single collection
+
+## `meho doctor`
+
+Check this machine's MEHO client setup and say which layer is broken
+
+```
+meho doctor [flags]
+```
+
+- `--backplane` — backplane URL to check (defaults to the URL saved by the last `meho login`)
+- `--json` — emit one JSON document on stdout instead of the human report
+- `--no-network` — run only the offline layer; make no network call
+- `--plugin-root` — path to the installed Claude Code plugin (defaults to $CLAUDE_PLUGIN_ROOT, then a search under ~/.claude/plugins)
 
 ## `meho event-source`
 
@@ -1803,6 +1911,7 @@ meho harbor operation call <op_id> [flags]
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--params` — params as inline JSON or @<file>
+- `--preview-hash` — preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op
 - `--target` — Harbor target slug
 
 #### `meho harbor operation search`
@@ -1907,7 +2016,7 @@ meho harbor robot create [flags]
 
 #### `meho harbor robot delete`
 
-Delete a project-scoped robot account from Harbor
+Delete a project-scoped robot account from Harbor (a second person must approve)
 
 ```
 meho harbor robot delete [flags]
@@ -2668,7 +2777,7 @@ meho keycloak
 
 ### `meho keycloak client`
 
-Keycloak client sub-verbs (list, get, create, update)
+Keycloak client sub-verbs (list, get, create, update, delete)
 
 ```
 meho keycloak client
@@ -2685,6 +2794,21 @@ meho keycloak client create [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--representation-file`, `-f` — path to a JSON file with the ClientRepresentation body (required)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak client delete`
+
+Delete a Keycloak client (destructive, a second person must approve)
+
+```
+meho keycloak client delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--client-id` — the exact clientId, the client's name (used when --id is absent)
+- `--id` — the client's internal UUID
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak client get`
@@ -2764,7 +2888,7 @@ meho keycloak client-scope list [flags]
 
 ### `meho keycloak group`
 
-Keycloak group sub-verbs (list, create, update-attributes, member)
+Keycloak group sub-verbs (list, create, update-attributes, member, delete)
 
 ```
 meho keycloak group
@@ -2783,6 +2907,22 @@ meho keycloak group create [flags]
 - `--json` — emit the full OperationResult envelope as JSON
 - `--name` — the group name (required)
 - `--parent-id` — parent group UUID to nest under (omit for top-level)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak group delete`
+
+Delete a Keycloak group (destructive, a second person must approve)
+
+```
+meho keycloak group delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--delete-subgroups` — also delete the group's sub-groups (a group with sub-groups is refused without this flag)
+- `--id` — the group's internal UUID
+- `--json` — emit the full OperationResult envelope as JSON
+- `--name` — the exact group name, searched at every level (used when --id is absent)
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak group list`
@@ -2899,7 +3039,7 @@ meho keycloak protocol-mapper create [flags]
 
 ### `meho keycloak realm`
 
-Keycloak realm sub-verbs (get, create, update)
+Keycloak realm sub-verbs (get, create, update, delete)
 
 ```
 meho keycloak realm
@@ -2916,6 +3056,20 @@ meho keycloak realm create [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--representation-file`, `-f` — path to a JSON file with the RealmRepresentation body (required)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak realm delete`
+
+Delete a whole Keycloak realm (destructive, a second person must approve)
+
+```
+meho keycloak realm delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
+- `--realm` — the name of the realm to delete (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`
@@ -2982,7 +3136,7 @@ meho keycloak role-mapping get [flags]
 
 ### `meho keycloak user`
 
-Keycloak user sub-verbs (list, create, reset-password)
+Keycloak user sub-verbs (list, create, reset-password, delete, logout)
 
 ```
 meho keycloak user
@@ -3005,6 +3159,21 @@ meho keycloak user create [flags]
 - `--target` — target slug to dispatch against (required)
 - `--temporary` — force a password change on first login
 
+#### `meho keycloak user delete`
+
+Delete a Keycloak user (destructive, a second person must approve)
+
+```
+meho keycloak user delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--id` — the user's internal UUID
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
+- `--target` — target slug to dispatch against (required)
+- `--username` — the exact username (used when --id is absent)
+
 #### `meho keycloak user list`
 
 List Keycloak users in the managed realm (credentials redacted)
@@ -3018,6 +3187,20 @@ meho keycloak user list [flags]
 - `--max` — cap on the number of users returned (0 = no cap)
 - `--target` — target slug to dispatch against (required)
 - `--username` — filter to matching users by username (Keycloak ?username=)
+
+#### `meho keycloak user logout`
+
+End all live sessions of one Keycloak user (approval-gated)
+
+```
+meho keycloak user logout [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--id` — the user's internal UUID (skips name→UUID resolution)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--target` — target slug to dispatch against (required)
+- `--username` — the username (resolved to UUID when --id is absent)
 
 #### `meho keycloak user reset-password`
 
@@ -3365,7 +3548,7 @@ meho operation preview <connector_id> <op_id> [flags]
 
 ### `meho operation result-query`
 
-Page or query rows back from a JSONFlux result handle
+Page or query rows back from a result handle, or read a document handle by path
 
 ```
 meho operation result-query <handle_id> [flags]
@@ -3378,22 +3561,25 @@ meho operation result-query <handle_id> [flags]
 - `--limit` — paging: page size; default 50, max 500 (matches the result_query MCP tool)
 - `--offset` — paging: zero-based index of the first row to return (advance by --limit)
 - `--order-by` — query: sort term "<field> [asc|desc]" (repeatable, max 4)
+- `--path` — path: RFC 6901 JSON Pointer into a document handle ("" is the whole document, /a/0/b one step per /); an array value pages with --offset / --limit
 - `--query-limit` — query: max output rows (clamps to 500); the result flags truncation when more matched
 - `--select` — query: projection column to return (repeatable; omit for all columns)
 - `--where` — query: WHERE predicate "<field> <op> [value]" (repeatable; op = != < <= > >= IN 'IS NULL')
 
 ### `meho operation search`
 
-Hybrid BM25 + cosine RRF search across enabled operations
+Search a connector's operations, or show one operation's call contract
 
 ```
-meho operation search <connector_id> <query> [flags]
+meho operation search <connector_id> [query] [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group` — narrow the search to one group_key within the connector
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
+- `--op-id` — show this one operation's call contract instead of ranked hits
+- `--scores` — add ranking scores to each hit (honoured for tenant_admin only)
 
 ## `meho pfsense`
 
@@ -3606,14 +3792,14 @@ meho promote <scope>/<slug> [flags]
 
 ## `meho recall`
 
-Fetch a memory by natural key or via retrieval (GET /api/v1/memory or /api/v1/retrieve)
+Fetch a memory by natural key or search memories (GET /api/v1/memory or POST /api/v1/memory/search)
 
 ```
 meho recall <scope>/<slug> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by `meho login`)
-- `--json` — emit raw MemoryEntry / RetrieveResponse JSON instead of human output
+- `--json` — emit raw MemoryEntry / MemorySearchResponse JSON instead of human output
 - `--limit` — max hits to return in --query mode (1..50, server default 10 when omitted)
 - `--query` — run hybrid retrieval against memories with this query; mutually exclusive with the <scope>/<slug> positional
 - `--scope` — narrow --query mode to one scope: user|user-tenant|user-target|tenant|target
@@ -3676,7 +3862,7 @@ meho retrieval retire-checklist [flags]
 
 ### `meho retrieval usage`
 
-Read audit-log-backed retrieval usage telemetry (daily buckets per surface)
+Read retrieval usage telemetry (daily buckets per surface)
 
 ```
 meho retrieval usage [flags]
@@ -4312,7 +4498,7 @@ meho service-principals grants create [flags]
 - `--connector-id` — exact connector id; globs are refused (required)
 - `--expires` — optional ISO 8601 UTC expiry
 - `--json` — emit raw ServiceGrantRead JSON
-- `--op-id` — exact operation id; globs and delete-shaped ops are refused (required)
+- `--op-id` — exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)
 - `--principal` — JWT sub of the service principal (required)
 - `--reason` — operator justification for this standing grant (required)
 - `--target` — target UUID (optional; targetless is not a wildcard)
@@ -4346,6 +4532,7 @@ meho service-principals grants revoke <grant-id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--confirm` — confirm revocation
 - `--json` — emit a machine-readable result JSON
+- `--reason` — optional reason for the revoke, stored on the grant and the audit row
 
 #### `meho service-principals grants show`
 
@@ -4375,7 +4562,7 @@ meho status [flags]
 
 ## `meho targets`
 
-Operate the MEHO targets registry (add / list / describe / probe / import / discover)
+Operate the MEHO targets registry (add / update / list / describe / probe / import / discover)
 
 ```
 meho targets
@@ -4392,9 +4579,11 @@ meho targets add <name> [flags]
 - `--alias` — additional name the target resolves by (repeatable)
 - `--auth-model` — per-target identity model (default: shared_service_account)
 - `--backplane` — backplane URL to create the target in (defaults to the URL recorded by `meho login`)
+- `--extra` — key=value to store in the target's extras map, e.g. scheme=http (repeatable)
 - `--fqdn` — fully-qualified domain name, when distinct from --host
 - `--host` — host or IP the connector dials (required)
 - `--json` — emit the created target as JSON instead of the human summary
+- `--no-secret-ref` — store the target with no credential (sends secret_ref: null); for products that need no login
 - `--note` — free-form operator note stored on the target
 - `--port` — connection port (default: the connector's product default)
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
@@ -4465,6 +4654,32 @@ meho targets probe <name-or-alias> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+
+### `meho targets update`
+
+Change fields on an existing target
+
+```
+meho targets update <name|alias> [flags]
+```
+
+- `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)
+- `--auth-model` — per-target identity model
+- `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
+- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
+- `--extra` — key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)
+- `--fqdn` — fully-qualified domain name, when distinct from --host
+- `--host` — new host or IP the connector dials
+- `--json` — emit the updated target as JSON instead of the human summary
+- `--note` — free-form operator note stored on the target
+- `--port` — connection port
+- `--preferred-impl` — connector impl_id override for the resolver's tie-break
+- `--product` — new connector product slug
+- `--secret-ref` — Vault path of the target's credential
+- `--tls-ca-pin` — PEM CA bundle to pin for this target
+- `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
+- `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
+- `--version` — operator-asserted product version
 
 ## `meho tenants`
 
@@ -5802,6 +6017,7 @@ meho vmware operation call <op_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
+- `--preview-hash` — preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op
 - `--target` — target slug to dispatch against (required for ops that read a target)
 
 #### `meho vmware operation search`

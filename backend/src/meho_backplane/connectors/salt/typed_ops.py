@@ -23,19 +23,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from meho_backplane.connectors.salt._op_common import (
-    _GROUP_JOBS,
-    _GROUP_MINIONS,
-    _GROUP_SERVER,
+    GROUP_JOBS,
+    GROUP_MINIONS,
+    GROUP_SERVER,
     JOB_STATES,
     KEY_STATES,
     SaltTypedOp,
 )
-from meho_backplane.connectors.salt._ops_jobs import _JOB_LIST, _JOB_RESULT
+from meho_backplane.connectors.salt._ops_jobs import JOB_LIST_OP, JOB_RESULT_OP
 from meho_backplane.connectors.salt._ops_minions import (
-    _ABOUT,
-    _KEY_LIST,
-    _MINION_LIST,
-    _TARGET_LIST,
+    ABOUT_OP,
+    KEY_LIST_OP,
+    MINION_LIST_OP,
+    TARGET_LIST_OP,
 )
 
 if TYPE_CHECKING:
@@ -53,18 +53,18 @@ __all__ = [
 #: Curated ``when_to_use`` text per group. Says what the group holds; it
 #: makes no claim about the safety of the whole group.
 SALT_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
-    _GROUP_SERVER: (
+    GROUP_SERVER: (
         "Use to see which Salt server (RaaS of Aria Automation Config or VCF Salt) a "
         "target is: its version, the versions of its parts, and the Salt masters it "
         "knows with their status (salt.about). One read."
     ),
-    _GROUP_MINIONS: (
+    GROUP_MINIONS: (
         "Use to see the Salt minions (the managed machines): each minion's key state, "
         "master, presence, last contact and OS (salt.minion.list), the minion keys by "
         "state (salt.key.list), and the saved targets, the minion groups that jobs run "
         "on (salt.target.list). Three reads."
     ),
-    _GROUP_JOBS: (
+    GROUP_JOBS: (
         "Use to see Salt job runs: recent runs with function, target, state, user and "
         "start time (salt.job.list), and the result of one run per minion, with the "
         "failed states named (salt.job.result). Two reads."
@@ -72,12 +72,12 @@ SALT_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 }
 
 SALT_TYPED_OPS: tuple[SaltTypedOp, ...] = (
-    _ABOUT,
-    _MINION_LIST,
-    _KEY_LIST,
-    _JOB_LIST,
-    _JOB_RESULT,
-    _TARGET_LIST,
+    ABOUT_OP,
+    MINION_LIST_OP,
+    KEY_LIST_OP,
+    JOB_LIST_OP,
+    JOB_RESULT_OP,
+    TARGET_LIST_OP,
 )
 
 

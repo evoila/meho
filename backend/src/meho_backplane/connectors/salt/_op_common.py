@@ -8,9 +8,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-_GROUP_SERVER = "salt-server"
-_GROUP_MINIONS = "salt-minions"
-_GROUP_JOBS = "salt-jobs"
+__all__ = [
+    "GROUP_JOBS",
+    "GROUP_MINIONS",
+    "GROUP_SERVER",
+    "JOB_STATES",
+    "KEY_ROW_PROPERTIES",
+    "KEY_STATES",
+    "KEY_STATE_SCHEMA",
+    "MASTER_ID_SCHEMA",
+    "MINION_ID_SCHEMA",
+    "PAGE_SCHEMA",
+    "TAGS",
+    "SaltTypedOp",
+]
+
+GROUP_SERVER = "salt-server"
+GROUP_MINIONS = "salt-minions"
+GROUP_JOBS = "salt-jobs"
 
 #: Minion key states, as the ``minions.get_minion_key_state`` page lists them.
 KEY_STATES: tuple[str, ...] = ("accepted", "pending", "rejected", "denied")
@@ -51,7 +66,7 @@ class SaltTypedOp:
 
 
 #: Tags every Salt read carries.
-_TAGS = ("read-only", "salt", "aria-automation-config")
+TAGS = ("read-only", "salt", "aria-automation-config")
 
 
 def _text(description: str) -> dict[str, Any]:
@@ -68,7 +83,7 @@ def _limit(default: int, maximum: int) -> dict[str, Any]:
     }
 
 
-_PAGE: dict[str, Any] = {
+PAGE_SCHEMA: dict[str, Any] = {
     "type": "integer",
     "minimum": 0,
     "description": (
@@ -77,25 +92,25 @@ _PAGE: dict[str, Any] = {
     ),
 }
 
-_MASTER_ID: dict[str, Any] = {
+MASTER_ID_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "description": "Only rows of this Salt master (master id).",
 }
 
-_MINION_ID: dict[str, Any] = {
+MINION_ID_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "description": "Only rows of this minion (minion id).",
 }
 
-_KEY_STATE: dict[str, Any] = {
+KEY_STATE_SCHEMA: dict[str, Any] = {
     "type": "string",
     "enum": list(KEY_STATES),
     "description": "Only minions whose key is in this state.",
 }
 
-_KEY_ROW_PROPERTIES: dict[str, Any] = {
+KEY_ROW_PROPERTIES: dict[str, Any] = {
     "minion_id": _text("Minion id."),
     "master_id": _text("Master the key belongs to."),
     "key_state": {

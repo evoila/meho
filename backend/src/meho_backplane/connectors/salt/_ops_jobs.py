@@ -8,17 +8,19 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.connectors.salt._op_common import (
-    _GROUP_JOBS,
-    _MASTER_ID,
-    _MINION_ID,
-    _PAGE,
-    _TAGS,
+    GROUP_JOBS,
     JOB_STATES,
+    MASTER_ID_SCHEMA,
+    MINION_ID_SCHEMA,
+    PAGE_SCHEMA,
+    TAGS,
     SaltTypedOp,
     _limit,
     _text,
 )
 from meho_backplane.connectors.salt.reads import LIST_PAGE_LIMIT, RETURN_BYTES_LIMIT
+
+__all__ = ["JOB_LIST_OP", "JOB_RESULT_OP"]
 
 _JOB_ROW_PROPERTIES: dict[str, Any] = {
     "jid": _text("Job id (jid) of the run."),
@@ -44,7 +46,7 @@ _JOB_ROW_PROPERTIES: dict[str, Any] = {
     "returned_failed": {"type": ["integer", "null"], "description": "Minions that failed."},
 }
 
-_JOB_LIST = SaltTypedOp(
+JOB_LIST_OP = SaltTypedOp(
     op_id="salt.job.list",
     handler_attr="job_list",
     summary="List recent Salt job runs: function, target, state, user and start time.",
@@ -82,9 +84,9 @@ _JOB_LIST = SaltTypedOp(
                 "maxLength": 64,
                 "description": "Only the run with this job id (jid).",
             },
-            "master_id": _MASTER_ID,
+            "master_id": MASTER_ID_SCHEMA,
             "limit": _limit(LIST_PAGE_LIMIT, 500),
-            "page": _PAGE,
+            "page": PAGE_SCHEMA,
         },
         "additionalProperties": False,
         "examples": [{"state": ["completed_failures", "completed_missing_returns"], "limit": 20}],
@@ -104,8 +106,8 @@ _JOB_LIST = SaltTypedOp(
             },
         },
     },
-    group_key=_GROUP_JOBS,
-    tags=(*_TAGS, "job"),
+    group_key=GROUP_JOBS,
+    tags=(*TAGS, "job"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
@@ -150,7 +152,7 @@ _STATE_SCHEMA: dict[str, Any] = {
     },
 }
 
-_JOB_RESULT = SaltTypedOp(
+JOB_RESULT_OP = SaltTypedOp(
     op_id="salt.job.result",
     handler_attr="job_result",
     summary="Read the results of one Salt job run, one row per minion, size-capped.",
@@ -169,13 +171,13 @@ _JOB_RESULT = SaltTypedOp(
                 "maxLength": 64,
                 "description": "Job id (jid) of the run, from salt.job.list.",
             },
-            "minion_id": _MINION_ID,
+            "minion_id": MINION_ID_SCHEMA,
             "has_errors": {
                 "type": "boolean",
                 "description": "True: only minions with errors. False: only minions without.",
             },
             "limit": _limit(LIST_PAGE_LIMIT, 500),
-            "page": _PAGE,
+            "page": PAGE_SCHEMA,
         },
         "required": ["jid"],
         "additionalProperties": False,
@@ -268,8 +270,8 @@ _JOB_RESULT = SaltTypedOp(
             },
         },
     },
-    group_key=_GROUP_JOBS,
-    tags=(*_TAGS, "job", "result"),
+    group_key=GROUP_JOBS,
+    tags=(*TAGS, "job", "result"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={

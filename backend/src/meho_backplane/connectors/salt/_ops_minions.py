@@ -6,21 +6,23 @@
 from __future__ import annotations
 
 from meho_backplane.connectors.salt._op_common import (
-    _GROUP_MINIONS,
-    _GROUP_SERVER,
-    _KEY_ROW_PROPERTIES,
-    _KEY_STATE,
-    _MASTER_ID,
-    _MINION_ID,
-    _PAGE,
-    _TAGS,
+    GROUP_MINIONS,
+    GROUP_SERVER,
+    KEY_ROW_PROPERTIES,
+    KEY_STATE_SCHEMA,
+    MASTER_ID_SCHEMA,
+    MINION_ID_SCHEMA,
+    PAGE_SCHEMA,
+    TAGS,
     SaltTypedOp,
     _limit,
     _text,
 )
 from meho_backplane.connectors.salt.reads import JOIN_LIMIT, KEY_PAGE_LIMIT, LIST_PAGE_LIMIT
 
-_ABOUT = SaltTypedOp(
+__all__ = ["ABOUT_OP", "KEY_LIST_OP", "MINION_LIST_OP", "TARGET_LIST_OP"]
+
+ABOUT_OP = SaltTypedOp(
     op_id="salt.about",
     handler_attr="about",
     summary="Read the Salt RaaS version, the versions of its parts and the masters it knows.",
@@ -71,8 +73,8 @@ _ABOUT = SaltTypedOp(
             },
         },
     },
-    group_key=_GROUP_SERVER,
-    tags=(*_TAGS, "probe"),
+    group_key=GROUP_SERVER,
+    tags=(*TAGS, "probe"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
@@ -91,7 +93,7 @@ _ABOUT = SaltTypedOp(
     },
 )
 
-_MINION_LIST = SaltTypedOp(
+MINION_LIST_OP = SaltTypedOp(
     op_id="salt.minion.list",
     handler_attr="minion_list",
     summary="List Salt minions with key state, master, presence, last contact and OS.",
@@ -103,11 +105,11 @@ _MINION_LIST = SaltTypedOp(
     parameter_schema={
         "type": "object",
         "properties": {
-            "master_id": _MASTER_ID,
-            "minion_id": _MINION_ID,
-            "key_state": _KEY_STATE,
+            "master_id": MASTER_ID_SCHEMA,
+            "minion_id": MINION_ID_SCHEMA,
+            "key_state": KEY_STATE_SCHEMA,
             "limit": _limit(KEY_PAGE_LIMIT, 1000),
-            "page": _PAGE,
+            "page": PAGE_SCHEMA,
         },
         "additionalProperties": False,
         "examples": [{"key_state": "accepted", "limit": 100}],
@@ -130,7 +132,7 @@ _MINION_LIST = SaltTypedOp(
                     "type": "object",
                     "description": "One minion.",
                     "properties": {
-                        **_KEY_ROW_PROPERTIES,
+                        **KEY_ROW_PROPERTIES,
                         "presence": _text("Presence status, for example present or lost."),
                         "last_seen": _text("Last contact time (ISO 8601)."),
                         "os": _text("OS name (grain os)."),
@@ -142,8 +144,8 @@ _MINION_LIST = SaltTypedOp(
             },
         },
     },
-    group_key=_GROUP_MINIONS,
-    tags=(*_TAGS, "minion"),
+    group_key=GROUP_MINIONS,
+    tags=(*TAGS, "minion"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
@@ -166,7 +168,7 @@ _MINION_LIST = SaltTypedOp(
     },
 )
 
-_KEY_LIST = SaltTypedOp(
+KEY_LIST_OP = SaltTypedOp(
     op_id="salt.key.list",
     handler_attr="key_list",
     summary="List Salt minion keys by state: accepted, pending, rejected or denied.",
@@ -177,11 +179,11 @@ _KEY_LIST = SaltTypedOp(
     parameter_schema={
         "type": "object",
         "properties": {
-            "master_id": _MASTER_ID,
-            "minion_id": _MINION_ID,
-            "key_state": _KEY_STATE,
+            "master_id": MASTER_ID_SCHEMA,
+            "minion_id": MINION_ID_SCHEMA,
+            "key_state": KEY_STATE_SCHEMA,
             "limit": _limit(KEY_PAGE_LIMIT, 1000),
-            "page": _PAGE,
+            "page": PAGE_SCHEMA,
         },
         "additionalProperties": False,
         "examples": [{"key_state": "pending"}],
@@ -196,16 +198,16 @@ _KEY_LIST = SaltTypedOp(
                 "items": {
                     "type": "object",
                     "description": "One minion key.",
-                    "properties": _KEY_ROW_PROPERTIES,
+                    "properties": KEY_ROW_PROPERTIES,
                 },
             },
         },
     },
-    group_key=_GROUP_MINIONS,
+    group_key=GROUP_MINIONS,
     # Not tagged "key": that word marks an operation that sends a secret
     # (SECRET_FAMILY_TAGS), so a trace would keep no body and an error would
     # lose the vendor's text. A minion key row holds no secret.
-    tags=(*_TAGS, "minion", "acceptance"),
+    tags=(*TAGS, "minion", "acceptance"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
@@ -225,7 +227,7 @@ _KEY_LIST = SaltTypedOp(
     },
 )
 
-_TARGET_LIST = SaltTypedOp(
+TARGET_LIST_OP = SaltTypedOp(
     op_id="salt.target.list",
     handler_attr="target_list",
     summary="List saved Salt targets (minion groups) and what each one matches.",
@@ -241,9 +243,9 @@ _TARGET_LIST = SaltTypedOp(
                 "minLength": 1,
                 "description": "Only saved targets with this name.",
             },
-            "master_id": _MASTER_ID,
+            "master_id": MASTER_ID_SCHEMA,
             "limit": _limit(LIST_PAGE_LIMIT, 500),
-            "page": _PAGE,
+            "page": PAGE_SCHEMA,
         },
         "additionalProperties": False,
         "examples": [{"name": "<target-name>"}],
@@ -286,8 +288,8 @@ _TARGET_LIST = SaltTypedOp(
             },
         },
     },
-    group_key=_GROUP_MINIONS,
-    tags=(*_TAGS, "target"),
+    group_key=GROUP_MINIONS,
+    tags=(*TAGS, "target"),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={

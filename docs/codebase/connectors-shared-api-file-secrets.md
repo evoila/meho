@@ -118,6 +118,16 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it. `<style>` content is
      free text.
+   - HTML `<pre>`, `<code>` and `<span>` blocks hold examples. The text
+     of the whole block is joined, also when a page colours it with
+     child elements (`<span>`), and every JSON object in it (or list that
+     holds one) is checked like a JSON file: a request line followed by
+     its JSON body is the usual shape. The block comes back as plain text, without the
+     child elements; the text around the JSON goes through the general
+     rules. A block that holds no JSON keeps its child elements. A block
+     the parser cannot finish within a bounded amount of work (brackets
+     that open over and over and never close) comes back as the
+     placeholder.
    - Any text value that is itself a JSON object or list (a sample
      request in a description, a `<pre>` block) is parsed and checked
      the same way, and always written back from the parsed copy, also

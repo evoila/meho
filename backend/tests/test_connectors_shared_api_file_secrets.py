@@ -566,6 +566,84 @@ def test_html_pre_block_with_json_is_checked() -> None:
     assert count == 1
 
 
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (
+            f'<pre>{{<span class="k">"password"</span>: <span class="s">"{_SECRET}"</span>}}</pre>',
+            f'<pre>{{"password":"{REDACTED}"}}</pre>',
+        ),
+        (
+            f'<pre><code class="json">{{\n  <span>"user"</span>: <span>"admin"</span>,\n'
+            f'  <span>"secret"</span>: <span>"{_SECRET}"</span>\n}}</code></pre>',
+            f'<pre>{{"user":"admin","secret":"{REDACTED}"}}</pre>',
+        ),
+        (
+            f'<p>Body:</p><code>[<span>{{"token": "{_SECRET}"}}</span>]</code>',
+            f'<p>Body:</p><code>[{{"token":"{REDACTED}"}}]</code>',
+        ),
+    ],
+    ids=["pre-with-spans", "pre-code-with-spans", "code-list-with-a-span"],
+)
+def test_html_highlighted_json_block_is_checked_as_one_document(
+    document: str, expected: str
+) -> None:
+    """Highlighting splits the JSON over child elements; the joined text is the document."""
+    text, count = _check(document, _HTML)
+    assert text == expected
+    assert count == 1
+
+
+def test_html_highlighted_block_that_is_not_json_keeps_its_markup() -> None:
+    document = '<pre><span class="kw">def</span> login(user):\n    return user</pre>'
+    text, count = _check(document, _HTML)
+    assert text == document
+    assert count == 0
+
+
+@pytest.mark.parametrize("tag", ["pre", "code", "span"])
+def test_html_example_with_a_request_line_before_the_json_is_checked(tag: str) -> None:
+    """The request line and the body are one text; the body is not JSON on its own."""
+    example = f'POST /api/v2/sessions\n{{"username": "admin", "password": "{_SECRET}"}}'
+    text, count = _check(f"<{tag}>{example}</{tag}>", _HTML)
+    checked = f'POST /api/v2/sessions\n{{"username":"admin","password":"{REDACTED}"}}'
+    assert text == f"<{tag}>{checked}</{tag}>"
+    assert count == 1
+
+
+def test_html_example_with_two_json_documents_checks_both() -> None:
+    document = (
+        f'<pre>Request:\n{{"username": "admin", "password": "{_SECRET}"}}\n'
+        f'Response:\n{{"userId": "u1", "sessionId": "{_SECRET}"}}\n</pre>'
+    )
+    text, count = _check(document, _HTML)
+    assert text == (
+        f'<pre>Request:\n{{"username":"admin","password":"{REDACTED}"}}\n'
+        f'Response:\n{{"userId":"u1","sessionId":"{REDACTED}"}}\n</pre>'
+    )
+    assert count == 2
+
+
+def test_html_example_json_inside_text_that_is_not_json_as_a_whole_is_checked() -> None:
+    text, count = _check(f'<pre>{{"body": {{"password": "{_SECRET}"}} ...}}</pre>', _HTML)
+    assert text == f'<pre>{{"body": {{"password":"{REDACTED}"}} ...}}</pre>'
+    assert count == 1
+
+
+def test_html_example_with_brackets_that_open_no_json_is_unchanged() -> None:
+    document = '<pre>GET /api/v2/hosts/{id}\n</pre><span>See <a href="/x">[1]</a> {{name}}</span>'
+    text, count = _check(document, _HTML)
+    assert text == document
+    assert count == 0
+
+
+def test_html_example_the_parser_cannot_finish_is_withheld() -> None:
+    """Brackets that open over and over and never close would cost a read per bracket."""
+    text, count = _check("<pre>" + "[1,1,1,1," * 2000 + "</pre>", _HTML)
+    assert text == f"<pre>{REDACTED}</pre>"
+    assert count == 1
+
+
 def test_html_comment_does_not_come_back() -> None:
     text, count = _check(f"<p>a<!-- password: {_SECRET} --></p>", _HTML)
     assert text == "<p>a</p>"

@@ -1414,8 +1414,6 @@ async def test_registered_ops_are_typed_safe_and_documented(
 
 
 def test_package_registers_versioned_connector_and_wildcard() -> None:
-    import meho_backplane.connectors.salt  # noqa: F401  (import-time registration)
-
     clear_registry()
     register_connector_v2(
         product=SALT_PRODUCT, version=SALT_VERSION, impl_id=SALT_IMPL_ID, cls=SaltConnector

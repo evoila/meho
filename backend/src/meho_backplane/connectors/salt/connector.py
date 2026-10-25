@@ -85,6 +85,14 @@ from meho_backplane.connectors.schemas import (
 )
 
 __all__ = [
+    "CMDS_RPC",
+    "GET_VERSIONS_RPC",
+    "MASTER_PRESENCE_RPC",
+    "MINION_CACHE_RPC",
+    "MINION_KEY_STATE_RPC",
+    "MINION_PRESENCE_RPC",
+    "RETURNS_RPC",
+    "TARGET_GROUP_RPC",
     "SaltConnector",
     "SaltRpcError",
     "SaltServerVersion",

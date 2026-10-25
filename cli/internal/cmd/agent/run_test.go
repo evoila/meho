@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -193,6 +195,36 @@ func TestRunEventsRejectsTooLongInputBeforeSending(t *testing.T) {
 	assertShortLimitError(t, stderr.String(), tooLong)
 	if stdout.Len() != 0 {
 		t.Errorf("stdout should stay empty; got %q", stdout.String())
+	}
+}
+
+// TestRunInputMaxCharsMatchesOpenAPI ties the CLI's copy of the limit to
+// the server's. CI keeps cli/api/openapi.json equal to the backend, so a
+// change to the backend constant without a matching change here fails
+// this test instead of letting the two fronts drift apart.
+func TestRunInputMaxCharsMatchesOpenAPI(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "api", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read openapi.json: %v", err)
+	}
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					MaxLength *int `json:"maxLength"`
+				} `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode openapi.json: %v", err)
+	}
+	got := doc.Components.Schemas["AgentRunRequest"].Properties["input"].MaxLength
+	if got == nil {
+		t.Fatalf("AgentRunRequest.input has no maxLength in openapi.json")
+	}
+	if *got != runInputMaxChars {
+		t.Fatalf("AgentRunRequest.input maxLength = %d; CLI runInputMaxChars = %d", *got, runInputMaxChars)
 	}
 }
 

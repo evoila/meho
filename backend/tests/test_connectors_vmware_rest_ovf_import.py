@@ -37,11 +37,15 @@ class _Target:
 def fake_upload_client(monkeypatch: pytest.MonkeyPatch):
     """Engine tests record uploads; the real TLS path has its own socket tests."""
 
+    materials = []
+
     @contextlib.asynccontextmanager
-    async def client(target: Any, thumbprint: Any):
+    async def client(target: Any, thumbprint: Any, certificate: Any = None):
+        materials.append((thumbprint, certificate))
         yield target.upload_client
 
     monkeypatch.setattr(ovf_transfer, "upload_client", client)
+    return materials
 
 
 class _Operator:
@@ -205,7 +209,7 @@ def _ready_poll(
     }
     if ssl_thumbprint is not None:
         device_url["sslThumbprint"] = ssl_thumbprint
-    if with_ssl_cert:  # 9.0-only field the engine must ignore
+    if with_ssl_cert:  # 9.0 lease certificate passed to the upload checker
         device_url["sslCertificate"] = "-----BEGIN CERTIFICATE-----"
     info = {
         "_typeName": "HttpNfcLeaseInfo",
@@ -397,12 +401,8 @@ async def test_progress_heartbeat_fires_during_a_slow_upload() -> None:
     assert source.keep_alives >= 1  # the source session was refreshed too
 
 
-async def test_import_is_version_agnostic_ignoring_9_0_only_device_fields() -> None:
-    """AC5: a device URL carrying the 9.0-only sslCertificate still imports cleanly.
-
-    The engine reads only the pre-9.0 key / importKey / url fields, so a lease
-    from a pre-9.0 (VCF 5.x migration-source) target and a 9.0+ target both work.
-    """
+async def test_import_passes_control_plane_lease_certificate_to_upload(fake_upload_client) -> None:
+    """The lease property response supplies expected material, not the upload peer."""
     conn = _EngineConnector(
         service_content=_service_content(),
         import_spec_result=_import_spec_result(),
@@ -413,6 +413,7 @@ async def test_import_is_version_agnostic_ignoring_9_0_only_device_fields() -> N
     result = await _run(conn, source)
     assert isinstance(result, LeaseImportResult)
     assert result.status == "imported"
+    assert fake_upload_client == [(None, "-----BEGIN CERTIFICATE-----")]
 
 
 async def test_upload_certificate_failure_aborts_lease(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -681,3 +682,23 @@ async def test_import_refuses_to_re_run_for_an_approved_power_on_without_state(
     assert "nothing was imported" in (out.error or "")
     assert connector.calls == []
     assert gate_calls == []
+
+
+async def test_invalid_lease_certificate_aborts_before_opening_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from meho_backplane.connectors.vmware_rest import ovf_upload_tls
+
+    monkeypatch.setattr(ovf_transfer, "upload_client", ovf_upload_tls.upload_client)
+    conn = _EngineConnector(
+        service_content=_service_content(),
+        import_spec_result=_import_spec_result(),
+        lease_ref=_lease_ref(),
+        lease_polls=[_ready_poll(with_ssl_cert=True)],
+    )
+    # No disk exists: opening the source would fail this test before a security result.
+    result = await _run(conn, _FakeSource("<Envelope/>", {}))
+    assert result.status == "import_error"
+    assert result.issues[0]["category"] == "security"
+    assert any(p.endswith("/HttpNfcLeaseAbort") for p, _ in conn.vmomi_calls)
+    assert conn._client.puts == []

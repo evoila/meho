@@ -3020,22 +3020,34 @@ envelope (a request saved before #4217) is refused before anything runs
 migration-source fleet (#3056) as well as 9.0+.
 
 **Device-host certificate checks.** Each disk PUT goes to the ESXi URL
-returned by vCenter's lease. `plan_transfers` keeps its `sslThumbprint`,
-which is a SHA-1 certificate hash (SHA-256 is also accepted). A fresh client
-checks this hash on the actual upload TLS connection, before sending HTTP
-headers, the lease token, or disk bytes. Every new connection checks again.
-There is no separate preflight connection. This supports self-signed ESXi
-certificates, even when normal TLS checks are disabled for the target.
-A missing certificate, bad hash, or mismatch raises `DeviceThumbprintError`;
-the engine aborts the lease and returns a security issue.
+returned by vCenter's lease. `plan_transfers` keeps its `sslCertificate` and
+`sslThumbprint`. When the optional PEM certificate is supplied, its SHA-256
+hash takes precedence. Invalid supplied PEM fails; it never falls back to a
+weaker hash. The certificate field was added in
+[vSphere 9](https://developer.broadcom.com/xapis/vsan-management-api/latest/vim.HttpNfcLease.DeviceUrl.html).
+Older servers can supply only a thumbprint. SHA-256 thumbprints remain supported;
+legacy SHA-1 thumbprints work only when the host crypto policy allows them.
+Hashing authenticates the peer, so it never bypasses that policy.
 
-When the lease has no hash, the upload requires normal CA and hostname
-checks, using the target's CA pin or the default trust store. A target with
-TLS checks disabled and no CA pin cannot upload without a lease hash.
-All device URLs must use HTTPS. The per-disk client carries no vCenter login
-cookies and follows no redirects. Private ESXi addresses remain supported:
-the authenticated lease and the upload certificate establish trust rather
-than a public-address-only rule.
+A fresh client checks the selected hash on the actual upload TLS connection,
+before sending HTTP headers, the lease token, or disk bytes. Every new
+connection checks again. There is no separate preflight connection. This
+supports self-signed ESXi certificates. A missing certificate, bad hash,
+blocked algorithm, or mismatch raises `DeviceThumbprintError`; the engine
+aborts the lease and returns a security issue.
+
+Lease metadata comes from the vCenter control-plane session. Its authenticity
+requires normal TLS verification or the target's CA pin. The explicit
+`verify_tls=false` override without a CA pin leaves that session open to
+interception. Checking the upload against its lease does not repair that risk.
+Use verified control-plane TLS to trust the lease certificate or thumbprint.
+
+When the lease has neither certificate nor hash, the upload requires normal
+CA and hostname checks, using the target's CA pin or the default trust store.
+A target with TLS checks disabled and no CA pin cannot upload without lease
+certificate material. All device URLs must use HTTPS. The per-disk client
+carries no vCenter login cookies and follows no redirects. Private ESXi
+addresses remain supported.
 
 The transport wraps HTTPcore's network stream. It checks the peer after
 `start_tls` and blocks every write until that check passes. This follows the

@@ -19,6 +19,8 @@ from typing import Any
 
 import httpcore
 import httpx
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 
 from meho_backplane.connectors.adapters.http import _build_ca_pinned_ssl_context
 
@@ -48,8 +50,13 @@ class _LeaseStream(httpcore.AsyncNetworkStream):
             if not cert:
                 raise DeviceThumbprintError("upload peer presented no TLS certificate")
             algorithm = "sha1" if len(self._expected) == 40 else "sha256"
-            # SHA-1 is the certificate hash format specified by the vim API.
-            actual = hashlib.new(algorithm, cert, usedforsecurity=False).hexdigest()
+            # Legacy leases can use SHA-1. Respect provider security policy.
+            try:
+                actual = hashlib.new(algorithm, cert, usedforsecurity=True).hexdigest()
+            except ValueError as exc:
+                raise DeviceThumbprintError(
+                    f"lease certificate hash {algorithm} is unavailable under crypto policy"
+                ) from exc
             if actual != self._expected:
                 raise DeviceThumbprintError("upload certificate does not match lease sslThumbprint")
             self._verified = True
@@ -92,7 +99,9 @@ class _LeaseBackend(httpcore.AsyncNetworkBackend):
         return _LeaseStream(stream, self._expected)
 
 
-def upload_client(target: Any, thumbprint: str | None) -> httpx.AsyncClient:
+def upload_client(
+    target: Any, thumbprint: str | None, certificate: str | None = None
+) -> httpx.AsyncClient:
     """Use the lease's certificate hash instead of CA/hostname trust.
 
     ESXi can serve a self-signed certificate whose name differs from its
@@ -100,6 +109,17 @@ def upload_client(target: Any, thumbprint: str | None) -> httpx.AsyncClient:
     identity before allowing even the HTTP headers to leave. No preflight
     connection or vCenter connection pool is used.
     """
+    if certificate is not None:
+        try:
+            if not isinstance(certificate, str):
+                raise ValueError("expected PEM text")
+            certificates = x509.load_pem_x509_certificates(certificate.encode("ascii"))
+            if len(certificates) != 1:
+                raise ValueError("expected one lease certificate")
+            der = certificates[0].public_bytes(serialization.Encoding.DER)
+            thumbprint = hashlib.sha256(der, usedforsecurity=True).hexdigest()
+        except ValueError as exc:
+            raise DeviceThumbprintError("lease sslCertificate is invalid or unavailable") from exc
     if not thumbprint or not thumbprint.strip():
         ca_pin = getattr(target, "tls_ca_pin", None)
         if not getattr(target, "verify_tls", True) and not ca_pin:

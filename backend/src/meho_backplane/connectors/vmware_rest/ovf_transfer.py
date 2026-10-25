@@ -109,7 +109,8 @@ class TransferEntry:
     ``ssl_thumbprint`` carries the lease's per-device
     ``HttpNfcLeaseDeviceUrl.sslThumbprint`` attestation (``None`` / empty
     when vCenter supplied none). The upload checks this hash on its own
-    TLS connection before sending data.
+    TLS connection before sending data. ``ssl_certificate`` carries the optional
+    vSphere 9 lease PEM; its SHA-256 takes precedence over a legacy thumbprint.
     """
 
     device_id: str
@@ -118,6 +119,7 @@ class TransferEntry:
     size: int
     is_disk: bool
     ssl_thumbprint: str | None = None
+    ssl_certificate: str | None = None
 
 
 def substitute_wildcard_host(url: str, connect_host: str) -> str:
@@ -165,6 +167,7 @@ def plan_transfers(
             continue
         size = item.get("size")
         thumbprint = matched.get("sslThumbprint")
+        certificate = matched.get("sslCertificate")
         plan.append(
             TransferEntry(
                 device_id=device_id,
@@ -173,6 +176,7 @@ def plan_transfers(
                 size=int(size) if isinstance(size, int) and not isinstance(size, bool) else 0,
                 is_disk=bool(matched.get("disk")),
                 ssl_thumbprint=thumbprint if isinstance(thumbprint, str) else None,
+                ssl_certificate=certificate,
             )
         )
     return plan
@@ -249,7 +253,7 @@ async def _upload_one(
     parts = urlsplit(entry.url)
     if parts.scheme != "https" or not parts.hostname:
         raise DeviceThumbprintError("lease device URL must use HTTPS and include a host")
-    async with upload_client(target, entry.ssl_thumbprint) as client:
+    async with upload_client(target, entry.ssl_thumbprint, entry.ssl_certificate) as client:
         return await _put_disk(client, entry=entry, source=source, tracker=tracker)
 
 

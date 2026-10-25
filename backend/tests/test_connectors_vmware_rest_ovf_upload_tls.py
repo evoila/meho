@@ -138,7 +138,7 @@ async def test_changed_certificate_is_rejected_before_headers_or_payload(tmp_pat
     """Knowing the earlier certificate cannot authorize a different upload peer."""
     _, earlier_der, _ = certificate(tmp_path, "earlier")
     context, _, _ = certificate(tmp_path, "replacement")
-    expected = hashlib.sha1(earlier_der).hexdigest()
+    expected = hashlib.sha256(earlier_der).hexdigest()
     body_started = False
 
     async def payload():
@@ -159,7 +159,7 @@ async def test_changed_certificate_is_rejected_before_headers_or_payload(tmp_pat
 async def test_each_reconnection_checks_certificate(tmp_path: Path) -> None:
     context, der, _ = certificate(tmp_path)
     certificate(tmp_path, "replacement")
-    expected = hashlib.sha1(der).hexdigest()
+    expected = hashlib.sha256(der).hexdigest()
     async with server(context) as (first, received):
         async with ovf_upload_tls.upload_client(SimpleNamespace(), expected) as client:
             assert (await put(client, first)).status_code == 200
@@ -206,7 +206,7 @@ async def test_redirect_is_not_followed(tmp_path: Path) -> None:
     async with (
         server(context) as (destination, untouched),
         server(context, redirect=destination) as (url, received),
-        ovf_upload_tls.upload_client(SimpleNamespace(), hashlib.sha1(der).hexdigest()) as client,
+        ovf_upload_tls.upload_client(SimpleNamespace(), hashlib.sha256(der).hexdigest()) as client,
     ):
         response = await put(client, url)
         assert response.status_code == 307
@@ -285,3 +285,99 @@ def test_plan_keeps_lease_hash_and_substitutes_private_device_host() -> None:
     )
     assert plan[0].ssl_thumbprint == "AA:BB"
     assert plan[0].url == "https://192.168.1.2/nfc/disk"
+
+
+@pytest.mark.parametrize("algorithm", ["sha1", "sha256"])
+async def test_blocked_certificate_hash_fails_before_headers_or_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, algorithm: str
+) -> None:
+    context, der, _ = certificate(tmp_path)
+    expected = hashlib.new(algorithm, der).hexdigest()
+    original = hashlib.new
+    body_started = False
+
+    def policy_hash(name, data=b"", **kwargs):
+        if name == algorithm:
+            assert kwargs.get("usedforsecurity", True) is True
+            raise ValueError("hash blocked by provider policy")
+        return original(name, data, **kwargs)
+
+    async def payload():
+        nonlocal body_started
+        body_started = True
+        yield b"disk-payload"
+
+    monkeypatch.setattr(hashlib, "new", policy_hash)
+    async with server(context) as (url, received):
+        async with ovf_upload_tls.upload_client(
+            SimpleNamespace(verify_tls=False), expected
+        ) as client:
+            with pytest.raises(ovf_upload_tls.DeviceThumbprintError, match="crypto policy"):
+                await client.put(url, content=payload(), headers={"Content-Length": "12"})
+        assert not body_started
+        assert received == []
+
+
+async def test_lease_pem_preferred_to_legacy_pin_without_sha1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, _, pem = certificate(tmp_path)
+    original = hashlib.new
+
+    def no_sha1(name, data=b"", **kwargs):
+        if name == "sha1":
+            raise AssertionError("stronger lease material must not use SHA-1")
+        return original(name, data, **kwargs)
+
+    monkeypatch.setattr(hashlib, "new", no_sha1)
+    async with server(context) as (url, received):
+        async with ovf_upload_tls.upload_client(
+            SimpleNamespace(verify_tls=False), "a" * 40, pem
+        ) as client:
+            assert (await put(client, url)).status_code == 200
+        assert len(received) == 1
+
+
+async def test_lease_pem_rejects_different_upload_certificate(tmp_path: Path) -> None:
+    _, _, expected_pem = certificate(tmp_path, "expected")
+    context, _, _ = certificate(tmp_path, "replacement")
+    async with server(context) as (url, received):
+        async with ovf_upload_tls.upload_client(
+            SimpleNamespace(verify_tls=False), None, expected_pem
+        ) as client:
+            with pytest.raises(ovf_upload_tls.DeviceThumbprintError, match="does not match"):
+                await put(client, url)
+        assert received == []
+
+
+@pytest.mark.parametrize("pem", ["", "not PEM", "-----BEGIN CERTIFICATE-----", 7])
+async def test_invalid_supplied_lease_pem_fails_before_source_open(pem) -> None:
+    entry = ovf_transfer.TransferEntry(
+        "disk", "disk", "https://127.0.0.1/upload", 1, True, "a" * 40, pem
+    )
+    with pytest.raises(ovf_upload_tls.DeviceThumbprintError, match="sslCertificate"):
+        await ovf_transfer._upload_one(
+            None,
+            SimpleNamespace(verify_tls=False),
+            entry=entry,
+            source=None,
+            tracker=ovf_transfer.ProgressTracker(1),
+        )
+
+
+def test_plan_preserves_supplied_lease_certificate() -> None:
+    plan = ovf_transfer.plan_transfers(
+        [{"deviceId": "disk", "path": "disk.vmdk", "size": 12}],
+        [
+            {
+                "importKey": "disk",
+                "url": "https://*/nfc/disk",
+                "disk": True,
+                "sslThumbprint": "a" * 40,
+                "sslCertificate": "lease PEM",
+            }
+        ],
+        "192.168.1.2",
+    )
+    assert plan[0].ssl_certificate == "lease PEM"
+    assert plan[0].ssl_thumbprint == "a" * 40

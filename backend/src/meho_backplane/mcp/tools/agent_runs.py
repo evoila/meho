@@ -40,6 +40,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.agent.invocation import (
+    RUN_INPUT_MAX_CHARS,
     AgentDisabledError,
     AgentNotFoundError,
     AgentRunNotFoundError,
@@ -220,7 +221,11 @@ register_mcp_tool(
                 "input": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "The user prompt to run the agent on.",
+                    "maxLength": RUN_INPUT_MAX_CHARS,
+                    "description": (
+                        "The user prompt to run the agent on. "
+                        f"At most {RUN_INPUT_MAX_CHARS} characters."
+                    ),
                 },
                 "async": {
                     "type": "boolean",

@@ -276,7 +276,7 @@ meho agent run <name> [flags]
 
 - `--async` — return a run handle immediately instead of blocking for the result
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--input` — the user prompt to run the agent on (required)
+- `--input` — the user prompt to run the agent on (required; at most 65536 characters)
 - `--json` — emit the raw run response JSON instead of the human summary
 - `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --work-ref`
 
@@ -300,7 +300,7 @@ meho agent run-events <name> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--input` — the user prompt to run the agent on (required)
+- `--input` — the user prompt to run the agent on (required; at most 65536 characters)
 - `--json` — emit one raw JSON object per event instead of a compact human line
 
 ### `meho agent run-list`

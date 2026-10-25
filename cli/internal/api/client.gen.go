@@ -1256,7 +1256,7 @@ type AgentRunRequest struct {
 	// Async Return a run handle immediately instead of blocking for the result.
 	Async *bool `json:"async,omitempty"`
 
-	// Input The user prompt to run the agent on.
+	// Input The user prompt to run the agent on. At most 65536 characters.
 	Input string `json:"input"`
 }
 

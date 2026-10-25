@@ -22787,9 +22787,10 @@
         "properties": {
           "input": {
             "type": "string",
+            "maxLength": 65536,
             "minLength": 1,
             "title": "Input",
-            "description": "The user prompt to run the agent on."
+            "description": "The user prompt to run the agent on. At most 65536 characters."
           },
           "async": {
             "type": "boolean",

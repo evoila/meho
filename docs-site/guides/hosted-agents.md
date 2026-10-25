@@ -93,7 +93,7 @@ A hosted agent gets two pieces of text. Keep them apart.
 | Text | Where you set it | What to put in it |
 |---|---|---|
 | **System prompt** | `--system-prompt` on `meho agent create` | The standing rules. Who the agent is, what it may do, which connector and target to use, how to answer. It is the same for every run. |
-| **Input** | `--input` on `meho agent run` | The task for **this** run. For example: "List the pods in namespace `web` that are not running." |
+| **Input** | `--input` on `meho agent run` | The task for **this** run. For example: "List the pods in namespace `web` that are not running." At most 65,536 characters. |
 
 A good system prompt for the read-only example:
 

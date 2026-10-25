@@ -98,9 +98,10 @@ about names that another file defines.
 
 The place answers are checked before any step runs, as wrong usage (exit
 code 2): `--first-tenant-id` must be a UUID, `--admin-user` and
-`--approver-user` take letters, digits and `. _ - @` and must differ. So
-the values go into the Helm values and the install record as they are,
-with no escaping.
+`--approver-user` take letters, digits and `. _ - @`, are put in lower
+case first (Keycloak keeps user names in lower case) and must then
+differ. So the values go into the Helm values and the install record as
+they are, with no escaping.
 
 **Why DNS needs care.** On Ubuntu, `systemd-resolved` answers from
 `/etc/hosts` too, also through its stub at 127.0.0.53. So when

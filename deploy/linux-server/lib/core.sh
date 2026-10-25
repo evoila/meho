@@ -80,8 +80,9 @@ coreKeycloak:
   firstLogin:
     adminUsername: "${admin_user}"
     approverUsername: "${approver_user}"
-# Until the chart knows its built-in parts: the pod range, so MEHO may
-# reach the built-in PostgreSQL and OpenBao.
+# shortcut: the pod range, so MEHO may reach the built-in PostgreSQL and
+# OpenBao, until the chart derives these from its built-in parts (#4047).
+# The update (#4736) removes the two keys.
 networkPolicy:
   postgresCIDR: "${pod_range}"
   vaultCIDR: "${pod_range}"

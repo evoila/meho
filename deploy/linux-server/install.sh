@@ -68,8 +68,9 @@ FROM_DISK=0
 
 readonly UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 # The user names go into Helm values and the install record as they are,
-# so they take only characters that need no escaping there.
-readonly USER_NAME_RE='^[A-Za-z0-9][A-Za-z0-9@._-]*$'
+# so they take only characters that need no escaping there. Keycloak keeps
+# user names in lower case, so set_option lowers them first.
+readonly USER_NAME_RE='^[a-z0-9][a-z0-9@._-]*$'
 
 usage() {
     cat <<'HELP'
@@ -93,9 +94,11 @@ Options:
   --first-tenant-id <uuid>   The id of the first tenant. Default: a new
                              random id. Give the old id to keep it on a
                              move to another machine.
-  --admin-user <name>        The user name of the first admin. Default: admin.
+  --admin-user <name>        The user name of the first admin, stored in
+                             lower case. Default: admin.
   --approver-user <name>     The user name of the second person, who
-                             approves. Default: approver.
+                             approves, stored in lower case.
+                             Default: approver.
   --cluster-cidr <cidr>      The address range of the pods.
                              Default: 10.42.0.0/16.
   --service-cidr <cidr>      The address range of the services.
@@ -127,8 +130,8 @@ set_option() {
         --hostname) HOSTNAME_FQDN=${2,,} ;;
         --public-address) PUBLIC_ADDRESS=$2 ;;
         --first-tenant-id) FIRST_TENANT_ID=${2,,} ;;
-        --admin-user) ADMIN_USER=$2 ;;
-        --approver-user) APPROVER_USER=$2 ;;
+        --admin-user) ADMIN_USER=${2,,} ;;
+        --approver-user) APPROVER_USER=${2,,} ;;
         --cluster-cidr) CLUSTER_CIDR=$2 ;;
         --service-cidr) SERVICE_CIDR=$2 ;;
         --join-address) JOIN_ADDRESS=$2 ;;

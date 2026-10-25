@@ -58,8 +58,9 @@ def place_values(
           firstLogin:
             adminUsername: "{admin}"
             approverUsername: "{approver}"
-        # Until the chart knows its built-in parts: the pod range, so MEHO may
-        # reach the built-in PostgreSQL and OpenBao.
+        # shortcut: the pod range, so MEHO may reach the built-in PostgreSQL and
+        # OpenBao, until the chart derives these from its built-in parts (#4047).
+        # The update (#4736) removes the two keys.
         networkPolicy:
           postgresCIDR: "{pod_range}"
           vaultCIDR: "{pod_range}"
@@ -120,9 +121,9 @@ class CoreInstallTests(InstallTestCase):
             "--hostname=meho-01.example.org",
             "--first-tenant-id",
             "9B4D2A7E-3F1C-4E2A-8C1F-5D6E7F8A9B0C",
-            "--admin-user=first.admin",
+            "--admin-user=First.Admin",
             "--approver-user",
-            "second@example.org",
+            "Second@Example.org",
             "--cluster-cidr",
             "172.30.0.0/16",
         )
@@ -150,13 +151,14 @@ class CoreInstallTests(InstallTestCase):
         self.assertEqual(TENANT_ID, record["options"]["first_tenant_id"])
 
     def test_bad_place_options_are_wrong_usage(self) -> None:
-        cases = {
-            "--first-tenant-id must be a UUID": ["--first-tenant-id", "tenant-one"],
-            "--admin-user must be a user name": ["--admin-user", "first admin"],
-            "--approver-user must be a user name": ["--approver-user", 'x"y'],
-            "must be two different names": ["--admin-user", "same", "--approver-user", "same"],
-        }
-        for message, args in cases.items():
+        cases = [
+            ("--first-tenant-id must be a UUID", ["--first-tenant-id", "tenant-one"]),
+            ("--admin-user must be a user name", ["--admin-user", "first admin"]),
+            ("--approver-user must be a user name", ["--approver-user", 'x"y']),
+            ("must be two different names", ["--admin-user", "same", "--approver-user", "same"]),
+            ("must be two different names", ["--admin-user", "Admin", "--approver-user", "admin"]),
+        ]
+        for message, args in cases:
             with self.subTest(args=args):
                 self.assert_usage_error(self.machine.run(*args), message)
                 self.assertEqual([], self.written_files())

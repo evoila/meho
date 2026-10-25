@@ -42,7 +42,6 @@ from meho_backplane.connectors.vra8.api_file import (
 from meho_backplane.connectors.vra8.typed_ops import VRA8_TYPED_WHEN_TO_USE_BY_GROUP
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
-from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
@@ -1050,7 +1049,7 @@ async def test_large_answer_is_read_back_part_by_part_through_result_query(
     # rows: the caller pages them with offset / limit, no path needed.
     texts: list[str] = []
     for offset in range(0, answer["parts"], 2):
-        page = await read_result_window(_operator(), handle.handle_id, offset=offset, limit=2)
+        page = await rq.read_result_window(_operator(), handle.handle_id, offset=offset, limit=2)
         texts.extend(row["text"] for row in page["rows"])
     assert len(texts) == answer["parts"]
     assert hashlib.sha256("".join(texts).encode("utf-8")).hexdigest() == answer["sha256"]

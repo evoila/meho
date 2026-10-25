@@ -606,7 +606,7 @@ meho argocd repo list [flags]
 
 ## `meho audit`
 
-Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex)
+Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)
 
 ```
 meho audit
@@ -697,6 +697,42 @@ meho audit show <audit-id> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+
+### `meho audit trace`
+
+List the operation runs that have a stored flight-recorder trace, or read one trace
+
+```
+meho audit trace
+```
+
+#### `meho audit trace list`
+
+List the operation runs that still have a stored trace
+
+```
+meho audit trace list [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
+- `--json` — print the route's AuditQueryResult JSON unchanged instead of the table
+- `--limit` — max rows per page (1..1000, server default 100 when omitted)
+- `--op-id` — narrow to one op-id (glob with * wildcards, e.g. 'vmware.*')
+- `--since` — earliest run time; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
+- `--target` — narrow to one target (name or alias; server-side resolution)
+- `--until` — latest run time; accepts the same shorthand as --since
+
+#### `meho audit trace show`
+
+Print the stored flight-recorder trace of one operation run
+
+```
+meho audit trace show <audit-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the route's AuditTraceResult JSON unchanged (includes redacted headers and bodies)
 
 ### `meho audit who-touched`
 

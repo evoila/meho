@@ -100,7 +100,9 @@ jobs:
                 const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
                   {...repo, run_id: Number(runId), per_page: 100});
                 const proofs = artifacts.filter(a => a.name === `sonar-gate-${entry.pullRequest.headRefOid}` && !a.expired);
-                if (proofs.length !== 1) throw new Error('Trusted scan proof is missing for the exact PR head');
+                // A workflow rerun can retain an earlier same-name artifact.
+                // Every matching proof is from this already authenticated run.
+                if (!proofs.length) throw new Error('Trusted scan proof is missing for the exact PR head');
 
                 base = entry.headCommit.oid;
               }

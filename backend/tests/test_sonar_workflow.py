@@ -22,7 +22,22 @@ _WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/quality-gat
 @pytest.mark.parametrize("event", ["push", "pull_request", "merge_group"])
 @pytest.mark.parametrize("conclusion", ["success", "failure", "cancelled"])
 @pytest.mark.parametrize(
-    "queue_case", ["valid", "missing", "gap", "failed", "stale", "forged", "wrong_head", "expired"]
+    "queue_case",
+    [
+        "valid",
+        "missing",
+        "gap",
+        "failed",
+        "stale",
+        "forged",
+        "wrong_head",
+        "expired",
+        "rerun",
+        "mixed_expiry",
+        "all_expired",
+        "duplicate_wrong_head",
+        "failed_scan",
+    ],
 )
 def test_gate_status_targets_upstream_commit(event: str, conclusion: str, queue_case: str) -> None:
     node = shutil.which("node")
@@ -48,15 +63,20 @@ const github = {rest: {repos: {
 }, actions: {
   getWorkflow: async () => ({data: {id: 123}}),
   getWorkflowRun: async () => ({data: {workflow_id: 123, head_branch: 'main',
-    event: queueCase === 'forged' ? 'pull_request' : 'workflow_run', conclusion: 'success'}}),
+    event: queueCase === 'forged' ? 'pull_request' : 'workflow_run',
+    conclusion: queueCase === 'failed_scan' ? 'failure' : 'success'}}),
   listWorkflowRunArtifacts: async () => {}
 }},
   paginate: async (method, args) => {
-    if (args.run_id) return [{
-      name: 'sonar-gate-' + (queueCase === 'wrong_head' ? 'other'
+    if (args.run_id) { const artifacts = [{
+      name: 'sonar-gate-' + (['wrong_head', 'duplicate_wrong_head'].includes(queueCase) ? 'other'
         : args.run_id === 70 ? 'pr1' : 'pr2'),
-      expired: queueCase === 'expired'
+      expired: ['expired', 'all_expired'].includes(queueCase)
     }];
+      if (queueCase === 'mixed_expiry') return [...artifacts, {...artifacts[0], expired: true}];
+      return ['rerun', 'all_expired', 'duplicate_wrong_head', 'failed_scan'].includes(queueCase)
+        ? [...artifacts, ...artifacts] : artifacts;
+    }
     // Both PR heads must be checked. One passing final PR is insufficient.
     if (args.ref !== 'pr1' && args.ref !== 'pr2') return [];
     return [{context: 'SonarCloud Quality Gate',
@@ -91,7 +111,9 @@ const github = {rest: {repos: {
     value = json.loads(result.stdout)
     assert [s["sha"] for s in value["statuses"]] == ["abc123", "abc123"]
     assert value["statuses"][0]["state"] == "pending"
-    passed = conclusion == "success" and (event != "merge_group" or queue_case == "valid")
+    passed = conclusion == "success" and (
+        event != "merge_group" or queue_case in {"valid", "rerun", "mixed_expiry"}
+    )
     assert value["statuses"][-1]["state"] == ("success" if passed else "failure")
     if event == "pull_request":
         assert json.loads(value["outputs"]["pr"]) == {

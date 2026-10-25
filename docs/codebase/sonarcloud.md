@@ -13,7 +13,8 @@ bugs or security findings.
 ## What runs
 
 CI runs on main pushes, pull requests, and merge-queue commits. Eight Python
-coverage shards measure unit tests. The combine job publishes `python-coverage`
+coverage shards measure unit tests on main and PRs. Queue runs reuse the
+member PR results and do not repeat the coverage sweep. The combine job publishes `python-coverage`
 only when every shard completed its tests and supplied worker data. Go CI
 publishes `go-coverage`. Integration-test coverage is not included.
 
@@ -24,9 +25,15 @@ not run repository scripts, local actions, builds, or package installers.
 
 The workflow binds a PR to its current head commit and main base through the
 GitHub API. It passes the PR number, source branch, and target branch explicitly
-to SonarCloud. PR analysis therefore stays separate from main analysis. Queue
-commits use their own temporary Sonar branch and compare with main. Main pushes
-update main. A failed or cancelled upstream CI run produces a failed gate
+to SonarCloud. PR analysis therefore stays separate from main analysis. Main
+pushes update main. Queue commits are not Sonar-scanned: the Free plan does
+not support feature-branch analysis. Instead, the queue gate reads the full
+current GitHub queue and finds the entry for the exact queue SHA. It requires
+a continuous chain from current main to that entry and a successful Sonar gate
+on every member PR's exact current head. Missing, stale, or unclear membership,
+or any missing, pending, or failed PR status, fails the queue gate. Existing
+merge-group CI still tests the combined code. The status description says that
+the queue commit itself was not Sonar-scanned. A failed or cancelled upstream CI run produces a failed gate
 status without scanning.
 
 The scanner waits up to ten minutes for the server's gate result. The workflow
@@ -49,8 +56,8 @@ fixed between releases. The analyzed commit is recorded separately with
 Do not use a commit SHA or build number as the project version. It would move
 the previous-version comparison window on every scan. SonarSource warns against
 this in its [analysis parameter documentation](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/analysis-parameters/parameters-not-settable-in-ui).
-PR gates assess the PR's changes against its target branch. Queue scans compare
-the queued result against main.
+PR gates assess the PR's changes against its target branch. The queue check
+rechecks all member PR heads. It does not claim to analyze the combined source.
 
 ## Safe rollout of a required check
 
@@ -62,12 +69,13 @@ branch protection does not require SonarCloud. A maintainer must first check:
 2. An approved public-fork PR runs coverage on GitHub-hosted runners and receives
    a terminal status. Follow GitHub's fork-workflow approval policy. Never send
    fork source to internal runners or run it with scan secrets.
-3. A merge-queue run receives a terminal status on the queue SHA. The SonarCloud
-   subscription must support analysis of the temporary queue branch. Confirm
-   this live before enabling the required check. Unsupported branch analysis
-   fails clearly; it is not treated as a passing queue check.
-4. All eight shards complete within the runner budget. PR and queue coverage
-   adds load; monitor queue time and memory before making this required.
+3. A merge-queue run receives a terminal status on the queue SHA. Test a group
+   with several PRs, including an earlier member with a missing or failed gate.
+   The whole group must fail. Confirm that stale or removed queue entries fail.
+4. All eight shards complete within the runner budget. PR coverage adds load;
+   monitor queue time and memory before making this required. A successful
+   October 25 run used about 150 runner-minutes across eight shards plus the
+   combine job. Each PR update adds a sweep. Queue runs do not repeat it.
 
 Then a repository maintainer can require `SonarCloud Quality Gate` for main,
 including merge-queue commits. Keep the check name stable. Do not add path filters
@@ -76,6 +84,12 @@ outage can still interrupt status publication; rerun the failed workflow after
 checking its upstream run and SHA.
 
 ## How to handle findings
+
+The dashboard uses Multi-Quality Rule (MQR) mode: one rule can have several
+quality impacts. Its Reliability and Security impact counts differ from the
+older Bugs and Vulnerabilities counts returned by some API metrics. Do not mix
+these counts or use the older counts as today's dashboard totals. Inspect each
+finding's current impact and severity when choosing work.
 
 The overall Reliability and Security grades summarize open findings across the
 project. They are separate from the new-code gate. The Security Review grade

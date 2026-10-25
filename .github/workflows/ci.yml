@@ -80,7 +80,7 @@
 #
 # The name CI is consumed by quality-gate.yml's workflow_run trigger.
 # Coverage is measured separately from required unit tests to limit memory.
-# It runs on main, PRs, and merge-queue commits. Coverage jobs remain
+# It runs on main and PRs. Queue checks reuse exact PR head results. Coverage jobs remain
 # non-required individually; missing or incomplete reports fail the downstream
 # SonarCloud Quality Gate status. Artifact names are a cross-workflow contract.
 # Failed coverage jobs still upload diagnostic data where possible.
@@ -1177,6 +1177,7 @@ jobs:
     # Raise the matrix count, TOTAL, and downloads together if memory or
     # runtime approaches the limits. test_ci_coverage_shards.py checks this.
     # Fork code runs only on disposable GitHub-hosted infrastructure.
+    if: github.event_name != 'merge_group'
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'meho-runners-ci-heavy' }}
     strategy:
       # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in
@@ -1528,7 +1529,7 @@ jobs:
     # Publish coverage only when every shard completed and uploaded data.
     # The scan fails clearly when this artifact is missing.
     needs: python-coverage
-    if: always()
+    if: always() && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     # 26 > the 22 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so

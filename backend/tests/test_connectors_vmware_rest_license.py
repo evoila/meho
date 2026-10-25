@@ -40,6 +40,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vmware_rest import (
@@ -63,7 +64,6 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_WHEN_TO_USE,
     assignment_row,
     license_row,
-    mask_license_key,
     query_assigned_licenses,
 )
 from meho_backplane.connectors.vmware_rest.soap import SoapFault, attach_soap_fault

@@ -3894,12 +3894,14 @@ flight-recorder span holds a full key.**
   On vCenter 9, licences are usually managed in VCF Operations
   (`vrops.licensing.*`). The guidance of the write says so; if vCenter 9
   refuses the change, the caller gets the vendor fault as an error.
-- **The mask.** `license_common.mask_license_key` keeps the last 5
-  characters and turns every other letter and digit into `*`; dashes stay,
-  for example `*****-*****-*****-*****-AB12C`. A value of 10 characters or
-  fewer is hidden in full. It is the same "last 5" rule as
-  `vrops.license.info`. The field is `key_masked`: a name with `license`
-  and `key` next to each other would be replaced by the secret-name scrubs.
+- **The mask.** The shared `mask_license_key` in
+  `connectors/_shared/license_key.py` keeps the last 5 characters and turns
+  every other letter and digit into `*`; dashes stay, for example
+  `*****-*****-*****-*****-AB12C`. A value of 10 characters or fewer is
+  hidden in full. It is the same rule `vrops.license.info` and
+  `sddc.license.list` use; the vSphere module has no copy of its own. The
+  field is `key_masked`: a name with `license` and `key` next to each other
+  would be replaced by the secret-name scrubs.
 - **Vendor answers.** `LicenseManager.licenses`, `QueryAssignedLicenses` and
   the `UpdateAssignedLicense` answer hold full keys. The handlers build their
   rows with `license_row` / `assignment_row`, which mask the key; a raw

@@ -132,13 +132,22 @@ func renderRequestError(
 	)
 }
 
+// Role advice for a 403, per verb. pair and unpair are tenant_admin
+// actions; list and show are operator reads.
+const (
+	adminRoleAdvice    = "pair and unpair need the tenant_admin role"
+	operatorRoleAdvice = "list and show need the operator role"
+)
+
 // renderHTTPStatus turns a non-success answer into a structured error.
 // It prints the server's code and one line that says what to do. name is
-// the add-on name the verb worked on; it is empty for list.
+// the add-on name the verb worked on; it is empty for list. roleAdvice is
+// the line printed after a 403.
 func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
 	name string,
+	roleAdvice string,
 	statusCode int,
 	body []byte,
 	jsonOut bool,
@@ -155,7 +164,7 @@ func renderHTTPStatus(
 		)
 	case http.StatusForbidden:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(detail+": pair and unpair need the tenant_admin role"),
+			output.InsufficientRole(detail+": "+roleAdvice),
 			jsonOut,
 		)
 	case http.StatusNotFound, http.StatusConflict,
@@ -165,11 +174,11 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	default:
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, statusCode, detail)),
-			jsonOut,
-		)
+		msg := fmt.Sprintf("call %s: HTTP %d", backplaneURL, statusCode)
+		if detail != "" {
+			msg += ": " + detail
+		}
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(msg), jsonOut)
 	}
 }
 

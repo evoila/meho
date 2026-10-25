@@ -66,7 +66,7 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if resp.StatusCode() != http.StatusOK {
-		return renderHTTPStatus(cmd, backplaneURL, opts.Name, resp.StatusCode(), resp.Body, opts.JSONOut)
+		return renderHTTPStatus(cmd, backplaneURL, opts.Name, operatorRoleAdvice, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	entry := resp.JSON200
 	if entry == nil {

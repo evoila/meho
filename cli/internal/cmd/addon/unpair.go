@@ -73,7 +73,7 @@ func runUnpair(cmd *cobra.Command, opts unpairOptions) error {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if resp.StatusCode() != http.StatusNoContent {
-		return renderHTTPStatus(cmd, backplaneURL, opts.Name, resp.StatusCode(), resp.Body, opts.JSONOut)
+		return renderHTTPStatus(cmd, backplaneURL, opts.Name, adminRoleAdvice, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), unpairResult{Name: opts.Name, Unpaired: true})

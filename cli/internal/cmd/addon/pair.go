@@ -123,7 +123,7 @@ func runPair(cmd *cobra.Command, opts pairOptions) error {
 		if resp.StatusCode() >= 200 && resp.StatusCode() < 300 {
 			body = nil
 		}
-		return renderHTTPStatus(cmd, backplaneURL, opts.Name, resp.StatusCode(), body, opts.JSONOut)
+		return renderHTTPStatus(cmd, backplaneURL, opts.Name, adminRoleAdvice, resp.StatusCode(), body, opts.JSONOut)
 	}
 	result := resp.JSON201
 	if result == nil {

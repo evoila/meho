@@ -400,7 +400,7 @@ func TestPairNeverEchoesSecretIntoErrors(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Errorf("json=%v: stdout must be empty on error; got %q", jsonOut, stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "HTTP 200") {
+		if !strings.Contains(stderr.String(), "HTTP 200\"") && !strings.Contains(stderr.String(), "HTTP 200\n") {
 			t.Errorf("json=%v: error should name the status; got %q", jsonOut, stderr.String())
 		}
 	}
@@ -513,6 +513,13 @@ func TestErrorAdvice(t *testing.T) {
 				"pair and unpair need the tenant_admin role"},
 		},
 		{
+			name: "403 role on a read", route: "GET /api/v1/addons/pairings",
+			status: http.StatusForbidden, detail: "insufficient_role",
+			run:        runListJSON,
+			wantCode:   output.ErrCodeInsufficientRole,
+			wantDetail: []string{"insufficient_role", "list and show need the operator role"},
+		},
+		{
 			name: "503 keycloak admin not configured", route: "POST /api/v1/addons/pairings",
 			status: http.StatusServiceUnavailable, detail: "keycloak_admin_not_configured",
 			run:      runPairJSON,
@@ -545,6 +552,10 @@ func TestErrorAdvice(t *testing.T) {
 
 func runPairJSON(cmd *cobra.Command, srv *httptest.Server) error {
 	return runPair(cmd, pairOpts(srv, true))
+}
+
+func runListJSON(cmd *cobra.Command, srv *httptest.Server) error {
+	return runList(cmd, listOptions{JSONOut: true, BackplaneOverride: srv.URL})
 }
 
 func runShowJSON(cmd *cobra.Command, srv *httptest.Server) error {

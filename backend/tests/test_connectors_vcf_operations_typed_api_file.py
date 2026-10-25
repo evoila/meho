@@ -53,7 +53,6 @@ from meho_backplane.connectors.vcf_operations.typed_ops_api_file import (
 from meho_backplane.connectors.vrops8 import Vrops8Connector
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
-from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 from tests.test_operation_contracts import OperationContract, check_operation
@@ -1032,7 +1031,9 @@ async def test_large_answer_is_read_back_part_by_part_through_result_query(
     assert summary["build"] == "24000000"
     texts: list[str] = []
     for offset in range(0, answer["parts"], limit):
-        page = await read_result_window(_operator(), handle.handle_id, offset=offset, limit=limit)
+        page = await rq.read_result_window(
+            _operator(), handle.handle_id, offset=offset, limit=limit
+        )
         texts.extend(row["text"] for row in page["rows"])
     assert len(texts) == answer["parts"]
     assert hashlib.sha256("".join(texts).encode("utf-8")).hexdigest() == answer["sha256"]

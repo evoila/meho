@@ -20,7 +20,13 @@ publishes `go-coverage`. Integration-test coverage is not included.
 
 The `Quality Gate` workflow starts after CI completes. It runs on disposable
 GitHub-hosted infrastructure. Fork source is never executed by this workflow.
-It downloads the reports from that exact CI run and reads the source. Its inline Python uses isolated mode, so PR-added modules cannot replace
+It downloads the reports from that exact CI run into separate temporary
+folders and reads the source under `analyzed-source`. Helper code runs outside
+that directory. Trusted settings and scanner work files stay in the runner's
+temporary directory. Source files cannot replace those files. Before scanning,
+the workflow replaces the PR's `sonar-project.properties` with a copy of its
+trusted generated settings. The scanner then uses normal config discovery;
+`project.settings` is not combined with `sonar.projectBaseDir`. Its inline Python uses isolated mode, so PR-added modules cannot replace
 standard-library imports. It does not run repository scripts, local actions, builds, or package installers.
 
 The workflow binds a PR to its current head commit and main base through the

@@ -112,19 +112,22 @@ jobs:
       # SECURITY: source and coverage are untrusted input. Never run repository
       # scripts, builds, package installers, or local actions in this job.
       # Use only fixed inline code and pinned scanner/action implementations.
+      # Helpers run outside analyzed-source. Reports and scanner work files
+      # stay in runner.temp, where source files cannot replace them.
       - if: steps.metadata.outputs.event != 'merge_group'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ steps.metadata.outputs.sha }}
           persist-credentials: false
+          path: analyzed-source
 
       - name: Download complete Python coverage
         if: steps.metadata.outputs.event != 'merge_group'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage
-          path: backend
+          path: ${{ runner.temp }}/sonar-coverage/python
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -133,7 +136,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: go-coverage
-          path: cli
+          path: ${{ runner.temp }}/sonar-coverage/go
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -149,8 +152,8 @@ jobs:
           set -euo pipefail
           # Read settings from the trusted default-branch workflow commit. A PR
           # cannot redirect SONAR_TOKEN or suppress its own findings via config.
-          git show "${TRUSTED_SHA}:sonar-project.properties" > /tmp/sonar-trusted.properties
-          git describe --tags --match 'v[0-9]*' --abbrev=0 "${ANALYZED_SHA}" > /tmp/sonar-release-version
+          git -C analyzed-source show "${TRUSTED_SHA}:sonar-project.properties" > "${RUNNER_TEMP}/sonar-trusted.properties"
+          git -C analyzed-source describe --tags --match 'v[0-9]*' --abbrev=0 "${ANALYZED_SHA}" > "${RUNNER_TEMP}/sonar-release-version"
           # Isolated mode ignores checkout modules and Python environment hooks.
           python3 -I - <<'PY'
           import json
@@ -158,34 +161,46 @@ jobs:
           from pathlib import Path
           from xml.etree import ElementTree as ET
 
-          report = Path('backend/coverage.xml')
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          report = temporary / 'sonar-coverage/python/coverage.xml'
+          go_report = temporary / 'sonar-coverage/go/coverage.out'
+          if report.is_symlink() or go_report.is_symlink():
+              raise SystemExit('Coverage reports must be regular files, not symlinks')
           tree = ET.parse(report)
           sources = tree.findall('./sources/source')
           if len(sources) != 1:
               raise SystemExit('Expected one Python coverage source root')
           sources[0].text = 'backend'
           tree.write(report, encoding='utf-8', xml_declaration=True)
-          if not Path('cli/coverage.out').stat().st_size:
+          if not go_report.is_file() or not go_report.stat().st_size:
               raise SystemExit('Go coverage report is empty')
-          settings = Path('/tmp/sonar-trusted.properties').read_text()
-          settings += '\nsonar.projectVersion=' + Path('/tmp/sonar-release-version').read_text().strip() + '\n'
+          settings = (temporary / 'sonar-trusted.properties').read_text()
+          settings += '\nsonar.projectVersion=' + (temporary / 'sonar-release-version').read_text().strip() + '\n'
           settings += 'sonar.scm.revision=' + os.environ['ANALYZED_SHA'] + '\n'
           settings += 'sonar.qualitygate.wait=true\nsonar.qualitygate.timeout=600\n'
+          settings += f'sonar.python.coverage.reportPaths={report}\n'
+          settings += f'sonar.go.coverage.reportPaths={go_report}\n'
+          settings += f'sonar.working.directory={temporary / "sonar-work"}\n'
           if os.environ['ANALYSIS_EVENT'] == 'pull_request':
               pr = json.loads(os.environ['ANALYSIS_PR'])
               settings += f"sonar.pullrequest.key={pr['number']}\nsonar.pullrequest.branch={pr['head']}\nsonar.pullrequest.base={pr['base']}\n"
           else:
               settings += 'sonar.branch.name=main\n'
-          output = Path('.sonar-ci.properties')
+          output = temporary / 'sonar-ci.properties'
           output.unlink(missing_ok=True)
           output.write_text(settings)
+          # project.settings cannot be combined with projectBaseDir. Replace
+          # the PR's config with this trusted copy for standard discovery.
+          source_settings = Path('analyzed-source/sonar-project.properties')
+          source_settings.unlink(missing_ok=True)
+          source_settings.write_text(settings)
           PY
 
       - name: SonarCloud scan and gate result
         if: steps.metadata.outputs.event != 'merge_group'
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9  # v8.3.0
         with:
-          args: -Dproject.settings=.sonar-ci.properties
+          projectBaseDir: analyzed-source
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 

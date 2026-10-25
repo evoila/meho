@@ -111,20 +111,28 @@ def test_preparation_ignores_checkout_python_modules(tmp_path: Path) -> None:
     invocation = shlex.split(command.splitlines()[-1])
     script = script.rsplit("\nPY", 1)[0]
     assert invocation[0] == "python3"
-    # The script reads two fixed temporary files prepared by the preceding git
-    # commands. Redirect only those paths into this isolated test directory.
-    settings = tmp_path / "trusted.properties"
+    temporary = tmp_path / "runner-temp"
+    temporary.mkdir()
+    settings = temporary / "sonar-trusted.properties"
     settings.write_text("sonar.projectKey=test\n")
-    version = tmp_path / "release-version"
+    version = temporary / "sonar-release-version"
     version.write_text("v1.2.3\n")
-    script = script.replace("/tmp/sonar-trusted.properties", str(settings))
-    script = script.replace("/tmp/sonar-release-version", str(version))
-    (tmp_path / "backend").mkdir()
-    (tmp_path / "backend/coverage.xml").write_text(
+    python_reports = temporary / "sonar-coverage/python"
+    python_reports.mkdir(parents=True)
+    (python_reports / "coverage.xml").write_text(
         "<coverage><sources><source/></sources></coverage>"
     )
-    (tmp_path / "cli").mkdir()
-    (tmp_path / "cli/coverage.out").write_text("mode: atomic\n")
+    go_reports = temporary / "sonar-coverage/go"
+    go_reports.mkdir(parents=True)
+    (go_reports / "coverage.out").write_text("mode: atomic\n")
+    # The analyzed tree has poisoned reports/settings/work files. Preparation
+    # must use only the separately downloaded reports and trusted settings.
+    source = tmp_path / "analyzed-source"
+    (source / "backend").mkdir(parents=True)
+    (source / "backend/coverage.xml").write_text("invalid attacker report")
+    (source / "sonar-project.properties").write_text("sonar.host.url=https://attacker.invalid\n")
+    (source / ".scannerwork").mkdir()
+    (source / ".scannerwork/poison").write_text("untrusted scanner workspace")
     marker = tmp_path / "checkout-code-ran"
     poison = f"open({str(marker)!r}, 'w').write('untrusted')\nraise RuntimeError('poison module')\n"
     for name in ["json.py", "pathlib.py"]:
@@ -134,6 +142,7 @@ def test_preparation_ignores_checkout_python_modules(tmp_path: Path) -> None:
     env = {
         **os.environ,
         "PYTHONPATH": str(tmp_path),
+        "RUNNER_TEMP": str(temporary),
         "ANALYSIS_EVENT": "pull_request",
         "ANALYZED_SHA": "abc123",
         "ANALYSIS_PR": json.dumps({"number": 7, "head": "feature", "base": "main"}),
@@ -159,7 +168,30 @@ def test_preparation_ignores_checkout_python_modules(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
-    output = (tmp_path / ".sonar-ci.properties").read_text()
+    output = (temporary / "sonar-ci.properties").read_text()
     assert "sonar.projectVersion=v1.2.3\n" in output
     assert "sonar.pullrequest.key=7\n" in output
     assert "sonar.qualitygate.wait=true\n" in output
+    assert "attacker.invalid" not in output
+    assert f"sonar.python.coverage.reportPaths={python_reports / 'coverage.xml'}\n" in output
+    assert f"sonar.go.coverage.reportPaths={go_reports / 'coverage.out'}\n" in output
+    assert f"sonar.working.directory={temporary / 'sonar-work'}\n" in output
+    assert (source / "backend/coverage.xml").read_text() == "invalid attacker report"
+    assert (source / "sonar-project.properties").read_text() == output
+
+
+def test_privileged_work_files_stay_outside_analyzed_source() -> None:
+    """Scanner input is isolated from helper code, reports, and scanner output."""
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["sonarcloud"]["steps"]
+    checkout = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert checkout["with"]["path"] == "analyzed-source"
+    assert checkout["with"]["persist-credentials"] is False
+    for step in steps:
+        assert step.get("working-directory") != "analyzed-source"
+        if str(step.get("uses", "")).startswith("actions/download-artifact@"):
+            assert step["with"]["path"].startswith("${{ runner.temp }}/sonar-coverage/")
+    scanner = next(step for step in steps if step.get("name") == "SonarCloud scan and gate result")
+    assert scanner["with"]["projectBaseDir"] == "analyzed-source"
+    assert "project.settings" not in scanner["with"].get("args", "")

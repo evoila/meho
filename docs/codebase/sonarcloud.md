@@ -89,23 +89,55 @@ rechecks all member PR heads. It does not claim to analyze the combined source.
 
 ## Safe rollout of a required check
 
-Do not require the new commit status before this workflow is on main. Existing
-branch protection does not require SonarCloud. A maintainer must first check:
+The workflow must land on main before any requirement changes. First prove
+main analysis, a same-repository PR, a failing PR gate, and an approved public
+fork. Check terminal statuses, exact head SHAs, complete reports, trusted proof
+artifacts, and runner use. Keep fork source off internal runners and away from
+scan secrets. Use existing completed runs when they test the same head with
+the landed workflow. Re-running an older run retains its original commit and
+ref; see [GitHub's rerun rules](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
 
-1. A same-repository PR produces a terminal status on its head SHA and a separate
-   PR analysis in SonarCloud. A failing gate must produce a failed status.
-2. An approved public-fork PR runs coverage on GitHub-hosted runners and receives
-   a terminal status. Follow GitHub's fork-workflow approval policy. Never send
-   fork source to internal runners or run it with scan secrets.
-3. A merge-queue run receives a terminal status on the queue SHA. Test a group
-   with several PRs, including an earlier member with a missing or failed gate.
-   The whole group must fail. Confirm that stale or removed queue entries fail.
-4. All eight shards complete within the runner budget. PR coverage adds load;
-   monitor queue time and memory before making this required. A successful
-   October 25 run used about 150 runner-minutes across eight shards plus the
-   combine job, before consolidation. PR/main coverage replaces the ordinary
-   unit sweep and excludes the separately tested migration files. Measure the
-   new workload live; queue runs retain only their ordinary fast unit sweep.
+Queue proof needs a short, controlled initial enforcement window. An advisory
+queue gate may start too late: once existing required checks pass, GitHub can
+merge the group and remove its entry before `workflow_run` reads it. A missing
+advisory queue entry is not evidence that the required gate is broken. GitHub
+[documents that merge timing](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue).
+
+Use this bounded sequence:
+
+1. Measure the consolidated PR/main sweep first. Each run must use only the
+   eight measured shards; queue runs must use only the four fast shards.
+   A pre-consolidation run used about 150 runner-minutes for coverage and combine.
+   Measure the new workload instead of assuming that old cost still applies.
+2. Let the existing queue drain naturally. Use a quiet window and at most two
+   already approved, ready PRs as canaries. Each exact head must already have a
+   successful trusted Sonar result and an unexpired proof. Reuse their normal
+   CI evidence. If the queue cannot drain, leave the gate advisory for now.
+3. Save the full current branch-protection and ruleset settings. Review the
+   proposed change: append only `SonarCloud Quality Gate`, with its expected
+   publisher, to the existing required checks. Preserve every existing check,
+   review rule, queue rule, and bypass restriction. A maintainer makes this
+   bounded initial enforcement change only after the earlier proofs pass.
+4. Enqueue the prepared canaries. The missing required queue status now holds
+   each group after its ordinary CI finishes. The workflow can read the live
+   entry, check the full chain from main, and check every member's exact head.
+   Capture the queue SHA, member heads, proof run IDs, and terminal status.
+   Two normal ready PRs can exercise a multi-member prefix without creating
+   extra coverage jobs or artificial PRs. No scan runs on the queue source.
+5. If either gate fails or cannot publish, stop adding canaries. Remove only
+   those canary entries if they remain queued. Restore only the new Sonar
+   requirement to the saved baseline, preserving all prior protections. Keep
+   the workflow advisory while the failure is fixed and reviewed. Never post
+   a synthetic passing test status to move a canary through.
+6. After the live queue proof passes, keep the requirement and record the
+   evidence. Use the regression fixtures for missing, failed, expired, forged,
+   and stale member proofs; do not disrupt unrelated PRs to manufacture them.
+
+A required check must not be enabled for the whole active queue before its
+member heads have been checked. Keep the status name stable. Do not add path
+filters that leave required statuses absent. Platform interruption can still
+prevent terminal status publication; inspect the upstream run and SHA before
+rerunning the affected workflow.
 
 The commit status still shares the GitHub Actions publisher identity with other
 repository workflows. Contributors who can run same-repository workflows with
@@ -115,12 +147,6 @@ workflow, but cannot stop another workflow from publishing the final check
 itself. If that contributor threat is in scope, use a dedicated publisher App
 or enforce a trusted required workflow at repository/organisation level before
 claiming that the gate prevents such forgery.
-
-Then a repository maintainer can require `SonarCloud Quality Gate` for main,
-including merge-queue commits. Keep the check name stable. Do not add path filters
-that would leave required statuses absent. A workflow cancellation or platform
-outage can still interrupt status publication; rerun the failed workflow after
-checking its upstream run and SHA.
 
 ## How to handle findings
 

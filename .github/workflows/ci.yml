@@ -1195,7 +1195,7 @@ jobs:
         # the single private shelf repo, nothing else. Secret absent →
         # this step skips → the spec lanes pytest.skip exactly as
         # before this step existed. Fork PRs never reach this step (the
-        # job-level fork guard skips the whole job) and would not see
+        # explicit same-repository step guard blocks them) and would not see
         # the secret anyway (GitHub withholds secrets from fork-PR
         # runs). Dependabot runs read the Dependabot secret store,
         # where this secret is deliberately not mirrored, so they skip
@@ -1452,12 +1452,9 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Same lane-placement opt-out as the required unit lane's
           # Pytest step (#2980) — this job runs that sweep, serially
-          # and under a 30-min per-shard step cap, so the canary's full-ingest
-          # tests are opted out here for the same budget reason. Today
-          # this is belt-and-suspenders (this job has no spec-shelf
-          # checkout, so those tests skip on shelf absence anyway);
-          # it keeps a future shelf-arming of this job from silently
-          # re-importing the multi-minute ingest wall.
+          # and under a 30-min per-shard step cap. The full-ingest canary
+          # stays in the integration gate; the fast spec checks run here
+          # when the trusted spec checkout is available.
           MEHO_SKIP_SPEC_INGEST_TESTS: "1"
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
           # calls coverage.process_startup() when COVERAGE_PROCESS_START points

@@ -5520,27 +5520,31 @@ def _vm_rows_by_moid(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {row["vm"]: row for row in rows if isinstance(row.get("vm"), str)}
 
 
+_REASON_STILL_LISTED_AFTER_MOVE = "still_listed_after_move"
+
+
+def _failure_reasons(failed: list[dict[str, str]]) -> dict[str, str]:
+    """Move error by VM moid."""
+    return {entry["vm"]: entry["error"] for entry in failed}
+
+
 def _remaining_vm_rows(
     rows: dict[str, dict[str, Any]],
-    migrated: list[str],
-    failed: list[dict[str, str]],
+    reasons: dict[str, str],
     default_reason: str,
 ) -> list[dict[str, Any]]:
-    """The VMs of *rows* that are still on the host, each with the reason it stayed.
+    """Every VM of *rows* (the VMs still on the host), each with the reason it stayed.
 
-    A VM MEHO moved is never "remaining", even when a listing still shows
-    it. The reason is the move error when MEHO tried to move the VM, the
-    power state when the VM was not running (MEHO moves only running VMs),
-    else *default_reason*.
+    The reason is *reasons*[vm] when the caller knows one (the move error,
+    or the note that a move vm.migrate reported as done did not take the VM
+    off the host), else the power state when the VM was not running (MEHO
+    moves only running VMs), else *default_reason*.
     """
-    failure_reasons = {entry["vm"]: entry["error"] for entry in failed}
     remaining: list[dict[str, Any]] = []
     for vm_moid, row in rows.items():
-        if vm_moid in migrated:
-            continue
         power_state = row.get("power_state")
-        if vm_moid in failure_reasons:
-            reason = failure_reasons[vm_moid]
+        if vm_moid in reasons:
+            reason = reasons[vm_moid]
         elif isinstance(power_state, str) and power_state != _VM_POWER_STATE_ON:
             reason = power_state.lower()
         else:
@@ -5582,13 +5586,18 @@ def _evacuate_aborted(
     migrated: list[str],
     failed: list[dict[str, str]],
 ) -> dict[str, Any]:
-    """``aborted`` envelope: a VM could not be moved and partial failure is not tolerated."""
+    """``aborted`` envelope: a VM could not be moved and partial failure is not tolerated.
+
+    The host is not listed again here, so the VMs vm.migrate reported as
+    moved count as migrated and the other VMs of the listing as remaining.
+    """
+    still_on_host = {vm: row for vm, row in _vm_rows_by_moid(vms).items() if vm not in migrated}
     envelope = _evacuate_envelope(
         status="aborted",
         host_moid=host_moid,
         migrated=migrated,
         failed=failed,
-        remaining=_remaining_vm_rows(_vm_rows_by_moid(vms), migrated, failed, "not_attempted"),
+        remaining=_remaining_vm_rows(still_on_host, _failure_reasons(failed), "not_attempted"),
         maintenance_entered=False,
         moved_by="meho",
     )
@@ -5615,15 +5624,18 @@ def _evacuate_finished(
 ) -> dict[str, Any]:
     """The truthful answer after the maintenance task ended or MEHO stopped waiting.
 
-    Compares the host's VM list before and after the task: every VM that is
-    gone left the host (moved by MEHO or by vCenter), every VM still listed
-    stayed, with its reason. A VM that left is never reported as failed.
+    The listing after the task decides: every VM of the first listing that
+    is gone left the host (moved by MEHO or by vCenter), every VM still
+    listed stayed, with its reason. A VM that left is never reported as
+    failed, and a VM vm.migrate reported as moved but that the host still
+    lists is remaining (``still_listed_after_move``), not migrated.
     """
     after = _vm_rows_by_moid(vms_after)
-    before_moids = list(_vm_rows_by_moid(vms_before))
-    left = [vm for vm in before_moids if vm in migrated or vm not in after]
+    left = [vm for vm in _vm_rows_by_moid(vms_before) if vm not in after]
     failed_still_on_host = [entry for entry in failed if entry["vm"] in after]
-    remaining = _remaining_vm_rows(after, migrated, failed_still_on_host, "not_moved")
+    reasons = {vm: _REASON_STILL_LISTED_AFTER_MOVE for vm in migrated if vm in after}
+    reasons.update(_failure_reasons(failed_still_on_host))
+    remaining = _remaining_vm_rows(after, reasons, "not_moved")
     running_left_behind = [row for row in remaining if row["power_state"] == _VM_POWER_STATE_ON]
     if outcome.timed_out:
         status = "timeout"

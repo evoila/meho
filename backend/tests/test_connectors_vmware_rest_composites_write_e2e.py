@@ -288,7 +288,9 @@ class _RecordingVmwareConnector:
     ) -> Any:
         spec = self._spec(path)
         self.calls.append(("GET", spec))
-        return self.responses.get(spec, {"value": {}})
+        response = self.responses.get(spec, {"value": {}})
+        # An iterator answers one GET after the other (a listing that changes).
+        return next(response) if isinstance(response, Iterator) else response
 
     async def _post_json(
         self,
@@ -915,7 +917,8 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(
         {
-            "/vcenter/vm": {"value": [_vm_listing_row("vm-a")]},
+            # Before the maintenance task the host runs vm-a; after it, nothing.
+            "/vcenter/vm": iter([{"value": [_vm_listing_row("vm-a")]}, {"value": []}]),
         }
     )
     recorder.vmomi_responses.update(

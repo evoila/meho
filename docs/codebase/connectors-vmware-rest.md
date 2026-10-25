@@ -1565,11 +1565,13 @@ on the host. The maintenance body is `{"timeout": 0, "maintenanceSpec":
 {"vsanMode": {"objectAction": <vsan_mode>}}}` — `vsan_mode` is
 `ensureObjectAccessibility` (vCenter's own default), `evacuateAllData` or
 `noAction`; `cluster.patch` keeps the plain `{"timeout": 0}` body. After
-the task the handler lists the host's VMs again: `migrated_vms` are the
-VMs that left (moved by MEHO or by vCenter, see `moved_by`),
-`remaining_vms` the VMs still on the host with the reason (`powered_off`,
-`no_recommendation`, `not_moved`, `not_attempted`), `failed_vms` only the
-VMs MEHO tried to move and that are still there. When the 600 s poll ends
+the task the handler lists the host's VMs again, and that listing alone
+decides: `migrated_vms` are the VMs that are gone (moved by MEHO or by
+vCenter, see `moved_by`), `remaining_vms` the VMs still listed with the
+reason (`powered_off`, `no_recommendation`, `still_listed_after_move` when
+`vm.migrate` reported a move the host does not show, `not_moved`,
+`not_attempted`), `failed_vms` only the VMs MEHO tried to move and that are
+still there. When the 600 s poll ends
 while the task still runs, the answer is `status: timeout` with
 `maintenance_task` and a `warning` issue — the call did not fail.
 

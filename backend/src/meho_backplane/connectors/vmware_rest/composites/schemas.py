@@ -3138,6 +3138,8 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
                         "description": (
                             "Why the VM stayed: ``powered_off`` / ``suspended`` "
                             "(only running VMs are moved), the move error, "
+                            "``still_listed_after_move`` (vm.migrate reported the "
+                            "move as done, but the host still lists the VM), "
                             "``not_moved`` (vCenter left it on the host) or "
                             "``not_attempted`` (the operation stopped before "
                             "reaching it)."

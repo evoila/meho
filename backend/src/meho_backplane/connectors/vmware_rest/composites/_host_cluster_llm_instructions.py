@@ -255,8 +255,9 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "[...], failed_vms: [{vm, error}], remaining_vms: [{vm, name, power_state, "
             "reason}], maintenance_entered, maintenance_task, moved_by: drs|meho|none, "
             "guidance, issues}. migrated_vms are the VMs that left the host, moved by MEHO or "
-            "by vCenter. remaining_vms are the VMs still on the host with the reason "
-            "(powered_off, no_recommendation, not_moved, ...). On timeout the maintenance-mode "
+            "by vCenter. remaining_vms are the VMs the host still lists after the task, with "
+            "the reason (powered_off, no_recommendation, still_listed_after_move, not_moved, "
+            "...). On timeout the maintenance-mode "
             "task still runs under maintenance_task; the call did not fail. A faulted "
             "maintenance-mode task makes the call fail."
         ),

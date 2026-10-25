@@ -5631,6 +5631,58 @@ async def test_host_evacuate_poll_timeout_reports_the_running_task(
     assert [i["severity"] for i in out["issues"]] == ["warning"]
 
 
+_STILL_LISTED = {
+    "vm": "vm-a",
+    "name": "app-a",
+    "power_state": "POWERED_ON",
+    "reason": "still_listed_after_move",
+}
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_vm_still_listed_after_a_reported_move_is_remaining(
+    gate: _GateRecorder,
+) -> None:
+    """vm.migrate said moved, but the listing after the task still shows the VM: it stayed."""
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    after = [_vm_listing_row("vm-a", "app-a", "POWERED_ON")]
+    conn = _evacuate_connector(host="host-1", listings=[before, after], drs_behavior="manual")
+    out = await _run_evacuate(
+        conn, _RecordingDispatchChild([_migrated(), _migrated()]), {"host": "host-1"}
+    )
+    assert out["status"] == "partial"
+    assert out["maintenance_entered"] is True
+    assert out["migrated_vms"] == ["vm-b"]
+    assert out["failed_vms"] == []
+    assert out["remaining_vms"] == [_STILL_LISTED]
+    assert any(i["severity"] == "error" for i in out["issues"])
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_poll_timeout_keeps_a_still_listed_vm_as_remaining(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On timeout too, the listing after the task wins over an earlier vm.migrate success."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    before = [
+        _vm_listing_row("vm-a", "app-a", "POWERED_ON"),
+        _vm_listing_row("vm-b", "app-b", "POWERED_ON"),
+    ]
+    after = [_vm_listing_row("vm-a", "app-a", "POWERED_ON")]
+    conn = _evacuate_connector(host="host-1", listings=[before, after], drs_behavior="manual")
+    conn._vmomi["Task"] = _task_info_result("task-mm-1", "running")
+    out = await _run_evacuate(
+        conn, _RecordingDispatchChild([_migrated(), _migrated()]), {"host": "host-1"}
+    )
+    assert out["status"] == "timeout"
+    assert out["migrated_vms"] == ["vm-b"]
+    assert out["remaining_vms"] == [_STILL_LISTED]
+    assert [i["severity"] for i in out["issues"]] == ["warning"]
+
+
 @pytest.mark.asyncio
 async def test_host_evacuate_faulted_maintenance_task_raises(gate: _GateRecorder) -> None:
     """A faulted EnterMaintenanceMode_Task is a failed call (connector_error), unchanged."""

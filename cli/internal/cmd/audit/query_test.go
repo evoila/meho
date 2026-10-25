@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/evoila/meho/cli/internal/api"
 )
 
@@ -248,7 +250,8 @@ func TestRunQueryHappyPathTable(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS",
+		"AUDIT_ID", "TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS",
+		"00000000-0000-0000-0000-000000000001",
 		"damir", "rdc-vcenter", "vsphere.vm.list", "read", "ok",
 		"NEXT: --cursor=opaque-next-cursor",
 	} {
@@ -449,8 +452,56 @@ func TestPrintQueryTableEmpty(t *testing.T) {
 	if !strings.Contains(out, "no audit rows matched the filter") {
 		t.Errorf("empty table missing helper line: %s", out)
 	}
-	if strings.Contains(out, "TIME") {
+	if strings.Contains(out, "TIME") || strings.Contains(out, "AUDIT_ID") {
 		t.Errorf("empty table should not print header: %s", out)
+	}
+}
+
+// TestPrintQueryTableShowsWholeAuditID pins the AUDIT_ID column (#4858):
+// every row prints its whole id as the first column, and the printed
+// value parses as a UUID, which is the check `meho audit show` makes on
+// its argument. A shortened id would fail there.
+func TestPrintQueryTableShowsWholeAuditID(t *testing.T) {
+	ids := []string{
+		"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+		"ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb",
+	}
+	var buf bytes.Buffer
+	printQueryTable(&buf, &api.AuditQueryResult{
+		Rows: []api.AuditEntry{
+			{
+				Id:           mustUUID(t, ids[0]),
+				Ts:           mustTS(t, "2026-05-13T15:42:11Z"),
+				PrincipalSub: "alice-sub",
+				OpId:         "vsphere.vm.list",
+				OpClass:      "read",
+				ResultStatus: "ok",
+			},
+			{
+				Id:           mustUUID(t, ids[1]),
+				Ts:           mustTS(t, "2026-05-13T15:43:02Z"),
+				PrincipalSub: "bob-sub",
+				OpId:         "vsphere.vm.get",
+				OpClass:      "read",
+				ResultStatus: "ok",
+			},
+		},
+	})
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want header + 2 rows; got %d lines:\n%s", len(lines), buf.String())
+	}
+	if !strings.HasPrefix(lines[0], "AUDIT_ID") {
+		t.Errorf("header does not start with AUDIT_ID: %q", lines[0])
+	}
+	for i, want := range ids {
+		first := strings.Fields(lines[i+1])[0]
+		if first != want {
+			t.Errorf("row %d: first column %q; want whole id %q", i, first, want)
+		}
+		if _, err := uuid.Parse(first); err != nil {
+			t.Errorf("row %d: first column %q is not a UUID: %v", i, first, err)
+		}
 	}
 }
 

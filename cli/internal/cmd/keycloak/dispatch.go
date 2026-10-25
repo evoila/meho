@@ -56,20 +56,7 @@ func renderCallResult(
 // printErrorTrailer surfaces the dispatcher error + extras envelope.
 // Used by the per-verb pretty-printers' non-ok branch.
 func printErrorTrailer(w io.Writer, r *CallResult) {
-	if r.Error != nil && *r.Error != "" {
-		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
-	} else {
-		fmt.Fprintf(w, "meho: connector status=%s\n", r.Status)
-	}
-	if len(r.Extras) > 0 && string(r.Extras) != "null" {
-		fmt.Fprintln(w, "extras:")
-		pretty, err := dispatch.PrettyJSON(r.Extras)
-		if err == nil {
-			fmt.Fprintln(w, pretty)
-		} else {
-			fmt.Fprintln(w, string(r.Extras))
-		}
-	}
+	dispatch.WriteErrorTrailer(w, r)
 }
 
 // fallbackResultRender dumps the result envelope verbatim when the

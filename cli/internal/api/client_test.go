@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -289,5 +290,58 @@ func TestTokenBox_Refresh_InvalidGrant_IsRefreshRejected(t *testing.T) {
 	box.mu.Unlock()
 	if surviving != "dead-refresh" {
 		t.Errorf("stored refresh_token must survive a failed refresh; got %q", surviving)
+	}
+}
+
+// TestTokenBox_Refresh_InvalidGrant_SendsOneRequest: a refused refresh
+// is sent once, with client_id in the form body and no Authorization
+// header. With the oauth2 package's auto-detect auth style every
+// refusal was sent twice (#4892).
+func TestTokenBox_Refresh_InvalidGrant_SendsOneRequest(t *testing.T) {
+	var (
+		calls    atomic.Int32
+		authHdr  string
+		clientID string
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_ = r.ParseForm()
+		authHdr = r.Header.Get("Authorization")
+		clientID = r.PostForm.Get("client_id")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"Token is not active"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	box := &tokenBox{
+		current: auth.StoredToken{
+			AccessToken:  "stale-access",
+			RefreshToken: "dead-refresh",
+			TokenType:    "Bearer",
+			ClientID:     "meho-cli",
+			Issuer:       "https://kc.example/realms/evba",
+			Expiry:       time.Now().Add(-time.Hour),
+		},
+		httpClient: srv.Client(),
+		refreshDiscoverer: func(_ context.Context, _ *http.Client, _ string) (*auth.DiscoveryDocument, error) {
+			return &auth.DiscoveryDocument{TokenEndpoint: srv.URL + "/token"}, nil
+		},
+	}
+
+	err := box.refresh(context.Background())
+	if !IsRefreshRejected(err) {
+		t.Fatalf("expected IsRefreshRejected, got %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("token endpoint called %d times, want exactly 1", got)
+	}
+	if authHdr != "" {
+		t.Errorf("refresh must not send an Authorization header, got %q", authHdr)
+	}
+	if clientID != "meho-cli" {
+		t.Errorf("client_id in form body: %q, want meho-cli", clientID)
 	}
 }

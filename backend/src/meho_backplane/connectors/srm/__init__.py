@@ -15,10 +15,7 @@ three versions serve the SRM REST API v2.
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
-from meho_backplane.connectors.srm.connector import (
-    SrmConnector,
-    SrmServerVersion,
-)
+from meho_backplane.connectors.srm.connector import SrmConnector
 from meho_backplane.connectors.srm.session import (
     SrmSessionLoader,
     SrmTargetLike,
@@ -60,7 +57,6 @@ __all__ = [
     "SRM_TYPED_OPS",
     "SRM_VERSION",
     "SrmConnector",
-    "SrmServerVersion",
     "SrmSessionLoader",
     "SrmTargetLike",
     "SrmTypedOp",

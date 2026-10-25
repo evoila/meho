@@ -282,7 +282,7 @@ The empty spec `{}` resolves, in order: `list_operation_groups`,
 `list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
 `broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
 keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
-out of the catalog on purpose; this is not full 25-tool parity with MCP.
+out of the catalog on purpose; this is not full parity with the MCP working surface.
 
 Hosted calls to these four tools do not write the per-call MCP audit row
 (`mcp/audit.py`); that row belongs to the MCP transport. They write the
@@ -656,6 +656,16 @@ a raised exception across the boundary, and never a launched loop.
   This is a best-effort boundary guard, not a parser: a phrasing it
   misses degrades to the old behaviour; a phrasing it catches turns a
   fabricated success into an honest typed failure.
+
+  The check runs at the start of every run, so it is kept fast. It
+  reads only the first 16,384 characters (16 KiB) of each text
+  (`_MAX_SCANNED_CHARS`), and its time grows in line with the length it
+  reads. So it takes at most a few milliseconds for any prompt. A
+  runbook instruction after the first 16 KiB of a longer text is not seen.
+  When a text is cut, a hit that the cut reaches is not used either: the
+  words after the cut could change what it means ("use the runbooks page"
+  cut to "use the runbook"). So the cut can make the check miss an
+  instruction, but it never refuses a run that the full text allows.
 
   Capability (`toolset_admits_runbook_execution` in `agent/toolset.py`)
   is intersected explicitly: `RUNBOOK_EXECUTION_META_TOOL_NAMES` is an

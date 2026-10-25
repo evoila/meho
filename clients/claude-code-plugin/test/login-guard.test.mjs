@@ -522,16 +522,40 @@ e2e("e2e: a second session does not crash while another one waits for a login", 
   }
 });
 
-// Play the browser: wait until mcp-remote prints the login URL, then send the
-// authorization code to the redirect_uri in it, as Keycloak would.
+// Play the browser: wait until mcp-remote prints the login URL and its
+// callback server listens, then send the authorization code to the
+// redirect_uri in that URL, as Keycloak would.
+//
+// mcp-remote prints the login URL before it starts the callback server. A
+// code sent in between reaches a port where nothing listens yet, and fetch
+// fails with ECONNREFUSED (#4896). So wait for the "running at" line too; it
+// names the port the server listens on.
 async function finishBrowserLogin(run, code) {
-  const loginUrl = await waitFor(
+  const waitInSession = (check, what) =>
+    waitFor(check, what).catch((err) => {
+      throw new Error(`${err.message}; stderr:\n${run.stderr}`, { cause: err });
+    });
+  const loginUrl = await waitInSession(
     () => run.stderr.match(/Please authorize this client by visiting:\n(\S+)/)?.[1],
     "the browser login URL",
   );
   const callback = new URL(new URL(loginUrl).searchParams.get("redirect_uri"));
+  const serverUp = new RegExp(`OAuth callback server running at http://127\\.0\\.0\\.1:${callback.port}\\b`);
+  await waitInSession(
+    () => serverUp.test(run.stderr),
+    `the OAuth callback server on port ${callback.port}`,
+  );
   callback.searchParams.set("code", code);
-  const res = await fetch(callback);
+  let res;
+  try {
+    res = await fetch(callback);
+  } catch (err) {
+    throw new Error(
+      `sending the code to ${callback.origin} failed: ${err.message}` +
+        ` (cause: ${err.cause?.message ?? "none"}); stderr:\n${run.stderr}`,
+      { cause: err },
+    );
+  }
   assert.equal(res.status, 200, `the callback must accept the code; stderr:\n${run.stderr}`);
   return Number(callback.port);
 }

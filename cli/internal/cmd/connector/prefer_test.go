@@ -17,7 +17,7 @@ import (
 	"github.com/evoila/meho/cli/internal/api"
 )
 
-// Tests for the --prefer tenant|builtin flag on `connector review` and
+// Tests for the --prefer tenant|builtin|legacy flag on `connector review` and
 // `connector enable-reads`, and for the CLI text of the backplane's
 // 409 connector_scope_ambiguous error.
 
@@ -70,6 +70,8 @@ func scopeTwinBackplane(t *testing.T, seen *[]string) *httptest.Server {
 				writeJSON(t, w, 200, reviewPayloadFor("tenant-row"))
 			case "builtin":
 				writeJSON(t, w, 200, reviewPayloadFor("builtin-row"))
+			case "legacy":
+				writeJSON(t, w, 200, reviewPayloadFor("legacy-row"))
 			default:
 				writeJSON(t, w, 409, scopeAmbiguousBody())
 			}
@@ -115,6 +117,7 @@ func TestRunReviewPreferPicksRow(t *testing.T) {
 	for _, tc := range []struct{ prefer, wantImpl string }{
 		{"tenant", "tenant-row"},
 		{"builtin", "builtin-row"},
+		{"legacy", "legacy-row"},
 	} {
 		t.Run(tc.prefer, func(t *testing.T) {
 			var seen []string
@@ -252,7 +255,7 @@ func TestPreferFlagRejectsUnknownValue(t *testing.T) {
 	}); err == nil {
 		t.Fatal("review: expected an error for --prefer global")
 	}
-	if !strings.Contains(errBuf.String(), "--prefer must be one of: tenant, builtin") {
+	if !strings.Contains(errBuf.String(), "--prefer must be one of: tenant, builtin, legacy") {
 		t.Fatalf("review: stderr missing allowed values: %q", errBuf.String())
 	}
 
@@ -265,7 +268,7 @@ func TestPreferFlagRejectsUnknownValue(t *testing.T) {
 	}); err == nil {
 		t.Fatal("enable-reads: expected an error for --prefer Tenant")
 	}
-	if !strings.Contains(errBuf.String(), "--prefer must be one of: tenant, builtin") {
+	if !strings.Contains(errBuf.String(), "--prefer must be one of: tenant, builtin, legacy") {
 		t.Fatalf("enable-reads: stderr missing allowed values: %q", errBuf.String())
 	}
 	if len(seen) != 0 {

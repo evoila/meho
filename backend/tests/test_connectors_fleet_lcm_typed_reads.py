@@ -13,13 +13,15 @@ dispatches a modern ``/v1/*`` read op end-to-end. Coverage:
   returns ``status="ok"``. By-id ops interpolate ``{sddcLcmId}`` /
   ``{componentId}`` / ``{taskId}`` / ``{planId}`` into the path via
   ``fill_path`` + ``encode_segment``.
-* **Both auth seams.** The reads ride :meth:`FleetLcmConnector.auth_headers`
-  per request — HTTP Basic when the loaded credentials carry only
-  username/password, and ``Authorization: Bearer <token>`` (the spec's
-  primary scheme) when they additionally carry a ``token``. The Bearer
-  *header shape* is exercised here against a mocked service; live-verify
-  against a real appliance is the #3047 follow-up (no reachable appliance,
-  #1002 / #995).
+* **Both token sources (#4476).** The reads ride
+  :meth:`FleetLcmConnector.auth_headers` per request — ``Authorization:
+  Bearer <jwtToken>`` from the VCF Operations login (acquire, then
+  exchange) when the credentials carry only username/password, and the
+  stored ``token`` when they carry one.
+* **Session renewal.** A ``401`` on a read makes the dispatcher call
+  :meth:`FleetLcmConnector.invalidate_session`; the connector logs in again
+  and the read runs once more. No token reaches the result, the error text
+  or a log line.
 * **Registration-shape invariants.** All 13 reads persist as
   ``source_kind="typed"``, ``is_enabled=True`` (enabled at register time —
   the "fresh boot, zero ingest" property), ``safe`` / ungated / ``read-only``,
@@ -42,11 +44,13 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from jsonschema import Draft202012Validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.fleet_lcm import (
@@ -187,16 +191,32 @@ def _make_operator() -> Operator:
     )
 
 
-async def _basic_loader(_target: object, _operator: Operator) -> dict[str, str]:
-    """Username/password only — drives the ``basicAuth`` fallback path."""
-    return {"username": "fleet-lcm-svc", "password": "fleet-lcm-pw"}
+_PASSWORD = "fleet-lcm-pw-must-not-leak"
+_OPS_TOKEN = "ops-token-must-not-leak"
+_JWT = "fleet-jwt-must-not-leak"
+
+
+async def _login_loader(_target: object, _operator: Operator) -> dict[str, str]:
+    """Username/password only — the connector logs in to VCF Operations."""
+    return {"username": "fleet-lcm-svc", "password": _PASSWORD}
+
+
+def _mock_login(mock: respx.MockRouter) -> tuple[respx.Route, respx.Route]:
+    """Mock the VCF Operations acquire + exchange answers on *mock*."""
+    acquire = mock.post("/suite-api/api/auth/token/acquire").respond(
+        200, json={"token": _OPS_TOKEN}
+    )
+    exchange = mock.post("/suite-api/api/auth/token/exchange").respond(
+        200, json={"jwtToken": _JWT, "services": []}
+    )
+    return acquire, exchange
 
 
 async def _bearer_loader(_target: object, _operator: Operator) -> dict[str, str]:
-    """Adds a ``token`` — drives the primary ``bearerToken`` path."""
+    """Adds a stored ``token`` — sent as is, no login."""
     return {
         "username": "fleet-lcm-svc",
-        "password": "fleet-lcm-pw",
+        "password": _PASSWORD,
         "token": "fleet-lcm-bearer-tok",
     }
 
@@ -304,10 +324,11 @@ async def test_each_typed_op_dispatches_zero_catalog(
     params: dict[str, Any],
     payload: Any,
 ) -> None:
-    """Each read dispatches typed (zero ingested catalog); the Basic header is sent."""
-    await _register_and_resolve(_basic_loader)
+    """Each read dispatches typed (zero ingested catalog) with the login's Bearer token."""
+    await _register_and_resolve(_login_loader)
 
     async with respx.mock(base_url=_FLEET_BASE_URL, assert_all_called=False) as mock:
+        _mock_login(mock)
         route = mock.get(path).respond(200, json=payload)
         result = await dispatch(
             operator=_make_operator(),
@@ -320,9 +341,7 @@ async def test_each_typed_op_dispatches_zero_catalog(
     assert result.status == "ok", result.error
     assert result.result == payload
     assert route.called and route.call_count == 1
-    # Basic loader (no token) → the spec's basicAuth fallback header is sent.
-    sent_auth = route.calls[0].request.headers.get("authorization")
-    assert sent_auth is not None and sent_auth.startswith("Basic ")
+    assert route.calls[0].request.headers.get("authorization") == f"Bearer {_JWT}"
 
 
 @pytest.mark.asyncio
@@ -330,7 +349,7 @@ async def test_dispatch_uses_bearer_when_token_present(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
 ) -> None:
-    """When the loaded credentials carry a ``token``, the read sends Bearer (primary scheme)."""
+    """When the loaded credentials carry a stored ``token``, the read sends it as is."""
     await _register_and_resolve(_bearer_loader)
 
     async with respx.mock(base_url=_FLEET_BASE_URL, assert_all_called=False) as mock:
@@ -354,9 +373,10 @@ async def test_by_id_op_percent_encodes_path_segment(
     session: AsyncSession,
 ) -> None:
     """A by-id param with a reserved char is percent-encoded (encode_segment), not injected."""
-    await _register_and_resolve(_basic_loader)
+    await _register_and_resolve(_login_loader)
 
     async with respx.mock(base_url=_FLEET_BASE_URL, assert_all_called=False) as mock:
+        _mock_login(mock)
         route = mock.get("/v1/components/a%2Fb/status").respond(200, json={"id": "a/b"})
         result = await dispatch(
             operator=_make_operator(),
@@ -370,6 +390,103 @@ async def test_by_id_op_percent_encodes_path_segment(
     assert route.called and route.call_count == 1
     # The "/" is encoded to %2F — a reserved char can never leak path structure.
     assert route.calls[0].request.url.raw_path.decode().startswith("/v1/components/a%2Fb/status")
+
+
+# ---------------------------------------------------------------------------
+# Session renewal — 401 -> invalidate_session -> new login -> success (#4476)
+# ---------------------------------------------------------------------------
+
+
+def test_connector_advertises_public_invalidate_session() -> None:
+    """The dispatcher's duck-typed renewal hook is present."""
+    assert callable(getattr(FleetLcmConnector, "invalidate_session", None))
+
+
+@pytest.mark.asyncio
+async def test_dispatch_renews_the_token_after_a_401(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A 401 on a read → invalidate_session → a new login → the read succeeds."""
+    await _register_and_resolve(_login_loader)
+
+    async with respx.mock(base_url=_FLEET_BASE_URL, assert_all_called=False) as mock:
+        acquire, exchange = _mock_login(mock)
+        exchange.side_effect = [
+            httpx.Response(200, json={"jwtToken": "jwt-expired"}),
+            httpx.Response(200, json={"jwtToken": "jwt-fresh"}),
+        ]
+        route = mock.get("/v1/components")
+        route.side_effect = [
+            httpx.Response(401),
+            httpx.Response(200, json={"components": []}),
+        ]
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=FLEET_LCM_CONNECTOR_ID,
+            op_id="fleet-lcm.component.list",
+            target=_FleetLcmReadTarget(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result == {"components": []}
+    assert acquire.call_count == 2 and exchange.call_count == 2
+    sent = [call.request.headers.get("authorization") for call in route.calls]
+    assert sent == ["Bearer jwt-expired", "Bearer jwt-fresh"]
+
+
+@pytest.mark.asyncio
+async def test_failed_renewal_shows_no_token_in_result_or_logs(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A read refused twice ends as connector_auth_failed, with no secret anywhere."""
+    await _register_and_resolve(_login_loader)
+
+    with capture_logs() as captured:
+        async with respx.mock(base_url=_FLEET_BASE_URL, assert_all_called=False) as mock:
+            _mock_login(mock)
+            mock.get("/v1/components").respond(401)
+            result = await dispatch(
+                operator=_make_operator(),
+                connector_id=FLEET_LCM_CONNECTOR_ID,
+                op_id="fleet-lcm.component.list",
+                target=_FleetLcmReadTarget(),
+                params={},
+            )
+
+    assert result.status == "error"
+    assert result.error is not None and result.error.startswith("connector_auth_failed:")
+    blob = result.model_dump_json() + repr(captured)
+    for secret in (_PASSWORD, _OPS_TOKEN, _JWT):
+        assert secret not in blob
+
+
+@pytest.mark.asyncio
+async def test_refused_login_shows_no_secret_in_result(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A refused exchange ends as connector_auth_failed, with no secret in the result."""
+    await _register_and_resolve(_login_loader)
+
+    async with respx.mock(base_url=_FLEET_BASE_URL, assert_all_called=False) as mock:
+        _acquire, exchange = _mock_login(mock)
+        exchange.respond(401)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=FLEET_LCM_CONNECTOR_ID,
+            op_id="fleet-lcm.component.list",
+            target=_FleetLcmReadTarget(),
+            params={},
+        )
+
+    assert result.status == "error"
+    assert result.error is not None and result.error.startswith("connector_auth_failed:")
+    blob = result.model_dump_json()
+    for secret in (_PASSWORD, _OPS_TOKEN, _JWT):
+        assert secret not in blob
 
 
 # ---------------------------------------------------------------------------

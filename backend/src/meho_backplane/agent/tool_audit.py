@@ -30,7 +30,8 @@ row unless the call already wrote its own record:
   parent's ``invoke_agent`` call.
 * The payload stores the tool name, a hash of the arguments, the op class,
   and for a failure the error type. It never stores the arguments or the
-  error text.
+  error text. The hash is the keyed audit hash the MCP rows use, with
+  secret-named values left out.
 * A call to a tool name the run cannot use never reaches a tool hook:
   Pydantic AI rejects the name first and asks the model to retry. The
   ``after_model_request`` hook records the attempt from the model's
@@ -51,7 +52,7 @@ for an error.
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
 import json
 import time
 import uuid
@@ -91,6 +92,7 @@ from meho_backplane.operations._audit import (
     resolve_agent_session_id,
     work_ref_var,
 )
+from meho_backplane.operations._validate import compute_audit_params_hash
 
 __all__ = [
     "AGENT_TOOL_AUDIT_METHOD",
@@ -126,12 +128,16 @@ class UnknownToolError(LookupError):
 
 
 def _params_hash(args: Any) -> str:
-    """SHA-256 of the canonical JSON of *args*; same as the MCP ``params_hash``."""
+    """The audit hash of *args*; same as the MCP ``params_hash`` for the same arguments.
+
+    Raw arguments arrive as JSON text when the model's call could not be
+    validated; that text is parsed first so secret-named values are left
+    out too. Text that is not JSON is hashed as one string.
+    """
     if isinstance(args, str):
-        canonical = args
-    else:
-        canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        with contextlib.suppress(ValueError):
+            args = json.loads(args)
+    return compute_audit_params_hash(args)
 
 
 def _op_class(tool_name: str) -> str:

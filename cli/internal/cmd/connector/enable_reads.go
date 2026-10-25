@@ -20,7 +20,7 @@ import (
 //
 // CLI shape:
 //
-//	meho connector enable-reads <connector_id> [--confirm] [--prefer tenant|builtin] [--json] [--backplane <url>]
+//	meho connector enable-reads <connector_id> [--confirm] [--prefer tenant|builtin|legacy] [--json] [--backplane <url>]
 //
 // Hits POST /api/v1/connectors/<connector_id>/enable-reads, which
 // flips is_enabled=true on every ingested op whose HTTP method is GET

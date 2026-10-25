@@ -1677,9 +1677,10 @@ Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
 ~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
 monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=660`, scaled from the old 1320 s
-whole-suite budget) is the PR-level early-warning gate that fires well
-below the cap. `python-lint` and the fan-in carry 10 and 5 minutes.
+perf-budget-guard step (`budget_s=900`; 660 s until 2026-10-24, scaled
+from the old 1320 s whole-suite budget) is the PR-level early-warning
+gate that fires well below the cap. `python-lint` and the fan-in carry
+10 and 5 minutes.
 `go-lint-test` and `helm-lint-template` carry 10 minutes;
 `python-integration` carries 60 minutes for the container-pull + DinD
 spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
@@ -1731,7 +1732,14 @@ shape (deterministic file-level matrix + fan-in):
   ran 613 s as a middle value against 465 s for shard 2, and the merge
   queue dropped pull requests whose tests had all passed. The budget
   stayed at 660 s: the rule in `ci.yml` is to measure, then rebalance or
-  add shards, not to raise the budget. To change the count, edit the
+  add shards, not to raise the budget. On 2026-10-24 the budget went to
+  900 s. From the measured split until that day, the slowest good shard
+  took 625 s, even when every heavy runner was busy (2 jobs per node).
+  That afternoon every heavy runner was busy again. Four shards that
+  passed every test took 674-710 s, and the merge queue dropped good pull
+  requests. With few runners busy, the four shards of one run took
+  448-515 s. So the extra time came from the busy runners, not from
+  slower tests. To change the count, edit the
   matrix and `TOTAL` in the pytest step together. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
@@ -1924,9 +1932,11 @@ reason.
 
 `ci.yml` deliberately does **not** build the backplane container image.
 [`image.yml`](../../.github/workflows/image.yml) runs on PRs that touch
-`backend/**` or `.github/workflows/image.yml` (path-filtered, see
-`image.yml`'s `on.pull_request.paths`) with `push: false` — the
-Dockerfile + dep-resolution gate. PRs that don't touch the backend
+`backend/**`, `.github/workflows/image.yml` or `.trivyignore`
+(path-filtered, see `image.yml`'s `on.pull_request.paths`) with
+`push: false` — the Dockerfile + dep-resolution gate — plus a trivy scan
+of `backend/uv.lock` on a hosted runner (the `lock-scan` job; see
+`docs/codebase/backend.md`). PRs that don't touch the backend
 (chart-only, CLI-only, docs-only) skip the image build by design,
 because the gate's inputs haven't changed and rebuilding would add zero
 signal. Repeating the build in `ci.yml` would double the cost for
@@ -1943,7 +1953,10 @@ fails the central CI check, but it does not duplicate the publish
 path. Migration backward-compat (`migration-compat.yml`), dependency
 license scan (`dependency-license-check.yml`), secret scan
 (`secret-scan.yml`), and the SAST stack (`security-scan.yml`) all stay
-in their dedicated workflows.
+in their dedicated workflows. There, the `Semgrep SAST` job sends every
+finding of its four rule packs (error, warning and info) to the GitHub
+Security tab and shows new ones as annotations on pull requests, but it
+fails only on a finding from an error-level rule.
 
 ### Coverage handoff to SonarCloud
 
@@ -2088,7 +2101,7 @@ their isolation posture:
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
-| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
 | `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |

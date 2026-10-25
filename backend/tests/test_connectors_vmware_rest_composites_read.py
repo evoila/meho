@@ -41,6 +41,7 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.vmware_rest import vim_retrieve
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
@@ -152,11 +153,15 @@ class _RecordingConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         # #2466: vmomi POST sub-ops route through the connector's VI-JSON
         # mount seam, NOT mount_op_path. The handler passes the
         # spec-relative path; the fake re-applies mount_prefix so the
         # recorded wire path + response keys keep the pre-#2466 form.
+        del promote_managed_object_not_found, session_used, session_token
         mounted = f"{self._mount_prefix}{path}"
         self.calls.append(
             {"method": "POST", "path": mounted, "query": None, "body": json, "vmomi": True}
@@ -1952,3 +1957,112 @@ async def test_every_read_composite_dispatches_directly_on_the_session() -> None
         assert all(c["vmomi"] for c in conn.calls if c["method"] == "POST"), (
             f"{handler.__qualname__} vmomi sub-op bypassed _post_vmomi_json"
         )
+
+
+# ---------------------------------------------------------------------------
+# vmware.composite.datastore.usage -- paged placement read (#4862)
+# ---------------------------------------------------------------------------
+
+_CONTINUE_RETRIEVE_PATH = "/api/PropertyCollector/propertyCollector/ContinueRetrievePropertiesEx"
+_DS_USAGE_LISTING = [
+    {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+    {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+]
+_DS_USAGE_VMS = [
+    {"vm": "vm-1", "name": "vm-a"},
+    {"vm": "vm-2", "name": "vm-b"},
+    {"vm": "vm-3", "name": "vm-c"},
+]
+
+
+def _ds_usage_sequence(*placement_pages: Any) -> list[Any]:
+    return [
+        _DS_USAGE_LISTING,
+        {"capacity": 100, "free_space": 40, "type": "VMFS"},
+        {"capacity": 500, "free_space": 250, "type": "NFS"},
+        _DS_USAGE_VMS,
+        *placement_pages,
+    ]
+
+
+async def _ds_usage(conn: _RecordingConnector) -> dict[str, Any]:
+    return await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_placement_read_follows_every_page() -> None:
+    """VMs on a later page of the placement answer count on their datastore."""
+    first_page = {
+        **_retrieve_result_multi(
+            {
+                ("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])},
+                ("VirtualMachine", "vm-2"): {"datastore": _vm_placement(["datastore-1"])},
+            }
+        ),
+        "token": "<token-1>",
+    }
+    second_page = _retrieve_result_multi(
+        {("VirtualMachine", "vm-3"): {"datastore": _vm_placement(["datastore-2"])}}
+    )
+    conn = _RecordingConnector(_ds_usage_sequence(first_page, second_page))
+
+    out = await _ds_usage(conn)
+
+    assert len(conn.calls) == 6
+    assert conn.calls[5]["path"] == _CONTINUE_RETRIEVE_PATH
+    assert conn.calls[5]["body"] == {"token": "<token-1>"}
+    rows = out["datastores"]
+    assert (rows[0]["vm_count"], rows[0]["vm_names"]) == (2, ["vm-a", "vm-b"])
+    assert (rows[1]["vm_count"], rows[1]["vm_names"]) == (1, ["vm-c"])
+    assert "enrichment_note" not in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_failed_placement_page_is_best_effort() -> None:
+    """A lost page nulls vm_count/vm_names on every row and keeps the capacity data."""
+    first_page = {
+        **_retrieve_result_multi(
+            {("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])}}
+        ),
+        "token": "<token-1>",
+    }
+    conn = _RecordingConnector(
+        _ds_usage_sequence(first_page, _http_error(503, "https://vc" + _CONTINUE_RETRIEVE_PATH))
+    )
+
+    out = await _ds_usage(conn)
+
+    rows = out["datastores"]
+    for row, cap in ((rows[0], 100), (rows[1], 500)):
+        assert row["capacity"] == cap
+        assert row["vm_count"] is None
+        assert row["vm_names"] is None
+        assert "placement read failed" in row["enrichment_note"]
+        assert "503" in row["enrichment_note"]
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_endless_placement_answer_is_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper's page-limit error is handled like any failed placement read."""
+    monkeypatch.setattr(vim_retrieve, "_MAX_PAGES", 2)
+    page = {
+        **_retrieve_result_multi(
+            {("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])}}
+        ),
+        "token": "<token-1>",
+    }
+    conn = _RecordingConnector(_ds_usage_sequence(page, page, page))
+
+    out = await _ds_usage(conn)
+
+    rows = out["datastores"]
+    assert all(row["vm_count"] is None and row["vm_names"] is None for row in rows)
+    assert "TooManyPagesError" in rows[0]["enrichment_note"]
+    assert "had not ended after 2 pages" in rows[0]["enrichment_note"]

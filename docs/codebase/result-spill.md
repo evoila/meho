@@ -21,7 +21,8 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   so the summary stays smaller than the 4 KB threshold that caused the
   reduction. The skipped values are not lost: they are stored with the
   rows, and `result_query` reads one back with `query={"path":
-  "/<field name>"}` (or all of them with `path: ""`). The drill-in
+  "/<field name>"}` (or all of them with `path: ""`); the CLI form is
+  `meho operation result-query <handle_id> --path /<field name>`. The drill-in
   rationale names that read when the count is above zero and the store
   kept the fields. When they leave no room for the rows under the
   per-record cap, the store drops them, keeps the rows, and reports
@@ -30,7 +31,9 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
   Lists and objects are never copied by default (objects need the
-  bounded `result_objects` hint); and
+  bounded `result_objects` hint). An object that hint names is stored
+  whole next to the omitted scalars, so a `path` read returns what the
+  bounded inline projection left out; and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope. `schema_` comes from the result field catalog
@@ -325,7 +328,9 @@ the reducer keeps it **whole** as a document record under a handle:
   inline envelope (`delivery: "unavailable"`) rather than ship it whole.
 
 Read it with `result_query` and `query={"path": "<RFC 6901 JSON
-Pointer>"}`. The pointer rules follow RFC 6901: `""` is the whole
+Pointer>"}`, or from the CLI with `meho operation result-query <handle_id>
+--path "<RFC 6901 JSON Pointer>"` (#4888; `--offset` / `--limit` page an
+array value). The pointer rules follow RFC 6901: `""` is the whole
 document, each `/` starts one step, and in a step `~1` means `/` and `~0`
 means `~` (in that order, so `/a~1b~0c` reads the key `a/b~c`). An array
 index has no leading zero, and `-` never resolves. On a rows handle, the

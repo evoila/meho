@@ -46,6 +46,10 @@ apparatus was retired in #2358 (T7 of #2266).
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+
+# Import for the side-effect: registers the approval previews of
+# sddc.host.validate and sddc.host.commission (#4850).
+from meho_backplane.connectors.sddc_manager import host_commission_preview  # noqa: F401
 from meho_backplane.connectors.sddc_manager.connector import SddcManagerConnector
 from meho_backplane.connectors.sddc_manager.profile import SDDC_EXECUTION_PROFILE
 from meho_backplane.connectors.sddc_manager.session import (

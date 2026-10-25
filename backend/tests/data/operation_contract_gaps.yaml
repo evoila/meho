@@ -1,0 +1,1656 @@
+# Known gaps in the contracts of the hand-written (typed and multi-step)
+# operations of every connector.
+#
+# Read by tests/test_operation_contracts.py. Shape: connector id, then
+# operation id, then the rules that operation does not meet yet.
+#
+# This list may only get shorter:
+# - A new gap fails the test. Fix the operation; do not add it here.
+# - A fixed gap also fails the test until you remove its entry here.
+# The rules are described in docs/codebase/connector-release-readiness.md
+# (section "Operation contract check").
+#
+# A 'requires_approval' or 'write_name' entry is a safety gap. Each one has
+# a comment with the reason it is still open. Fixing one changes who must
+# approve the operation, so the pull request that fixes it names the operation.
+
+argocd-api:
+  argocd.app.delete:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  argocd.app.diff:
+    - summary
+    - llm_instructions
+    - examples
+  argocd.app.get:
+    - summary
+    - llm_instructions
+    - examples
+  argocd.app.list:
+    - summary
+    - llm_instructions
+    - examples
+  argocd.app.refresh:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  argocd.app.resource_tree:
+    - summary
+    - llm_instructions
+    - examples
+  argocd.app.rollback:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  argocd.app.set:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  argocd.app.sync:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  argocd.appproject.create:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  argocd.appproject.list:
+    - summary
+    - llm_instructions
+    - examples
+  argocd.appproject.update:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  argocd.cluster.list:
+    - summary
+    - llm_instructions
+    - examples
+  argocd.repo.list:
+    - summary
+    - llm_instructions
+    - examples
+# audit.loose_rows landed on main after this list was first written. Its gaps
+# go on the list once, like every other gap that was already on main.
+audit-integrity:
+  audit.loose_rows:
+    - summary
+    - llm_instructions
+    - examples
+
+bind9-ssh:
+  bind9.about:
+    - summary
+    - llm_instructions
+    - examples
+  bind9.config.apply_file:
+    - summary
+    - llm_instructions
+    - examples
+  bind9.config.apply_views:
+    - summary
+    - llm_instructions
+    - examples
+  # Writes a backup file; kept at caution without approval as today.
+  bind9.config.backup:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  bind9.config.reload:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  bind9.config.show:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  bind9.record.add:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  bind9.record.delete:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  bind9.record.get:
+    - summary
+    - llm_instructions
+    - examples
+  bind9.record.remove:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  bind9.zone.list:
+    - summary
+    - llm_instructions
+    - examples
+  bind9.zone.read:
+    - summary
+    - llm_instructions
+    - examples
+gcloud-rest:
+  gcloud.about:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.compute.instances.list:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.compute.networks.list:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.compute.subnetworks.list:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.iam.policy.read:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.iam.service_account_keys.list:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.iam.service_accounts.list:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.project.describe:
+    - summary
+    - llm_instructions
+    - examples
+  gcloud.services.list:
+    - summary
+    - llm_instructions
+    - examples
+gh-rest:
+  gh.composite.pr_status_summary:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  gh.composite.project_item_add:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  gh.composite.project_item_set_field:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  gh.composite.project_view:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  gh.composite.sub_issue_add:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+harbor-rest:
+  harbor.about:
+    - response_schema
+    - examples
+  harbor.artifact.info:
+    - summary
+    - response_schema
+    - examples
+  harbor.artifact.list:
+    - summary
+    - response_schema
+    - examples
+  harbor.artifact.vulnerabilities:
+    - summary
+    - llm_instructions
+    - examples
+  harbor.health:
+    - response_schema
+    - examples
+  harbor.project.info:
+    - response_schema
+    - examples
+  harbor.project.list:
+    - summary
+    - field_descriptions
+    - response_schema
+    - examples
+  harbor.project.summary:
+    - summary
+    - llm_instructions
+    - examples
+  harbor.quota.list:
+    - summary
+    - llm_instructions
+    - examples
+  harbor.repository.info:
+    - response_schema
+    - examples
+  harbor.repository.list:
+    - response_schema
+    - examples
+  harbor.robot.create:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  harbor.robot.delete:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  harbor.robot.list:
+    - summary
+    - response_schema
+    - examples
+    - no_ticket_numbers
+hyperv-ssh:
+  hyperv.about:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  hyperv.checkpoints.create:
+    - llm_instructions
+    - examples
+    - requires_approval
+  hyperv.checkpoints.delete:
+    - llm_instructions
+    - examples
+  hyperv.checkpoints.list:
+    - llm_instructions
+    - examples
+  hyperv.checkpoints.revert:
+    - llm_instructions
+    - examples
+  hyperv.disks.vhd.chain:
+    - summary
+    - llm_instructions
+    - examples
+  hyperv.disks.vhd.get:
+    - llm_instructions
+    - examples
+  hyperv.disks.vm.list:
+    - llm_instructions
+    - examples
+  # Writes a backup file; kept at caution without approval as today.
+  hyperv.export.vm:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  hyperv.host.info:
+    - llm_instructions
+    - examples
+  hyperv.host.numa:
+    - llm_instructions
+    - examples
+  hyperv.host.vswitch.list:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  hyperv.power.start:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  hyperv.power.stop:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  hyperv.vms.config:
+    - summary
+    - llm_instructions
+    - examples
+  hyperv.vms.get:
+    - llm_instructions
+    - examples
+  hyperv.vms.list:
+    - summary
+    - llm_instructions
+    - examples
+  hyperv.vms.state:
+    - llm_instructions
+    - examples
+installer-rest:
+  # A check that writes nothing; kept at caution without approval as today.
+  installer.sddc.spec.validate:
+    - requires_approval
+k8s:
+  k8s.about:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.annotate:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.apply:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.configmap.info:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.configmap.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.cordon:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.cr.info:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.cr.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.crd.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.delete:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.deployment.info:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.deployment.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.event.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.exec:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.ingress.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.job.create:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.label:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.logs:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.ls:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.namespace.create:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.namespace.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.node.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.persistentvolume.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.persistentvolumeclaim.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.pod.info:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.pod.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.rollout.restart:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.scale:
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.secret.create:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  k8s.secret.read_to_ref:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.service.list:
+    - summary
+    - llm_instructions
+    - examples
+  k8s.storageclass.list:
+    - summary
+    - llm_instructions
+    - examples
+keycloak-admin:
+  keycloak.client.create:
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.client.delete:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.client.get:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.client.list:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.client.update:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.client_scope.create:
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.client_scope.list:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.group.create:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.group.delete:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.group.list:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.group.member.add:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.group.member.list:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.group.member.remove:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.group.update_attributes:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.protocol_mapper.create:
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.realm.create:
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.realm.delete:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.realm.get:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.realm.update:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.role.list:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.role.users:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.role_mapping.assign:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.role_mapping.get:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.user.create:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.user.delete:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.user.list:
+    - summary
+    - llm_instructions
+    - examples
+  keycloak.user.logout:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  keycloak.user.reset_password:
+    - response_schema
+    - llm_instructions
+    - examples
+linux-ssh:
+  linux.about:
+    - summary
+    - llm_instructions
+    - examples
+  linux.file.read:
+    - summary
+    - llm_instructions
+    - examples
+  linux.file.write:
+    - summary
+    - llm_instructions
+    - examples
+  linux.firewall.load:
+    - summary
+    - llm_instructions
+    - examples
+  linux.firewall.show:
+    - summary
+    - llm_instructions
+    - examples
+  linux.log.tail:
+    - summary
+    - llm_instructions
+    - examples
+  linux.mount.list:
+    - summary
+    - llm_instructions
+    - examples
+  linux.script.run:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  linux.service.control:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  linux.service.status:
+    - summary
+    - llm_instructions
+    - examples
+  linux.sysctl.read:
+    - summary
+    - llm_instructions
+    - examples
+  linux.sysctl.write:
+    - summary
+    - llm_instructions
+    - examples
+loki-api:
+  loki.get:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  loki.label_values:
+    - summary
+    - llm_instructions
+    - examples
+  loki.labels:
+    - llm_instructions
+    - examples
+  loki.query:
+    - summary
+    - llm_instructions
+    - examples
+  loki.query_range:
+    - summary
+    - llm_instructions
+    - examples
+  loki.series:
+    - summary
+    - llm_instructions
+    - examples
+mail-smtp:
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  mail.send:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+mongodb-wire:
+  mongodb.collection_stats:
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.collections:
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.count:
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.current_ops:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.databases:
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.db_stats:
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.indexes:
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.replica_status:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  mongodb.server_status:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+msad-ssh:
+  msad.about:
+    - summary
+    - llm_instructions
+    - examples
+  msad.computer.delete:
+    - llm_instructions
+    - examples
+  msad.computer.get:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.computer.join-prestage:
+    - llm_instructions
+    - examples
+    - requires_approval
+  msad.computer.list:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.computer.unjoin:
+    - llm_instructions
+    - examples
+    - requires_approval
+  msad.domain.controllers:
+    - llm_instructions
+    - examples
+  msad.domain.forest:
+    - llm_instructions
+    - examples
+  msad.domain.info:
+    - llm_instructions
+    - examples
+  msad.domain.replication:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.group.add-member:
+    - llm_instructions
+    - examples
+    - requires_approval
+  msad.group.delete:
+    - llm_instructions
+    - examples
+  msad.group.get:
+    - llm_instructions
+    - examples
+  msad.group.list:
+    - llm_instructions
+    - examples
+  msad.group.members:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.group.remove-member:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.ou.create:
+    - llm_instructions
+    - examples
+    - requires_approval
+  msad.ou.list:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.ou.move:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.user.create:
+    - llm_instructions
+    - examples
+    - requires_approval
+  msad.user.delete:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.user.disable:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.user.enable:
+    - llm_instructions
+    - examples
+    - requires_approval
+  msad.user.get:
+    - llm_instructions
+    - examples
+  msad.user.list:
+    - llm_instructions
+    - examples
+  # msad.user.password-expiry landed on main after this list was first written.
+  # Its gaps go on the list once, like every other gap that was already on main.
+  msad.user.password-expiry:
+    - summary
+    - llm_instructions
+    - examples
+  msad.user.search:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  msad.user.set:
+    - llm_instructions
+    - examples
+    - requires_approval
+mssql-tds:
+  # Writes a backup file; kept at caution without approval as today.
+  mssql.backup.database:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  mssql.backup.history:
+    - summary
+    - llm_instructions
+    - examples
+  mssql.backup.restore:
+    - summary
+    - llm_instructions
+    - examples
+  mssql.databases.create:
+    - summary
+    - llm_instructions
+    - examples
+  mssql.databases.drop:
+    - llm_instructions
+    - examples
+  mssql.databases.files:
+    - llm_instructions
+    - examples
+  mssql.databases.list:
+    - llm_instructions
+    - examples
+  mssql.ha.availability-groups:
+    - summary
+    - llm_instructions
+    - examples
+  mssql.ha.fci:
+    - llm_instructions
+    - examples
+  mssql.ha.sync-health:
+    - summary
+    - llm_instructions
+    - examples
+  mssql.instance.about:
+    - response_schema
+    - llm_instructions
+    - examples
+  mssql.instance.config:
+    - llm_instructions
+    - examples
+  mssql.instance.logins:
+    - llm_instructions
+    - examples
+  mssql.instance.version:
+    - response_schema
+    - llm_instructions
+    - examples
+net-probe:
+  net.dns_lookup:
+    - summary
+    - llm_instructions
+    - examples
+  net.http_probe:
+    - summary
+    - llm_instructions
+    - examples
+  net.ntp_check:
+    - summary
+    - llm_instructions
+    - examples
+  net.path_mtu:
+    - summary
+    - llm_instructions
+    - examples
+  net.ping:
+    - summary
+    - llm_instructions
+    - examples
+  net.ssh_keyscan:
+    - summary
+    - llm_instructions
+    - examples
+  net.tcp_check:
+    - summary
+    - llm_instructions
+    - examples
+  net.tls_inspect:
+    - summary
+    - llm_instructions
+    - examples
+  net.trace:
+    - summary
+    - llm_instructions
+    - examples
+pfsense-ssh:
+  pfsense.about:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.alias.delete:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.alias.member.remove:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.config.show:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.dhcp.leases:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.filter.rule.add:
+    - summary
+    - field_descriptions
+    - llm_instructions
+    - examples
+  pfsense.filter.rule.delete:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.firewall.rules:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.firewall.state:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  pfsense.gateway.add:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  pfsense.gateway.delete:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.gateway.list:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.interface.list:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.mgmt_flow.summary:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.nat.delete:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.nat.rules:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  pfsense.route.static.add:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  pfsense.route.static.delete:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.route.static.list:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.user.disable:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.user.enable:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.user.list:
+    - summary
+    - llm_instructions
+    - examples
+  pfsense.version:
+    - summary
+    - llm_instructions
+    - examples
+postgres-wire:
+  postgres.activity:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  postgres.databases:
+    - response_schema
+    - llm_instructions
+    - examples
+  postgres.indexes:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  postgres.query:
+    - summary
+    - llm_instructions
+    - examples
+  postgres.replication:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  postgres.schemas:
+    - response_schema
+    - llm_instructions
+    - examples
+  postgres.settings:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  postgres.tables:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+prometheus-api:
+  prometheus.alerts:
+    - response_schema
+    - llm_instructions
+    - examples
+  prometheus.get:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  prometheus.labels:
+    - response_schema
+    - llm_instructions
+    - examples
+  prometheus.query:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  prometheus.query_range:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  prometheus.rules:
+    - response_schema
+    - llm_instructions
+    - examples
+  prometheus.series:
+    - response_schema
+    - llm_instructions
+    - examples
+  prometheus.targets:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+proxmox-api:
+  proxmox.about:
+    - response_schema
+    - llm_instructions
+    - examples
+  proxmox.api.get:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  proxmox.api.write:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  proxmox.task.status:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+rabbitmq-management:
+  rabbitmq.bindings:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.channels:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.connections:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.consumers:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.definitions:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.exchanges:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.federation_links:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.nodes:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.overview:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.parameters:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.policies:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.queues:
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.request:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.shovel_status:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.shovels:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  rabbitmq.vhosts:
+    - response_schema
+    - llm_instructions
+    - examples
+rke2-ssh:
+  rke2.about:
+    - summary
+    - llm_instructions
+    - examples
+  rke2.etcd-snapshot.list:
+    - summary
+    - llm_instructions
+    - examples
+  # Writes a snapshot file on the node. Its connector keeps it 'safe' on purpose: it changes no cluster state.
+  rke2.etcd-snapshot.save:
+    - summary
+    - llm_instructions
+    - examples
+    - write_name
+  rke2.node.config.get:
+    - summary
+    - llm_instructions
+    - examples
+  rke2.node.config.update:
+    - summary
+    - llm_instructions
+    - examples
+  rke2.node.service.restart:
+    - summary
+    - llm_instructions
+    - examples
+  rke2.node.service.status:
+    - summary
+    - llm_instructions
+    - examples
+  rke2.posture.show:
+    - summary
+    - llm_instructions
+    - examples
+  rke2.token.rotate:
+    - summary
+    - llm_instructions
+    - examples
+sddc-rest:
+  # A check that writes nothing; kept at caution without approval as today.
+  sddc.domain.validate:
+    - requires_approval
+  # A check that writes nothing; kept at caution without approval as today.
+  sddc.host.validate:
+    - requires_approval
+secret-broker:
+  secret.move:
+    - summary
+    - llm_instructions
+    - examples
+targets-registry:
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  targets.register:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+tempo-api:
+  tempo.get:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  tempo.metrics_query_range:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  tempo.search:
+    - summary
+    - llm_instructions
+    - examples
+  tempo.search_tag_values:
+    - summary
+    - llm_instructions
+    - examples
+  tempo.search_tags:
+    - summary
+    - llm_instructions
+    - examples
+  tempo.trace:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+topology-graph:
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  topology.annotate:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  topology.bulk_import:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  topology.create_node:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  topology.delete_node:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  topology.unannotate:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+vault:
+  vault.auth.approle.delete:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.approle.generate_secret_id:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.approle.list:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.approle.read:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.approle.write:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.userpass.delete:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.userpass.list:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.userpass.read:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.userpass.update_password:
+    - summary
+    - llm_instructions
+    - examples
+  vault.auth.userpass.write:
+    - summary
+    - llm_instructions
+    - examples
+  vault.identity.entity.read:
+    - summary
+    - response_schema
+    - llm_instructions
+    - examples
+  vault.identity.entity.write:
+    - summary
+    - llm_instructions
+    - examples
+  vault.identity.entity_alias.write:
+    - summary
+    - llm_instructions
+    - examples
+  vault.identity.group.delete:
+    - summary
+    - llm_instructions
+    - examples
+  vault.identity.group.read:
+    - response_schema
+    - llm_instructions
+    - examples
+  vault.identity.group.write:
+    - summary
+    - llm_instructions
+    - examples
+  vault.identity.list:
+    - llm_instructions
+    - examples
+  vault.kv.delete:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  vault.kv.list:
+    - summary
+    - llm_instructions
+    - examples
+  vault.kv.metadata.delete:
+    - summary
+    - llm_instructions
+    - examples
+  vault.kv.patch:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  vault.kv.put:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  vault.kv.read:
+    - summary
+    - llm_instructions
+    - examples
+  vault.kv.versions:
+    - summary
+    - llm_instructions
+    - examples
+  vault.sys.auth.enable:
+    - summary
+    - llm_instructions
+    - examples
+  vault.sys.auth.list:
+    - llm_instructions
+    - examples
+  vault.sys.auth.tune:
+    - llm_instructions
+    - examples
+  vault.sys.health:
+    - summary
+    - llm_instructions
+    - examples
+  vault.sys.mounts.enable:
+    - summary
+    - llm_instructions
+    - examples
+  vault.sys.mounts.list:
+    - llm_instructions
+    - examples
+  vault.sys.mounts.tune:
+    - llm_instructions
+    - examples
+  vault.sys.policy.delete:
+    - llm_instructions
+    - examples
+  vault.sys.policy.list:
+    - llm_instructions
+    - examples
+  vault.sys.policy.read:
+    - llm_instructions
+    - examples
+  vault.sys.policy.write:
+    - llm_instructions
+    - examples
+  vault.sys.seal_status:
+    - llm_instructions
+    - examples
+  vault.token.create:
+    - summary
+    - llm_instructions
+    - examples
+  vault.token.list_accessors:
+    - summary
+    - llm_instructions
+    - examples
+  vault.token.lookup_accessor:
+    - summary
+    - llm_instructions
+    - examples
+  vault.token.revoke_accessor:
+    - summary
+    - llm_instructions
+    - examples
+vmware-rest:
+  # Kept on purpose: reads a file from a guest; an agent's call waits for approval, a person's call runs at once.
+  vmware.composite.vm.guest.file.read:
+    - requires_approval
+windns-ssh:
+  windns.about:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  windns.record.add:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  windns.record.get:
+    - llm_instructions
+    - examples
+  windns.record.remove:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  windns.zone.list:
+    - summary
+    - llm_instructions
+    - examples
+winsrv-ssh:
+  winsrv.about:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.feature.install:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  winsrv.feature.list:
+    - llm_instructions
+    - examples
+  winsrv.feature.remove:
+    - summary
+    - llm_instructions
+    - examples
+    - no_ticket_numbers
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.localuser.create:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  winsrv.localuser.delete:
+    - llm_instructions
+    - examples
+  # The longer summary of winsrv.localuser.list landed on main after this list
+  # was first written, together with msad.user.password-expiry.
+  winsrv.localuser.list:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.localuser.set:
+    - llm_instructions
+    - examples
+    - requires_approval
+  winsrv.power.reboot:
+    - summary
+    - llm_instructions
+    - examples
+  winsrv.power.shutdown:
+    - llm_instructions
+    - examples
+  winsrv.service.get:
+    - llm_instructions
+    - examples
+  winsrv.service.list:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.service.restart:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.service.start:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.service.stop:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.storage.disk.format:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  winsrv.storage.disk.list:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  winsrv.storage.iscsi.connect:
+    - llm_instructions
+    - examples
+    - requires_approval
+  winsrv.storage.iscsi.list:
+    - llm_instructions
+    - examples
+  winsrv.storage.volume.list:
+    - llm_instructions
+    - examples
+  winsrv.system.os-info:
+    - llm_instructions
+    - examples
+  winsrv.system.pending-reboot:
+    - summary
+    - llm_instructions
+    - examples
+  winsrv.system.uptime:
+    - llm_instructions
+    - examples
+wsfc-ssh:
+  wsfc.about:
+    - summary
+    - llm_instructions
+    - examples
+  wsfc.cluster.get:
+    - summary
+    - llm_instructions
+    - examples
+  wsfc.cluster.quorum:
+    - summary
+    - llm_instructions
+    - examples
+  # A check that writes nothing; kept at caution without approval as today.
+  wsfc.cluster.test:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  wsfc.cluster.validation-report:
+    - summary
+    - llm_instructions
+    - examples
+  wsfc.groups.list:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  wsfc.groups.move:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval
+  wsfc.groups.offline:
+    - summary
+    - llm_instructions
+    - examples
+  wsfc.groups.online:
+    - summary
+    - llm_instructions
+    - examples
+  wsfc.groups.state:
+    - llm_instructions
+    - examples
+  wsfc.nodes.evict:
+    - llm_instructions
+    - examples
+  wsfc.nodes.list:
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  wsfc.nodes.pause:
+    - llm_instructions
+    - examples
+    - requires_approval
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  wsfc.nodes.resume:
+    - llm_instructions
+    - examples
+    - requires_approval
+  wsfc.nodes.state:
+    - llm_instructions
+    - examples
+  wsfc.resources.dependency-report:
+    - summary
+    - llm_instructions
+    - examples
+  wsfc.resources.list:
+    - llm_instructions
+    - examples
+  wsfc.witness.get:
+    - summary
+    - llm_instructions
+    - examples
+  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
+  wsfc.witness.set:
+    - summary
+    - llm_instructions
+    - examples
+    - requires_approval

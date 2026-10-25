@@ -113,7 +113,12 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     unwrap_vim_value,
     vim_moref,
 )
-from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
+from meho_backplane.connectors.vmware_rest.vim_task import (
+    TASK_STATE_ERROR,
+    VimTaskResult,
+    poll_vim_task,
+)
 from meho_backplane.operations.composite import (
     DispatchChild,
     composite_resume_scope_var,
@@ -266,6 +271,11 @@ _OVF_LIBRARY_ITEM_TYPE = "ovf"
 # mount); a single ``PropertyParams`` entry carries the operator's
 # ``ovf_properties`` map as ``{id, value}`` rows.
 _OVF_PROPERTY_PARAMS_TYPE = "PropertyParams"
+# ``Vcenter.Ovf.OvfParams`` subtype for the OVF deployment option (the size
+# profile of an appliance). The ``?action=filter`` summary lists the keys in
+# ``deployment_options[].key``; the deploy takes the choice as
+# ``selected_key`` (#4035).
+_OVF_DEPLOYMENT_OPTION_PARAMS_TYPE = "DeploymentOptionParams"
 _OP_GET_TASK = "GET:/cis/tasks/{task}"
 # Per-host vLCM remediation (``Esx.Settings.Hosts.Software_apply$Task``).
 # The pinned spec serves no ``POST:/vcenter/host/{host}?action=patch``
@@ -351,6 +361,10 @@ _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 # form the ingest parser emits and the pinned-spec reconcile asserts).
 _OP_RECONFIG_VM_TASK = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# A read of many objects in one call follows the continuation pages vCenter
+# may send (#4862, ``vim_retrieve.retrieve_all_pages``). Listed on the
+# manifest of every composite that reads that way.
+_OP_CONTINUE_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
 # #3697: vm.deploy_from_library deploys under a unique name and renames the
 # finished VM or vApp to the requested name through the core vim
 # ``ManagedEntity.Rename_Task`` (no REST rename exists in the pinned spec).
@@ -822,6 +836,22 @@ _PROP_DVS_CONFIG_VERSION = "config.configVersion"
 # Required int ``timeout`` on the maintenance request types; ``0`` defers
 # entirely to the poll's wall-clock bound below.
 _MAINTENANCE_VIM_TIMEOUT: Final[int] = 0
+# host.evacuate (#4895): the host's ``parent`` is the cluster it is in (a
+# ``ClusterComputeResource`` MoRef); a host outside a cluster has a plain
+# ``ComputeResource`` parent, so the read doubles as the "in a cluster" check.
+_PROP_PARENT = "parent"
+# ``ClusterDrsConfigInfo.defaultVmBehavior`` value under which vCenter carries
+# out its own DRS moves -- including the ones maintenance mode needs.
+_DRS_BEHAVIOR_FULLY_AUTOMATED = "fullyAutomated"
+# ``Vcenter.VM.Summary.power_state`` value of a running VM; only running VMs
+# are moved (MEHO does not send ``evacuatePoweredOffVms``).
+_VM_POWER_STATE_ON = "POWERED_ON"
+# ``EnterMaintenanceModeRequestType.maintenanceSpec`` DataObjects (#3103:
+# every DataObject carries its ``_typeName``) and vCenter's own default for
+# ``VsanHostDecommissionMode.objectAction`` when the spec is left out.
+_HOST_MAINTENANCE_SPEC_TYPE = "HostMaintenanceSpec"
+_VSAN_HOST_DECOMMISSION_MODE_TYPE = "VsanHostDecommissionMode"
+_VSAN_MODE_DEFAULT = "ensureObjectAccessibility"
 
 # Wall-clock bounds for the #2970 vim task polls + the cluster.patch cis
 # task poll -- the 600s ``vm.disk.grow`` / ``vm.clone_from_template``
@@ -1097,9 +1127,11 @@ _SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
 #: vm.deploy_from_library's vim leg (#3697): the ``Rename_Task`` that gives
 #: the finished VM (or vApp) its requested name, the ``Destroy_Task`` that
 #: removes a vApp a failed deploy left (with its VMs), and the property
-#: read that polls the tasks and finds such a vApp by its deploy name.
+#: read that polls the tasks and finds such a vApp by its deploy name (with
+#: the continuation pages of the vApp name read, #4862).
 _VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RENAME_VM_TASK,
     _OP_RENAME_VAPP_TASK,
     _OP_DESTROY_VAPP_TASK,
@@ -3106,7 +3138,9 @@ def _build_ovf_deploy_body(params: dict[str, Any], eula_field: str, *, name: str
     ``resource_pool`` is the required deploy-target anchor; ``host`` / ``folder``
     refine it. ``network_mappings`` is sent verbatim as the OVF-key → network-moid
     map (the pinned 9.0 spec models it as a map, not an array). ``ovf_properties``
-    folds into a single ``PropertyParams`` entry in ``additional_parameters``.
+    folds into a single ``PropertyParams`` entry in ``additional_parameters``,
+    and ``deployment_option`` into a ``DeploymentOptionParams`` entry with
+    ``selected_key`` (#4035).
     The EULA-accept flag defaults to true (deploying a curated item accepts its
     EULA) and is keyed by *eula_field* — the version-aware wire name resolved by
     :func:`_deploy_eula_field_name`. *name* is the unique deploy name from
@@ -3120,14 +3154,22 @@ def _build_ovf_deploy_body(params: dict[str, Any], eula_field: str, *, name: str
     _put_if_str(deployment_spec, "storage_provisioning", params.get("storage_provisioning"))
     _put_if_str(deployment_spec, "storage_profile_id", params.get("storage_profile"))
     _put_if_str(deployment_spec, "default_datastore_id", params.get("datastore"))
+    additional_parameters: list[dict[str, Any]] = []
     ovf_properties = params.get("ovf_properties")
     if isinstance(ovf_properties, dict) and ovf_properties:
-        deployment_spec["additional_parameters"] = [
+        additional_parameters.append(
             {
                 "type": _OVF_PROPERTY_PARAMS_TYPE,
                 "properties": [{"id": str(k), "value": str(v)} for k, v in ovf_properties.items()],
             }
-        ]
+        )
+    deployment_option = params.get("deployment_option")
+    if isinstance(deployment_option, str) and deployment_option:
+        additional_parameters.append(
+            {"type": _OVF_DEPLOYMENT_OPTION_PARAMS_TYPE, "selected_key": deployment_option}
+        )
+    if additional_parameters:
+        deployment_spec["additional_parameters"] = additional_parameters
 
     return {"deployment_spec": deployment_spec, "target": _build_ovf_deploy_target(params)}
 
@@ -3218,28 +3260,20 @@ def _deploy_vm_name(name: str, token: str) -> str:
     return f"{name[: _VM_NAME_MAX_LENGTH - len(suffix)]}{suffix}"
 
 
-async def _resolve_deploy_vm_name(
+async def _read_ovf_summary(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     *,
     item_id: str,
     params: dict[str, Any],
-) -> tuple[str | None, dict[str, Any] | None]:
-    """The name the deployed VM must end up with: ``name``, or the OVF default.
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read the OVF summary of *item_id* (``?action=filter``, un-gated).
 
-    Without ``name`` vCenter would take the VM name from the OVF descriptor.
-    The composite needs that name before the deploy (#3697): the VM is
-    deployed under a unique name and renamed afterwards. So the default is
-    read from the un-gated ``?action=filter`` summary (``OvfSummary.name``).
-    Returns ``(name, None)``, or ``(None, envelope)`` when the summary call
-    faulted (``resolve_error``) or the descriptor names nothing
-    (``invalid_reference`` — the caller must set ``name``). Both refusals
-    happen before any VM is created.
+    Returns ``(summary, None)``, or ``({}, envelope)`` with a
+    ``resolve_error`` envelope when the call faulted. A summary that is not
+    an object comes back as ``{}``.
     """
-    name = params.get("name")
-    if isinstance(name, str) and name:
-        return name, None
     method, path, body = _split_sub_op(
         _OP_FILTER_OVF_LIBRARY_ITEM,
         {"ovfLibraryItemId": item_id, "target": _build_ovf_deploy_target(params)},
@@ -3250,7 +3284,7 @@ async def _resolve_deploy_vm_name(
             target, mounted, operator=operator, verb=method, json=body
         )
     except httpx.HTTPError as exc:
-        return None, _deploy_failure(
+        return {}, _deploy_failure(
             "resolve_error",
             library_item_id=item_id,
             issues=[
@@ -3262,7 +3296,92 @@ async def _resolve_deploy_vm_name(
             ],
         )
     summary = _unwrap_value(payload)
-    default = summary.get("name") if isinstance(summary, dict) else None
+    return (summary if isinstance(summary, dict) else {}), None
+
+
+def _ovf_deployment_option_keys(summary: dict[str, Any]) -> list[str]:
+    """The deployment-option keys the OVF summary lists, in its order (#4035)."""
+    keys: list[str] = []
+    for entry in summary.get("additional_params") or []:
+        if not isinstance(entry, dict) or entry.get("type") != _OVF_DEPLOYMENT_OPTION_PARAMS_TYPE:
+            continue
+        for option in entry.get("deployment_options") or []:
+            key = option.get("key") if isinstance(option, dict) else None
+            if isinstance(key, str) and key:
+                keys.append(key)
+    return keys
+
+
+def _check_deployment_option(
+    option: str, summary: dict[str, Any], item_id: str
+) -> dict[str, Any] | None:
+    """Refuse a ``deployment_option`` the OVF item does not offer (#4035).
+
+    Returns ``None`` when *option* is one of the keys the summary lists.
+    Otherwise an ``invalid_reference`` envelope whose ``candidates`` are the
+    keys the item offers (empty when it offers none). The refusal comes
+    before any VM is created.
+    """
+    keys = _ovf_deployment_option_keys(summary)
+    if option in keys:
+        return None
+    offered = ", ".join(repr(key) for key in keys) if keys else "none"
+    return _deploy_failure(
+        "invalid_reference",
+        library_item_id=item_id,
+        candidates=keys,
+        issues=[
+            issue(
+                "input",
+                "error",
+                f"deployment_option {option!r} is not offered by this OVF item; "
+                f"its deployment options are: {offered}",
+            )
+        ],
+    )
+
+
+async def _resolve_deploy_vm_name(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    item_id: str,
+    params: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The name the deployed VM must end up with, after the pre-deploy checks.
+
+    The name is ``name``, or the OVF default. Without ``name`` vCenter would
+    take the VM name from the OVF descriptor. The composite needs that name
+    before the deploy (#3697): the VM is deployed under a unique name and
+    renamed afterwards. So the default is read from the un-gated
+    ``?action=filter`` summary (``OvfSummary.name``). The same summary read
+    checks ``deployment_option`` against the keys the item offers (#4035);
+    with ``name`` set and no ``deployment_option`` no summary is read.
+    Returns ``(name, None)``, or ``(None, envelope)`` when the summary call
+    faulted (``resolve_error``), the option is not offered
+    (``invalid_reference``) or the descriptor names nothing
+    (``invalid_reference`` — the caller must set ``name``). Every refusal
+    happens before any VM is created.
+    """
+    name = params.get("name")
+    has_name = isinstance(name, str) and bool(name)
+    option = params.get("deployment_option")
+    has_option = isinstance(option, str) and bool(option)
+    if has_name and not has_option:
+        return name, None
+    summary, summary_error = await _read_ovf_summary(
+        connector, target, operator, item_id=item_id, params=params
+    )
+    if summary_error is not None:
+        return None, summary_error
+    if has_option:
+        option_error = _check_deployment_option(str(option), summary, item_id)
+        if option_error is not None:
+            return None, option_error
+    if has_name:
+        return name, None
+    default = summary.get("name")
     if not isinstance(default, str) or not default:
         return None, _deploy_failure(
             "invalid_reference",
@@ -3449,11 +3568,12 @@ async def _find_vapps_named(
 
     Two un-gated ``RetrievePropertiesEx`` reads: the pool's ``resourcePool``
     children (a vApp is a child resource pool of the pool it was deployed
-    into), then the ``name`` of every child that is a ``VirtualApp``. No
-    read leaves the named objects (no traversal). An unexpected shape
-    yields no match; a transport fault, the connector's :exc:`RuntimeError`
-    for an unavailable VI-JSON API, or a response that is not JSON raises
-    for the caller.
+    into), then the ``name`` of every child that is a ``VirtualApp``, with
+    every continuation page vCenter sends (#4862). No read leaves the named
+    objects (no traversal). An unexpected shape yields no match; a
+    transport fault, a failed page, the connector's :exc:`RuntimeError` for
+    an unavailable VI-JSON API, or a response that is not JSON raises for
+    the caller.
     """
     children_read = await connector._post_vmomi_json(
         target,
@@ -3473,11 +3593,11 @@ async def _find_vapps_named(
     ]
     if not vapp_ids:
         return []
-    names_read = await connector._post_vmomi_json(
+    names_read = await retrieve_all_pages(
+        connector,
         target,
-        _VMOMI_RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
+        operator,
+        retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
     )
     return [moid for moid, vapp_name in _entity_names(names_read).items() if vapp_name == name]
 
@@ -4596,16 +4716,18 @@ async def vm_snapshot_revert_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Revert a VM to a named snapshot. Idempotent; ambiguity-rejecting.
+    """Revert a VM to a snapshot, by name or by id. Idempotent; ambiguity-rejecting.
 
     Op-id: ``vmware.composite.vm.snapshot.revert``. Multiple snapshots
     sharing the name -> ``status='ambiguous'``; missing -> ``not_found``.
-    Revert never dispatches on either. The revert is a vim ``*_Task``:
-    a task fault raises (the dispatcher wraps it ``connector_error``);
-    a poll timeout returns ``status='timeout'`` with the task id.
+    A ``snapshot_id`` must be in the VM's own snapshot tree, else
+    ``not_found``. Revert never dispatches on any of these. The revert is a
+    vim ``*_Task``: a task fault raises (the dispatcher wraps it
+    ``connector_error``); a poll timeout returns ``status='timeout'`` with
+    the task id.
     """
     vm_moid = params["vm"]
-    snapshot_name = params["snapshot_name"]
+    snapshot_id = params.get("snapshot_id")
 
     tree_result = await connector._post_vmomi_json(
         target,
@@ -4616,13 +4738,21 @@ async def vm_snapshot_revert_composite(
     snapshot_info = _extract_single_prop(tree_result, _PROP_SNAPSHOT)
     root_list = snapshot_info.get("rootSnapshotList") if isinstance(snapshot_info, dict) else None
     entries = _flatten_snapshot_tree(root_list)
-    matches = [e for e in entries if e["name"] == snapshot_name]
+    if isinstance(snapshot_id, str):
+        matches = [e for e in entries if e["snapshot"] == snapshot_id]
+        missing = (
+            f"vm {vm_moid!r} has no snapshot {snapshot_id!r}; list its snapshots with "
+            "vmware.snapshot.list"
+        )
+    else:
+        matches = [e for e in entries if e["name"] == params["snapshot_name"]]
+        missing = f"no snapshot named {params['snapshot_name']!r} on vm {vm_moid!r}"
     if not matches:
         return {
             "status": "not_found",
             "snapshot_id": None,
             "candidates": [],
-            "guidance": f"no snapshot named {snapshot_name!r} on vm {vm_moid!r}",
+            "guidance": missing,
         }
     if len(matches) > 1:
         return {
@@ -4642,7 +4772,7 @@ async def vm_snapshot_revert_composite(
         op_id=_OP_REVERT_TO_SNAPSHOT_TASK,
         vmomi_path=f"/{_VM_SNAPSHOT_MO_TYPE}/{snapshot_moid}/RevertToSnapshot_Task",
         body={},
-        params={"vm": vm_moid, "snapshot_name": snapshot_name, "snapshot": snapshot_moid},
+        params={"vm": vm_moid, "snapshot_name": matches[0]["name"], "snapshot": snapshot_moid},
     )
     if gate is not None:
         return gate
@@ -5210,6 +5340,68 @@ async def vm_power_composite(
 # ===========================================================================
 
 
+async def _run_host_maintenance_task(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+    op_id: str,
+    maintenance_spec: dict[str, Any] | None = None,
+) -> OperationResult | VimTaskResult:
+    """Gate, send and poll one vim maintenance transition on a host.
+
+    The pinned vcenter.yaml serves no host-maintenance REST path (#2970);
+    enter / exit are the vim ``HostSystem.EnterMaintenanceMode_Task`` /
+    ``ExitMaintenanceMode_Task`` methods, whose request types carry a
+    required int ``timeout`` (``<= 0`` = no vim-side bound -- the poll's
+    wall clock is the bound here). *maintenance_spec* is the optional
+    ``HostMaintenanceSpec`` of the enter call (the vSAN data option,
+    #4895); ``None`` leaves the body at ``{"timeout": 0}``, so vCenter
+    applies its own defaults. Returns the governance seam's
+    :class:`OperationResult` when it parks/denies the write, else the
+    polled :class:`VimTaskResult` (success, fault or poll timeout).
+    """
+    method_name = op_id.rsplit("/", 1)[-1]
+    body: dict[str, Any] = {"timeout": _MAINTENANCE_VIM_TIMEOUT}
+    if maintenance_spec is not None:
+        body["maintenanceSpec"] = maintenance_spec
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=op_id,
+        vmomi_path=f"/{_HOST_SYSTEM_MO_TYPE}/{host_moid}/{method_name}",
+        body=body,
+        params={"host": host_moid},
+    )
+    if gate is not None:
+        return gate
+    return await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_MAINTENANCE_TASK_TIMEOUT_SECONDS,
+    )
+
+
+def _maintenance_task_failure(outcome: VimTaskResult, op_id: str, host_moid: str) -> str | None:
+    """Why a maintenance task did not succeed, or ``None`` when it did."""
+    method_name = op_id.rsplit("/", 1)[-1]
+    if outcome.state == TASK_STATE_ERROR:
+        return (
+            f"{method_name} on host {host_moid!r} faulted: "
+            f"{outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return (
+            f"{method_name} task {outcome.task} on host {host_moid!r} did not reach a "
+            f"terminal state within {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s"
+        )
+    return None
+
+
 async def _host_maintenance_vim_step(
     *,
     connector: VmwareRestConnector,
@@ -5220,46 +5412,20 @@ async def _host_maintenance_vim_step(
 ) -> tuple[OperationResult | None, str | None]:
     """Run one governed vim maintenance transition on a host, polled to terminal.
 
-    The pinned vcenter.yaml serves no host-maintenance REST path (#2970);
-    enter / exit are the vim ``HostSystem.EnterMaintenanceMode_Task`` /
-    ``ExitMaintenanceMode_Task`` methods, whose request types carry a
-    required int ``timeout`` (``<= 0`` = no vim-side bound -- the poll's
-    wall clock is the bound here). Returns ``(gate, None)`` when the
-    governance seam parks/denies the write, ``(None, reason)`` when the
-    returned Task faults or the poll deadline elapses, ``(None, None)`` on
-    success. Shared by :func:`host_evacuate_composite` (enter) and
-    :func:`cluster_patch_composite` (enter + exit).
+    Returns ``(gate, None)`` when the governance seam parks/denies the
+    write, ``(None, reason)`` when the returned Task faults or the poll
+    deadline elapses, ``(None, None)`` on success. Used by
+    :func:`cluster_patch_composite` (enter + exit) with the plain
+    ``{"timeout": 0}`` body; :func:`host_evacuate_composite` drives
+    :func:`_run_host_maintenance_task` itself because it reports a poll
+    timeout as a status, not a failure.
     """
-    method_name = op_id.rsplit("/", 1)[-1]
-    gate, task_payload = await _write_vmomi_sub_op(
-        connector,
-        target,
-        operator,
-        op_id=op_id,
-        vmomi_path=f"/{_HOST_SYSTEM_MO_TYPE}/{host_moid}/{method_name}",
-        body={"timeout": _MAINTENANCE_VIM_TIMEOUT},
-        params={"host": host_moid},
+    outcome = await _run_host_maintenance_task(
+        connector=connector, target=target, operator=operator, host_moid=host_moid, op_id=op_id
     )
-    if gate is not None:
-        return gate, None
-    outcome = await poll_vim_task(
-        connector,
-        target,
-        operator,
-        task=_unwrap_value(task_payload),
-        timeout_seconds=_MAINTENANCE_TASK_TIMEOUT_SECONDS,
-    )
-    if outcome.state == TASK_STATE_ERROR:
-        return None, (
-            f"{method_name} on host {host_moid!r} faulted: "
-            f"{outcome.error_message or '<no fault reported>'}"
-        )
-    if outcome.timed_out:
-        return None, (
-            f"{method_name} task {outcome.task} on host {host_moid!r} did not reach a "
-            f"terminal state within {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s"
-        )
-    return None, None
+    if isinstance(outcome, OperationResult):
+        return outcome, None
+    return None, _maintenance_task_failure(outcome, op_id, host_moid)
 
 
 def _classify_vm_migrate_outcome(
@@ -5275,25 +5441,243 @@ def _classify_vm_migrate_outcome(
     return False, str(inner_status or "unknown")
 
 
-def _evacuate_aborted(
-    host_moid: str, migrated: list[str], failed: list[dict[str, str]]
+async def _resolve_host_cluster(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+) -> str | None:
+    """The moid of the cluster *host_moid* is in, or ``None`` for a host outside a cluster.
+
+    One ``RetrievePropertiesEx`` read of the host's ``parent`` (the same
+    vim path the vm.migrate DRS read uses). All VMs on a host share its
+    cluster, so one read serves every per-VM move. The vCenter VM listing
+    rows carry no cluster field (``Vcenter.VM.Summary``: ``vm``, ``name``,
+    ``power_state``, ``cpu_count``, ``memory_size_mib``), which is why the
+    cluster cannot be read per VM (#4895).
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(_HOST_SYSTEM_MO_TYPE, host_moid, _PROP_PARENT),
+    )
+    parent = _extract_single_prop(payload, _PROP_PARENT)
+    if not isinstance(parent, dict) or parent.get("type") != _CLUSTER_COMPUTE_RESOURCE_MO_TYPE:
+        return None
+    cluster_moid = parent.get("value")
+    return cluster_moid if isinstance(cluster_moid, str) and cluster_moid else None
+
+
+async def _read_cluster_drs_config(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    cluster_moid: str,
 ) -> dict[str, Any]:
-    """``aborted`` envelope: a VM failed to migrate and partial failure is not tolerated."""
+    """The cluster's ``ClusterDrsConfigInfo`` (``{}`` when vCenter has none set).
+
+    Reads the whole ``configurationEx`` and picks ``drsConfig`` in code, as
+    :func:`._read.cluster_drs_recommendations_composite` does -- vCenter
+    8.0 refuses the nested path ``configurationEx.drsConfig`` (#3617).
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(
+            _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, cluster_moid, _PROP_CONFIGURATION_EX
+        ),
+    )
+    config_ex = _extract_single_prop(payload, _PROP_CONFIGURATION_EX)
+    drs_config = config_ex.get("drsConfig") if isinstance(config_ex, dict) else None
+    return drs_config if isinstance(drs_config, dict) else {}
+
+
+def _drs_moves_running_vms(drs_config: dict[str, Any]) -> bool:
+    """Whether vCenter's DRS moves the running VMs itself when the host enters maintenance."""
+    return (
+        bool(drs_config.get("enabled"))
+        and drs_config.get("defaultVmBehavior") == _DRS_BEHAVIOR_FULLY_AUTOMATED
+    )
+
+
+def _vsan_maintenance_spec(vsan_mode: str) -> dict[str, Any]:
+    """``HostMaintenanceSpec`` carrying the vSAN data option (``vsanMode.objectAction``)."""
     return {
-        "status": "aborted",
+        VIM_TYPE_NAME_KEY: _HOST_MAINTENANCE_SPEC_TYPE,
+        "vsanMode": {
+            VIM_TYPE_NAME_KEY: _VSAN_HOST_DECOMMISSION_MODE_TYPE,
+            "objectAction": vsan_mode,
+        },
+    }
+
+
+def _vm_rows_by_moid(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Listing rows keyed by VM moid, in listing order; rows without a moid are dropped."""
+    return {row["vm"]: row for row in rows if isinstance(row.get("vm"), str)}
+
+
+_REASON_STILL_LISTED_AFTER_MOVE = "still_listed_after_move"
+
+
+def _failure_reasons(failed: list[dict[str, str]]) -> dict[str, str]:
+    """Move error by VM moid."""
+    return {entry["vm"]: entry["error"] for entry in failed}
+
+
+def _remaining_vm_rows(
+    rows: dict[str, dict[str, Any]],
+    reasons: dict[str, str],
+    default_reason: str,
+) -> list[dict[str, Any]]:
+    """Every VM of *rows* (the VMs still on the host), each with the reason it stayed.
+
+    The reason is *reasons*[vm] when the caller knows one (the move error,
+    or the note that a move vm.migrate reported as done did not take the VM
+    off the host), else the power state when the VM was not running (MEHO
+    moves only running VMs), else *default_reason*.
+    """
+    remaining: list[dict[str, Any]] = []
+    for vm_moid, row in rows.items():
+        power_state = row.get("power_state")
+        if vm_moid in reasons:
+            reason = reasons[vm_moid]
+        elif isinstance(power_state, str) and power_state != _VM_POWER_STATE_ON:
+            reason = power_state.lower()
+        else:
+            reason = default_reason
+        remaining.append(
+            {"vm": vm_moid, "name": row.get("name"), "power_state": power_state, "reason": reason}
+        )
+    return remaining
+
+
+def _evacuate_envelope(
+    *,
+    status: str,
+    host_moid: str,
+    migrated: list[str],
+    failed: list[dict[str, str]],
+    remaining: list[dict[str, Any]],
+    maintenance_entered: bool,
+    moved_by: str,
+    maintenance_task: str | None = None,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
         "host": host_moid,
         "migrated_vms": migrated,
         "failed_vms": failed,
-        "maintenance_entered": False,
-        "issues": [
+        "remaining_vms": remaining,
+        "maintenance_entered": maintenance_entered,
+        "maintenance_task": maintenance_task,
+        "moved_by": moved_by,
+        "guidance": guidance,
+    }
+
+
+def _evacuate_aborted(
+    host_moid: str,
+    vms: list[dict[str, Any]],
+    migrated: list[str],
+    failed: list[dict[str, str]],
+) -> dict[str, Any]:
+    """``aborted`` envelope: a VM could not be moved and partial failure is not tolerated.
+
+    The host is not listed again here, so the VMs vm.migrate reported as
+    moved count as migrated and the other VMs of the listing as remaining.
+    """
+    still_on_host = {vm: row for vm, row in _vm_rows_by_moid(vms).items() if vm not in migrated}
+    envelope = _evacuate_envelope(
+        status="aborted",
+        host_moid=host_moid,
+        migrated=migrated,
+        failed=failed,
+        remaining=_remaining_vm_rows(still_on_host, _failure_reasons(failed), "not_attempted"),
+        maintenance_entered=False,
+        moved_by="meho",
+    )
+    envelope["issues"] = [
+        issue(
+            "connector",
+            "error",
+            f"evacuation of host {host_moid!r} stopped: {len(failed)} VM(s) could not "
+            "be migrated; maintenance mode was not entered",
+        )
+    ]
+    return envelope
+
+
+def _evacuate_finished(
+    *,
+    host_moid: str,
+    vms_before: list[dict[str, Any]],
+    vms_after: list[dict[str, Any]],
+    migrated: list[str],
+    failed: list[dict[str, str]],
+    outcome: VimTaskResult,
+    moved_by: str,
+) -> dict[str, Any]:
+    """The truthful answer after the maintenance task ended or MEHO stopped waiting.
+
+    The listing after the task decides: every VM of the first listing that
+    is gone left the host (moved by MEHO or by vCenter), every VM still
+    listed stayed, with its reason. A VM that left is never reported as
+    failed, and a VM vm.migrate reported as moved but that the host still
+    lists is remaining (``still_listed_after_move``), not migrated.
+    """
+    after = _vm_rows_by_moid(vms_after)
+    left = [vm for vm in _vm_rows_by_moid(vms_before) if vm not in after]
+    failed_still_on_host = [entry for entry in failed if entry["vm"] in after]
+    reasons = {vm: _REASON_STILL_LISTED_AFTER_MOVE for vm in migrated if vm in after}
+    reasons.update(_failure_reasons(failed_still_on_host))
+    remaining = _remaining_vm_rows(after, reasons, "not_moved")
+    running_left_behind = [row for row in remaining if row["power_state"] == _VM_POWER_STATE_ON]
+    if outcome.timed_out:
+        status = "timeout"
+    elif running_left_behind:
+        status = "partial"
+    else:
+        status = "evacuated"
+    envelope = _evacuate_envelope(
+        status=status,
+        host_moid=host_moid,
+        migrated=left,
+        failed=failed_still_on_host,
+        remaining=remaining,
+        maintenance_entered=outcome.succeeded,
+        moved_by=moved_by,
+        maintenance_task=outcome.task,
+    )
+    if status == "timeout":
+        envelope["guidance"] = (
+            f"MEHO stopped waiting after {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s, but the "
+            f"maintenance-mode task {outcome.task} still runs on vCenter. The call did not "
+            "fail. Check the task (vmware.tasks.recent) before you work on the host."
+        )
+        envelope["issues"] = [
+            issue(
+                "connector",
+                "warning",
+                f"maintenance-mode task {outcome.task} on host {host_moid!r} still runs "
+                f"after {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s; the host is not yet in "
+                "maintenance mode",
+            )
+        ]
+    elif status == "partial":
+        envelope["issues"] = [
             issue(
                 "connector",
                 "error",
-                f"evacuation of host {host_moid!r} stopped: {len(failed)} VM(s) could not "
-                "be migrated; maintenance mode was not entered",
+                f"host {host_moid!r} entered maintenance but {len(running_left_behind)} "
+                "running VM(s) stayed on it",
             )
-        ],
-    }
+        ]
+    return envelope
 
 
 async def host_evacuate_composite(
@@ -5304,88 +5688,105 @@ async def host_evacuate_composite(
     connector: VmwareRestConnector,
     dispatch_child: DispatchChild,
 ) -> dict[str, Any] | OperationResult:
-    """Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.
+    """Move every running VM off a host, then put the host into maintenance mode.
 
-    Op-id: ``vmware.composite.host.evacuate``. First production composite
-    that calls another composite via ``dispatch_child`` -- that recursion
-    into ``vmware.composite.vm.migrate`` stays on the ``dispatch_child`` path
-    (a registrar-guaranteed ``source_kind="composite"`` row, #2248), while
-    the host's own VM listing read and the maintenance-enter write run
-    directly on the injected ``connector`` session.
+    Op-id: ``vmware.composite.host.evacuate``. Steps (#4895):
+
+    1. Read the host's cluster from its ``parent`` (vim). A host outside a
+       cluster is refused before any change (``not_in_cluster``).
+    2. Read the cluster's DRS config. When DRS is on and fully automated,
+       vCenter moves the running VMs itself as part of the maintenance-mode
+       task, so MEHO sends no per-VM move. Otherwise every running VM is
+       moved through the recursive ``vmware.composite.vm.migrate``
+       (``dispatch_child``, a registrar-guaranteed ``source_kind="composite"``
+       row, #2248) with the cluster from step 1; a VM DRS has no suggestion
+       for is ``no_recommendation`` and, unless ``tolerate_partial_failure``
+       is set, stops the operation before maintenance mode.
+    3. Send ``EnterMaintenanceMode_Task`` with the vSAN data option
+       (``vsan_mode``) and poll it.
+    4. Read the host's VM list again and report which VMs left, which
+       stayed and why, and whether the host is in maintenance mode. A poll
+       timeout is the ``timeout`` status with the task id, not a failure.
     """
     host_moid = params["host"]
     tolerate_partial = bool(params.get("tolerate_partial_failure", False))
+    vsan_mode = str(params.get("vsan_mode") or _VSAN_MODE_DEFAULT)
 
-    vms = await _resolve_vm_list(
+    cluster_moid = await _resolve_host_cluster(
+        connector=connector, target=target, operator=operator, host_moid=host_moid
+    )
+    if cluster_moid is None:
+        return _evacuate_envelope(
+            status="not_in_cluster",
+            host_moid=host_moid,
+            migrated=[],
+            failed=[],
+            remaining=[],
+            maintenance_entered=False,
+            moved_by="none",
+            guidance=(
+                f"host {host_moid!r} is not in a cluster, so there is no DRS to move its VMs. "
+                "Nothing was changed. Move the VMs with vm.migrate and a target_host first, "
+                "or put the host into maintenance mode without moving VMs."
+            ),
+        )
+    drs_config = await _read_cluster_drs_config(
+        connector=connector, target=target, operator=operator, cluster_moid=cluster_moid
+    )
+    drs_moves_vms = _drs_moves_running_vms(drs_config)
+    moved_by = "drs" if drs_moves_vms else "meho"
+
+    vms_before = await _resolve_vm_list(
         connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
     )
 
     migrated: list[str] = []
     failed: list[dict[str, str]] = []
-    for vm_entry in vms:
-        vm_moid = vm_entry.get("vm")
-        if not isinstance(vm_moid, str):
-            continue
-        # Resolve the cluster per-VM rather than once from ``vms[0]``. The
-        # vCenter listing row reports each VM's containing cluster; VMs on
-        # the same host can belong to different clusters when the host
-        # straddles a federation (and the listing payload may simply omit
-        # the field for a row mid-flight). Treat a missing cluster as a
-        # per-VM failure so the recursive migrate doesn't fire against an
-        # empty target — that would short-circuit to ``no_recommendation``
-        # without surfacing the underlying data gap.
-        vm_cluster = vm_entry.get("cluster")
-        if not isinstance(vm_cluster, str) or not vm_cluster:
-            failed.append({"vm": vm_moid, "error": "missing_cluster"})
+    if not drs_moves_vms:
+        for vm_moid, vm_entry in _vm_rows_by_moid(vms_before).items():
+            if vm_entry.get("power_state") != _VM_POWER_STATE_ON:
+                continue
+            migrate_result = await dispatch_child(
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_COMPOSITE_VM_MIGRATE,
+                params={"vm": vm_moid, "cluster": cluster_moid},
+            )
+            succeeded, err_text = _classify_vm_migrate_outcome(migrate_result)
+            if succeeded:
+                migrated.append(vm_moid)
+                continue
+            failed.append({"vm": vm_moid, "error": err_text})
             if not tolerate_partial:
-                return _evacuate_aborted(host_moid, migrated, failed)
-            continue
-        migrate_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_COMPOSITE_VM_MIGRATE,
-            params={"vm": vm_moid, "cluster": vm_cluster},
-        )
-        succeeded, err_text = _classify_vm_migrate_outcome(migrate_result)
-        if succeeded:
-            migrated.append(vm_moid)
-            continue
-        failed.append({"vm": vm_moid, "error": err_text})
-        if not tolerate_partial:
-            return _evacuate_aborted(host_moid, migrated, failed)
+                return _evacuate_aborted(host_moid, vms_before, migrated, failed)
 
-    gate, reason = await _host_maintenance_vim_step(
+    outcome = await _run_host_maintenance_task(
         connector=connector,
         target=target,
         operator=operator,
         host_moid=host_moid,
         op_id=_OP_ENTER_MAINTENANCE_TASK,
+        maintenance_spec=_vsan_maintenance_spec(vsan_mode),
     )
-    if gate is not None:
-        return gate
-    if reason is not None:
-        # The maintenance-enter is the load-bearing final step; a task
-        # fault / poll timeout raises so the dispatcher wraps it
-        # ``connector_error`` (mirrors the pre-#2970 propagate-on-HTTPError
-        # semantics of the synchronous REST fiction).
+    if isinstance(outcome, OperationResult):
+        return outcome
+    if outcome.state == TASK_STATE_ERROR:
+        # A faulted maintenance task is a failed call; the dispatcher wraps
+        # it ``connector_error`` (unchanged from #2970). A poll timeout is
+        # reported below instead.
+        reason = _maintenance_task_failure(outcome, _OP_ENTER_MAINTENANCE_TASK, host_moid)
         raise RuntimeError(f"host.evacuate: {reason}")
-    envelope: dict[str, Any] = {
-        "status": "partial" if failed else "evacuated",
-        "host": host_moid,
-        "migrated_vms": migrated,
-        "failed_vms": failed,
-        "maintenance_entered": True,
-    }
-    if failed:
-        # Even when tolerated, VMs left behind mean the evacuation is incomplete.
-        envelope["issues"] = [
-            issue(
-                "connector",
-                "error",
-                f"host {host_moid!r} entered maintenance but {len(failed)} VM(s) "
-                "could not be migrated off it",
-            )
-        ]
-    return envelope
+    vms_after = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
+    )
+    return _evacuate_finished(
+        host_moid=host_moid,
+        vms_before=vms_before,
+        vms_after=vms_after,
+        migrated=migrated,
+        failed=failed,
+        outcome=outcome,
+        moved_by=moved_by,
+    )
 
 
 # ===========================================================================
@@ -8935,39 +9336,35 @@ async def vm_device_cdrom_composite(
         "guidance": None,
     }
 
+    cdrom_params: dict[str, Any] = {"vm": vm_moid, "cdrom": cdrom_id}
+    done: dict[str, Any]
     if action == "remove":
-        gate, _ = await _write_sub_op(
-            connector, target, operator, _OP_DELETE_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+        sub_op, done = _OP_DELETE_VM_CDROM, {"status": "removed"}
+    elif action == "disconnect":
+        sub_op, done = _OP_DISCONNECT_VM_CDROM, {"status": "disconnected"}
+    else:
+        backing = params.get("backing")
+        if not isinstance(backing, dict):
+            return {
+                **base,
+                "status": "invalid_request",
+                "guidance": (
+                    "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}"
+                ),
+            }
+        sub_op, done = _OP_UPDATE_VM_CDROM, {"status": "updated", "requested_backing": backing}
+        cdrom_params["backing"] = backing
+    try:
+        gate, _ = await _write_sub_op(connector, target, operator, sub_op, cdrom_params)
+    except httpx.TimeoutException:
+        from meho_backplane.connectors.vmware_rest.vm_wait_state import (
+            device_change_result_unknown,
         )
-        if gate is not None:
-            return gate
-        return {**base, "status": "removed"}
 
-    if action == "disconnect":
-        gate, _ = await _write_sub_op(
-            connector, target, operator, _OP_DISCONNECT_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
-        )
-        if gate is not None:
-            return gate
-        return {**base, "status": "disconnected"}
-
-    backing = params.get("backing")
-    if not isinstance(backing, dict):
-        return {
-            **base,
-            "status": "invalid_request",
-            "guidance": "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}",
-        }
-    gate, _ = await _write_sub_op(
-        connector,
-        target,
-        operator,
-        _OP_UPDATE_VM_CDROM,
-        {"vm": vm_moid, "cdrom": cdrom_id, "backing": backing},
-    )
+        return {**base, **await device_change_result_unknown(connector, operator, target, vm_moid)}
     if gate is not None:
         return gate
-    return {**base, "status": "updated", "requested_backing": backing}
+    return {**base, **done}
 
 
 # ===========================================================================

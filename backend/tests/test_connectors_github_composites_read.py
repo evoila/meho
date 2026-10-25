@@ -35,6 +35,8 @@ behaviour -- parity is the acceptance gate):
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -46,6 +48,7 @@ from meho_backplane.connectors.github.composites._read import (
     _summarize_checks,
     _summarize_reviews,
     pr_status_summary_composite,
+    repo_view_composite,
 )
 
 
@@ -494,3 +497,88 @@ def test_summarize_reviews_no_reviews() -> None:
 def test_summarize_reviews_unknown_shape() -> None:
     assert _summarize_reviews(None) == "unknown"
     assert _summarize_reviews("not-a-list") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# gh.composite.repo_view
+# ---------------------------------------------------------------------------
+
+_REPO_VIEW_RESPONSE = Path(__file__).parent / "data" / "github_repo_view_response.json"
+
+
+def _saved_repo_payload() -> dict[str, Any]:
+    return dict(json.loads(_REPO_VIEW_RESPONSE.read_text(encoding="utf-8")))
+
+
+class _RepoSession:
+    """Session stub that answers one GET with a saved payload or raises."""
+
+    def __init__(self, payload: Any = None, error: Exception | None = None) -> None:
+        self.payload = payload
+        self.error = error
+        self.paths: list[str] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return path
+
+    async def _get_json(self, target: Any, path: str, *, operator: Operator) -> Any:
+        self.paths.append(path)
+        if self.error is not None:
+            raise self.error
+        return self.payload
+
+
+async def _run_repo_view(session: _RepoSession) -> dict[str, Any]:
+    return await repo_view_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"owner": "example-org", "repo": "example-repo"},
+        connector=session,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_repo_view_returns_only_the_summary_fields() -> None:
+    """The saved repository answer is cut down to the documented summary."""
+    session = _RepoSession(payload=_saved_repo_payload())
+
+    result = await _run_repo_view(session)
+
+    assert session.paths == ["/repos/example-org/example-repo"]
+    assert result == {
+        "name": "example-repo",
+        "full_name": "example-org/example-repo",
+        "owner": "example-org",
+        "owner_type": "Organization",
+        "visibility": "public",
+        "default_branch": "main",
+        "archived": False,
+        "topics": ["example", "python"],
+        "open_issues_count": 42,
+        "pushed_at": "2026-10-23T14:47:18Z",
+        "permissions": {"read": True, "write": True, "admin": False},
+    }
+
+
+@pytest.mark.asyncio
+async def test_repo_view_permissions_is_null_when_github_omits_them() -> None:
+    payload = _saved_repo_payload()
+    del payload["permissions"]
+    del payload["topics"]
+
+    result = await _run_repo_view(_RepoSession(payload=payload))
+
+    assert result["permissions"] is None
+    assert result["topics"] == []
+
+
+@pytest.mark.asyncio
+async def test_repo_view_http_error_propagates() -> None:
+    with pytest.raises(httpx.HTTPStatusError):
+        await _run_repo_view(_RepoSession(error=_http_error(404)))
+
+
+@pytest.mark.asyncio
+async def test_repo_view_rejects_a_payload_that_is_not_an_object() -> None:
+    with pytest.raises(RuntimeError, match="repo_view"):
+        await _run_repo_view(_RepoSession(payload=["not", "an", "object"]))

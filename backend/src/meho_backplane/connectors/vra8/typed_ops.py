@@ -49,6 +49,8 @@ from meho_backplane.connectors.vra8._response_schemas import (
     DEPLOYMENT_RESPONSE,
     PROJECT_PAGE_RESPONSE,
 )
+from meho_backplane.connectors.vra8.api_file import DOCUMENTATION_PATHS, PATH_PATTERN
+from meho_backplane.connectors.vra8.api_file import OP_ID as API_FILE_OP_ID
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -68,6 +70,7 @@ _log = structlog.get_logger(__name__)
 # operator's migration drill: what is running (inventory) -> what defines it (content).
 _GROUP_INVENTORY = "vcfa-vra8-inventory"
 _GROUP_CONTENT = "vcfa-vra8-content"
+_GROUP_API_FILES = "vcfa-vra8-api-files"
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,14 @@ VRA8_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "templates a migration must rebuild (vcfa.vra8.blueprint.list), and Service "
         "Broker catalog items, the self-service offers to publish again "
         "(vcfa.vra8.catalog-item.list). All reads."
+    ),
+    _GROUP_API_FILES: (
+        "This group holds one read: vcfa.vra8.api_file.get. It reads one API "
+        "description page or file that the Aria Automation 8 appliance serves (the "
+        "API landing pages, the Swagger file of one service, or the reference of the "
+        "Orchestrator inside the appliance), with its size, SHA-256, and the version "
+        "and build of the appliance. Use it to get the 8.18 API files, which no "
+        "vendor download contains."
     ),
 }
 
@@ -169,11 +180,114 @@ _DEPLOYMENT_GET_PARAMS: dict[str, Any] = {
     "examples": [{"deployment_id": "<deployment-id>"}],
 }
 
+#: The one-file read parameter object. The ``pattern`` is the path rule of
+#: :mod:`.api_file`, so the dispatcher refuses a bad path before the handler runs;
+#: the handler checks it again. The example is the vendor's documented API landing
+#: page, a fixed public path: the rule leaves no room for a placeholder character.
+_API_FILE_GET_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 512,
+            "pattern": PATH_PATTERN,
+            "description": (
+                "Path of one documentation page or API description file on the target "
+                "appliance: /automation/api-docs or /automation-ui/api-docs (the API "
+                "landing pages), /<service>/api/swagger and every path under it, "
+                "/vco/api/docs and every path under it, or a Swagger or OpenAPI file at "
+                "its usual place (a part named api-docs, swagger-resources or "
+                "swagger-config, or a file named swagger.json, swagger.yaml, "
+                "openapi.json or openapi.yaml). Only letters, digits and . _ ~ / -, no "
+                "'..', and a query of only 'group' and 'apiVersion'."
+            ),
+        },
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+    "examples": [{"path": DOCUMENTATION_PATHS[0]}],
+}
+
+_TEXT_OR_NULL = ["string", "null"]
+
+#: The one-file read response: the scalar file fields, the text in parts, and the
+#: version fields. The text parts make it set-shaped, so a large answer goes behind
+#: a result handle.
+_API_FILE_GET_RESPONSE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "description": "The path that was read."},
+        "status": {"type": "integer", "description": "HTTP status of the GET."},
+        "content_type": {
+            "type": _TEXT_OR_NULL,
+            "description": "Content-Type header of the answer.",
+        },
+        "redirect_path": {
+            "type": _TEXT_OR_NULL,
+            "description": (
+                "For a 3xx answer: the path the redirect points to, or scheme://host/path "
+                "for another host (not followed)."
+            ),
+        },
+        "size": {
+            "type": ["integer", "null"],
+            "description": "Size of the checked copy in bytes; null when the status is not 2xx.",
+        },
+        "sha256": {
+            "type": _TEXT_OR_NULL,
+            "description": ("SHA-256 (hex) of the checked copy; null when the status is not 2xx."),
+        },
+        "secrets_replaced": {
+            "type": "integer",
+            "description": (
+                "How many values under a secret name (password, token, licence key, ...) "
+                "or other secret text were replaced with a [REDACTED:...] placeholder "
+                "in the copy."
+            ),
+        },
+        "parts": {"type": "integer", "description": "How many text parts the file has."},
+        "text_parts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Position of the part."},
+                    "text": {"type": "string", "description": "At most 64 KiB of the copy."},
+                },
+                "required": ["index", "text"],
+            },
+            "description": (
+                "The text of the checked copy, in order. Joined, they are the copy; its "
+                "SHA-256 equals sha256."
+            ),
+        },
+        "version": {
+            "type": _TEXT_OR_NULL,
+            "description": "Product version from the Orchestrator inside the appliance.",
+        },
+        "build": {
+            "type": _TEXT_OR_NULL,
+            "description": "Build number from the Orchestrator inside the appliance.",
+        },
+        "iaas_api_version": {
+            "type": _TEXT_OR_NULL,
+            "description": "The IaaS API date label (latestApiVersion), not the build.",
+        },
+        "version_error": {
+            "type": _TEXT_OR_NULL,
+            "description": "Why version, build or iaas_api_version is empty; null when all worked.",
+        },
+    },
+    "required": ["path", "status", "parts", "text_parts"],
+}
+
 _READ_TAGS = ("read-only", "vcfa", "vra8", "vra")
 
 
 #: The typed ops :class:`Vra8Connector` registers at lifespan startup — the 6-op
-#: vRA 8 migration-inventory read core (#3058). Every op is safe, read-only, and
+#: vRA 8 migration-inventory read core (#3058) plus the API description read
+#: ``vcfa.vra8.api_file.get`` (:mod:`.api_file`). Every op is safe, read-only, and
 #: ungated; the wire path/type lives in the handler (see ``.typed_reads`` /
 #: ``._paths``), so the descriptor rows carry ``method=None`` / ``path=None`` (typed
 #: convention).
@@ -284,6 +398,25 @@ VRA8_TYPED_OPS: tuple[Vra8TypedOp, ...] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=VRA8_READ_LLM_INSTRUCTIONS["vcfa.vra8.catalog-item.list"],
+    ),
+    # ---- API description files ----
+    Vra8TypedOp(
+        op_id=API_FILE_OP_ID,
+        handler_attr="api_file_get",
+        summary="Read one API description page or file that an Aria Automation 8 appliance serves.",
+        description=(
+            "Sends one GET with the connector's login to a documentation path (a landing "
+            "page, a Swagger file or the Orchestrator reference) and returns its status, "
+            "content type, size, SHA-256, version and build, and the text in parts with "
+            "secret values replaced. Does not follow redirects. Read-only."
+        ),
+        parameter_schema=_API_FILE_GET_PARAMS,
+        response_schema=_API_FILE_GET_RESPONSE,
+        group_key=_GROUP_API_FILES,
+        tags=(*_READ_TAGS, "api-description", "swagger", "orchestrator"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=VRA8_READ_LLM_INSTRUCTIONS[API_FILE_OP_ID],
     ),
 )
 

@@ -82,6 +82,7 @@ func TestNewRootCmdRegistersAllVerbs(t *testing.T) {
 		"who-touched": false,
 		"my-recent":   false,
 		"replay":      false,
+		"trace":       false,
 	}
 	for _, sub := range root.Commands() {
 		// cobra splits `Use` on the first space to render <args>

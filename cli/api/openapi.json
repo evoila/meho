@@ -4594,7 +4594,7 @@
           "connectors"
         ],
         "summary": "Get Review Endpoint",
-        "description": "Return the full review payload for *connector_id*.\n\nOperator-level read: any operator can inspect a connector their\ntenant owns plus built-ins. Editing the payload requires\n``tenant_admin`` via the PATCH routes. Cross-tenant /\nnon-existent connector \u2192 404 (the deliberate conflation). A label\nthat resolves to a built-in-only row still returns 200 (the\nG0.13-T5 #1135 global fallback); a label that maps to **both** a\ntenant row and a built-in row \u2192 409 ``connector_scope_ambiguous``\nwith the candidate list (G0.26-T1 #1801), identical to the write\nsibling ``POST /{id}/enable-reads`` via the shared service resolver.\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nmakes that 409 actionable: it resolves directly to the named scope\nand skips the ambiguity probe, so an operator who has both rows can\ntarget the tenant-curated one (``prefer=tenant``) or the built-in\none (``prefer=builtin``). Omitted \u2192 the fail-loud default.",
+        "description": "Return the full review payload for *connector_id*.\n\nOperator-level read: any operator can inspect a connector their\ntenant owns plus built-ins. Editing the payload requires\n``tenant_admin`` via the PATCH routes. Cross-tenant /\nnon-existent connector \u2192 404 (the deliberate conflation). A label\nthat resolves to a built-in-only row still returns 200 (the\nG0.13-T5 #1135 global fallback); a label that maps to **both** a\ntenant row and a built-in row \u2192 409 ``connector_scope_ambiguous``\nwith the candidate list (G0.26-T1 #1801), identical to the write\nsibling ``POST /{id}/enable-reads`` via the shared service resolver.\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nmakes that 409 actionable: it resolves directly to the named scope\nand skips the ambiguity probe, so an operator who has both rows can\ntarget the tenant-curated one (``prefer=tenant``) or the built-in\none (``prefer=builtin``). ``prefer=legacy`` shows the tenant's old\ncopy stored under a former product name (#4889), the copy ``DELETE``\nremoves first. Omitted \u2192 the fail-loud default.",
         "operationId": "get_review_endpoint_api_v1_connectors__connector_id__review_get",
         "parameters": [
           {
@@ -4613,14 +4613,15 @@
             "schema": {
               "enum": [
                 "tenant",
-                "builtin"
+                "builtin",
+                "legacy"
               ],
               "type": "string",
               "nullable": true,
-              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
+              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
               "title": "Prefer"
             },
-            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response."
+            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response."
           },
           {
             "name": "authorization",
@@ -4868,14 +4869,15 @@
             "schema": {
               "enum": [
                 "tenant",
-                "builtin"
+                "builtin",
+                "legacy"
               ],
               "type": "string",
               "nullable": true,
-              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
+              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
               "title": "Prefer"
             },
-            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response."
+            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response."
           },
           {
             "name": "authorization",
@@ -23249,6 +23251,30 @@
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
       },
+      "ApprovalsStatus": {
+        "properties": {
+          "custody": {
+            "type": "string",
+            "title": "Custody"
+          },
+          "effective_posture": {
+            "type": "string",
+            "title": "Effective Posture"
+          },
+          "delegated_decision_posture": {
+            "type": "string",
+            "title": "Delegated Decision Posture"
+          }
+        },
+        "type": "object",
+        "required": [
+          "custody",
+          "effective_posture",
+          "delegated_decision_posture"
+        ],
+        "title": "ApprovalsStatus",
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value."
+      },
       "ApproveRequestBody": {
         "properties": {
           "params": {
@@ -23804,6 +23830,11 @@
           "event_class": {
             "$ref": "#/components/schemas/AuditEventClass",
             "nullable": true
+          },
+          "has_trace": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Has Trace"
           },
           "limit": {
             "type": "integer",
@@ -26759,7 +26790,7 @@
           "enabled_operation_count"
         ],
         "title": "ConnectorListItem",
-        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho_connector_list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`.\n\n``scope`` (#2474) is the named projection of ``tenant_id`` \u2014\n``\"builtin\"`` for ``tenant_id IS NULL`` rows, ``\"tenant\"`` for\ntenant-curated ones. It is additive and fully derivable from\n``tenant_id``, but surfacing it directly lets a consumer key on it\nwithout re-deriving. ``shadowed_by_tenant_scope`` is the precedence\nmarker: within a single response, a ``\"builtin\"`` row carries\n``True`` when a ``\"tenant\"`` row shares its ``connector_id`` \u2014 i.e.\nthe built-in copy is *shadowed* by a tenant-scoped twin that\n:func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves\nfirst (tenant-wins dispatch precedence). The two fields exist because\n``connector_id`` encodes only ``(impl_id, version)``, so scope twins\nfrom the #2085 re-ingest trap render the same id twice; the marker\ntells an agent exactly which row ``call_operation`` dispatches to and\nlets it count unique connectors. Both default to the built-in,\nunshadowed reading (``scope=\"builtin\"``, ``shadowed_by_tenant_scope\n=False``) so existing construction call sites (tests, MCP fakes)\nkeep working; the listing sets ``scope`` explicitly per row and\nstamps ``shadowed_by_tenant_scope`` in a post-pass over the full\nresponse. Invariant: within one response no two rows share\n``(connector_id, scope)``. See :data:`ConnectorScope`."
+        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho_connector_list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector) \u2014 with one exception: a tenant row stored under\na former product name (``vcf-logs`` rows for ``vrli-rest-9.0``,\n#4889) can never be called, so it ships ``dispatchable=False`` plus\na ``next_step`` naming ``meho connector delete <id>`` as the\nclean-up. For registered rows the hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`.\n\n``scope`` (#2474) is the named projection of ``tenant_id`` \u2014\n``\"builtin\"`` for ``tenant_id IS NULL`` rows, ``\"tenant\"`` for\ntenant-curated ones. It is additive and fully derivable from\n``tenant_id``, but surfacing it directly lets a consumer key on it\nwithout re-deriving. ``shadowed_by_tenant_scope`` is the precedence\nmarker: within a single response, a ``\"builtin\"`` row carries\n``True`` when a ``\"tenant\"`` row shares its ``connector_id`` **and**\n``product`` (the rule dispatch uses; a tenant row under a former\nproduct name, #4889, shares the id but shadows nothing) \u2014 i.e.\nthe built-in copy is *shadowed* by a tenant-scoped twin that\n:func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves\nfirst (tenant-wins dispatch precedence). The two fields exist because\n``connector_id`` encodes only ``(impl_id, version)``, so scope twins\nfrom the #2085 re-ingest trap render the same id twice; the marker\ntells an agent exactly which row ``call_operation`` dispatches to and\nlets it count unique connectors. Both default to the built-in,\nunshadowed reading (``scope=\"builtin\"``, ``shadowed_by_tenant_scope\n=False``) so existing construction call sites (tests, MCP fakes)\nkeep working; the listing sets ``scope`` explicitly per row and\nstamps ``shadowed_by_tenant_scope`` in a post-pass over the full\nresponse. Invariant: within one response no two rows share\n``(connector_id, scope)``, with one exception: a tenant row stored\nunder a former product name (#4889) sits next to the tenant's\ncurrent copy of the same id; ``product`` tells the two apart. See\n:data:`ConnectorScope`."
       },
       "ConnectorListResponse": {
         "properties": {
@@ -28033,6 +28064,21 @@
             "type": "boolean",
             "nullable": true,
             "title": "Migrated"
+          },
+          "revision": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revision"
+          },
+          "head": {
+            "type": "string",
+            "nullable": true,
+            "title": "Head"
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true,
+            "title": "Detail"
           }
         },
         "type": "object",
@@ -28040,7 +28086,7 @@
           "migrated"
         ],
         "title": "DbStatus",
-        "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe."
+        "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe.\n\n``revision``, ``head`` and ``detail`` (#4830) carry the probe's\nvalues, so an operator can confirm an upgrade from ``meho status``\nwithout a shell into the pod: ``revision`` is the revision stamped\nin the database, ``head`` the revision this build expects, and\n``detail`` the same text ``/ready`` shows for the ``db`` check.\n``revision`` is ``None`` when the database has no revision or could\nnot be read; ``head`` is ``None`` when the migration scripts could\nnot be loaded. After a rollback ``revision`` is newer than ``head``\nwhile ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,\n\"Rollback contract\"). The defaults keep older response decoders\nworking."
       },
       "DecideRequestBody": {
         "properties": {
@@ -29490,6 +29536,33 @@
         "title": "EventSourceUpdate",
         "description": "PATCH body. Every field optional; ``name`` / ``slug`` are absent.\n\n``name`` and ``slug`` are immutable (rename or re-slug = delete +\nre-create) because ``slug`` is a live routing key external senders are\nalready pointed at. Sending ``secret`` rotates the Vault secret in\nplace at the source's existing ``secret_ref`` -- a new KV-v2 version at\nthe same path, so the ingest path reads the new value on its next\nlookup with no downtime (#2880 acceptance criterion 2). Omitting\n``secret`` leaves the stored secret untouched."
       },
+      "FeatureStatus": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "missing_env": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Env",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "configured"
+        ],
+        "title": "FeatureStatus",
+        "description": "One gated feature from ``/ready``'s ``features`` block (#4830).\n\n``configured`` is the feature's state; ``missing_env`` lists the\nnames of the settings it still needs. Names only, never values."
+      },
       "FilterPredicate": {
         "properties": {
           "field": {
@@ -30008,6 +30081,22 @@
             "type": "string",
             "title": "Sandbox Mode",
             "default": "off"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/ReadinessStatus",
+            "nullable": true
+          },
+          "approvals": {
+            "$ref": "#/components/schemas/ApprovalsStatus",
+            "nullable": true
+          },
+          "features": {
+            "items": {
+              "$ref": "#/components/schemas/FeatureStatus"
+            },
+            "type": "array",
+            "title": "Features",
+            "default": []
           }
         },
         "type": "object",
@@ -30018,7 +30107,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them."
       },
       "InCompare": {
         "properties": {
@@ -30655,7 +30744,7 @@
           "db"
         ],
         "title": "LivenessResponse",
-        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret."
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault."
       },
       "ManualStep": {
         "properties": {
@@ -32018,6 +32107,52 @@
         ],
         "title": "ReadDocsRequest",
         "description": "POST body for ``/api/v1/read_docs``, the same fields as the MCP tool.\n\n``collection`` is typed optional so a missing value gets the docs\nsurfaces' own 422 naming the mandatory scope. ``product`` / ``version``\nare needed only on a collection whose scope gates send hard filters: the\nhandle is bound to the filters of the hit's search. So a caller passes\nthem only for a hit from a single-collection search that used them, and\nleaves them out for a hit from a cross-collection search, which ignores\nthem. ``extra=\"forbid\"`` rejects unknown fields."
+      },
+      "ReadinessCheck": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "ok"
+        ],
+        "title": "ReadinessCheck",
+        "description": "One readiness check, as ``/ready`` reports it (#4830)."
+      },
+      "ReadinessStatus": {
+        "properties": {
+          "ready": {
+            "type": "boolean",
+            "title": "Ready"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/ReadinessCheck"
+            },
+            "type": "array",
+            "title": "Checks",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "ready"
+        ],
+        "title": "ReadinessStatus",
+        "description": "The ``/ready`` verdict and its checks (#4830).\n\nBuilt from :func:`meho_backplane.health.readiness_snapshot`, the\nhelper the web console's dashboard already uses, so ``meho status``\nand ``meho_status`` show the same checks as ``/ready`` \u2014 which a\ndeployment may block at its ingress, and which hides its\n``features`` block from callers without the metrics token."
       },
       "ReassignRunRequest": {
         "properties": {
@@ -35361,6 +35496,7 @@
               "proxmox",
               "rabbitmq",
               "rke2",
+              "salt",
               "sddc",
               "srm",
               "tempo",
@@ -35368,7 +35504,9 @@
               "vcd",
               "vcfa",
               "vmware",
+              "vr",
               "vrli",
+              "vro",
               "vrops",
               "windns",
               "winsrv",

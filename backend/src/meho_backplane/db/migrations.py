@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
@@ -55,8 +56,10 @@ from meho_backplane.db.engine import get_engine
 from meho_backplane.health import ProbeResult
 
 __all__ = [
+    "DbMigrationStatus",
     "alembic_config",
     "db_migration_probe",
+    "db_migration_status",
     "find_alembic_ini",
 ]
 
@@ -238,6 +241,68 @@ def _check_pgvector_extension(connection: Connection) -> bool:
     return result.scalar_one_or_none() is not None
 
 
+@dataclass(frozen=True)
+class DbMigrationStatus:
+    """The probe verdict plus the two revisions it compared (#4830).
+
+    ``probe`` is the :class:`~meho_backplane.health.ProbeResult` that
+    ``/ready`` shows. ``revision`` is the revision stamped in the
+    database (``None`` when the ``alembic_version`` table is missing or
+    the database could not be read). ``head`` is the newest revision
+    this build ships (``None`` when the migration scripts could not be
+    loaded). ``/api/v1/health`` returns both as values, so the CLI and
+    the MCP tool never parse the detail text.
+    """
+
+    probe: ProbeResult
+    revision: str | None
+    head: str | None
+
+
+async def db_migration_status() -> DbMigrationStatus:
+    """Run the migration probe and keep the revisions it compared.
+
+    Same I/O and same verdict as :func:`db_migration_probe` (which
+    delegates here). ``head`` is kept when the scripts loaded but the
+    database read failed, so a caller can still say which revision this
+    build expects. The function never raises.
+    """
+    pgvector_ok = True  # default for non-PG dialects; PG branch overrides below
+    head: str | None = None
+    try:
+        cfg = alembic_config()
+        script = ScriptDirectory.from_config(cfg)
+        head = script.get_current_head()
+        engine = get_engine()
+        async with engine.connect() as conn:
+            current = await conn.run_sync(_read_current_revision)
+            if engine.dialect.name == "postgresql":
+                pgvector_ok = await conn.run_sync(_check_pgvector_extension)
+        # The verdict stays inside the try: its db-ahead branch walks
+        # the script directory again (``_revision_known``), and an
+        # unexpected error there must fold into ``check_failed`` —
+        # the probe never raises (Task #27 AC #3).
+        return DbMigrationStatus(
+            probe=_revision_verdict(script, current, head, pgvector_ok),
+            revision=current,
+            head=head,
+        )
+    except Exception as exc:
+        _log.warning(
+            "db_migration_probe_failed",
+            extra={"exc_type": type(exc).__name__},
+        )
+        return DbMigrationStatus(
+            probe=ProbeResult(
+                name="db",
+                ok=False,
+                detail=f"check_failed: {type(exc).__name__}",
+            ),
+            revision=None,
+            head=head,
+        )
+
+
 async def db_migration_probe() -> ProbeResult:
     """Compare the DB's Alembic revision to the code's head.
 
@@ -287,33 +352,11 @@ async def db_migration_probe() -> ProbeResult:
     The function is ``async`` because the canonical SQLAlchemy 2.x
     pattern reads the version through an ``AsyncEngine.connect()`` /
     ``run_sync`` pair; it is registered as an async probe by
-    :mod:`meho_backplane.main`'s lifespan hook.
+    :mod:`meho_backplane.main`'s lifespan hook. The work itself lives in
+    :func:`db_migration_status`, which also keeps the two revisions for
+    ``/api/v1/health`` (#4830).
     """
-    pgvector_ok = True  # default for non-PG dialects; PG branch overrides below
-    try:
-        cfg = alembic_config()
-        script = ScriptDirectory.from_config(cfg)
-        head = script.get_current_head()
-        engine = get_engine()
-        async with engine.connect() as conn:
-            current = await conn.run_sync(_read_current_revision)
-            if engine.dialect.name == "postgresql":
-                pgvector_ok = await conn.run_sync(_check_pgvector_extension)
-        # The verdict stays inside the try: its db-ahead branch walks
-        # the script directory again (``_revision_known``), and an
-        # unexpected error there must fold into ``check_failed`` —
-        # the probe never raises (Task #27 AC #3).
-        return _revision_verdict(script, current, head, pgvector_ok)
-    except Exception as exc:
-        _log.warning(
-            "db_migration_probe_failed",
-            extra={"exc_type": type(exc).__name__},
-        )
-        return ProbeResult(
-            name="db",
-            ok=False,
-            detail=f"check_failed: {type(exc).__name__}",
-        )
+    return (await db_migration_status()).probe
 
 
 def _revision_verdict(

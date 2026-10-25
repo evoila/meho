@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import pytest
 
+from meho_backplane.connectors.srm import SrmConnector
 from meho_backplane.connectors.srm import api_file as _api_file_module
-from meho_backplane.connectors.srm import connector as _connector_module
 from tests._spec_shelf import (
     assert_op_ids_served,
     openapi_served_op_ids,
@@ -36,19 +36,12 @@ from tests._spec_shelf import (
 #: One ``(shelf directory, file)`` per SRM version with a pinned file.
 _SPEC_FILES = (("vcf-protection-and-recovery-9.1", "recovery-srm-v2.yaml"),)
 
-#: HTTP method of each hand-coded API call, by module constant name.
-_METHODS = {"_SESSION_PATH": "POST", "_SERVER_INFO_PATH": "GET"}
-
 
 def _declared_api_op_ids() -> set[str]:
     """The hand-coded API calls, relative to the API base, as ``METHOD:/path``."""
-    base = _connector_module.API_BASE
-    declared = set()
-    for name, value in vars(_connector_module).items():
-        if not (name.endswith("_PATH") and isinstance(value, str) and value.startswith(base)):
-            continue
-        declared.add(f"{_METHODS[name]}:{value.removeprefix(base)}")
-    return declared
+    base = SrmConnector.api_base
+    calls = {"POST": SrmConnector.session_path, "GET": SrmConnector.info_path}
+    return {f"{method}:{path.removeprefix(base)}" for method, path in calls.items()}
 
 
 def test_srm_hand_coded_op_id_manifest_is_pinned() -> None:

@@ -12,7 +12,7 @@ meho-internal#320). #3499 adds a **per-tenant narrowing** override —
 path.
 
 It is an **operator-plane** surface: REST + CLI only, gated at the
-`tenant_admin` tier. It is deliberately **not** on the 25-tool agent working
+`tenant_admin` tier. It is deliberately **not** on the agent working
 surface and has **no MCP tool** — narrowing a tenant's mail reach is a
 governance decision, an operator action, not an agent one. (Simplest correct
 answer per postulate 5: REST + CLI, no MCP tool at all — the same posture as the

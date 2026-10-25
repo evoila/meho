@@ -203,6 +203,7 @@ take `event_class` as a required argument.
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
 | `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
 | `event_class` | `AuditEventClass \| None` | `audit_log.event_class = :value` — exact match on the closed set (#3733). `None` applies no class filter, so a query without it returns every class, the same rows as before. Old rows match `legacy_request`. |
+| `has_trace` | `bool \| None` | `True` keeps only the rows the trace route returns a trace for: `event_class = operation_execution` AND `EXISTS` a `dispatch_trace` row with the same `audit_id` and the caller's `tenant_id` (#4855). `False` keeps the other rows. `None` applies no filter. The unique index `dispatch_trace_audit_id_idx` makes the check cheap. On the REST body (`AuditQueryRequest`) and used by `meho audit trace list`; not on the MCP input schema. |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 
@@ -473,8 +474,9 @@ unchanged (the substrate's first WHERE clause is always
 `audit_log.tenant_id`; `show` → 404 on a foreign
 `audit_id`, per the module and `show` docstrings in
 `backend/src/meho_backplane/api/v1/audit.py`), and dispatch rows carry
-`payload.params_hash` — a SHA-256 over the canonicalised params
-(`operations/_validate.py::compute_params_hash`) — instead of the raw
+`payload.params_hash` — a keyed hash of the canonicalised params with
+secret-named values left out
+(`operations/_validate.py::compute_audit_params_hash`) — instead of the raw
 params, so a cross-principal-visible row never exposes sensitive
 operation arguments. Same shelf as the `who-touched` shortcut and the
 aggregate-only broadcast redaction; same category-2 doc-resolution
@@ -526,6 +528,12 @@ Tenant scoping mirrors the REST surface: `operator.tenant_id` comes
 from the validated JWT (resolved by `verify_mcp_jwt_and_bind`); the
 arguments dict never carries `tenant_id` (rejected by the schema).
 Cross-tenant probes are structurally impossible.
+
+The input schema accepts the same filters as the REST body, including
+`event_class` (#4807). Its `enum` is built from `AuditEventClass` plus
+null, so the schema and the substrate cannot drift apart. A test checks
+that every filter the tool's help text names is a property of the
+schema.
 
 Audit + broadcast contract:
 

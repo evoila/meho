@@ -55,6 +55,8 @@ Slug derivation: the slug is the filename stem (`vcenter-9.0-snapshot-revert.md`
 
 To skip drafts or scratch files, drop a `.kb-ignore` file at the kb root — one glob pattern per line, `#` for comments. A bare directory name (`drafts`) skips everything beneath it.
 
+The ingest reads only regular files inside the folder. It skips links (to files or folders) and special files such as pipes. For each skipped file it writes one `kb_file_skipped` line to the server log. If your kb content arrives as links, copy it into a normal folder first. For example, a Kubernetes ConfigMap volume shows its files as links.
+
 ### 4. Verify ingestion
 
 ```bash

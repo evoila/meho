@@ -32,7 +32,6 @@ import respx
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.api_file_read import ApiFileRedactedError
 from meho_backplane.connectors._shared.api_file_secrets import REDACTED, check_api_file
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
@@ -751,22 +750,69 @@ _FILE_WITH_A_LABELLED_SECRET = (
 )
 
 
-async def test_file_whose_text_redaction_would_change_is_refused() -> None:
+def _checked_text(answer: dict[str, Any]) -> str:
+    """The joined parts; check that ``size`` and ``sha256`` describe them."""
+    joined = _joined(answer)
+    assert answer["size"] == len(joined)
+    assert answer["sha256"] == hashlib.sha256(joined).hexdigest()
+    return joined.decode()
+
+
+async def test_labelled_secret_in_a_description_comes_back_replaced_and_counted() -> None:
+    """MEHO's general rules run on each parsed value, so the read returns the file."""
     body = _FILE_WITH_A_LABELLED_SECRET.encode()
     assert _redact_like_the_dispatcher({"text": _FILE_WITH_A_LABELLED_SECRET}).manifest
     connector = _connector()
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_session_and_version(mock)
         mock.get(_FILE_PATH).respond(200, content=body)
-        with pytest.raises(ApiFileRedactedError) as excinfo:
-            await _call(connector, _FILE_PATH)
+        answer = await _call(connector, _FILE_PATH)
     await connector.aclose()
 
-    message = str(excinfo.value)
-    assert _FILE_PATH in message
-    assert "strip-api-key" in message
-    assert "the read stopped" in message
-    assert "made-up-pass-value" not in message
+    text = _checked_text(answer)
+    assert "made-up-pass-value" not in text
+    assert json.loads(text)["openapi"] == "3.0.1"
+    assert answer["secrets_replaced"] >= 1
+    assert "made-up-pass-value" not in msgspec.json.encode(answer).decode()
+
+
+#: Header examples as a vendor API file may show them in a description.
+#: Built in pieces so that this test file holds no header line itself.
+_HEADER = "Author" + "ization"
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        f"{_HEADER}: vRealizeOpsToken made-up-token-0123456789",
+        f"{_HEADER}: OpsToken made-up-token-0123456789",
+        f"{_HEADER}: Bearer made-up-token-0123456789",
+    ],
+)
+async def test_authorization_example_in_a_description_comes_back_replaced(example: str) -> None:
+    """An ``Authorization: ...`` example does not stop the read; it comes back replaced."""
+    description = f"Send the token on every call. {example}"
+    assert _redact_like_the_dispatcher({"text": description}).manifest
+    body = json.dumps(
+        {"openapi": "3.0.1", "info": {"title": "Ops API", "description": description}}
+    ).encode()
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_FILE_PATH).respond(
+            200, content=body, headers={"Content-Type": "application/json"}
+        )
+        answer = await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    assert answer["status"] == 200
+    text = _checked_text(answer)
+    copy = json.loads(text)
+    assert copy["info"]["title"] == "Ops API"
+    assert "made-up-token" not in text
+    assert "Send the token on every call." in copy["info"]["description"]
+    assert answer["secrets_replaced"] >= 1
+    assert "made-up-token" not in msgspec.json.encode(answer).decode()
 
 
 def _json_with_a_secret_key_across_the_part_cut() -> bytes:
@@ -790,11 +836,12 @@ def _json_with_a_secret_across_the_part_cut(tail: str) -> bytes:
     return (head + padding + joint + "pass" + tail).encode()
 
 
-async def test_secret_split_across_the_part_cut_is_refused() -> None:
+async def test_secret_split_across_the_part_cut_comes_back_replaced() -> None:
+    """The rules see the whole parsed value, so a label cut by a part border is found."""
     body = _json_with_a_secret_across_the_part_cut('word=made-up-pass-value-0123"}')
     parts = split_text_parts(body)
     assert parts[0].endswith("pass") and parts[1].startswith("word=")
-    # The per-part check alone misses the split label; the whole text trips it.
+    # Each part alone does not trip the rules; the whole value does.
     per_part = _redact_like_the_dispatcher(
         {"text_parts": [{"index": i, "text": text} for i, text in enumerate(parts)]}
     )
@@ -805,14 +852,13 @@ async def test_secret_split_across_the_part_cut_is_refused() -> None:
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_session_and_version(mock)
         mock.get(_FILE_PATH).respond(200, content=body)
-        with pytest.raises(ApiFileRedactedError) as excinfo:
-            await _call(connector, _FILE_PATH)
+        answer = await _call(connector, _FILE_PATH)
     await connector.aclose()
 
-    message = str(excinfo.value)
-    assert "strip-api-key" in message
-    assert "the read stopped" in message
-    assert "made-up-pass-value" not in message
+    text = _checked_text(answer)
+    assert "made-up-pass-value" not in text
+    assert answer["secrets_replaced"] >= 1
+    assert "made-up-pass-value" not in msgspec.json.encode(answer).decode()
 
 
 # ---------------------------------------------------------------------------

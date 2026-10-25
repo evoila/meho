@@ -343,10 +343,16 @@ registrar is queued via `register_typed_op_registrar` in the package
     cannot hide a secret. The check parses the file with a real parser for
     its format (JSON, YAML, XML or HTML; the content type decides, or the
     file ending) and replaces every value under a secret name with
-    `[REDACTED:param_name]`, at any depth and however it is written. It
-    then writes the file back from the parsed copy; `size`, `sha256` and
-    the parts describe that copy, and `secrets_replaced` counts the
-    replaced values (redirect query included). The copy loses comments,
+    `[REDACTED:param_name]`, at any depth and however it is written.
+    MEHO's general secret-redaction rules run on each parsed text value
+    too (`text_redactor` in `connectors/_shared/api_file_read.py`, with
+    the connector, tenant and operation labels the dispatcher uses), like
+    the Logs and Aria Automation 8 reads. So an example such as
+    `Authorization: vRealizeOpsToken ...` in a description comes back as
+    a placeholder instead of stopping the read. It then writes the file
+    back from the parsed copy; `size`, `sha256` and the parts describe
+    that copy, and `secrets_replaced` counts every replaced value
+    (redirect query included). The copy loses comments,
     and JSON comes back compact. An inline script that is not JSON comes
     back as the placeholder, so the Swagger page keeps its markup but not
     its script. A file that does not parse, or a JavaScript, CSS or plain
@@ -357,8 +363,8 @@ registrar is queued via `register_typed_op_registrar` in the package
     runs the same middleware, with the same connector, tenant and operation
     labels, on the whole file text and on the answer before it returns
     (the shared `assert_not_redacted`), and stops with an error that names
-    the rules and the number of places when the text would change. The
-    whole-file pass catches a secret that the part cut splits in two.
+    the rules and the number of places when the text would change. Since
+    the rules already ran on each parsed value, this is a last guard.
     Redaction itself stays on.
   - **Tests.** `tests/test_connectors_vcf_operations_typed_api_file.py`
     (respx: accepted and refused paths with no request, the login header on
@@ -366,7 +372,8 @@ registrar is queued via `register_typed_op_registrar` in the package
     a redirect with a secret-named query value (plain and encoded name), a
     gzip body, the checked body the flight recorder and a `401` get, large
     files, version
-    failures, a login failure, a copy that a redaction rule would change, a
+    failures, a login failure, a labelled secret and an `Authorization`
+    example in a description that come back replaced, a
     secret value in JSON, YAML, XML or HTML that comes back replaced (also
     the examples the code reviews found), a file with no secret name that
     comes back with nothing replaced, a file that cannot be parsed, a

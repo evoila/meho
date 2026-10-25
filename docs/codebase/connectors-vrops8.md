@@ -129,7 +129,10 @@ sends the `GET` with its own `vRealizeOpsToken` login header.
   ([`connectors-shared-api-file-secrets.md`](connectors-shared-api-file-secrets.md))
   on the whole file before it cuts it into parts. The check parses the
   file (JSON, YAML, XML or HTML) and replaces every value under a secret
-  name with `[REDACTED:param_name]`; `secrets_replaced` says how many. A
+  name with `[REDACTED:param_name]`. MEHO's general redaction rules run on
+  each text value too, so an `Authorization: vRealizeOpsToken ...`
+  example in a description comes back as a placeholder instead of
+  stopping the read. `secrets_replaced` says how many. A
   file that does not parse, or a JavaScript, CSS or plain text file, is
   refused. A secret-named query value in `redirect_path` is replaced too.
   The flight recorder gets only the checked copy.

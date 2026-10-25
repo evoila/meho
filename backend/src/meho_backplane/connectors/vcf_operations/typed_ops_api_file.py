@@ -41,8 +41,13 @@ The read is narrow on purpose:
   (:mod:`meho_backplane.connectors._shared.api_file_secrets`) parses the
   whole file (JSON, YAML, XML or HTML) and replaces every value under a
   secret name with ``[REDACTED:param_name]`` before the file is cut into
-  parts; ``secrets_replaced`` says how many. A file that does not parse,
-  or whose format is unknown (JavaScript, CSS, plain text), is refused.
+  parts. MEHO's general secret-redaction rules run on each parsed text
+  value too
+  (:func:`~meho_backplane.connectors._shared.api_file_read.text_redactor`),
+  so an ``Authorization: ...`` example in a description comes back as a
+  placeholder instead of stopping the read. ``secrets_replaced`` counts
+  both. A file that does not parse, or whose format is unknown
+  (JavaScript, CSS, plain text), is refused.
 * The checked copy comes back as text parts of at most 64 KiB each,
   measured as JSON text, so a part always fits one ``result_query``
   answer. Joining the parts in order gives the checked copy; ``size`` and
@@ -83,6 +88,7 @@ from meho_backplane.connectors._shared.api_file_read import (
     decode_text,
     fetch_without_redirects,
     redirect_target,
+    text_redactor,
 )
 from meho_backplane.connectors._shared.api_file_secrets import (
     ApiFileFormatError,
@@ -361,13 +367,18 @@ async def _read_version(
     return {"version": version, "build": build, "version_error": error}
 
 
-def _file_fields(path: str, content_type: str | None, body: bytes) -> tuple[dict[str, Any], bytes]:
+def _file_fields(
+    path: str, content_type: str | None, body: bytes, operator: Operator, connector_id: str
+) -> tuple[dict[str, Any], bytes]:
     """Decode a ``2xx`` body, check the whole file and build the file fields of the answer.
 
     The shared check runs on the whole text before it is cut into parts,
-    so a part cut cannot hide a secret. ``size``, ``sha256`` and the parts
-    describe the checked copy, which comes back as bytes too, for the
-    flight recorder.
+    so a part cut cannot hide a secret. MEHO's general redaction rules run
+    on each parsed text value too, with the labels the dispatcher uses
+    (:func:`text_redactor`), so an example such as ``Authorization: ...``
+    in a description comes back as a placeholder instead of stopping the
+    read. ``size``, ``sha256`` and the parts describe the checked copy,
+    which comes back as bytes too, for the flight recorder.
     """
     if not _is_text(content_type):
         raise VropsApiFileError(
@@ -380,7 +391,12 @@ def _file_fields(path: str, content_type: str | None, body: bytes) -> tuple[dict
             f"{path!r} ({content_type or 'no content type'}) is not UTF-8 text: {exc.reason}."
         ) from exc
     try:
-        checked = check_api_file(text, content_type=content_type, path=path)
+        checked = check_api_file(
+            text,
+            content_type=content_type,
+            path=path,
+            text_rule=text_redactor(operator, connector_id=connector_id, op_id=OP_ID),
+        )
     except ApiFileFormatError as exc:
         raise VropsApiFileError(str(exc)) from None
     copy = checked.text.encode("utf-8")
@@ -465,7 +481,9 @@ async def api_file_get_impl(
     }
     if response.is_success:
         try:
-            fields, copy = _file_fields(path, content_type, response.content)
+            fields, copy = _file_fields(
+                path, content_type, response.content, operator, connector_id
+            )
         except VropsApiFileError:
             _record(span, headers, response, b"")
             raise

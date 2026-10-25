@@ -2441,6 +2441,28 @@ scope the cosign-signed `image.yml` release build restores from; the
 release image's trust chain never depends on cache produced by unmerged
 code, while the per-PR build keeps its warm-cache read.
 
+## Dependabot waits 7 days before it takes a new version
+
+Every entry in `.github/dependabot.yml` has a `cooldown` block with
+`default-days: 7`. Dependabot opens a version-update pull request for a
+new release (a GitHub Action, a Python package in `backend/uv.lock`, or
+a base image in a Dockerfile) only when that release is at least 7 days
+old.
+
+- **Why.** A new release can carry harmful code, for example when an
+  attacker takes over a maintainer's account. Such releases are usually
+  found and removed within a few days. The wait skips them.
+- **Security updates are not delayed.** Dependabot's `cooldown` applies
+  to version updates only. A security update still comes at once.
+- **Without the block, Dependabot already waits 3 days** on github.com.
+  The block makes the wait visible in the file and sets it to 7 days.
+- **A manual upgrade does not wait.** `uv lock --upgrade` or a hand
+  edit of a Dockerfile digest can still take a release that is younger
+  than 7 days. The matching uv setting (`exclude-newer` in
+  `backend/pyproject.toml`) is not set yet; it needs a lock file in
+  which every locked version is already 7 days old, otherwise
+  `uv lock` moves packages back.
+
 ## Dependencies
 
 - Image — `ghcr.io/evoila/meho:<tag>` from G2.4 (#31). Multi-arch

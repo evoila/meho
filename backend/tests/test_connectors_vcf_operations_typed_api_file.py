@@ -448,6 +448,33 @@ async def test_secret_child_in_a_highlighted_json_block_comes_back_replaced(
         '{"value":"<span name="password">made-up-recorder-secret</span>"}'
         f"</{block}></body></html>"
     )
+    await _check_highlighted_block(page, block, f'{{"value":"{REDACTED}"}}', recorded, replaced=1)
+
+
+@pytest.mark.parametrize("block", ["pre", "code"])
+@pytest.mark.parametrize("child", ['<span name="token">42</span>', '<span name="token">"x"</span>'])
+async def test_secret_child_holding_a_whole_value_keeps_the_block_checked(
+    monkeypatch: pytest.MonkeyPatch, block: str, child: str
+) -> None:
+    """A secret child that holds a whole JSON value does not stop the check of the block.
+
+    Its placeholder is written as a JSON string, so the joined text stays
+    JSON and the secret key next to it is replaced too.
+    """
+    recorded = _record_calls(monkeypatch)
+    page = (
+        f"<html><body><{block}>"
+        f'{{"password":<span>"made-up-recorder-secret"</span>,"other":{child}}}'
+        f"</{block}></body></html>"
+    )
+    await _check_highlighted_block(
+        page, block, f'{{"password":"{REDACTED}","other":"{REDACTED}"}}', recorded, replaced=2
+    )
+
+
+async def _check_highlighted_block(
+    page: str, block: str, expected: str, recorded: list[dict[str, Any]], *, replaced: int
+) -> None:
     connector = _connector()
     async with respx.mock(base_url=_BASE) as mock:
         _mock_session_and_version(mock)
@@ -457,8 +484,8 @@ async def test_secret_child_in_a_highlighted_json_block_comes_back_replaced(
 
     text = _joined(answer).decode()
     assert answer["status"] == 200
-    assert f'<{block}>{{"value":"{REDACTED}"}}</{block}>' in text
-    assert answer["secrets_replaced"] == 1
+    assert f"<{block}>{expected}</{block}>" in text
+    assert answer["secrets_replaced"] == replaced
     assert "made-up-recorder-secret" not in msgspec.json.encode(answer).decode()
     (call,) = [call for call in recorded if call["response"].url.path == _PAGE_PATH]
     assert call["response_body"] == text.encode()

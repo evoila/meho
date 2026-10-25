@@ -119,8 +119,13 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      it is checked like a JSON file and comes back as plain JSON, without
      the child elements. A child the block marks as secret (`<span
      name="password">`) is replaced before the text is joined, so its
-     value cannot hide inside a JSON value with a harmless name. Any
-     other block keeps its child elements and is checked as before.
+     value cannot hide inside a JSON value with a harmless name. The
+     placeholder is written so the joined text stays JSON: as a JSON
+     string when the child held a whole value (a number, a quoted
+     string), bare when it held part of one. When no placeholder keeps
+     the text JSON (the child held a key and its value), the block
+     cannot be checked, and its whole content becomes the placeholder.
+     Any other block keeps its child elements and is checked as before.
    - Any text value that holds a private key in PEM form
      (`-----BEGIN ... PRIVATE KEY-----`), under any name.
 4. Write the copy in the same format from the parsed file. JSON is

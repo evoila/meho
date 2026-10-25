@@ -19,7 +19,8 @@ it. A ``<script>`` block comes back only when its content is JSON. A
 (syntax highlighting with ``<span>``) is read as one text: when that text
 is a JSON document, it is checked like a JSON file and comes back as
 plain JSON, without the child elements. A secret-marked child inside such
-a block is replaced before the text is joined.
+a block is replaced before the text is joined, in a form that keeps the
+text JSON; when no form does, the whole block content is replaced.
 """
 
 from __future__ import annotations
@@ -389,10 +390,8 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
         out.append(REDACTED)
     elif node.tag == "script":
         out.append(_html_script(node, scrubber))
-    elif node.tag in _HTML_TEXT_BLOCKS and (block := _html_json_block(node)) is not None:
-        document, replaced = block
-        scrubber.count += replaced
-        out.append(html.escape(scrubber.text(document), quote=False))
+    elif node.tag in _HTML_TEXT_BLOCKS and (block := _html_json_block(node, scrubber)) is not None:
+        out.append(block)
     elif node.tag == "style":
         out.extend(scrubber.text(c) for c in node.children if isinstance(c, str))
     else:
@@ -400,23 +399,37 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
     out.append(f"</{node.tag}>")
 
 
-def _html_json_block(node: _HtmlNode) -> tuple[str, int] | None:
-    """The text of a block split over child elements, when that text is a JSON document.
+def _html_json_block(node: _HtmlNode, scrubber: Scrubber) -> str | None:
+    """The checked text of a block split over child elements, when that text is JSON.
 
     A block with only text needs nothing here: :meth:`Scrubber.text`
     already reads JSON in one text value. A highlighted block splits the
     same JSON over ``<span>`` elements, so no single text value is JSON.
-    Joined, the text is the document; ``None`` when it is not one. A
-    secret-marked child (``<span name="password">``) is replaced in the
-    joined text, as it would be with its markup; the second value is the
-    number of such children, which counts only when the block comes back
-    as JSON.
+    Joined, the text is the document; ``None`` when it is not one, and
+    the block keeps its markup. A secret-marked child (``<span
+    name="password">``) is replaced in the joined text with the
+    placeholder, written so that the document stays JSON: as a JSON string
+    when the child held a whole JSON value (``42``, ``"made-up"``), bare
+    when it held part of one. When the document is no longer JSON after
+    that, the child held more than a value and the block cannot be
+    checked, so its whole content becomes the placeholder.
     """
     if all(isinstance(child, str) for child in node.children):
         return None
-    pieces: list[str] = []
-    replaced = _html_text(node, pieces)
-    text = "".join(pieces)
+    pieces: list[_HtmlPiece] = []
+    _html_text(node, pieces)
+    if _json_document("".join(piece.text for piece in pieces)) is None:
+        return None
+    secrets = sum(1 for piece in pieces if piece.secret)
+    document = "".join(piece.replaced() for piece in pieces)
+    if secrets and _json_document(document) is None:
+        scrubber.count += 1
+        return REDACTED
+    scrubber.count += secrets
+    return html.escape(scrubber.text(document), quote=False)
+
+
+def _json_document(text: str) -> dict[str, Any] | list[Any] | None:
     stripped = text.strip()
     if not stripped or stripped[0] not in "{[":
         return None
@@ -424,28 +437,44 @@ def _html_json_block(node: _HtmlNode) -> tuple[str, int] | None:
         parsed = json.loads(stripped)
     except ValueError:
         return None
-    return (text, replaced) if isinstance(parsed, (dict, list)) else None
+    return parsed if isinstance(parsed, (dict, list)) else None
 
 
-def _html_text(node: _HtmlNode, out: list[str]) -> int:
-    """Add every text value under *node* to *out*; count the secret children replaced.
+@dataclass(frozen=True, slots=True)
+class _HtmlPiece:
+    """One run of text inside a highlighted block; *secret* when a secret-marked child held it."""
 
-    A secret-marked child with content adds the placeholder instead of
-    its text, like :func:`_html_element` writes it.
+    text: str
+    secret: bool = False
+
+    def replaced(self) -> str:
+        if not self.secret:
+            return self.text
+        try:
+            json.loads(self.text.strip())
+        except ValueError:
+            return REDACTED
+        return json.dumps(REDACTED)
+
+
+def _html_text(node: _HtmlNode, out: list[_HtmlPiece]) -> None:
+    """Add every text value under *node* to *out*.
+
+    The text under a secret-marked child with content is added as one
+    secret piece, so the caller can replace it.
     """
-    replaced = 0
     for child in node.children:
         if isinstance(child, str):
-            out.append(child)
+            out.append(_HtmlPiece(child))
         elif child.tag == "!":
             continue
         elif _html_node_is_secret(child):
             if child.children:
-                out.append(REDACTED)
-                replaced += 1
+                inner: list[_HtmlPiece] = []
+                _html_text(child, inner)
+                out.append(_HtmlPiece("".join(piece.text for piece in inner), secret=True))
         else:
-            replaced += _html_text(child, out)
-    return replaced
+            _html_text(child, out)
 
 
 def _html_node_is_secret(node: _HtmlNode) -> bool:

@@ -618,16 +618,87 @@ def test_html_highlighted_json_block_is_checked_as_one_document(
             f'<pre>{{"user":"{REDACTED}","password":"{REDACTED}"}}</pre>',
             2,
         ),
+        (
+            f'<pre>{{"password":<span>"{_SECRET}"</span>,'
+            f'"other":<span name="token">42</span>}}</pre>',
+            f'<pre>{{"password":"{REDACTED}","other":"{REDACTED}"}}</pre>',
+            2,
+        ),
+        (
+            f'<code>{{"password":<span>"{_SECRET}"</span>,'
+            f'"other":<span name="token">42</span>}}</code>',
+            f'<code>{{"password":"{REDACTED}","other":"{REDACTED}"}}</code>',
+            2,
+        ),
+        (
+            f'<pre>{{"password":<span>"{_SECRET}"</span>,'
+            f'"other":<span name="token">"{_SECRET}"</span>}}</pre>',
+            f'<pre>{{"password":"{REDACTED}","other":"{REDACTED}"}}</pre>',
+            2,
+        ),
+        (
+            f'<code>{{"password":<span>"{_SECRET}"</span>,'
+            f'"other":<span name="token">"{_SECRET}"</span>}}</code>',
+            f'<code>{{"password":"{REDACTED}","other":"{REDACTED}"}}</code>',
+            2,
+        ),
+        (
+            f'<pre>[<span name="token">1234</span>, '
+            f'{{"password": <span>"{_SECRET}"</span>}}]</pre>',
+            f'<pre>["{REDACTED}",{{"password":"{REDACTED}"}}]</pre>',
+            2,
+        ),
     ],
-    ids=["pre-secret-child", "code-secret-child", "nested-secret-child", "child-and-key"],
+    ids=[
+        "pre-secret-child",
+        "code-secret-child",
+        "nested-secret-child",
+        "child-and-key",
+        "pre-child-holds-a-number",
+        "code-child-holds-a-number",
+        "pre-child-holds-a-quoted-value",
+        "code-child-holds-a-quoted-value",
+        "list-child-holds-a-number",
+    ],
 )
 def test_html_secret_child_in_a_highlighted_json_block_is_replaced(
     document: str, expected: str, count: int
 ) -> None:
-    """A child the block marks as secret is replaced before its text joins the JSON."""
+    """A child the block marks as secret is replaced before its text joins the JSON.
+
+    The placeholder is written so the joined text stays JSON: as a JSON
+    string when the child held a whole value (a number, a quoted string),
+    bare when it held part of a quoted string. The joined JSON is then
+    checked by key, so a secret key next to the child is replaced too.
+    """
     text, replaced = _check(document, _HTML)
     assert text == expected
     assert replaced == count
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        f'<pre>{{"password":<span>"{_SECRET}"</span>,<span name="token">"other":42</span>}}</pre>',
+        f'<code>{{"password":<span>"{_SECRET}"</span>,'
+        f'<span name="token">"other":42</span>}}</code>',
+        f'<pre>{{"password":<span>"{_SECRET}"</span>,'
+        f'"pin":"<span name="token">1234</span>"}}</pre>',
+    ],
+    ids=["pre-child-holds-key-and-value", "code-child-holds-key-and-value", "number-in-quotes"],
+)
+def test_html_highlighted_json_block_that_cannot_be_checked_is_refused(document: str) -> None:
+    """When the replaced child leaves the joined text no longer JSON, the block is not checked.
+
+    The block holds a JSON document, but the secret child covers more
+    than one value, so no placeholder keeps the document valid. Checking
+    the children one by one would miss the secret key whose value sits in
+    another child, so the whole block content becomes the placeholder.
+    """
+    tag = document[1 : document.index(">")]
+    text, count = _check(document, _HTML)
+    assert text == f"<{tag}>{REDACTED}</{tag}>"
+    assert count == 1
 
 
 def test_html_secret_child_in_a_block_that_is_not_json_keeps_its_markup() -> None:

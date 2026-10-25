@@ -26,7 +26,10 @@ that directory. Trusted settings and scanner work files stay in the runner's
 temporary directory. Source files cannot replace those files. Before scanning,
 the workflow replaces the PR's `sonar-project.properties` with a copy of its
 trusted generated settings. The scanner then uses normal config discovery;
-`project.settings` is not combined with `sonar.projectBaseDir`. Its inline Python uses isolated mode, so PR-added modules cannot replace
+`project.settings` is not combined with `sonar.projectBaseDir`. Before preparing
+the scan, the workflow checks every tracked source symlink. Links must resolve
+inside the checkout. External, broken, and looping links fail the gate. This
+also prevents source links from making the scanner read other runner files. Its inline Python uses isolated mode, so PR-added modules cannot replace
 standard-library imports. It does not run repository scripts, local actions, builds, or package installers.
 
 The workflow binds a PR to its current head commit and main base through the

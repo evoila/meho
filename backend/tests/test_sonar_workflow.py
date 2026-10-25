@@ -140,6 +140,8 @@ def test_preparation_ignores_checkout_python_modules(tmp_path: Path, source_link
         )
     (source / ".scannerwork").mkdir()
     (source / ".scannerwork/poison").write_text("untrusted scanner workspace")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
     marker = tmp_path / "checkout-code-ran"
     poison = f"open({str(marker)!r}, 'w').write('untrusted')\nraise RuntimeError('poison module')\n"
     for name in ["json.py", "pathlib.py"]:
@@ -173,8 +175,13 @@ def test_preparation_ignores_checkout_python_modules(tmp_path: Path, source_link
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
     assert not marker.exists()
+    if source_links:
+        assert result.returncode != 0
+        assert "symlink escapes checkout" in result.stderr
+        assert settings.read_text() == "sonar.projectKey=test\n"
+        return
+    assert result.returncode == 0, result.stderr
     output = (temporary / "sonar-ci.properties").read_text()
     assert "sonar.projectVersion=v1.2.3\n" in output
     assert "sonar.pullrequest.key=7\n" in output
@@ -207,3 +214,52 @@ def test_privileged_work_files_stay_outside_analyzed_source() -> None:
     scanner = next(step for step in steps if step.get("name") == "SonarCloud scan and gate result")
     assert scanner["with"]["projectBaseDir"] == "analyzed-source"
     assert "project.settings" not in scanner["with"].get("args", "")
+
+
+@pytest.mark.parametrize(
+    ("kind", "allowed"),
+    [
+        ("internal_file", True),
+        ("internal_dir", True),
+        ("external_file", False),
+        ("external_dir", False),
+        ("broken", False),
+        ("loop", False),
+        ("ancestor", False),
+    ],
+)
+def test_scan_rejects_unsafe_tracked_symlinks(tmp_path: Path, kind: str, allowed: bool) -> None:
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["sonarcloud"]["steps"]
+    prepare = next(step for step in steps if step.get("name") == "Prepare trusted scan settings")
+    script = prepare["run"].split(" <<'PY'\n", 1)[1]
+    # Run the actual source guard, stopping before report preparation.
+    script = script.split("temporary = Path(os.environ['RUNNER_TEMP'])", 1)[0]
+    source = tmp_path / "analyzed-source"
+    (source / "src").mkdir(parents=True)
+    (source / "src/real.py").write_text("# static input\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "dummy.py").write_text("# outside input\n")
+    targets = {
+        "internal_file": "real.py",
+        "internal_dir": "../other",
+        "external_file": str(outside / "dummy.py"),
+        "external_dir": str(outside),
+        "broken": "missing.py",
+        "loop": "link.py",
+        "ancestor": "..",
+    }
+    (source / "other").mkdir()
+    (source / "src/link.py").symlink_to(targets[kind])
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    result = subprocess.run(
+        [sys.executable, "-I", "-"],
+        input=script,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    if not allowed:
+        assert "symlink" in result.stderr

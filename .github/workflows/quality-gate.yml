@@ -158,8 +158,32 @@ jobs:
           python3 -I - <<'PY'
           import json
           import os
+          import subprocess
           from pathlib import Path
           from xml.etree import ElementTree as ET
+
+          # The scanner follows source links. Reject tracked links that could
+          # make it read outside this checkout, or fail to resolve safely.
+          checkout = Path('analyzed-source').resolve(strict=True)
+          indexed = subprocess.run(
+              ['git', '-C', str(checkout), 'ls-files', '--stage', '-z'],
+              check=True, stdout=subprocess.PIPE,
+          ).stdout
+          for entry in indexed.split(b'\0'):
+              if not entry:
+                  continue
+              metadata, name = entry.split(b'\t', 1)
+              if metadata.split()[0] != b'120000':
+                  continue
+              link = checkout / os.fsdecode(name)
+              try:
+                  target = link.resolve(strict=True)
+              except (OSError, RuntimeError) as error:
+                  raise SystemExit(f'Unsafe source symlink: {os.fsdecode(name)}') from error
+              if not target.is_relative_to(checkout):
+                  raise SystemExit(f'Source symlink escapes checkout: {os.fsdecode(name)}')
+              if target.is_dir() and link.parent.resolve().is_relative_to(target):
+                  raise SystemExit(f'Source directory symlink loops: {os.fsdecode(name)}')
 
           temporary = Path(os.environ['RUNNER_TEMP'])
           report = temporary / 'sonar-coverage/python/coverage.xml'

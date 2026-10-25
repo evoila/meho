@@ -11,7 +11,9 @@ A fake VI-JSON seam (``_post_vmomi_json``) holds a small alarm state: the
 ServiceContent, the ``AlarmState`` entries of the root folder, the alarm rules
 and the object names. ``AcknowledgeAlarm`` and ``ClearTriggeredAlarms`` change
 that state the way vCenter does, so the handlers' reads after the change see
-the result. No test calls a vCenter. All ids and names are made up.
+the result. The fake splits a many-object answer into pages the way vCenter
+may (``tests._vim_pages.PagedVim``). No test calls a vCenter. All ids and
+names are made up.
 """
 
 from __future__ import annotations
@@ -31,8 +33,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.vmware_rest import VmwareRestConnector
-from meho_backplane.connectors.vmware_rest import alarm_state as alarm_state_module
+from meho_backplane.connectors.vmware_rest import VmwareRestConnector, vim_retrieve
 from meho_backplane.connectors.vmware_rest.alarm_state import (
     ALARMS_GROUP_KEY,
     ALARMS_WHEN_TO_USE,
@@ -66,6 +67,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered import (
     VMWARE_ALARM_TRIGGERED_LIST_OP,
     alarm_triggered_list_impl,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import TooManyPagesError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
@@ -80,6 +82,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
+from tests._vim_pages import PagedVim
 from tests.test_operation_contracts import OperationContract, check_operation
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-000000004383")
@@ -158,10 +161,11 @@ def _vendor_trigger_match(type_trigger: str, kind: str | None) -> bool:
 _VENDOR_ENTITY_TYPES = {"entityTypeHost": "HostSystem", "entityTypeVm": "VirtualMachine"}
 
 
-class _AlarmVim:
+class _AlarmVim(PagedVim):
     """Recording fake of the connector's VI-JSON seam, with alarm state."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.calls: list[tuple[str, Any, bool]] = []
         self.states: list[dict[str, Any]] = []
         self.rules: dict[str, tuple[str, dict[str, Any] | None]] = {}
@@ -179,22 +183,10 @@ class _AlarmVim:
         self.alarm_list_answer_after_change: str | None = None
         #: Object types whose name read comes back in missingSet.
         self.unreadable_names: set[str] = set()
-        #: Paging: at most this many objects per page of a multi-object read.
-        self.page_size: int | None = None
         #: The alarm list read answers an empty first page with a token.
         self.alarm_list_on_second_page = False
         #: The same, only for the reads after a change was sent.
         self.alarm_list_on_second_page_after_change = False
-        #: A ContinueRetrievePropertiesEx call raises this.
-        self.fail_continue: Exception | None = None
-        #: Every page carries a new token (an answer that never ends).
-        self.endless_pages = False
-        #: The session token the fake reports to ``session_used``.
-        self.session = "<session-1>"
-        #: ``(token, session_token)`` of every ContinueRetrievePropertiesEx call.
-        self.continue_calls: list[tuple[str, str | None]] = []
-        self._pending: dict[str, list[list[dict[str, Any]]]] = {}
-        self._tokens = 0
         self.apply_changes = True
         self.missing: set[str] = set()
         self._changed = False
@@ -217,8 +209,7 @@ class _AlarmVim:
         session_token: str | None = None,
     ) -> Any:
         self.calls.append((path, copy.deepcopy(json), promote_managed_object_not_found))
-        if session_used is not None:
-            session_used.token = self.session
+        self._record_session(session_used)
         _, _, method = path.strip("/").split("/")
         if method in self.fail:
             raise self.fail[method]
@@ -297,26 +288,7 @@ class _AlarmVim:
             else:
                 props = [{"name": "name", "val": _boxed(self.names[(mo_type, moid)])}]
             objects.append({"obj": moref(mo_type, moid), "propSet": props})
-        size = self.page_size or max(len(objects), 1)
-        return self._serve([objects[i : i + size] for i in range(0, len(objects), size)] or [[]])
-
-    def _serve(self, pages: list[list[dict[str, Any]]]) -> dict[str, Any]:
-        """Answer the first page; keep the rest behind a single-use token."""
-        first, rest = pages[0], pages[1:]
-        result: dict[str, Any] = {"objects": first}
-        if rest or self.endless_pages:
-            self._tokens += 1
-            token = f"<token-{self._tokens}>"
-            self._pending[token] = rest or [[]]
-            result["token"] = token
-        return result
-
-    def _continue(self, token: str, session_token: str | None) -> dict[str, Any]:
-        self.continue_calls.append((token, session_token))
-        if self.fail_continue is not None:
-            raise self.fail_continue
-        pages = self._pending.pop(token)  # a token works once
-        return self._serve(pages)
+        return self._serve_objects(objects)
 
     def _acknowledge(self, body: dict[str, Any]) -> None:
         for state in self.states:
@@ -643,10 +615,10 @@ async def test_a_failed_alarm_list_page_fails_the_list() -> None:
 
 
 async def test_an_answer_that_never_ends_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(alarm_state_module, "_MAX_PAGES", 3)
+    monkeypatch.setattr(vim_retrieve, "_MAX_PAGES", 3)
     vim = _seeded()
     vim.endless_pages = True
-    with pytest.raises(AlarmStateUnreadableError, match="had not ended after 3 pages"):
+    with pytest.raises(TooManyPagesError, match="had not ended after 3 pages"):
         await _list(vim)
     assert len(vim.continue_calls) == 2
 

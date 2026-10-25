@@ -126,6 +126,11 @@ _OP_UPDATE_SERVICE_POLICY: Final = "POST:/HostServiceSystem/{moId}/UpdateService
 # read, like disk-grow's device read), but the op_id is listed on the sub-op
 # manifests so the reconcile lane asserts the path exists in the pinned spec.
 _OP_RETRIEVE_PROPERTIES: Final = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# The NFS mount pre-check reads every datastore of the host in one call and
+# follows the continuation pages vCenter may send (#4862).
+_OP_CONTINUE_RETRIEVE_PROPERTIES: Final = (
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
+)
 
 # Concrete runtime path for the config-manager read: the PropertyCollector is
 # a singleton whose moId is the literal ``propertyCollector`` (the same
@@ -138,6 +143,7 @@ _VMOMI_RETRIEVE_PROPERTIES_PATH: Final = "/PropertyCollector/propertyCollector/R
 #: assert every declared vim path exists in the spec.
 _VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_CREATE_NAS_DATASTORE,
 )
 _VIM_SUB_OPS_HOST_DISK_MARK_FLASH: tuple[str, ...] = (

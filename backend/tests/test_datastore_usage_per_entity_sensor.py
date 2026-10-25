@@ -150,8 +150,12 @@ class _SequenceConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
-        del target, path, operator, json
+        del target, path, operator, json, promote_managed_object_not_found
+        del session_used, session_token
         return self._next()
 
 

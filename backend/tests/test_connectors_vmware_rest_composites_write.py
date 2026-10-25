@@ -152,6 +152,7 @@ class _RecordingConnector:
         self.calls: list[dict[str, Any]] = []
         self.mount_calls: list[str] = []
         self.vmomi_calls: list[tuple[str, Any]] = []
+        self.continue_sessions: list[str] = []
 
     async def _about_version(self, target: Any, operator: Operator) -> str | None:
         """Serve the live ``about.version`` the version-aware deploy path reads."""
@@ -218,7 +219,15 @@ class _RecordingConnector:
         return payload
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: Any = None,
+        promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
         """Serve the vim (VI-JSON) sub-calls the #2970 composite steps issue.
 
@@ -229,8 +238,15 @@ class _RecordingConnector:
         ``DistributedVirtualSwitch`` / ``Task`` -- the seam a real vCenter
         keys them by, mirroring ``_DiskGrowConnector``). An unkeyed
         ``Task`` read serves a terminal-success ``Task.info`` so tests
-        only model the poll when a fault/timeout is the point.
+        only model the poll when a fault/timeout is the point. A
+        ``ContinueRetrievePropertiesEx`` page is keyed by its path like any
+        other method; the session token it was pinned to is recorded.
         """
+        del promote_managed_object_not_found
+        if session_used is not None:
+            session_used.token = "<session-1>"
+        if session_token is not None:
+            self.continue_sessions.append(session_token)
         self.vmomi_calls.append((path, json))
         if path.endswith("/RetrievePropertiesEx"):
             spec_type = json["specSet"][0]["propSet"][0]["type"]
@@ -1022,7 +1038,7 @@ class _UnifiedRecordingConnector(_RecordingConnector):
     """
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self, target: Any, path: str, *, operator: Operator, json: Any = None, **kwargs: Any
     ) -> Any:
         self.calls.append(
             {
@@ -1033,7 +1049,7 @@ class _UnifiedRecordingConnector(_RecordingConnector):
                 "timeout": httpx.USE_CLIENT_DEFAULT,
             }
         )
-        return await super()._post_vmomi_json(target, path, operator=operator, json=json)
+        return await super()._post_vmomi_json(target, path, operator=operator, json=json, **kwargs)
 
 
 _VMOMI_TASK_INFO_READ_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
@@ -10200,3 +10216,88 @@ async def test_vm_customize_gate_short_circuits(monkeypatch: pytest.MonkeyPatch)
     assert out.status == "awaiting_approval"
     # The resolve GET fired but the PUT did not.
     assert [c["method"] for c in conn.calls] == ["GET"]
+
+
+# ---------------------------------------------------------------------------
+# vm.deploy_from_library clean-up: the vApp name read follows every page (#4862)
+# ---------------------------------------------------------------------------
+
+_CONTINUE_RETRIEVE_PATH = "/PropertyCollector/propertyCollector/ContinueRetrievePropertiesEx"
+
+
+def _paged_vapp_cleanup_vmomi(second_page: Any) -> dict[str, Any]:
+    """The vApp lookup with the deploy-named vApp on page two of the name read.
+
+    Page one holds another vApp and a token; *second_page* is the answer to
+    ``ContinueRetrievePropertiesEx`` (a page, or an exception to raise).
+    """
+    vmomi = _vapp_cleanup_vmomi(
+        ("resgroup-v2", "other-vapp"), ("resgroup-v9", _DEPLOY_NAME), destroy="resgroup-v9"
+    )
+    names = vmomi[_VAPP_TYPE]
+    first, second = names["objects"]
+    vmomi[_VAPP_TYPE] = {**names, "objects": [first], "token": "<token-1>"}
+    vmomi[_CONTINUE_RETRIEVE_PATH] = (
+        second_page if isinstance(second_page, Exception) else {**names, "objects": [second]}
+    )
+    return vmomi
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_finds_a_vapp_on_a_later_page(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A vApp on page two of the name read is found and destroyed."""
+    conn = _InventoryConnector(
+        {_DEPLOY_PATH: httpx.ReadTimeout("")},
+        vms=[{"vm": "vm-web", "name": "web-01"}],
+        vmomi=_paged_vapp_cleanup_vmomi(second_page=None),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    paths = [path for path, _ in conn.vmomi_calls]
+    assert paths[:4] == [
+        _VMOMI_TASK_INFO_READ_PATH,
+        _VMOMI_TASK_INFO_READ_PATH,
+        _CONTINUE_RETRIEVE_PATH,
+        "/VirtualApp/resgroup-v9/Destroy_Task",
+    ]
+    # The token of page one went once, on the session of the first call.
+    assert conn.vmomi_calls[2][1] == {"token": "<token-1>"}
+    assert conn.continue_sessions == ["<session-1>"]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DESTROY_VAPP_OP]
+    assert "resgroup-v2" not in str(out["issues"])
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_failed_page_warns_and_still_removes_the_vm(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A lost page of the vApp name read adds the warning; the VM removal still runs."""
+    conn = _InventoryConnector(
+        {_DEPLOY_PATH: httpx.ReadTimeout(""), "/api/vcenter/vm/vm-partial": None},
+        vms=[{"vm": "vm-partial", "name": _DEPLOY_NAME}],
+        vmomi=_paged_vapp_cleanup_vmomi(second_page=httpx.ConnectError("page lost")),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    warnings = [i for i in out["issues"] if i["severity"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["message"].startswith(f"could not list vApps named {_DEPLOY_NAME!r}")
+    assert "ConnectError" in warnings[0]["message"]
+    # No vApp was destroyed on the partial list; the VM found by name was removed.
+    assert not any(path.endswith("/Destroy_Task") for path, _ in conn.vmomi_calls)
+    assert ("DELETE", "/api/vcenter/vm/vm-partial") in [
+        (c["method"], c["path"]) for c in conn.calls
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DELETE_VM_OP]

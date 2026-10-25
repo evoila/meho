@@ -57,6 +57,8 @@ _ROUTE_COND = "head.repo.full_name != github.repository"
 _HOSTED_TARGET = "ubuntu-latest"
 # A job gated to push only is not reachable by a pull_request at all.
 _PUSH_ONLY = "github.event_name == 'push'"
+# Exact equality only: adding an OR branch could admit fork PRs.
+_MERGE_GROUP_ONLY = "github.event_name == 'merge_group'"
 
 
 def _load_workflow(path: Path) -> dict[Any, Any]:
@@ -111,12 +113,30 @@ def _job_is_safe(job: dict[str, Any]) -> bool:
     # References the internal pool. Safe only if one of:
     #   1. it routes fork PRs to a GitHub-hosted runner, or
     #   2. a fork guard skips the job on fork PRs, or
-    #   3. the job runs on push events only (never a pull_request).
+    #   3. the job runs on push events only (never a pull_request), or
+    #   4. its whole guard admits only merge_group events.
     if _ROUTE_COND in runs_on and _HOSTED_TARGET in runs_on:
         return True
     if _FORK_GUARD in job_if:
         return True
-    return _PUSH_ONLY in job_if
+    return _PUSH_ONLY in job_if or job_if.strip() == _MERGE_GROUP_ONLY
+
+
+@pytest.mark.parametrize(
+    ("guard", "safe"),
+    [
+        ("github.event_name == 'merge_group'", True),
+        ("  github.event_name == 'merge_group'  ", True),
+        ("github.event_name == 'pull_request'", False),
+        ("github.event_name == 'pull_request_target'", False),
+        ("github.event_name == 'merge_group' || github.event_name == 'pull_request'", False),
+        ("github.event_name == 'pull_request' || github.event_name == 'merge_group'", False),
+        ("github.event_name == 'merge_group' || true", False),
+        ("github.event_name != 'merge_group'", False),
+    ],
+)
+def test_internal_job_merge_queue_guard_must_be_exact(guard: str, safe: bool) -> None:
+    assert _job_is_safe({"runs-on": "meho-runners-ci-heavy", "if": guard}) is safe
 
 
 def _workflow_files() -> list[Path]:

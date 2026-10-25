@@ -415,6 +415,6 @@ never holds a query or a body, and it never averages across groups.
 - KB passage index: #3761 (Initiative #3730).
 - Offline KB passage benchmark: #3765 (Initiative #3730).
 - multilingual-e5-small model card (prefixes, 512-token limit): <https://huggingface.co/intfloat/multilingual-e5-small>.
-- fastembed tokenizer loading (0.9.0, `fastembed/common/preprocessor_utils.py`, `load_tokenizer`): <https://github.com/qdrant/fastembed>.
+- fastembed tokenizer loading (0.9.1, `fastembed/common/preprocessor_utils.py`, `load_tokenizer`): <https://github.com/qdrant/fastembed>.
 - Hugging Face `tokenizers` (`no_truncation`, `no_padding`, post-processor): <https://huggingface.co/docs/tokenizers/api/tokenizer>.
 - BGE small model card (512-token window): <https://huggingface.co/BAAI/bge-small-en-v1.5>.

@@ -960,7 +960,7 @@ exist, they are the only rows that count for that tenant:
 Ownership is decided by descriptor rows in any `is_enabled` state, so
 disabling every op on the tenant row leaves the tenant with nothing to
 run on that connector. To use the built-in row again, delete the tenant
-row (`connector delete` on the tenant scope).
+row (`meho connector delete <id>`, which works on the tenant scope).
 
 One predicate, `visible_scope_clause` in `operations/_lookup.py`, carries
 this rule. `lookup_descriptor` (dispatch, preview, sensors, gateway
@@ -2694,12 +2694,16 @@ dispatch. The DELETE surface removes it:
   Content`. `tenant_admin` role. Always scoped to the calling
   operator's tenant (the #1699 contract: the route exposes no
   `tenant_id` parameter).
+* **CLI** — `meho connector delete <connector_id> [--confirm] [--json]`
+  (#4889) calls the REST route. It shares the flags, prompt and 204
+  rendering of `enable` / `disable` (`cli/internal/cmd/connector/
+  delete.go`, constructor only; the logic is in `enable.go`).
 * **MCP** — `meho_connector_delete(connector_id, tenant_id=None)` →
   `{ok: true, deleted: {...}, warnings: [...]}`. `tenant_id` omitted
   targets the built-in / global scope (the only path that can remove
   `tenant_id IS NULL` rows), mirroring `meho_connector_ingest`.
 
-Both delegate to `ReviewService.delete_connector`
+All three delegate to `ReviewService.delete_connector`
 (`operations/ingest/delete_connector.py` is the engine). Semantics:
 
 * **Row removal, not a status flag.** The scoped

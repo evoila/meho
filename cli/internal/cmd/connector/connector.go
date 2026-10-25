@@ -24,6 +24,10 @@
 //     (G0.25-T7 #1749). Reports the count flipped; idempotent.
 //   - `meho connector disable`    — flip back to disabled without
 //     deleting rows (per-op overrides preserved for rollback).
+//   - `meho connector delete`     — remove a connector's operations
+//     and groups from the operator's own tenant (#4889). Built-in
+//     copies stay; the MCP sibling `meho_connector_delete` removes
+//     those.
 //
 // Each verb is a thin cobra command that POSTs / GETs / PATCHes a
 // single backplane route under `/api/v1/connectors*` (T6 #406).
@@ -85,7 +89,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "connector",
-		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable)",
+		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newIngestCmd())
@@ -98,6 +102,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newEnableReadsCmd())
 	cmd.AddCommand(newDisableCmd())
+	cmd.AddCommand(newDeleteCmd())
 	return cmd
 }
 

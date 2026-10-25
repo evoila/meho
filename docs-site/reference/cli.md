@@ -1049,7 +1049,7 @@ meho broadcast watch [flags]
 
 ## `meho connector`
 
-spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable)
+spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)
 
 ```
 meho connector
@@ -1073,6 +1073,18 @@ meho connector catalog list [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
+
+### `meho connector delete`
+
+Remove a connector from your tenant (its operations and groups; the built-in copy stays)
+
+```
+meho connector delete <connector_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--confirm` — skip the interactive confirmation prompt
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
 
 ### `meho connector disable`
 

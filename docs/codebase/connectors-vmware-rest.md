@@ -3013,11 +3013,11 @@ library lookup, no second import. An approved power-on with no saved
 envelope (a request saved before #4217) is refused before anything runs
 (`composite_resume_unsupported`).
 
-**Version-agnostic (AC5).** Every schema + method is core vim25 (`OvfManager`
-/ `HttpNfcLease` predate 9.0), and the engine reads only the pre-9.0
-`HttpNfcLeaseDeviceUrl` fields (`key` / `importKey` / `url` / `sslThumbprint`)
-— never the 9.0-only `sslCertificate` — so it works on the VCF 5.x
-migration-source fleet (#3056) as well as 9.0+.
+**Version support (AC5).** The core vim25 methods (`OvfManager` and
+`HttpNfcLease`) predate 9.0. Older lease fields remain sufficient for the
+VCF 5.x migration-source fleet (#3056). On 9.0+, the engine prefers the
+optional `sslCertificate` when present. Older leases use their thumbprint
+or verified TLS as described below.
 
 **Device-host certificate checks.** Each disk PUT goes to the ESXi URL
 returned by vCenter's lease. `plan_transfers` keeps its `sslCertificate` and

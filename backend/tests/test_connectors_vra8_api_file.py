@@ -564,6 +564,101 @@ async def test_file_get_is_kept_in_the_flight_recorder(monkeypatch: pytest.Monke
     assert [(call["method"], call["response"].status_code) for call in file_calls] == [("GET", 200)]
 
 
+_SECRET_FILE = '{"swagger":"2.0","x-example":{"password":"made-up-recorder-secret"}}'
+
+
+def _record_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Catch what the read hands the flight recorder for the file GET."""
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        api_file.flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "content_type"),
+    [
+        (200, _SECRET_FILE, "application/json"),
+        (404, _SECRET_FILE, "application/json"),
+        (500, "<html><body>password: not parsed</body>", "text/plain"),
+    ],
+)
+async def test_flight_recorder_gets_only_the_checked_body(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: str, content_type: str
+) -> None:
+    """The recorder gets the checked copy of the body, or no body when it cannot be checked."""
+    recorded = _record_calls(monkeypatch)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(status, text=body, headers={"Content-Type": content_type})
+        await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    (call,) = [call for call in recorded if call["response"].url.path == _SWAGGER_PATH]
+    if content_type == "application/json":
+        assert REDACTED.encode() in call["response_body"]
+    else:
+        assert call["response_body"] == b""
+    assert b"made-up-recorder-secret" not in call["response_body"]
+    assert b"not parsed" not in call["response_body"]
+
+
+async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _record_calls(monkeypatch)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(
+            200,
+            text='{"password": "made-up-recorder-secret"',
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(ApiFileFormatError):
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    (call,) = [call for call in recorded if call["response"].url.path == _SWAGGER_PATH]
+    assert call["response_body"] == b""
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "expected"),
+    [
+        (_SECRET_FILE, "application/json", REDACTED.encode()),
+        ("password=made-up-recorder-secret", "text/plain", b""),
+        ("\xff\xfe", "application/octet-stream", b""),
+    ],
+)
+async def test_401_body_is_checked_before_it_is_raised(
+    monkeypatch: pytest.MonkeyPatch, body: str, content_type: str, expected: bytes
+) -> None:
+    """A 401 is raised with the checked body, or none; the status stays for the login retry."""
+    recorded = _record_calls(monkeypatch)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_login_and_version(mock)
+        mock.get(_SWAGGER_PATH).respond(401, text=body, headers={"Content-Type": content_type})
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await _call(connector, _SWAGGER_PATH)
+    await connector.aclose()
+
+    raised = excinfo.value.response
+    assert raised.status_code == 401
+    if expected:
+        assert expected in raised.content
+    else:
+        assert raised.content == b""
+    assert b"made-up-recorder-secret" not in raised.content
+    (call,) = [call for call in recorded if call["response"].url.path == _SWAGGER_PATH]
+    assert call["response_body"] == raised.content
+
+
 async def test_file_with_more_parts_than_the_row_limit_stops_with_its_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

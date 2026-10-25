@@ -283,13 +283,19 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   `fetch_without_redirects` (`connectors/_shared/api_file_read.py`), like
   the other API file reads: a redirect is not followed, the body is read up
   to the stored-result limit (also a gzip or deflate body, measured after
-  decoding), and the call is kept in the flight recorder. A `3xx` returns
+  decoding). The call is kept in the flight recorder, but the recorder
+  gets only the checked copy of the body (see below), and no body when
+  the file is refused. A `3xx` returns
   `redirect_path`: the path on the target, or `scheme://host/path` when the
   redirect points to another host (the query is dropped). A secret-named
   query value on a same-host path is replaced. A `403`, `404` or `5xx`
   returns its `status` with no text. A `401` is raised instead, so the
   dispatcher's session-recovery arm drops the cached bearer, logs in again
-  and retries once, like every other read of this connector.
+  and retries once, like every other read of this connector. When the
+  retry fails too, the dispatcher copies the body of the `401` into the
+  error result. So the read raises the `401` with a checked body: a
+  secret-named value is replaced, and a body that is not text or does not
+  parse is left out.
 - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
   `size` (bytes) and `sha256` (both of the checked copy, see below),
   `secrets_replaced` (how many secret values were replaced),
@@ -343,10 +349,11 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   comes back compact), inline JavaScript, and the value under a secret
   name even when it is a schema. An example credential in a documentation
   file is replaced like a real one; that is on purpose. Before the answer
-  leaves the handler, the read runs the stored-result redaction once more,
-  on the text parts and on the whole text, and refuses the file if a rule
-  would still change anything (naming the rule and the place, never the
-  text), so the stored parts are always the text the read returns.
+  leaves the handler, the read runs the stored-result redaction once more
+  (the shared `assert_not_redacted`), on the whole text and on the answer,
+  and refuses the file if a rule would still change anything (naming the
+  rules and the number of places, never the text), so the stored parts are
+  always the text the read returns.
 - **Tests.**
   [`test_connectors_vra8_api_file.py`](../../backend/tests/test_connectors_vra8_api_file.py)
   (respx: accepted and refused paths with no request, the login on the
@@ -355,11 +362,12 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   no known format, secret values in JSON, YAML, XML and HTML replaced and
   counted, also the layouts the code reviews found and a value across the
   part cut, a labelled `password=...` pair in a description, a secret in
-  the redirect query, a file with more parts than the row limit, and the
+  the redirect query, a file with more parts than the row limit, the
+  checked body the flight recorder and a `401` get, and the
   result-handle round trip);
   [`test_connectors_vra8_typed_reads.py`](../../backend/tests/test_connectors_vra8_typed_reads.py)
-  (zero-catalog dispatch, the 401 re-login, and `invalid_params` for a data
-  path); and the reconcile lane below (`GET /vco/api/about` in the manifest,
+  (zero-catalog dispatch, the 401 re-login, no part of a `401` body in the
+  error result after the retry, and `invalid_params` for a data path); and the reconcile lane below (`GET /vco/api/about` in the manifest,
   the documentation paths pinned apart).
 
 ## Spec reconcile lane

@@ -27,7 +27,9 @@ The read is narrow on purpose:
   names where it points (a path on the target, or ``scheme://host/path``
   for another host, without its query). A ``401`` is raised so the dispatcher
   renews the login and retries once; every other status comes back in
-  ``status``.
+  ``status``. The body of a ``401`` goes through the file check below
+  before the read raises it, and a body that cannot be checked is left
+  out, so the error result sees only a checked body.
 * The file is checked before it comes back
   (:func:`~meho_backplane.connectors._shared.api_file_secrets.check_api_file`).
   MEHO parses it as JSON, YAML, XML or HTML, replaces every value under a
@@ -47,8 +49,11 @@ The read is narrow on purpose:
   comes back.
 * The stored-result redaction runs once more when the dispatcher stores
   the answer. The read checks that it changes nothing on the copy and on
-  each part, and refuses the file if it would, naming the rule. So the
-  stored parts are always the text the read returns.
+  the answer, and refuses the file if it would, naming the rule
+  (:func:`~meho_backplane.connectors._shared.api_file_read.assert_not_redacted`).
+  So the stored parts are always the text the read returns.
+* The flight recorder gets the checked copy of the body, never the body
+  as it came. When the file is refused, it gets no body.
 
 The version and build come from the Orchestrator inside the appliance
 (``GET /vco/api/about``: ``version`` and ``build-number``); the IaaS API
@@ -71,17 +76,22 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.api_file_read import (
     ApiFileNotTextError,
     ApiFileTooLargeError,
+    assert_not_redacted,
+    decode_text,
     fetch_without_redirects,
     redirect_target,
     text_redactor,
 )
-from meho_backplane.connectors._shared.api_file_secrets import check_api_file, scrub_query_string
+from meho_backplane.connectors._shared.api_file_secrets import (
+    ApiFileFormatError,
+    check_api_file,
+    scrub_query_string,
+)
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors.result_handle_store import rows_record_bytes
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH, _VCO_ABOUT_PATH
 from meho_backplane.connectors.vra8.session import Vra8TargetLike
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
-from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -211,23 +221,23 @@ def _redirect(response: httpx.Response) -> str | None:
 
 async def _fetch_file(
     connector: Vra8Connector,
-    operator: Operator,
     target: Vra8TargetLike,
     path: str,
+    headers: dict[str, str],
+    span: flight_recorder_capture.SpanStart | None,
     max_bytes: int,
 ) -> httpx.Response:
     """Send the one ``GET`` with the bearer and return the answer with its body.
 
     The shared :func:`fetch_without_redirects` sends the request without
     following a redirect and reads the body up to *max_bytes*, also for a
-    compressed body. The call is kept in the flight recorder. A ``401`` is
-    raised as :class:`httpx.HTTPStatusError`: the dispatcher then drops
-    the cached bearer, logs in again and retries once, like every other
-    read of this connector.
+    compressed body. A ``401`` is raised as :class:`httpx.HTTPStatusError`
+    with a checked body (:func:`_with_checked_body`): the dispatcher then
+    drops the cached bearer, logs in again and retries once, like every
+    other read of this connector. The caller records every other answer
+    once the body is checked.
     """
     client = await connector._http_client(target)
-    headers = await connector.auth_headers(target, operator)
-    span = flight_recorder_capture.span_start()
     try:
         response = await fetch_without_redirects(
             client,
@@ -241,12 +251,59 @@ async def _fetch_file(
         raise
     except (ApiFileTooLargeError, ApiFileNotTextError) as exc:
         raise Vra8ApiFileError(f"{path!r}: {exc}. The file was not returned.") from exc
-    flight_recorder_capture.record_vendor_call(
-        span, method="GET", request_headers=headers, response=response
-    )
     if response.status_code == httpx.codes.UNAUTHORIZED:
-        response.raise_for_status()
+        expired = _with_checked_body(response, path)
+        _record(span, headers, expired, expired.content)
+        expired.raise_for_status()
     return response
+
+
+def _record(
+    span: flight_recorder_capture.SpanStart | None,
+    headers: dict[str, str],
+    response: httpx.Response,
+    body: bytes,
+) -> None:
+    """Record the vendor call with *body* in place of the body as it came."""
+    flight_recorder_capture.record_vendor_call(
+        span, method="GET", request_headers=headers, response=response, response_body=body
+    )
+
+
+def _checked_body(response: httpx.Response, path: str) -> bytes:
+    """The body as the file check writes it back, or no body when it cannot be checked.
+
+    For an answer the read does not return as a file: a ``401`` or another
+    error status. A secret-named value comes back as the placeholder; a
+    body that is not text, or does not parse, is left out.
+    """
+    try:
+        checked = check_api_file(
+            decode_text(response, path),
+            content_type=response.headers.get("content-type"),
+            path=path,
+        )
+    except (ApiFileNotTextError, ApiFileFormatError):
+        return b""
+    return checked.text.encode("utf-8")
+
+
+def _with_checked_body(response: httpx.Response, path: str) -> httpx.Response:
+    """The same answer with a checked body (:func:`_checked_body`).
+
+    The status and the headers stay, so the dispatcher still sees the
+    login as expired and the retry still runs. When the retry fails too,
+    the dispatcher copies this body into the error result.
+    """
+    return httpx.Response(
+        status_code=response.status_code,
+        headers=[
+            (k, v) for k, v in response.headers.multi_items() if k.lower() != "content-length"
+        ],
+        content=_checked_body(response, path),
+        request=response.request,
+        extensions=response.extensions,
+    )
 
 
 def _text_field(payload: Any, key: str) -> str | None:
@@ -312,41 +369,33 @@ def _decode_text(path: str, content_type: str | None, body: bytes) -> str:
         ) from exc
 
 
-def _redaction_labels(connector: Vra8Connector, operator: Operator) -> dict[str, str | None]:
-    """The labels the dispatcher gives the stored-result redaction for this read."""
-    return {
-        "connector_id": f"{connector.impl_id}-{connector.version}",
-        "tenant": str(operator.tenant_id) if operator.tenant_id is not None else None,
-        "op": OP_ID,
-    }
-
-
 def _checked_fields(
-    path: str, content_type: str | None, text: str, connector: Vra8Connector, operator: Operator
-) -> dict[str, Any]:
+    path: str, content_type: str | None, text: str, operator: Operator, connector_id: str
+) -> tuple[dict[str, Any], bytes]:
     """Check the file and build its fields: ``size`` and ``sha256`` of the copy, the parts.
 
     The shared check parses the file, replaces every value under a secret
     name and runs MEHO's general redaction rules (with the labels the
     dispatcher uses) on each text value, then writes the copy back. The
-    parts, ``size`` and ``sha256`` all describe that copy.
+    parts, ``size`` and ``sha256`` all describe that copy, which comes
+    back as bytes too, for the flight recorder.
     """
-    labels = _redaction_labels(connector, operator)
     checked = check_api_file(
         text,
         content_type=content_type,
         path=path,
-        text_rule=text_redactor(operator, connector_id=str(labels["connector_id"]), op_id=OP_ID),
+        text_rule=text_redactor(operator, connector_id=connector_id, op_id=OP_ID),
     )
     body = checked.text.encode("utf-8")
     parts = split_text_parts(body)
-    return {
+    fields = {
         "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
         "secrets_replaced": checked.secrets_replaced,
         "parts": len(parts),
         "text_parts": [{"index": index, "text": part} for index, part in enumerate(parts)],
     }
+    return fields, body
 
 
 def _check_fits(answer: dict[str, Any], operator: Operator) -> None:
@@ -378,35 +427,6 @@ def _check_fits(answer: dict[str, Any], operator: Operator) -> None:
         )
 
 
-def _check_redaction_keeps_text(
-    answer: dict[str, Any], file_text: str, connector: Vra8Connector, operator: Operator
-) -> None:
-    """Refuse a file whose cleaned text the stored-result redaction would still change.
-
-    The dispatcher redacts every result with the policy for this
-    (connector, tenant, operation) before it stores the result.
-    The file check already ran those rules on each text value, so a
-    second run should change nothing; this check proves it on the text
-    parts and on the whole text, and refuses the file if a rule still
-    fires, so the stored parts are always the text the read returns.
-    """
-    probe = {"text_parts": answer["text_parts"], "file_text": file_text}
-    result = apply_connector_boundary_redaction(probe, **_redaction_labels(connector, operator))
-    if result.redacted == result.raw:
-        return
-    hit = result.manifest[0] if result.manifest else None
-    where = (
-        f"rule {hit.rule!r} ({hit.reason}) fires at {hit.path}"
-        if hit is not None
-        else f"policy {result.policy_id!r} changes the text"
-    )
-    raise Vra8ApiFileError(
-        f"{answer['path']!r} holds text that MEHO's secret redaction would still change: "
-        f"{where}. The stored parts would not be the text of this answer, so the file was "
-        "not returned."
-    )
-
-
 async def vra8_api_file_get_impl(
     connector: Vra8Connector,
     operator: Operator,
@@ -430,8 +450,11 @@ async def vra8_api_file_get_impl(
     """
     path = check_api_file_path(params.get("path"))
     max_record_bytes = get_settings().result_handle_max_record_bytes
+    connector_id = f"{connector.impl_id}-{connector.version}"
 
-    response = await _fetch_file(connector, operator, target, path, max_record_bytes)
+    headers = await connector.auth_headers(target, operator)
+    span = flight_recorder_capture.span_start()
+    response = await _fetch_file(connector, target, path, headers, span, max_record_bytes)
     status = response.status_code
     content_type = response.headers.get("content-type")
     redirect_to = _redirect(response)
@@ -448,13 +471,21 @@ async def vra8_api_file_get_impl(
         "text_parts": [],
     }
     if response.is_success:
-        text = _decode_text(path, content_type, response.content)
-        answer.update(_checked_fields(path, content_type, text, connector, operator))
+        try:
+            text = _decode_text(path, content_type, response.content)
+            fields, body = _checked_fields(path, content_type, text, operator, connector_id)
+        except (Vra8ApiFileError, ApiFileFormatError):
+            _record(span, headers, response, b"")
+            raise
+        _record(span, headers, response, body)
+        answer.update(fields)
+    else:
+        _record(span, headers, response, _checked_body(response, path))
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         file_text = "".join(part["text"] for part in answer["text_parts"])
         _check_fits(answer, operator)
-        _check_redaction_keeps_text(answer, file_text, connector, operator)
+        assert_not_redacted(answer, file_text, operator, connector_id=connector_id, op_id=OP_ID)
 
     _log.info(
         "vra8_api_file_read",

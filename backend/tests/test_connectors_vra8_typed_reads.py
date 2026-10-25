@@ -27,6 +27,7 @@ Mirrors :mod:`tests.test_connectors_vcd_typed_reads`.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -303,6 +304,51 @@ async def test_api_file_get_dispatches_zero_catalog_and_remints_on_401(
     assert answer["text_parts"] == [{"index": 0, "text": body.decode()}]
     assert answer["build"] == "22222222"
     assert answer["iaas_api_version"] == "2021-07-15"
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        ('{"error":"expired","password":"made-up-401-secret"}', "application/json"),
+        ('{"password": "made-up-401-secret"', "text/plain"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_api_file_get_401_body_never_reaches_the_error_result(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    body: str,
+    content_type: str,
+) -> None:
+    """Two 401 answers: the login retry runs, and the error result holds no part of the body.
+
+    The dispatcher copies the body of the last 401 into the error result. The read
+    raises it with a checked body (a secret-named value replaced) or with no body
+    when the body cannot be checked.
+    """
+    await _register_and_resolve()
+
+    async with respx.mock(base_url=_VRA_BASE_URL) as mock:
+        csp = mock.post(_CSP_LOGIN_PATH).respond(200, json={"refresh_token": "rt"})
+        iaas = mock.post(_IAAS_LOGIN_PATH).respond(200, json={"token": "bt"})
+        swagger = mock.get("/iaas/api/swagger").respond(
+            401, text=body, headers={"Content-Type": content_type}
+        )
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=VRA8_CONNECTOR_ID,
+            op_id="vcfa.vra8.api_file.get",
+            target=_Vra8ReadTarget(),
+            params={"path": "/iaas/api/swagger"},
+        )
+
+    assert result.status == "error"
+    assert csp.call_count == 2 and iaas.call_count == 2
+    assert swagger.call_count == 2
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert "made-up-401-secret" not in rendered
 
 
 @pytest.mark.asyncio

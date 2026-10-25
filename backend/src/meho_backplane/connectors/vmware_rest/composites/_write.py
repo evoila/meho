@@ -113,6 +113,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     unwrap_vim_value,
     vim_moref,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
 from meho_backplane.operations.composite import (
     DispatchChild,
@@ -356,6 +357,10 @@ _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 # form the ingest parser emits and the pinned-spec reconcile asserts).
 _OP_RECONFIG_VM_TASK = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# A read of many objects in one call follows the continuation pages vCenter
+# may send (#4862, ``vim_retrieve.retrieve_all_pages``). Listed on the
+# manifest of every composite that reads that way.
+_OP_CONTINUE_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
 # #3697: vm.deploy_from_library deploys under a unique name and renames the
 # finished VM or vApp to the requested name through the core vim
 # ``ManagedEntity.Rename_Task`` (no REST rename exists in the pinned spec).
@@ -1102,9 +1107,11 @@ _SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
 #: vm.deploy_from_library's vim leg (#3697): the ``Rename_Task`` that gives
 #: the finished VM (or vApp) its requested name, the ``Destroy_Task`` that
 #: removes a vApp a failed deploy left (with its VMs), and the property
-#: read that polls the tasks and finds such a vApp by its deploy name.
+#: read that polls the tasks and finds such a vApp by its deploy name (with
+#: the continuation pages of the vApp name read, #4862).
 _VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RENAME_VM_TASK,
     _OP_RENAME_VAPP_TASK,
     _OP_DESTROY_VAPP_TASK,
@@ -3541,11 +3548,12 @@ async def _find_vapps_named(
 
     Two un-gated ``RetrievePropertiesEx`` reads: the pool's ``resourcePool``
     children (a vApp is a child resource pool of the pool it was deployed
-    into), then the ``name`` of every child that is a ``VirtualApp``. No
-    read leaves the named objects (no traversal). An unexpected shape
-    yields no match; a transport fault, the connector's :exc:`RuntimeError`
-    for an unavailable VI-JSON API, or a response that is not JSON raises
-    for the caller.
+    into), then the ``name`` of every child that is a ``VirtualApp``, with
+    every continuation page vCenter sends (#4862). No read leaves the named
+    objects (no traversal). An unexpected shape yields no match; a
+    transport fault, a failed page, the connector's :exc:`RuntimeError` for
+    an unavailable VI-JSON API, or a response that is not JSON raises for
+    the caller.
     """
     children_read = await connector._post_vmomi_json(
         target,
@@ -3565,11 +3573,11 @@ async def _find_vapps_named(
     ]
     if not vapp_ids:
         return []
-    names_read = await connector._post_vmomi_json(
+    names_read = await retrieve_all_pages(
+        connector,
         target,
-        _VMOMI_RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
+        operator,
+        retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
     )
     return [moid for moid, vapp_name in _entity_names(names_read).items() if vapp_name == name]
 

@@ -1183,8 +1183,8 @@ dogfooding consumer) verifies the entire chain — image, build
 provenance, bill of materials — with one trust anchor.
 
 **Trivy vulnerability scan (fails on fixable CRITICAL/HIGH).**
-`aquasecurity/trivy-action` runs after the attestation step against the
-same digest. The scan emits SARIF covering OS packages + the locked
+`aquasecurity/trivy-action` runs against the quarantine digest before
+the promote, sign and attest steps. The scan emits SARIF covering OS packages + the locked
 Python deps inside `/app/.venv`, filtered to `CRITICAL,HIGH` with
 `ignore-unfixed: true` so the results list only actionable findings.
 SARIF is uploaded **twice** (both uploads publish on a failing scan too —
@@ -1202,12 +1202,34 @@ see the gate note below):
 **The scan gates main/tag runs (`exit-code: '1'`).** A fixable
 CRITICAL/HIGH finding fails the run — a red-main alarm against silent
 CVE accumulation on a stale base image, not a PR merge gate (the step
-is skipped on `pull_request`). Both SARIF uploads are gated on the scan
+is skipped on `pull_request`; see the lock-file scan below for what a
+pull request gets instead). Both SARIF uploads are gated on the scan
 step's `outcome` (`if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}`)
 rather than the implicit `success()`, so a failing scan still lands its
 findings on the Security tab and the 30-day artefact instead of skipping
 the uploads. A red run means "bump the base-image digest (Dependabot
 docker PR) and re-push", not "this merge is blocked".
+
+**Pull-request scan of `backend/uv.lock` (`lock-scan` job).** On a pull
+request the image is built but not pushed, so the image scan cannot run
+there. The `lock-scan` job runs trivy in file-system mode on
+`backend/uv.lock` alone (`scan-type: fs`, `scanners: vuln`) with the same
+rules as the image scan: the same action commit, the same `.trivyignore`,
+`severity: CRITICAL,HIGH`, `ignore-unfixed: true` and `exit-code: '1'`.
+It prints the findings as a table in the job log; nothing is uploaded
+to the Security tab, so that tab keeps only the main/tag results. The
+job runs on `ubuntu-latest` with `permissions: contents: read`, does not
+depend on the build job, and needs no fork guard (trivy only reads the
+lock file; `backend/tests/test_ci_fork_runner_isolation.py` accepts
+hosted jobs). It is not a required check. `.trivyignore` is in
+`on.pull_request.paths`, so a pull request that only changes an
+exception runs the workflow too. What the lock scan does not cover: the
+Debian packages of the base image and anything else in the image that is
+not in the lock file (only the image scan on main and tags checks those);
+new findings for packages already on main (main still fails on its next
+run; the fix pull request now shows a passing scan before merge); and the
+few Windows-only packages in the lock file that the image never installs
+(a finding there fails the pull-request job while main passes).
 
 **Action pin discipline (same rule as cosign).** Every third-party
 action in the new steps is SHA-pinned with the human-readable tag in

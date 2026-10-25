@@ -3366,6 +3366,27 @@ class VmwareRestConnector(HttpConnector):
 
         return await tasks_history_impl(self, operator, target, params)
 
+    async def alarm_triggered_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.alarm.triggered.list`` -- the alarms that are triggered now (#4383).
+
+        A ``source_kind="typed"`` read. Reads ``triggeredAlarmState`` of the
+        root folder (the whole vCenter) or of one object, then the alarm and
+        object names. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered.alarm_triggered_list_impl`
+        (imported lazily, like the other typed reads). Returns
+        ``{"scope", "alarms": [...], "read_note"}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered import (
+            alarm_triggered_list_impl,
+        )
+
+        return await alarm_triggered_list_impl(self, operator, target, params)
+
     async def sso_admin_api_file_get(
         self,
         operator: Operator,
@@ -3385,6 +3406,23 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await sso_admin_api_file_get_impl(self, operator, target, params)
+
+    async def vm_hardware_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.hardware.show`` -- one VM's CPU, memory, CD drives and controllers.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware.vm_hardware_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
+            vm_hardware_show_impl,
+        )
+
+        return await vm_hardware_show_impl(self, operator, target, params)
 
     async def license_list(
         self,

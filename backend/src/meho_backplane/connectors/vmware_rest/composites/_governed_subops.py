@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Final
 
 from meho_backplane.connectors.vmware_rest.composites import (
+    _alarm,
     _datastore_files,
     _drs_rule_delete,
     _host,
@@ -44,6 +45,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _teardown,
     _teardown_network,
     _vm_allocation,
+    _vm_cdrom_tools,
     _write,
 )
 
@@ -111,6 +113,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.resize": _write._SUB_OPS_VM_RESIZE,
     "vmware.composite.vm.nic.repoint": _write._SUB_OPS_VM_NIC_REPOINT,
     "vmware.composite.vm.device.cdrom": _write._SUB_OPS_VM_DEVICE_CDROM,
+    "vmware.composite.vm.cdrom.add": _vm_cdrom_tools.SUB_OPS_VM_CDROM_ADD,
+    "vmware.composite.vm.tools.installer.unmount": (
+        _vm_cdrom_tools.SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT
+    ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE
     ),
@@ -156,6 +162,9 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
     ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
+    # #4383 alarm changes: one AlarmManager write each, after two reads.
+    "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
+    "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
 }
 
 

@@ -72,7 +72,7 @@ wrapper until v0.2.next ships policy + approval flow:
 | --- | --- | --- |
 | cluster | `k8s.about`, `k8s.ls` | read-only discovery |
 | inventory | `k8s.namespace.list`, `k8s.node.list` | read-only |
-| workload | `k8s.pod.list`, `k8s.pod.info`, `k8s.deployment.list`, `k8s.deployment.info` | read-only |
+| workload | `k8s.pod.list`, `k8s.pod.info`, `k8s.deployment.list`, `k8s.deployment.info`, `k8s.job.list`, `k8s.job.info` | read-only |
 | network | `k8s.service.list`, `k8s.ingress.list` | read-only |
 | config | `k8s.configmap.list` (keys-only), `k8s.configmap.info` (full data) | read-only |
 | events | `k8s.event.list` | read-only |

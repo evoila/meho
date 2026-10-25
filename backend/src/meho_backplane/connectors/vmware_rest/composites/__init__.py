@@ -91,8 +91,14 @@ Scope:
 * the VM snapshot writes (``_snapshot``): ``vm.snapshot.create`` (caution,
   waits for approval) and the destructive ``vm.snapshot.delete``. The list is
   the typed read ``vmware.snapshot.list``; the revert lives in ``_write``.
+* the two alarm changes ``alarm.acknowledge`` and ``alarm.reset``
+  (``_alarm``, #4383): both ``caution`` with ``requires_approval=True``.
 """
 
+from meho_backplane.connectors.vmware_rest.composites._alarm import (
+    alarm_acknowledge_composite,
+    alarm_reset_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
@@ -206,9 +212,16 @@ register_typed_op_registrar(register_vmware_composite_operations_8_0)
 # blast-radius #3198) onto the per-op hook in
 # :mod:`meho_backplane.operations._preview` — mirrors how
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
-from meho_backplane.connectors.vmware_rest.composites import _write_preview  # noqa: E402,F401
+# Same for the guest file read (#4850): a caution read, so an agent's call
+# waits for approval.
+from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402,F401
+    _guest_file_read_preview,
+    _write_preview,
+)
 
 __all__ = [
+    "alarm_acknowledge_composite",
+    "alarm_reset_composite",
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
     "cluster_drs_rule_delete_composite",

@@ -306,14 +306,23 @@ operation call <op_id> --params @spec.json` (CLI) — **no new MCP tool and no n
 CLI verb** (CLAUDE.md postulate 5; the generic `operation call` verb carries the
 body). No `enable_writes` bulk path exists by design; each mutating op is a
 distinct approval-gated typed op that the dispatcher **parks** for approval
-before the handler runs. The reviewer context
-(`resolve_reviewer_context`) surfaces the op + target + subject identity only —
-never the hidden `params` body — so a `DomainCreationSpec`'s or
-`HostCommissionSpec`'s plaintext passwords never reach the approver (the
-connector-boundary redaction engine is the backstop on any identity field that
-resolves). A custom park-time blast-radius preview builder (the vcf-installer
-`bringup` shape) is a possible future enhancement, not required at the
-`dangerous` tier.
+before the handler runs.
+
+What the approver sees:
+
+- **`sddc.host.validate` and `sddc.host.commission`** have a preview (#4850,
+  `sddc_manager/host_commission_preview.py`). It shows the host count and, for
+  each host, `fqdn`, `username`, `storageType` and `networkPoolId`. It never
+  shows the ESXi password or any other field of the `HostCommissionSpec`. See
+  [approvals.md — Credential writes: what the approver sees](approvals.md#credential-writes-what-the-approver-sees-4850).
+- **`sddc.domain.validate` and `sddc.domain.create`** have no preview. The
+  reviewer context (`resolve_reviewer_context`) surfaces the op + target +
+  subject identity only — never the hidden `params` body — so a
+  `DomainCreationSpec`'s plaintext passwords never reach the approver (the
+  connector-boundary redaction engine is the backstop on any identity field
+  that resolves). A custom park-time blast-radius preview builder (the
+  vcf-installer `bringup` shape) is a possible future enhancement, not
+  required at the `dangerous` tier.
 
 **The governed WLD build sequence** (the caller's responsibility — runbook or
 the meho-automation add-on — not the dispatcher's): `network_pool.create` →

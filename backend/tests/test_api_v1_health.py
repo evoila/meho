@@ -53,12 +53,14 @@ from unittest.mock import AsyncMock
 import pytest
 import respx
 import structlog
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector, register_vault_typed_operations
+from meho_backplane.db.migrations import alembic_config
 from meho_backplane.main import app
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
@@ -374,6 +376,26 @@ def test_happy_path_returns_full_federation_response(
     # No ``scope`` claim on the token → not elevated.
     assert summary["operator_surface_listed"] is False
 
+    # #4830: the six gated features ride along with their setting names.
+    # Their configured state depends on the env, so pin names + shape here.
+    features = body.pop("features")
+    assert [entry["name"] for entry in features] == [
+        "agent_runtime",
+        "ui_surface",
+        "audit_replay",
+        "approval_queue",
+        "approval_custody",
+        "mcp",
+    ]
+    assert all({"name", "configured", "missing_env"} == set(entry) for entry in features)
+    # #4830: the approval key comes from the test env (conftest), so pin the
+    # state words, not one value. The default postures are env-independent.
+    approvals = body.pop("approvals")
+    assert approvals["custody"] in {"configured", "missing"}
+    assert approvals["effective_posture"] == "four_eyes_enforced"
+    assert approvals["delegated_decision_posture"] == "production_own_hand_only"
+
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert body == {
         # #2746: OperatorIdentity now carries tenant_id + tenant_role, so the
         # federation health response echoes the caller's tenant identity too.
@@ -385,7 +407,9 @@ def test_happy_path_returns_full_federation_response(
             "tenant_role": "operator",
         },
         "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
-        "db": {"migrated": True},
+        # #4830: the probe's revisions ride along so an upgrade can be
+        # confirmed from ``meho status``.
+        "db": {"migrated": True, "revision": head, "head": head, "detail": f"revision={head}"},
         "mcp_session_id_capture": "when_negotiated",
         "mcp_protocol_version": PROTOCOL_VERSION,
         # #4622: the instance's sandbox mode; off on every ordinary instance.
@@ -404,6 +428,9 @@ def test_happy_path_returns_full_federation_response(
         "pairings": [],
         # #3666: the token carries no ``scope`` claim, so no scopes are granted.
         "granted_scopes": [],
+        # #4830: this TestClient never ran the lifespan, so no readiness
+        # probe is registered and the snapshot fails closed with no checks.
+        "readiness": {"ready": False, "checks": []},
     }
 
     # Vault was hit with the configured role / mount and the operator's

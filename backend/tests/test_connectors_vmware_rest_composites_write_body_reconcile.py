@@ -209,6 +209,7 @@ def test_flattened_2973_bodies_are_served_flat_by_the_pinned_spec() -> None:
 
 from meho_backplane.connectors.vmware_rest import ovf_import_control  # noqa: E402
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
+    _alarm,
     _datastore_browse,
     _read,
     _snapshot,
@@ -275,6 +276,8 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _read._EVENT_FILTER_SPEC_TYPE,
     _read._EVENT_FILTER_SPEC_BY_TIME_TYPE,
     _read._EVENT_FILTER_SPEC_BY_ENTITY_TYPE,
+    # #4383 alarm.reset ClearTriggeredAlarms filter.
+    _alarm._ALARM_FILTER_SPEC_TYPE,
 }
 
 

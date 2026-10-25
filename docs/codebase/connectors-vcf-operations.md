@@ -288,14 +288,26 @@ registrar is queued via `register_typed_op_registrar` in the package
   - **How it reads.** One `GET` on the pooled client with the target's own
     login (`Authorization: OpsToken <token>` on 9.x, `vRealizeOpsToken` on
     8.x through the inherited `auth_headers`). The request goes through
-    `httpx.AsyncClient.send(..., follow_redirects=False)`, so a redirect
-    is not followed (the pooled client class would follow a same-origin
-    redirect by itself). A `3xx` returns `redirect_path`, with the value
-    of a secret-named query setting in it (`?licenseKey=...`, also with an
-    encoded name such as `license%4Bey`) replaced by
+    the shared `fetch_without_redirects`
+    (`connectors/_shared/api_file_read.py`), like the other API file
+    reads: a redirect is not followed, and the body is read up to the
+    stored-result limit (also a gzip or deflate body, measured after
+    decoding). A `3xx` returns `redirect_path` (shared `redirect_target`):
+    the path on the target, or `scheme://host/path` when the redirect
+    points to another host (the query is dropped). In a path on the
+    target, the value of a secret-named query setting (`?licenseKey=...`,
+    also with an encoded name such as `license%4Bey`) is replaced by
     `[REDACTED:param_name]` (`scrub_query_string` of the shared check).
-    A `401`, `403`, `404` or `5xx` returns its `status` with no text. A login failure
-    (no credentials, a rejected login) stops the read before the request.
+    A `403`, `404` or `5xx` returns its `status` with no text. A `401` is
+    raised instead, so the dispatcher drops the cached token, logs in
+    again and retries once, like every other read of this connector. When
+    the retry fails too, the dispatcher copies the body of the `401` into
+    the error result, so the read raises it with a checked body: a
+    secret-named value is replaced, and a body that is not text or does
+    not parse is left out. A login failure (no credentials, a rejected
+    login) stops the read before the request. The call is kept in the
+    flight recorder, but the recorder gets only the checked copy of the
+    body, and no body when the file is refused.
   - **What it returns.** `path`, `status`, `content_type`, `redirect_path`,
     `size` (bytes of the checked copy), `sha256` (of the checked copy),
     `secrets_replaced`, `parts`, `text_parts`, `version`, `build`,
@@ -343,14 +355,17 @@ registrar is queued via `register_typed_op_registrar` in the package
     every stored result. A rule that fires on the copy would rewrite a
     part, and the joined parts would no longer match `sha256`. So the read
     runs the same middleware, with the same connector, tenant and operation
-    labels, on the text parts and on the whole file text before it returns,
-    and stops with an error that names the rule and the place when the text
-    would change. The whole-file pass catches a secret that the part cut
-    splits in two. Redaction itself stays on.
+    labels, on the whole file text and on the answer before it returns
+    (the shared `assert_not_redacted`), and stops with an error that names
+    the rules and the number of places when the text would change. The
+    whole-file pass catches a secret that the part cut splits in two.
+    Redaction itself stays on.
   - **Tests.** `tests/test_connectors_vcf_operations_typed_api_file.py`
     (respx: accepted and refused paths with no request, the login header on
-    both connectors, status and redirect cases, a redirect with a
-    secret-named query value (plain and encoded name), large files, version
+    both connectors, status and redirect cases, a redirect to another host,
+    a redirect with a secret-named query value (plain and encoded name), a
+    gzip body, the checked body the flight recorder and a `401` get, large
+    files, version
     failures, a login failure, a copy that a redaction rule would change, a
     secret value in JSON, YAML, XML or HTML that comes back replaced (also
     the examples the code reviews found), a file with no secret name that

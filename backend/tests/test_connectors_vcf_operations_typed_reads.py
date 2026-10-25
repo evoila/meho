@@ -54,6 +54,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -536,6 +537,96 @@ async def test_auth_source_omitted_from_acquire_body_when_unset(
     assert "authSource" not in acquire_body
     assert acquire_body == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
     assert "auth-source" not in route.calls[0].request.url.params
+
+
+_API_FILE_PATH = "/suite-api/doc/openapi/v3/public-api.json"
+
+
+@pytest.mark.asyncio
+async def test_api_file_get_logs_in_again_on_401_and_retries_once(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 on the file drops the cached token; the read logs in again and retries once."""
+    await _register_typed_ops(_stub_embedding)
+    install_fake_client(
+        monkeypatch, secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    )
+    body = b'{"openapi":"3.0.1","paths":{}}'
+
+    async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        acquire = mock.post(_ACQUIRE_PATH).mock(
+            side_effect=[
+                httpx.Response(200, json={**_ACQUIRE_RESPONSE, "token": "token-stale"}),
+                httpx.Response(200, json={**_ACQUIRE_RESPONSE, "token": "token-fresh"}),
+            ]
+        )
+        file_route = mock.get(_API_FILE_PATH).mock(
+            side_effect=[
+                httpx.Response(401),
+                httpx.Response(200, content=body, headers={"Content-Type": "application/json"}),
+            ]
+        )
+        mock.get(_LIVENESS_PATH).respond(200, json=_LIVENESS_RESPONSE)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="vrops.api_file.get",
+            target=_TypedReadTarget(),
+            params={"path": _API_FILE_PATH},
+        )
+
+    assert result.status == "ok", result.error
+    assert acquire.call_count == 2
+    assert file_route.call_count == 2
+    assert file_route.calls[0].request.headers["authorization"] == "OpsToken token-stale"
+    assert file_route.calls[1].request.headers["authorization"] == "OpsToken token-fresh"
+    assert result.result["status"] == 200
+    assert result.result["text_parts"] == [{"index": 0, "text": body.decode()}]
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        ('{"error":"expired","password":"made-up-401-secret"}', "application/json"),
+        ('{"password": "made-up-401-secret"', "text/plain"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_api_file_get_401_body_never_reaches_the_error_result(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    content_type: str,
+) -> None:
+    """Two 401 answers: the retry runs, and the error result holds no part of the body."""
+    await _register_typed_ops(_stub_embedding)
+    install_fake_client(
+        monkeypatch, secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    )
+
+    async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        acquire = mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
+        file_route = mock.get(_API_FILE_PATH).respond(
+            401, text=body, headers={"Content-Type": content_type}
+        )
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="vrops.api_file.get",
+            target=_TypedReadTarget(),
+            params={"path": _API_FILE_PATH},
+        )
+
+    assert result.status == "error"
+    assert acquire.call_count == 2
+    assert file_route.call_count == 2
+    rendered = (
+        (result.error or "") + json.dumps(result.result) + json.dumps(result.extras, default=str)
+    )
+    assert "made-up-401-secret" not in rendered
 
 
 # ---------------------------------------------------------------------------

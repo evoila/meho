@@ -22,10 +22,21 @@ The read is narrow on purpose:
   host; the query may hold only ``group`` and ``apiVersion``. Any other
   path is refused before a request goes out.
 * It sends one ``GET`` to the target's own address with the target's own
-  login (the connector's token session), on the pooled client.
-* It does not follow a redirect. The answer names the redirect's path;
-  a secret-named query setting in it (``?licenseKey=...``, also with an
-  encoded name) comes back with its value replaced by the placeholder.
+  login (the connector's token session), on the pooled client, through
+  the shared
+  :func:`~meho_backplane.connectors._shared.api_file_read.fetch_without_redirects`:
+  the body is read up to the stored-result limit, also a ``gzip`` or
+  ``deflate`` body, measured after decoding.
+* A ``401`` is raised, so the dispatcher renews the login and retries
+  once, like every other read of this connector. Its body goes through
+  the file check below first, and a body that cannot be checked is left
+  out, so the error result sees only a checked body. Every other status
+  comes back in ``status``.
+* It does not follow a redirect. The answer names where it points: a
+  path on the target, or ``scheme://host/path`` for another host,
+  without its query. A secret-named query setting in a path on the
+  target (``?licenseKey=...``, also with an encoded name) comes back
+  with its value replaced by the placeholder.
 * The read never returns a secret. The shared check
   (:mod:`meho_backplane.connectors._shared.api_file_secrets`) parses the
   whole file (JSON, YAML, XML or HTML) and replaces every value under a
@@ -38,8 +49,12 @@ The read is narrow on purpose:
   ``sha256`` describe it. A file that does not fit in one stored result is
   refused with its size, never cut.
 * The read then runs the redaction rules the dispatcher will apply, on
-  the whole copy and on each part, and refuses a copy whose text they
-  would still change. So the stored parts always match ``sha256``.
+  the whole copy and on the answer, and refuses a copy whose text they
+  would still change
+  (:func:`~meho_backplane.connectors._shared.api_file_read.assert_not_redacted`).
+  So the stored parts always match ``sha256``.
+* The flight recorder gets the checked copy of the body, never the body
+  as it came. When the file is refused, it gets no body.
 
 The appliance version and build come from
 ``GET /suite-api/api/versions/current`` (``releaseName``, ``buildNumber``),
@@ -61,6 +76,14 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.api_file_read import (
+    ApiFileNotTextError,
+    ApiFileTooLargeError,
+    assert_not_redacted,
+    decode_text,
+    fetch_without_redirects,
+    redirect_target,
+)
 from meho_backplane.connectors._shared.api_file_secrets import (
     ApiFileFormatError,
     check_api_file,
@@ -70,7 +93,7 @@ from meho_backplane.connectors._shared.credential_backend import CredentialsRead
 from meho_backplane.connectors.vcf_operations.connector import _VERSIONS_CURRENT_PATH
 from meho_backplane.connectors.vcf_operations.session import VcfOperationsTargetLike
 from meho_backplane.connectors.vcf_operations.typed_ops import VropsTypedOp
-from meho_backplane.redaction import apply_connector_boundary_redaction
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -216,70 +239,92 @@ def _is_text(content_type: str | None) -> bool:
     )
 
 
-def _redirect_path(request_url: httpx.URL, location: str | None) -> str | None:
-    """Return the path (and query) a redirect points to, or ``None``."""
-    if not location:
-        return None
-    try:
-        target = request_url.join(location)
-    except httpx.InvalidURL:
-        return None
-    return target.raw_path.decode("ascii", "replace")
-
-
-async def _read_body(response: httpx.Response, max_bytes: int) -> bytes:
-    """Read the body, but refuse one over *max_bytes* without keeping it."""
-    declared = response.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > max_bytes:
-        raise VropsApiFileError(
-            f"The file is {int(declared)} bytes (Content-Length). One stored result "
-            f"holds at most {max_bytes} bytes, so the file was not read."
-        )
-    chunks: list[bytes] = []
-    size = 0
-    async for chunk in response.aiter_bytes():
-        size += len(chunk)
-        if size > max_bytes:
-            raise VropsApiFileError(
-                f"The file is more than {max_bytes} bytes. One stored result holds at "
-                "most that, so the file was not read."
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 async def _fetch_file(
     connector: VcfOperationsConnector,
-    operator: Operator,
     target: VcfOperationsTargetLike,
     path: str,
+    headers: dict[str, str],
+    span: flight_recorder_capture.SpanStart | None,
     max_bytes: int,
-) -> dict[str, Any]:
-    """Send the one ``GET`` with the target's login and return status, headers and body.
+) -> httpx.Response:
+    """Send the one ``GET`` with the target's login and return the answer with its body.
 
     The request carries the connector's token header (``OpsToken`` on 9.x,
-    ``vRealizeOpsToken`` on 8.x). The pooled client class follows same-origin
-    redirects by itself, so the request goes through
-    :meth:`httpx.AsyncClient.send` with ``follow_redirects=False``.
+    ``vRealizeOpsToken`` on 8.x). The shared :func:`fetch_without_redirects`
+    sends it without following a redirect and reads the body up to
+    *max_bytes*, also for a compressed body. A ``401`` is raised as
+    :class:`httpx.HTTPStatusError` with a checked body
+    (:func:`_with_checked_body`): the dispatcher then drops the cached
+    token, logs in again and retries once. The caller records every other
+    answer once the body is checked.
     """
     client = await connector._http_client(target)
-    headers = await connector.auth_headers(target, operator)
-    request = client.build_request(
-        "GET", path, headers=headers, extensions=connector._request_extensions(target)
-    )
-    response = await httpx.AsyncClient.send(client, request, stream=True, follow_redirects=False)
     try:
-        status = response.status_code
-        content_type = response.headers.get("content-type")
-        redirect = (
-            _redirect_path(request.url, response.headers.get("location"))
-            if response.is_redirect
-            else None
+        response = await fetch_without_redirects(
+            client,
+            path,
+            headers=headers,
+            extensions=connector._request_extensions(target),
+            max_bytes=max_bytes,
         )
-        body = await _read_body(response, max_bytes) if response.is_success else b""
-    finally:
-        await response.aclose()
-    return {"status": status, "content_type": content_type, "redirect": redirect, "body": body}
+    except httpx.TransportError as exc:
+        flight_recorder_capture.record_vendor_call_error(span, method="GET", exc=exc)
+        raise
+    except (ApiFileTooLargeError, ApiFileNotTextError) as exc:
+        raise VropsApiFileError(f"{path!r}: {exc}. The file was not read.") from exc
+    if response.status_code == httpx.codes.UNAUTHORIZED:
+        expired = _with_checked_body(response, path)
+        _record(span, headers, expired, expired.content)
+        expired.raise_for_status()
+    return response
+
+
+def _record(
+    span: flight_recorder_capture.SpanStart | None,
+    headers: dict[str, str],
+    response: httpx.Response,
+    body: bytes,
+) -> None:
+    """Record the vendor call with *body* in place of the body as it came."""
+    flight_recorder_capture.record_vendor_call(
+        span, method="GET", request_headers=headers, response=response, response_body=body
+    )
+
+
+def _checked_body(response: httpx.Response, path: str) -> bytes:
+    """The body as the file check writes it back, or no body when it cannot be checked.
+
+    For an answer the read does not return as a file: a ``401`` or another
+    error status. A secret-named value comes back as the placeholder; a
+    body that is not text, or does not parse, is left out.
+    """
+    try:
+        checked = check_api_file(
+            decode_text(response, path),
+            content_type=response.headers.get("content-type"),
+            path=path,
+        )
+    except (ApiFileNotTextError, ApiFileFormatError):
+        return b""
+    return checked.text.encode("utf-8")
+
+
+def _with_checked_body(response: httpx.Response, path: str) -> httpx.Response:
+    """The same answer with a checked body (:func:`_checked_body`).
+
+    The status and the headers stay, so the dispatcher still sees the
+    session as expired and the retry still runs. When the retry fails too,
+    the dispatcher copies this body into the error result.
+    """
+    return httpx.Response(
+        status_code=response.status_code,
+        headers=[
+            (k, v) for k, v in response.headers.multi_items() if k.lower() != "content-length"
+        ],
+        content=_checked_body(response, path),
+        request=response.request,
+        extensions=response.extensions,
+    )
 
 
 async def _read_version(
@@ -316,12 +361,13 @@ async def _read_version(
     return {"version": version, "build": build, "version_error": error}
 
 
-def _file_fields(path: str, content_type: str | None, body: bytes) -> dict[str, Any]:
+def _file_fields(path: str, content_type: str | None, body: bytes) -> tuple[dict[str, Any], bytes]:
     """Decode a ``2xx`` body, check the whole file and build the file fields of the answer.
 
     The shared check runs on the whole text before it is cut into parts,
     so a part cut cannot hide a secret. ``size``, ``sha256`` and the parts
-    describe the checked copy.
+    describe the checked copy, which comes back as bytes too, for the
+    flight recorder.
     """
     if not _is_text(content_type):
         raise VropsApiFileError(
@@ -339,13 +385,14 @@ def _file_fields(path: str, content_type: str | None, body: bytes) -> dict[str, 
         raise VropsApiFileError(str(exc)) from None
     copy = checked.text.encode("utf-8")
     parts = split_text_parts(copy)
-    return {
+    fields = {
         "size": len(copy),
         "sha256": hashlib.sha256(copy).hexdigest(),
         "secrets_replaced": checked.secrets_replaced,
         "parts": len(parts),
         "text_parts": [{"index": index, "text": text} for index, text in enumerate(parts)],
     }
+    return fields, copy
 
 
 def _check_fits(answer: dict[str, Any], max_record_bytes: int, max_rows: int) -> None:
@@ -369,45 +416,6 @@ def _check_fits(answer: dict[str, Any], max_record_bytes: int, max_rows: int) ->
         )
 
 
-def _check_redaction_keeps_text(
-    answer: dict[str, Any], connector: VcfOperationsConnector, operator: Operator
-) -> None:
-    """Refuse a checked copy whose text the stored-result redaction would change.
-
-    The dispatcher redacts every result with the policy for this
-    (connector, tenant, operation) before it stores the result. A rule
-    that fires on the file text would rewrite a part, and the joined parts
-    would no longer match ``sha256``. This runs the same middleware with
-    the same labels on the text parts, so the check and the real
-    redaction cannot disagree, and on the whole file text as well: a
-    secret that a part cut splits in two is invisible to the per-part
-    check, and the dispatcher would store it in clear text.
-    """
-    probe = {
-        "text_parts": answer["text_parts"],
-        "file_text": "".join(part["text"] for part in answer["text_parts"]),
-    }
-    result = apply_connector_boundary_redaction(
-        probe,
-        connector_id=f"{connector.impl_id}-{connector.version}",
-        tenant=str(operator.tenant_id) if operator.tenant_id is not None else None,
-        op=OP_ID,
-    )
-    if result.redacted == result.raw:
-        return
-    hit = result.manifest[0] if result.manifest else None
-    where = (
-        f"rule {hit.rule!r} ({hit.reason}) fires at {hit.path}"
-        if hit is not None
-        else f"policy {result.policy_id!r} changes the text"
-    )
-    raise VropsApiFileError(
-        f"{answer['path']!r} holds text that MEHO's secret redaction would change: {where}. "
-        "The stored parts would no longer match sha256, so the file was not returned. "
-        "This read never returns a changed file."
-    )
-
-
 async def api_file_get_impl(
     connector: VcfOperationsConnector,
     operator: Operator,
@@ -417,7 +425,8 @@ async def api_file_get_impl(
     """Implementation of ``vrops.api_file.get``.
 
     1. Check the path (no request goes out for a refused path).
-    2. ``GET`` the file with the target's login, without following a redirect.
+    2. ``GET`` the file with the target's login, without following a
+       redirect. A ``401`` is raised for the login retry.
     3. Read the appliance version and build (best effort).
     4. Check the whole file and replace every secret value (see
        :func:`_file_fields`); replace a secret-named query value in
@@ -431,15 +440,22 @@ async def api_file_get_impl(
     path = check_api_file_path(params.get("path"))
     settings = get_settings()
     max_record_bytes = settings.result_handle_max_record_bytes
+    connector_id = f"{connector.impl_id}-{connector.version}"
 
-    fetched = await _fetch_file(connector, operator, target, path, max_record_bytes)
-    redirect_path, redirect_replaced = (
-        scrub_query_string(fetched["redirect"]) if fetched["redirect"] else (None, 0)
+    headers = await connector.auth_headers(target, operator)
+    span = flight_recorder_capture.span_start()
+    response = await _fetch_file(connector, target, path, headers, span, max_record_bytes)
+    content_type = response.headers.get("content-type")
+    redirect = (
+        redirect_target(response.headers.get("location"), response.request.url)
+        if response.is_redirect
+        else None
     )
+    redirect_path, redirect_replaced = scrub_query_string(redirect) if redirect else (None, 0)
     answer: dict[str, Any] = {
         "path": path,
-        "status": fetched["status"],
-        "content_type": fetched["content_type"],
+        "status": response.status_code,
+        "content_type": content_type,
         "redirect_path": redirect_path,
         "size": None,
         "sha256": None,
@@ -447,13 +463,22 @@ async def api_file_get_impl(
         "parts": 0,
         "text_parts": [],
     }
-    if 200 <= fetched["status"] < 300:
-        answer.update(_file_fields(path, fetched["content_type"], fetched["body"]))
+    if response.is_success:
+        try:
+            fields, copy = _file_fields(path, content_type, response.content)
+        except VropsApiFileError:
+            _record(span, headers, response, b"")
+            raise
+        _record(span, headers, response, copy)
+        answer.update(fields)
+    else:
+        _record(span, headers, response, _checked_body(response, path))
     answer["secrets_replaced"] += redirect_replaced
     answer.update(await _read_version(connector, operator, target))
     if answer["parts"]:
         _check_fits(answer, max_record_bytes, settings.result_handle_max_spill_rows)
-        _check_redaction_keeps_text(answer, connector, operator)
+        file_text = "".join(part["text"] for part in answer["text_parts"])
+        assert_not_redacted(answer, file_text, operator, connector_id=connector_id, op_id=OP_ID)
 
     _log.info(
         "vrops_api_file_read",
@@ -504,8 +529,9 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "content_type": {"type": ["string", "null"], "description": "Content-Type of the answer."},
         "redirect_path": {
             "type": ["string", "null"],
-            "description": "For a 3xx answer: the path the redirect points to (not followed), "
-            "a secret-named query value in it replaced by [REDACTED:param_name].",
+            "description": "For a 3xx answer: where the redirect points (not followed): a "
+            "path on the target, or scheme://host/path for another host. A secret-named "
+            "query value in a path on the target is replaced by [REDACTED:param_name].",
         },
         "size": {
             "type": ["integer", "null"],
@@ -596,9 +622,10 @@ VROPS_API_FILE_GET_OP = VropsTypedOp(
             "secret name replaced by [REDACTED:param_name]; secrets_replaced counts them."
         ),
         "next_step": (
-            "On a 3xx status, read redirect_path next. If the page names another file "
-            "under /suite-api/doc/, read that path next with this same operation. On 401, "
-            "403 or 404 the path is not served for this login; report the status."
+            "On a 3xx status, read redirect_path next if it is a path on the target. If "
+            "the page names another file under /suite-api/doc/, read that path next with "
+            "this same operation. On 403 or 404 the path is not served for this login; "
+            "report the status."
         ),
     },
 )

@@ -16,6 +16,7 @@ the read runs it on the whole file and returns the checked copy.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 from collections.abc import Iterator
@@ -24,12 +25,14 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import msgspec
 import pytest
 import respx
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.api_file_read import ApiFileRedactedError
 from meho_backplane.connectors._shared.api_file_secrets import REDACTED, check_api_file
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
@@ -309,7 +312,7 @@ def test_accepted_paths_pass_parameter_validation(path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status", [401, 403, 404, 500])
+@pytest.mark.parametrize("status", [403, 404, 500])
 async def test_error_status_comes_back_in_the_answer(status: int) -> None:
     connector = _connector()
     async with respx.mock(base_url=_BASE) as mock:
@@ -324,6 +327,101 @@ async def test_error_status_comes_back_in_the_answer(status: int) -> None:
     assert answer["parts"] == 0
     assert answer["text_parts"] == []
     assert answer["build"] == "24000000"
+
+
+_SECRET_FILE = '{"openapi":"3.0.1","x-example":{"password":"made-up-recorder-secret"}}'
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "expected"),
+    [
+        (_SECRET_FILE, "application/json", REDACTED.encode()),
+        ('{"password": "made-up-recorder-secret"', "text/plain", b""),
+        ("\xff\xfe", "application/octet-stream", b""),
+    ],
+)
+async def test_401_is_raised_with_a_checked_body(
+    monkeypatch: pytest.MonkeyPatch, body: str, content_type: str, expected: bytes
+) -> None:
+    """A 401 is raised for the login retry, with the checked body or none."""
+    recorded = _record_calls(monkeypatch)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_FILE_PATH).respond(401, text=body, headers={"Content-Type": content_type})
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    raised = excinfo.value.response
+    assert raised.status_code == 401
+    if expected:
+        assert expected in raised.content
+    else:
+        assert raised.content == b""
+    assert b"made-up-recorder-secret" not in raised.content
+    (call,) = [call for call in recorded if call["response"].url.path == _FILE_PATH]
+    assert call["response_body"] == raised.content
+
+
+def _record_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Catch what the read hands the flight recorder for the file GET."""
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        api_file.flight_recorder_capture,
+        "record_vendor_call",
+        lambda _span, **kwargs: recorded.append(kwargs),
+    )
+    return recorded
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "content_type"),
+    [
+        (200, _SECRET_FILE, "application/json"),
+        (404, _SECRET_FILE, "application/json"),
+        (500, "<html><body>password: not parsed</body>", "text/plain"),
+    ],
+)
+async def test_flight_recorder_gets_only_the_checked_body(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: str, content_type: str
+) -> None:
+    """The recorder gets the checked copy of the body, or no body when it cannot be checked."""
+    recorded = _record_calls(monkeypatch)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_FILE_PATH).respond(status, text=body, headers={"Content-Type": content_type})
+        await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    (call,) = [call for call in recorded if call["response"].url.path == _FILE_PATH]
+    if content_type == "application/json":
+        assert REDACTED.encode() in call["response_body"]
+    else:
+        assert call["response_body"] == b""
+    assert b"made-up-recorder-secret" not in call["response_body"]
+    assert b"not parsed" not in call["response_body"]
+
+
+async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _record_calls(monkeypatch)
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_FILE_PATH).respond(
+            200,
+            text='{"password": "made-up-recorder-secret"',
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(VropsApiFileError):
+            await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    (call,) = [call for call in recorded if call["response"].url.path == _FILE_PATH]
+    assert call["response_body"] == b""
 
 
 async def test_redirect_is_not_followed_and_its_path_comes_back() -> None:
@@ -351,6 +449,19 @@ async def test_relative_redirect_resolves_against_the_page_folder() -> None:
     await connector.aclose()
 
     assert answer["redirect_path"] == _PAGE_PATH
+
+
+async def test_redirect_to_another_host_names_the_host_without_the_query() -> None:
+    connector = _connector()
+    location = "https://login.example.test/sso/start?licenseKey=MADEUP-MADEUP#top"
+    async with respx.mock(base_url=_BASE) as mock:
+        _mock_session_and_version(mock)
+        mock.get(_PAGE_PATH).respond(302, headers={"Location": location})
+        answer = await _call(connector, _PAGE_PATH)
+    await connector.aclose()
+
+    assert answer["redirect_path"] == "https://login.example.test/sso/start"
+    assert "MADEUP" not in msgspec.json.encode(answer).decode()
 
 
 async def test_secret_named_query_value_in_a_redirect_is_replaced() -> None:
@@ -569,6 +680,40 @@ async def test_file_over_the_byte_cap_is_not_read(monkeypatch: pytest.MonkeyPatc
     await connector.aclose()
 
 
+async def test_gzip_body_is_read_and_measured_after_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small compressed body is decoded; one that decodes past the limit is refused."""
+    small = _one_line_json(2_000)
+    big = _one_line_json(50_000)
+    assert len(gzip.compress(big)) < 10_000
+    monkeypatch.setattr(
+        api_file, "get_settings", _settings_with(result_handle_max_record_bytes=10_000)
+    )
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_session_and_version(mock)
+        route = mock.get(_FILE_PATH)
+        route.side_effect = [
+            httpx.Response(
+                200,
+                content=gzip.compress(small),
+                headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+            ),
+            httpx.Response(
+                200,
+                content=gzip.compress(big),
+                headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+            ),
+        ]
+        answer = await _call(connector, _FILE_PATH)
+        with pytest.raises(VropsApiFileError, match="more than 10000 bytes"):
+            await _call(connector, _FILE_PATH)
+    await connector.aclose()
+
+    assert _joined(answer) == small
+
+
 # ---------------------------------------------------------------------------
 # Text only
 # ---------------------------------------------------------------------------
@@ -614,15 +759,14 @@ async def test_file_whose_text_redaction_would_change_is_refused() -> None:
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_session_and_version(mock)
         mock.get(_FILE_PATH).respond(200, content=body)
-        with pytest.raises(VropsApiFileError) as excinfo:
+        with pytest.raises(ApiFileRedactedError) as excinfo:
             await _call(connector, _FILE_PATH)
     await connector.aclose()
 
     message = str(excinfo.value)
     assert _FILE_PATH in message
     assert "strip-api-key" in message
-    assert "text_parts.0.text" in message
-    assert "not returned" in message
+    assert "the read stopped" in message
     assert "made-up-pass-value" not in message
 
 
@@ -662,14 +806,13 @@ async def test_secret_split_across_the_part_cut_is_refused() -> None:
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_session_and_version(mock)
         mock.get(_FILE_PATH).respond(200, content=body)
-        with pytest.raises(VropsApiFileError) as excinfo:
+        with pytest.raises(ApiFileRedactedError) as excinfo:
             await _call(connector, _FILE_PATH)
     await connector.aclose()
 
     message = str(excinfo.value)
     assert "strip-api-key" in message
-    assert "file_text" in message
-    assert "not returned" in message
+    assert "the read stopped" in message
     assert "made-up-pass-value" not in message
 
 

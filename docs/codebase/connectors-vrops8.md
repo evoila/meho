@@ -132,6 +132,10 @@ sends the `GET` with its own `vRealizeOpsToken` login header.
   name with `[REDACTED:param_name]`; `secrets_replaced` says how many. A
   file that does not parse, or a JavaScript, CSS or plain text file, is
   refused. A secret-named query value in `redirect_path` is replaced too.
+  The flight recorder gets only the checked copy.
+- **A `401` starts the login retry.** The read raises it, so the
+  dispatcher logs in again and retries once. The `401` body is checked
+  first, or left out when it cannot be checked.
 - **How to rebuild the checked copy.** `text_parts` is a list of
   `{index, text}`, each at most 64 KiB, measured as JSON text, so a part
   always fits one `result_query` answer. A large answer is a result handle

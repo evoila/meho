@@ -2997,9 +2997,9 @@ content-library byte source in `library_download.py`):
    the PUT's `Content-Length` is the download response's own `Content-Length`
    (the `File.Info.size` is not guaranteed set before the download completes).
    A `*` device-URL host is substituted with the host the client connected to
-   (the `HttpNfcLeaseDeviceUrl.url` spec contract). **Before a byte streams,
-   the device host's certificate is pinned to the lease's `sslThumbprint`**
-   (see the hardening note below).
+   (the `HttpNfcLeaseDeviceUrl.url` spec contract). Before disk bytes stream,
+   the upload checks the lease certificate or thumbprint, or uses verified
+   TLS when neither is supplied (see the certificate checks below).
 6. `HttpNfcLeaseComplete` on success; `HttpNfcLeaseAbort` on any failure after
    the lease exists — vCenter then removes the half-created inventory objects,
    so a failed import never leaves a partial VM behind.
@@ -3013,36 +3013,47 @@ library lookup, no second import. An approved power-on with no saved
 envelope (a request saved before #4217) is refused before anything runs
 (`composite_resume_unsupported`).
 
-**Version-agnostic (AC5).** Every schema + method is core vim25 (`OvfManager`
-/ `HttpNfcLease` predate 9.0), and the engine reads only the pre-9.0
-`HttpNfcLeaseDeviceUrl` fields (`key` / `importKey` / `url` / `sslThumbprint`)
-— never the 9.0-only `sslCertificate` — so it works on the VCF 5.x
-migration-source fleet (#3056) as well as 9.0+.
+**Version support (AC5).** The core vim25 methods (`OvfManager` and
+`HttpNfcLease`) predate 9.0. Older lease fields remain sufficient for the
+VCF 5.x migration-source fleet (#3056). On 9.0+, the engine prefers the
+optional `sslCertificate` when present. Older leases use their thumbprint
+or verified TLS as described below.
 
-**Device-host thumbprint pinning (#3284).** Each disk PUT streams to an
-*absolute* per-device ESXi upload URL, not to `target.host`, so the pooled
-client's per-target SSRF host re-screen (keyed to `target.host`) does not run
-for the device host — a deliberate bypass, since screening would wrongly
-block a legitimate private ESXi host. The replacement control is certificate
-thumbprint pinning: `plan_transfers` captures each device URL's
-`HttpNfcLeaseDeviceUrl.sslThumbprint` (a SHA-1 hash of the DER certificate in
-colon-separated hex — the vim thumbprint convention `HostConnectSpec.sslThumbprint`
-documents), and `ovf_transfer.verify_device_thumbprint` opens a pre-flight
-`VERIFY_NONE` handshake to the device host and **refuses to stream a byte**
-unless the presented certificate hashes to that attestation. A mismatch — or
-a handshake that cannot obtain a certificate — raises `DeviceThumbprintError`,
-which `_run_transfer` catches before `httpx.HTTPError`, aborts the lease, and
-maps to a distinct `import_error` with a `security`-category issue (no disk
-bytes flowed). **Missing-thumbprint policy: fail-open.** An empty / absent
-`sslThumbprint` skips pinning and falls back to the pooled client's existing
-TLS trust, because the vim spec sanctions an empty value ("Empty if no SSL
-thumbprint is available or needed") — a conformant lease that omits the field
-must still import, and pinning is a strict improvement layered on top of the
-pre-existing "device URLs are trusted vendor data" posture, never a new gate
-that fails closed on legitimate traffic. The SSRF host screen stays off for
-device-URL PUTs; pinning is the replacement, comparison is
-colon/case-insensitive, and the 64-hex-char case is accepted as SHA-256 for
-forward-compatibility.
+**Device-host certificate checks.** Each disk PUT goes to the ESXi URL
+returned by vCenter's lease. `plan_transfers` keeps its `sslCertificate` and
+`sslThumbprint`. When the optional PEM certificate is supplied, its SHA-256
+hash takes precedence. Invalid supplied PEM fails; it never falls back to a
+weaker hash. The certificate field was added in
+[vSphere 9](https://developer.broadcom.com/xapis/vsan-management-api/latest/vim.HttpNfcLease.DeviceUrl.html).
+Older servers can supply only a thumbprint. SHA-256 thumbprints remain supported;
+legacy SHA-1 thumbprints work only when the host crypto policy allows them.
+Hashing authenticates the peer, so it never bypasses that policy.
+
+A fresh client checks the selected hash on the actual upload TLS connection,
+before sending HTTP headers, the lease token, or disk bytes. Every new
+connection checks again. There is no separate preflight connection. This
+supports self-signed ESXi certificates. A missing certificate, bad hash,
+blocked algorithm, or mismatch raises `DeviceThumbprintError`; the engine
+aborts the lease and returns a security issue.
+
+Lease metadata comes from the vCenter control-plane session. Its authenticity
+requires normal TLS verification or the target's CA pin. The explicit
+`verify_tls=false` override without a CA pin leaves that session open to
+interception. Checking the upload against its lease does not repair that risk.
+Use verified control-plane TLS to trust the lease certificate or thumbprint.
+
+When the lease has neither certificate nor hash, the upload requires normal
+CA and hostname checks, using the target's CA pin or the default trust store.
+A target with TLS checks disabled and no CA pin cannot upload without lease
+certificate material. All device URLs must use HTTPS. The per-disk client
+carries no vCenter login cookies and follows no redirects. Private ESXi
+addresses remain supported.
+
+The transport wraps HTTPcore's network stream. It checks the peer after
+`start_tls` and blocks every write until that check passes. This follows the
+[HTTPcore network backend API](https://www.encode.io/httpcore/network-backends/).
+Real TLS tests cover self-signed matches, changed certificates, reconnects,
+missing hashes, CA pins, hostname checks, and redirects.
 
 **Envelope.** Item resolution (id passthrough or name find, ambiguity-refusing)
 reuses `_resolve_deploy_library_item`, and the outcome maps onto the **same**

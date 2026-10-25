@@ -156,6 +156,22 @@ def _tool_result_is_error(name: str, result: dict[str, Any]) -> bool:
     return name in _OPERATION_RESULT_TOOLS and result.get("status") in _ERROR_STATUSES
 
 
+def _schema_error_text(exc: jsonschema.ValidationError) -> str:
+    """Return the human-readable part of a schema-violation message.
+
+    ``jsonschema``'s own ``maxLength`` message repeats the whole offending
+    value (``'xxxx…' is too long``) and never names the limit. A too-long
+    free-text argument is the one case where that is both useless and
+    costly — the value can be tens of kilobytes — so it is rendered as
+    ``<field>: at most <n> characters`` instead. Every other violation keeps
+    the library's message.
+    """
+    if exc.validator != "maxLength":
+        return exc.message
+    field = ".".join(str(part) for part in exc.path) or "value"
+    return f"{field}: at most {exc.validator_value} characters"
+
+
 #: MCP-defined error code for "Resource not found" per spec
 #: §Resources/Error Handling. Distinct from the generic JSON-RPC
 #: ``METHOD_NOT_FOUND`` because ``resources/read`` is the method that
@@ -490,7 +506,7 @@ async def handle_tools_call(
         except jsonschema.ValidationError as exc:
             status_code = 400
             raise McpInvalidParamsError(
-                f"tools/call {name!r}: arguments failed inputSchema: {exc.message}",
+                f"tools/call {name!r}: arguments failed inputSchema: {_schema_error_text(exc)}",
             ) from exc
 
         result = await handler(operator, arguments)

@@ -59,6 +59,12 @@ connector script produces the evidence bundle; the driver grades it.
 | 4 | **Audit + approval completeness** — exactly one **dispatch audit row** (`path == op_id`, the durable write-record the dispatcher writes once the op executes) AND (being `dangerous` + `requires_approval`) exactly the **two synchronous approval audit rows** (`approval.request` + `approval.decision`, the #817 invariant), with the op not returning until the decision row commits. A rejected decision never executes → zero dispatch rows. A dispatch publishes no Broadcast event (#3758), so the feed is not part of the evidence. | ✅ `assert_approval_completeness` | core |
 | 5 | **Bounded live soak** — MEHO + wrapper in parallel on the **real** target for a bounded window (~2 weeks / N≥10 real invocations per op), wrapper authoritative. The scorecard write column moves 🟡→✅ only after a clean soak. | Documented protocol (below) | runbook |
 
+## Prepared environment
+
+Prepare `backend/.venv` with `uv sync --locked` from `backend/` before
+running the driver. The driver uses that environment directly. It never
+installs dependencies or builds the project while checking evidence.
+
 ## The evidence bundle (consumer wiring contract)
 
 Each connector slice supplies a `parity-check-<connector>.sh` that drives

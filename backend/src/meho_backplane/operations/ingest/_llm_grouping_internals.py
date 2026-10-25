@@ -377,22 +377,16 @@ def render_assign_ops_prompt(
 # LLM-output parsing
 # ---------------------------------------------------------------------------
 
-#: Strip leading/trailing fenced-code markup the model sometimes emits
-#: in addition to bare JSON. Matches a single optional ```json``` or
-#: ``` ... ``` block; everything outside the first match is preserved
-#: so unexpected wrapper prose still surfaces in the parse error.
-_FENCE_PATTERN = re.compile(
-    r"^\s*```(?:json)?\s*\n?(.*?)\n?```\s*$",
-    re.DOTALL,
-)
-
 
 def strip_code_fences(raw: str) -> str:
-    """Remove a single surrounding ```json ... ``` fence, if present."""
-    match = _FENCE_PATTERN.match(raw)
-    if match is None:
-        return raw.strip()
-    return match.group(1).strip()
+    """Remove one surrounding code fence without retrying whitespace matches."""
+    cleaned = raw.strip()
+    if len(cleaned) < 6 or not cleaned.startswith("```") or not cleaned.endswith("```"):
+        return cleaned
+    body = cleaned[3:-3]
+    if body.startswith("json"):
+        body = body[4:]
+    return body.strip()
 
 
 def extract_json_object(raw: str) -> str:

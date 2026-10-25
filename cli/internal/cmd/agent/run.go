@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -44,6 +45,12 @@ type runResponse struct {
 	Error            *string        `json:"error,omitempty"`
 	ConvertedToAsync bool           `json:"converted_to_async,omitempty"`
 }
+
+// runInputMaxChars mirrors the backplane's bound on a run's --input text
+// (RUN_INPUT_MAX_CHARS in agent/invocation.py), counted in characters the
+// way the server counts them. Checking before the request keeps a too-long
+// input from coming back as a 422 body that repeats the whole input.
+const runInputMaxChars = 64 * 1024
 
 // newRunCmd returns the `meho agent run` command.
 //
@@ -86,7 +93,8 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&input, "input", "",
-		"the user prompt to run the agent on (required)")
+		fmt.Sprintf("the user prompt to run the agent on (required; at most %d characters)",
+			runInputMaxChars))
 	cmd.Flags().BoolVar(&asyncRun, "async", false,
 		"return a run handle immediately instead of blocking for the result")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",
@@ -116,6 +124,11 @@ func runRun(cmd *cobra.Command, opts runOptions) error {
 	if opts.Input == "" {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("run requires a non-empty --input"), opts.JSONOut)
+	}
+	if utf8.RuneCountInString(opts.Input) > runInputMaxChars {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--input is longer than %d characters", runInputMaxChars)),
+			opts.JSONOut)
 	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {

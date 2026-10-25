@@ -31,11 +31,16 @@ from fastapi.testclient import TestClient
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from meho_backplane.agent.invocation import AgentInvoker, reset_agent_invoker_for_testing
+from meho_backplane.agent.invocation import (
+    RUN_INPUT_MAX_CHARS,
+    AgentInvoker,
+    reset_agent_invoker_for_testing,
+)
 from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentDefinition, AgentRun, Tenant
+from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -377,3 +382,62 @@ async def test_mcp_run_returns_invalid_params_when_budget_exceeded_pre_execution
     # Prefix discriminates the budget refusal from sibling refusals
     # (agent_not_found / agent_disabled) that ride the same code.
     assert body["error"]["message"].startswith("budget_exceeded: "), body
+
+
+# ---------------------------------------------------------------------------
+# #4908 -- the run input has a size limit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_run_tool_schema_names_input_limit(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """``meho_agents_run`` declares ``maxLength`` on ``input`` and says so."""
+    client, _op = client_with_operator
+    resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools = {t["name"]: t for t in resp.json()["result"]["tools"]}
+    prop = tools["meho_agents_run"]["inputSchema"]["properties"]["input"]
+    assert prop["maxLength"] == RUN_INPUT_MAX_CHARS
+    assert f"At most {RUN_INPUT_MAX_CHARS} characters." in prop["description"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_run_input_over_limit_is_short_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """One character over the limit: -32602 naming ``input`` and the limit.
+
+    The schema gate rejects before the handler runs. The message is built
+    from the field and the limit, not from the value, so a 64 KiB input is
+    not echoed back.
+    """
+    client, op = client_with_operator
+    await _seed_definition(tenant_id=op.tenant_id)
+    _install_invoker()
+    resp = _call(
+        client, "meho_agents_run", {"name": "triage", "input": "x" * (RUN_INPUT_MAX_CHARS + 1)}
+    )
+    body = resp.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    message = body["error"]["message"]
+    assert "input" in message
+    assert str(RUN_INPUT_MAX_CHARS) in message
+    assert "xxxx" not in message
+    assert len(message) < 200, message
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_run_input_at_limit_runs(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Exactly RUN_INPUT_MAX_CHARS characters runs normally."""
+    client, op = client_with_operator
+    await _seed_definition(tenant_id=op.tenant_id)
+    _install_invoker("fits")
+    resp = _call(client, "meho_agents_run", {"name": "triage", "input": "x" * RUN_INPUT_MAX_CHARS})
+    result = _result_dict(resp)
+    assert result["status"] == "succeeded"
+    assert result["output"] == {"text": "fits"}

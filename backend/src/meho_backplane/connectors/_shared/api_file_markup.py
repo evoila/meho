@@ -15,13 +15,16 @@ its content, a secret-named attribute loses its value, and an element
 that a ``name``, ``id``, ``key`` or ``type`` attribute marks as secret
 loses its content and every attribute value except the label that marks
 it. A ``<script>`` block comes back only when its content is JSON. A
-``<pre>``, ``<code>`` or ``<span>`` block is an example block: its text,
-joined over child elements (syntax highlighting with ``<span>``), is read
-as one document, and every JSON object in it (the body after a request
+``<pre>``, ``<code>`` or ``<span>`` block that holds text alone is an
+example block: every JSON object in its text (the body after a request
 line, for example; also a list that holds an object) is checked like a
-JSON file. Such a block comes back as plain text, without the child
-elements; a secret child element and a non-JSON script in it are joined
-as the placeholder, as they would come back on their own.
+JSON file and written back from the parsed copy. A ``<pre>`` or
+``<code>`` block with child elements (syntax highlighting with
+``<span>``) fails closed: it comes back as it was only when every child
+passes its own check unchanged and the text joined over the children is
+one JSON or YAML object or list that the structured check leaves
+unchanged. Any other such block is withheld: the placeholder stands in
+its place, counted once.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from html.parser import HTMLParser
 from typing import Any, Final
 
 import defusedxml.ElementTree as DefusedET
+import yaml
 from defusedxml import DefusedXmlException
 
 from meho_backplane.connectors._shared.api_file_values import (
@@ -77,9 +81,16 @@ _HTML_VOID: Final[frozenset[str]] = frozenset(
 
 _XML_NAMESPACE: Final[str] = "http://www.w3.org/XML/1998/namespace"
 
-#: HTML blocks that hold an example: a request with its body, or JSON a
-#: page colours with child elements. Their text is read as one document.
+#: HTML blocks that hold an example (a request with its body) as text
+#: alone. Every JSON document in the text is checked.
 _HTML_EXAMPLE_BLOCKS: Final[frozenset[str]] = frozenset({"pre", "code", "span"})
+
+#: HTML blocks that fail closed when child elements split their text
+#: (syntax highlighting). A ``<span>`` is not one: it is an inline
+#: element of ordinary page text, which the element check covers.
+_HTML_FAIL_CLOSED_BLOCKS: Final[frozenset[str]] = frozenset({"pre", "code"})
+
+_YAML_LOADER: Final[type[yaml.SafeLoader]] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 _JSON_DECODER: Final[json.JSONDecoder] = json.JSONDecoder()
 _JSON_START: Final[re.Pattern[str]] = re.compile(r"[{\[]")
@@ -401,7 +412,13 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
         out.append(REDACTED)
     elif node.tag == "script":
         out.append(_html_script(node, scrubber))
-    elif node.tag in _HTML_EXAMPLE_BLOCKS and (document := _html_example(node, scrubber)):
+    elif node.tag in _HTML_FAIL_CLOSED_BLOCKS and _has_elements(node):
+        out.append(_html_block(node, scrubber))
+    elif (
+        node.tag in _HTML_EXAMPLE_BLOCKS
+        and not _has_elements(node)
+        and (document := _html_example(node, scrubber))
+    ):
         out.append(html.escape(document, quote=False))
     elif node.tag == "style":
         out.extend(scrubber.text(c) for c in node.children if isinstance(c, str))
@@ -410,30 +427,85 @@ def _html_element(node: _HtmlNode, out: list[str], scrubber: Scrubber) -> None:
     out.append(f"</{node.tag}>")
 
 
+def _has_elements(node: _HtmlNode) -> bool:
+    return any(not isinstance(child, str) for child in node.children)
+
+
+def _html_block(node: _HtmlNode, scrubber: Scrubber) -> str:
+    """A ``<pre>`` or ``<code>`` block with child elements: as it was, or the placeholder.
+
+    The block fails closed. Two checks run on it, and it comes back as it
+    was only when neither would replace anything: every child element is
+    checked as it would be on its own (a secret-marked child, a
+    secret-named attribute, a script that is not JSON), and the block's
+    text, joined over the children as the page wrote it, is checked as
+    one JSON or YAML object or list. Text that is no such document, or a
+    check that would replace anything, withholds the whole block: the
+    placeholder in its place, counted once. The checks are never
+    combined into a rebuilt block: a child element can split a secret
+    name (``{"<span>pass</span>word": ...}``) or stand inside a key, so
+    that text with the children replaced is another document than the
+    one the page shows. A block with no text has only the element check.
+    """
+    probe = scrubber.fresh()
+    checked: list[str] = []
+    _html_children(node, checked, probe)
+    text = "".join(_html_text(node))
+    parsed = _parse_document(text)
+    if parsed is not None:
+        probe.tree(parsed, {})
+    if probe.count or (parsed is None and text.strip()):
+        scrubber.count += 1
+        return REDACTED
+    return "".join(checked)
+
+
+def _parse_document(text: str) -> dict[str, Any] | list[Any] | None:
+    """*text* as one JSON or YAML object or list; ``None`` when it is not one.
+
+    JSON is tried first, then YAML with the safe loader. A YAML scalar is
+    not a document: almost any text is one. Text the loader refuses or
+    cannot build, for any reason, is not a document either.
+    """
+    try:
+        parsed: Any = json.loads(text)
+    except ValueError:
+        parsed = _load_yaml(text)
+    except RecursionError:
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def _load_yaml(text: str) -> Any:
+    loader = _YAML_LOADER(text)
+    try:
+        return loader.get_single_data()
+    except Exception:  # any failure to read the text means it is no document
+        return None
+    finally:
+        loader.dispose()
+
+
 def _html_example(node: _HtmlNode, scrubber: Scrubber) -> str | None:
-    """The text of an example block with every JSON document in it checked.
+    """The text of an example block that holds text alone, with every JSON document checked.
 
     A page writes an example as one text, often with the request line
-    before the body (``POST /sessions`` and then the JSON), and often
-    coloured with ``<span>`` elements that split the JSON over several
-    text values. Neither is a text value that is JSON on its own, so
-    :meth:`Scrubber.text` would pass the body through. Here the text of
-    the whole block is joined, every JSON object in it (or list that holds
-    one) is checked like a JSON file and written back from the parsed
-    copy, and the text between them goes through the text rule. ``None``
-    when the text holds no such JSON: the block keeps its child elements
-    and is checked as any other element. A block the parser cannot finish
-    within its work budget comes back as the placeholder.
+    before the body (``POST /sessions`` and then the JSON). That is not a
+    text value that is JSON on its own, so :meth:`Scrubber.text` would
+    pass the body through. Here every JSON object in the text (or list
+    that holds one) is checked like a JSON file and written back from the
+    parsed copy, and the text between them goes through the text rule.
+    ``None`` when the text holds no such JSON: the block is checked as
+    any other element. A block the parser cannot finish within its work
+    budget comes back as the placeholder.
     """
-    joined = Scrubber()
-    text = "".join(_html_text(node, joined))
+    text = "".join(_html_text(node))
     documents = _json_documents(text)
     if documents is None:
         scrubber.count += 1
         return REDACTED
     if not documents:
         return None
-    scrubber.count += joined.count
     out: list[str] = []
     position = 0
     for start, end, parsed in documents:
@@ -492,28 +564,13 @@ def _holds_object(value: Any) -> bool:
     return isinstance(value, list) and any(_holds_object(item) for item in value)
 
 
-def _html_text(node: _HtmlNode, scrubber: Scrubber) -> Iterable[str]:
-    """Every text value under *node*, in order, without the markup.
-
-    A child element keeps the check it gets on its own: a secret element
-    (``<span id="password">``) with content gives the placeholder in
-    place of its content, and a script gives what :func:`_html_script`
-    gives. *scrubber* counts these; the caller adds the count when it
-    uses the joined text.
-    """
+def _html_text(node: _HtmlNode) -> Iterable[str]:
+    """Every text value under *node*, in order, as the page wrote it, without the markup."""
     for child in node.children:
         if isinstance(child, str):
             yield child
-        elif child.tag == "!":
-            continue
-        elif _html_element_is_secret(child):
-            if child.children:
-                scrubber.count += 1
-                yield REDACTED
-        elif child.tag == "script":
-            yield _html_script(child, scrubber)
-        else:
-            yield from _html_text(child, scrubber)
+        elif child.tag != "!":
+            yield from _html_text(child)
 
 
 def _html_element_is_secret(node: _HtmlNode) -> bool:

@@ -1051,6 +1051,20 @@ _SECRET_PAGES: list[Any] = [
         id="secret-child-element-before-json-in-one-block",
     ),
     pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre><span id="password">{"password": "example-secret-value-0123456789"}</span></pre>',
+        "example-secret-value-0123456789",
+        id="secret-child-element-holding-the-json",
+    ),
+    pytest.param(
+        "text/html",
+        "/rest-api/login.html",
+        '<pre>{"<span id="password">password</span>": "example-secret-value-0123456789"}</pre>',
+        "example-secret-value-0123456789",
+        id="secret-child-element-as-the-json-key",
+    ),
+    pytest.param(
         "application/json",
         _API_DOCS,
         '{"username": "admin", "password": "it\'s-a-secret-0123456789"}',

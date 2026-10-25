@@ -97,6 +97,10 @@ class Scrubber:
         self.count = count
         self._text_rule = text_rule
 
+    def fresh(self) -> Scrubber:
+        """A scrubber with the same text rule and a count of zero, to check one part on its own."""
+        return Scrubber(text_rule=self._text_rule)
+
     def tree(self, node: Any, memo: dict[int, Any]) -> Any:
         """Return a copy of *node* with every secret value replaced.
 

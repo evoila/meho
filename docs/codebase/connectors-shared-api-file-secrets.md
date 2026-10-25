@@ -118,20 +118,26 @@ is how `{"credentials": {"default": "..."}}` got through a text scan.
      Any other script content becomes the placeholder; the helper cannot
      parse JavaScript, so it does not return it. `<style>` content is
      free text.
-   - HTML `<pre>`, `<code>` and `<span>` blocks hold examples. The text
-     of the whole block is joined, also when a page colours it with
-     child elements (`<span>`), and every JSON object in it (or list that
-     holds one) is checked like a JSON file: a request line followed by
-     its JSON body is the usual shape. The block comes back as plain text, without the
-     child elements; the text around the JSON goes through the general
-     rules. A child element keeps the check it gets on its own: a secret
-     child (`<span id="password">`) is joined as the placeholder, and a
-     nested `<script>` as what it would come back as (its JSON checked,
-     anything else the placeholder). A block that holds no JSON keeps its
-     child elements. A block
-     the parser cannot finish within a bounded amount of work (brackets
-     that open over and over and never close) comes back as the
-     placeholder.
+   - HTML `<pre>`, `<code>` and `<span>` blocks that hold text alone are
+     examples. Every JSON object in the text (or list that holds one) is
+     checked like a JSON file and written back from the parsed copy: a
+     request line followed by its JSON body is the usual shape. The text
+     around the JSON goes through the general rules. A block the parser
+     cannot finish within a bounded amount of work (brackets that open
+     over and over and never close) comes back as the placeholder.
+   - An HTML `<pre>` or `<code>` block with child elements (a page
+     colours its example with `<span>`) fails closed. Two checks run:
+     every child element gets the check it would get on its own (a
+     secret-marked child, a secret-named attribute, a `<script>` that is
+     not JSON), and the text joined over the children, as the page wrote
+     it, must be one JSON or YAML object or list, which is then checked
+     like a file. The block comes back as it was only when neither check
+     would replace anything. Otherwise the whole block is the placeholder,
+     counted once; it is never rebuilt from the two checks, because a
+     child element can split a secret name or stand inside a key, so the
+     text with the children replaced is another document than the one
+     the page shows. A `<span>` with child elements is ordinary page
+     text and gets the element check.
    - Any text value that is itself a JSON object or list (a sample
      request in a description, a `<pre>` block) is parsed and checked
      the same way, and always written back from the parsed copy, also

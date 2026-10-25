@@ -571,34 +571,80 @@ def test_html_pre_block_with_json_is_checked() -> None:
     [
         (
             f'<pre>{{<span class="k">"password"</span>: <span class="s">"{_SECRET}"</span>}}</pre>',
-            f'<pre>{{"password":"{REDACTED}"}}</pre>',
+            f"<pre>{REDACTED}</pre>",
         ),
         (
             f'<pre><code class="json">{{\n  <span>"user"</span>: <span>"admin"</span>,\n'
             f'  <span>"secret"</span>: <span>"{_SECRET}"</span>\n}}</code></pre>',
-            f'<pre>{{"user":"admin","secret":"{REDACTED}"}}</pre>',
+            f"<pre>{REDACTED}</pre>",
         ),
         (
             f'<p>Body:</p><code>[<span>{{"token": "{_SECRET}"}}</span>]</code>',
-            f'<p>Body:</p><code>[{{"token":"{REDACTED}"}}]</code>',
+            f"<p>Body:</p><code>{REDACTED}</code>",
+        ),
+        (
+            f'<pre><span class="k">password</span>: <span class="s">{_SECRET}</span></pre>',
+            f"<pre>{REDACTED}</pre>",
+        ),
+        (
+            f'<pre>{{"<span>pass</span>word": "{_SECRET}"}}</pre>',
+            f"<pre>{REDACTED}</pre>",
         ),
     ],
-    ids=["pre-with-spans", "pre-code-with-spans", "code-list-with-a-span"],
+    ids=[
+        "pre-with-spans",
+        "pre-code-with-spans",
+        "code-list-with-a-span",
+        "yaml-with-spans",
+        "secret-name-split-over-a-span",
+    ],
 )
-def test_html_highlighted_json_block_is_checked_as_one_document(
-    document: str, expected: str
-) -> None:
-    """Highlighting splits the JSON over child elements; the joined text is the document."""
+def test_html_highlighted_block_with_a_secret_is_withheld(document: str, expected: str) -> None:
+    """The text joined over the children is the document; a secret in it withholds the block."""
     text, count = _check(document, _HTML)
     assert text == expected
     assert count == 1
 
 
-def test_html_highlighted_block_that_is_not_json_keeps_its_markup() -> None:
-    document = '<pre><span class="kw">def</span> login(user):\n    return user</pre>'
+@pytest.mark.parametrize(
+    "document",
+    [
+        '<pre>{<span class="k">"user"</span>: <span class="s">"admin"</span>}</pre>',
+        '<pre><code class="json">{\n  <span>"user"</span>: <span>"admin"</span>\n}</code></pre>',
+        '<p>Body:</p><code>[<span>{"user":"admin"}</span>]</code>',
+        "<pre><span>[</span>1<span>]</span></pre>",
+        '<pre><span class="k">user</span>: <span class="s">admin</span>\nroles: [reader]</pre>',
+        "<pre><br></pre>",
+    ],
+    ids=[
+        "json-with-spans",
+        "pre-code-with-spans",
+        "code-list-with-a-span",
+        "json-list-of-numbers",
+        "yaml",
+        "no-text",
+    ],
+)
+def test_html_highlighted_block_without_a_secret_comes_back_as_it_was(document: str) -> None:
     text, count = _check(document, _HTML)
     assert text == document
     assert count == 0
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        '<pre><span class="p">$</span> meho connector list</pre>',
+        '<pre><span class="kw">GET</span> /api/v2/hosts\nAccept: application/json</pre>',
+        '<pre><span class="n">1</span>, 2, 3</pre>',
+    ],
+    ids=["shell-line", "request-with-a-header", "list-of-words"],
+)
+def test_html_highlighted_block_that_is_no_document_is_withheld(document: str) -> None:
+    """A block split over child elements must be a JSON or YAML object or list."""
+    text, count = _check(document, _HTML)
+    assert text == f"<pre>{REDACTED}</pre>"
+    assert count == 1
 
 
 @pytest.mark.parametrize("tag", ["pre", "code", "span"])
@@ -638,52 +684,36 @@ def test_html_example_with_brackets_that_open_no_json_is_unchanged() -> None:
 
 
 @pytest.mark.parametrize(
-    ("document", "expected"),
+    "document",
     [
-        (
-            f'<pre><span id="password">{_SECRET}</span>{{"ok": true}}</pre>',
-            f'<pre>{REDACTED}{{"ok":true}}</pre>',
-        ),
-        (
-            f'<pre>Token:\n<code name="token">{_SECRET}</code>\n{{"ok": true}}</pre>',
-            f'<pre>Token:\n{REDACTED}\n{{"ok":true}}</pre>',
-        ),
-        (
-            f'<pre><b><password>{_SECRET}</password></b>\n[{{"ok": true}}]</pre>',
-            f'<pre>{REDACTED}\n[{{"ok":true}}]</pre>',
-        ),
+        f'<pre><span id="password">{_SECRET}</span>{{"ok": true}}</pre>',
+        f'<pre><span id="password">{{"password": "{_SECRET}"}}</span></pre>',
+        f'<pre>{{"<span id="password">password</span>": "{_SECRET}"}}</pre>',
+        f'<pre>{{"<span id="password">password</span>": "{_SECRET}", "ok": true}}</pre>',
+        f'<pre>Token:\n<code name="token">{_SECRET}</code>\n{{"ok": true}}</pre>',
+        f'<pre><b><password>{_SECRET}</password></b>\n[{{"ok": true}}]</pre>',
+        f'<pre><span id="password">{_SECRET}</span> is the password</pre>',
+        f'<pre><span data-password="{_SECRET}">{{"ok": true}}</span></pre>',
+        f'<pre><script>var password = "{_SECRET}";</script>\n{{"ok": true}}</pre>',
+        f'<pre><script type="application/json">{{"password": "{_SECRET}"}}</script></pre>',
     ],
-    ids=["span-named-password", "code-named-token", "secret-named-element-nested"],
+    ids=[
+        "secret-span-before-json",
+        "secret-span-holding-json",
+        "secret-span-as-the-json-key",
+        "secret-span-as-one-json-key-of-two",
+        "code-named-token",
+        "secret-named-element-nested",
+        "secret-span-in-prose",
+        "secret-named-attribute",
+        "nested-script-not-json",
+        "nested-script-with-a-secret",
+    ],
 )
-def test_html_example_keeps_the_check_of_a_secret_child_element(
-    document: str, expected: str
-) -> None:
-    """Joining the block's text must not drop the check a secret child gets on its own."""
+def test_html_block_with_a_secret_child_element_is_withheld(document: str) -> None:
+    """A child whose own element check would replace anything withholds the block."""
     text, count = _check(document, _HTML)
-    assert text == expected
-    assert count == 1
-
-
-def test_html_example_with_a_secret_child_but_no_json_keeps_its_markup() -> None:
-    text, count = _check(f'<pre><span id="password">{_SECRET}</span> is the password</pre>', _HTML)
-    assert text == f'<pre><span id="password">{REDACTED}</span> is the password</pre>'
-    assert count == 1
-
-
-@pytest.mark.parametrize(
-    ("script", "expected"),
-    [
-        (f'<script>var password = "{_SECRET}";</script>', REDACTED),
-        (
-            f'<script type="application/json">{{"password": "{_SECRET}"}}</script>',
-            f'{{"password":"{REDACTED}"}}',
-        ),
-    ],
-    ids=["not-json", "json"],
-)
-def test_html_example_keeps_the_check_of_a_nested_script(script: str, expected: str) -> None:
-    text, count = _check(f'<pre>{script}\n{{"ok": true}}</pre>', _HTML)
-    assert text == f'<pre>{expected}\n{{"ok":true}}</pre>'
+    assert text == f"<pre>{REDACTED}</pre>"
     assert count == 1
 
 

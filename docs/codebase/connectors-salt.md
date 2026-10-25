@@ -148,7 +148,10 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   name of a `cmd` state is the command, and the name of a `git` or `pip`
   state can be a URL with a password (`_NAME_STATE_MODULES` in
   `returns.py`). Every kept field is checked by shape (a boolean, a
-  number, a time, a state file name). A number,
+  number, a time, a state file name). The state keys are not checked as
+  field names: a state id such as `reset_password` would otherwise hide
+  the whole state run. A key is only shown as its module and function,
+  and the fields of each state are scrubbed. A number,
   `true`, `false` or `null` is shown as is. Every other return (a text, a
   list, a dict that is not a state run) is `null` with
   `return_withheld: true`, because `file.read` or `cmd.run` can return a

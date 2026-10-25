@@ -159,12 +159,20 @@ _TIME_RE: Final[re.Pattern[str]] = re.compile(r"^\d{2}:\d{2}:\d{2}(\.\d+)?$")
 
 
 def _state_run(value: Any) -> dict[str, Any] | None:
-    """The states of a state run return (every value has a ``result``), else ``None``."""
+    """The states of a state run return (every value has a ``result``), else ``None``.
+
+    *value* is the raw return. Its keys are state keys
+    (``module_|-id_|-name_|-function``), not field names, so they do not
+    go through the scrubber: a state id such as ``reset_password`` would
+    make it replace the whole state and hide the outcome of the run. A key
+    is only ever shown as its module and function. The fields of each
+    state are scrubbed.
+    """
     if not isinstance(value, dict) or not value:
         return None
     if not all(isinstance(item, dict) and "result" in item for item in value.values()):
         return None
-    return value
+    return {key: Scrubber().tree(item, {}) for key, item in value.items()}
 
 
 def _state_kind(key: str) -> str | None:
@@ -240,7 +248,7 @@ def result_row(row: dict[str, Any]) -> dict[str, Any]:
     raw_return = row["return"] if "return" in row else full.get("return")
     scrubbed = Scrubber().tree(raw_return, {})
     size = _json_size(scrubbed)
-    states = None if pillar else _state_run(scrubbed)
+    states = None if pillar else _state_run(raw_return)
     shown, checked = _checked_return(scrubbed, states)
     withheld = pillar or not checked
     truncated = size > RETURN_BYTES_LIMIT

@@ -1034,6 +1034,85 @@ async def test_job_result_withholds_state_names_ids_and_comments(
 
 
 @pytest.mark.asyncio
+async def test_job_result_counts_failed_states_whose_id_names_a_password(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A state id such as ``reset_password`` hides neither that state nor the others.
+
+    The shared scrubber reads such an id as a secret field name. The answer
+    and the stored trace still count both failed states and name them by
+    module and function; the id, the command and the changes stay out.
+    """
+    await _register(_stub_embedding)
+    await _enable_trace_capture(session)
+    command = "reset-tool --user app --value plain-hidden-value-31"
+    state_return = {
+        f"cmd_|-reset_password_|-{command}_|-run": {
+            "__id__": "reset_password",
+            "__run_num__": 0,
+            "name": command,
+            "result": False,
+            "comment": f'Command "{command}" run',
+            "changes": {"password": "plain-hidden-value-32"},
+        },
+        "service_|-app_|-app_|-running": {
+            "__id__": "app",
+            "__run_num__": 1,
+            "name": "app",
+            "result": False,
+            "comment": "Service app is not running",
+            "changes": {},
+        },
+        "file_|-cfg_|-/etc/made-up.conf_|-managed": {
+            "__run_num__": 2,
+            "name": "/etc/made-up.conf",
+            "result": True,
+            "comment": "ok",
+            "changes": {},
+        },
+    }
+    answers = _one_return(
+        {
+            "minion_id": "<minion-1>",
+            "jid": "1",
+            "fun": "state.apply",
+            "fun_args": ["app"],
+            "return": state_return,
+        }
+    )
+    result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
+    assert result.status == "ok", result.error
+    row = result.result["results"][0]
+    assert row["return_withheld"] is False
+    assert row["states_total"] == 3
+    assert row["states_failed"] == 2
+    failed = [
+        {**_state_entry(state="cmd.run", result=False, changed=True), "run_num": 0},
+        {**_state_entry(state="service.running", name="app", result=False), "run_num": 1},
+    ]
+    assert row["failed_states"] == failed
+    assert row["return"] == [
+        *failed,
+        {
+            **_state_entry(state="file.managed", name="/etc/made-up.conf", result=True),
+            "run_num": 2,
+        },
+    ]
+    assert result.audit_id is not None
+    spans = await _vendor_call_spans(result.audit_id)
+    assert len(spans) == 1
+    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    assert recorded["states_total"] == 3
+    assert recorded["states_failed"] == 2
+    assert recorded["failed_states"] == failed
+    assert recorded["return"] == row["return"]
+    for text in (json.dumps(result.result), _render(spans)):
+        assert "plain-hidden-value" not in text
+        assert "reset_password" not in text
+        assert "reset-tool" not in text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fun", ["pillar.get", "grains.get"])
 async def test_job_result_withholds_the_default_value_of_a_key_lookup(
     _stub_embedding: AsyncMock, session: AsyncSession, fun: str

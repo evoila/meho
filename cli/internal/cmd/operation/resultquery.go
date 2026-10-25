@@ -28,7 +28,11 @@ import (
 // `*map[string]interface{}` with no typed model worth using. Rows stay
 // `[]json.RawMessage` so the renderer pretty-prints each row without imposing
 // a per-vendor row shape. Coverage / CoverageNote are populated only in query
-// mode (#3366).
+// mode (#3366). Path / ValueType / Value are populated only by a path read
+// (#3633, #4888): Path is a pointer so the empty pointer `""` (the whole
+// document) still shows in --json; Value stays raw JSON because it is one
+// node of the document, of any JSON type. An array value arrives in Rows
+// instead, paged by offset / limit.
 type ResultQueryResult struct {
 	HandleID     string            `json:"handle_id"`
 	Rows         []json.RawMessage `json:"rows"`
@@ -40,7 +44,13 @@ type ResultQueryResult struct {
 	Truncated    bool              `json:"truncated"`
 	Coverage     string            `json:"coverage,omitempty"`
 	CoverageNote *string           `json:"coverage_note,omitempty"`
+	Path         *string           `json:"path,omitempty"`
+	ValueType    string            `json:"value_type,omitempty"`
+	Value        json.RawMessage   `json:"value,omitempty"`
 }
+
+// IsPathRead reports whether the result answers a path read (--path).
+func (r *ResultQueryResult) IsPathRead() bool { return r.Path != nil }
 
 // newResultQueryCmd returns the `meho operation result-query` command —
 // the CLI verb the vcf-logs result-handle hint already advertises
@@ -58,6 +68,7 @@ type ResultQueryResult struct {
 //	  [--aggregate "<FUNC> [field]"]           # query: repeatable aggregate
 //	  [--order-by "<field> [asc|desc]"]        # query: repeatable sort term
 //	  [--query-limit N]                        # query: max output rows (clamps to 500)
+//	  [--path <pointer>]                       # path: read one value of a document handle
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
@@ -65,7 +76,9 @@ type ResultQueryResult struct {
 // `result_query` tool. With no query flags it pages the FULL set back beyond
 // the inline sample; with any query flag it runs one bounded, read-only query
 // server-side (filter / project / group / aggregate) and `--offset` /
-// `--limit` are ignored.
+// `--limit` are ignored. With --path it reads one value out of a document
+// handle (or a left-out top-level field of a rows handle) by RFC 6901 JSON
+// Pointer; an array value pages with `--offset` / `--limit` (#4888).
 //
 // Exit codes mirror `meho operation groups`:
 //   - 0   window/result returned cleanly (including the past-the-end empty window)
@@ -83,17 +96,20 @@ func newResultQueryCmd() *cobra.Command {
 		aggregateTerms    []string
 		orderByTerms      []string
 		queryLimit        int
+		path              string
 		jsonOut           bool
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
 		Use:   "result-query <handle_id>",
-		Short: "Page or query rows back from a JSONFlux result handle",
+		Short: "Page or query rows back from a result handle, or read a document handle by path",
 		Long: "result-query calls POST /api/v1/operations/result-query — the " +
 			"REST twin of the MCP `result_query` tool. After `meho operation " +
 			"call` reduces a large list response, the reduced envelope carries " +
 			"a `handle` (`result.handle.handle_id`); this verb reads the FULL " +
-			"set back beyond the inline sample.\n\n" +
+			"set back beyond the inline sample. A rows handle holds a list; a " +
+			"document handle holds one large object. This verb reads both: rows " +
+			"by paging or querying, a document by path.\n\n" +
 			"Paging mode (default): --offset advances the window (page by adding " +
 			"the previous --limit); --limit sets the page size (default 50, max " +
 			"500). A window whose offset is past the stored row count returns an " +
@@ -108,13 +124,22 @@ func newResultQueryCmd() *cobra.Command {
 			"column on the handle; there is no raw-SQL argument. Results carry a " +
 			"`coverage` label — `partial` means the spill was capped so a count " +
 			"covers only the stored subset, not the whole inventory.\n\n" +
+			"Path mode: --path <pointer> reads one value out of a document handle " +
+			"by RFC 6901 JSON Pointer. --path \"\" is the whole document; " +
+			"/a/0/b goes one step per / (object key or array index); in a step " +
+			"~1 means / and ~0 means ~. An array value pages with --offset / " +
+			"--limit; any other value comes back whole. On a rows handle, " +
+			"--path /<field> reads a top-level field that was left out of the " +
+			"inline summary (counted in `omitted_scalar_count`). --path cannot be " +
+			"combined with the query flags.\n\n" +
 			"A handle that does not exist, has expired (TTL elapsed), or belongs " +
 			"to a different operator is a 404 carrying a structured " +
 			"`reason=handle_not_found` detail: re-run the original operation to " +
 			"mint a fresh handle.\n\n" +
 			"A read that is too large to deliver is refused with " +
 			"`reason=output_too_large`: nothing is returned. Lower --limit, or " +
-			"narrow the query with --select or --where, and try the read again.",
+			"narrow the query with --select or --where, or point --path at a " +
+			"smaller part of the document, and try the read again.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -130,6 +155,8 @@ func newResultQueryCmd() *cobra.Command {
 				OrderByTerms:      orderByTerms,
 				QueryLimit:        queryLimit,
 				QueryLimitSet:     cmd.Flags().Changed("query-limit"),
+				Path:              path,
+				PathSet:           cmd.Flags().Changed("path"),
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -151,6 +178,8 @@ func newResultQueryCmd() *cobra.Command {
 		"query: sort term \"<field> [asc|desc]\" (repeatable, max 4)")
 	cmd.Flags().IntVar(&queryLimit, "query-limit", 0,
 		"query: max output rows (clamps to 500); the result flags truncation when more matched")
+	cmd.Flags().StringVar(&path, "path", "",
+		"path: RFC 6901 JSON Pointer into a document handle (\"\" is the whole document, /a/0/b one step per /); an array value pages with --offset / --limit")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the full result-query envelope as JSON instead of the human render")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -169,6 +198,8 @@ type resultQueryOptions struct {
 	OrderByTerms      []string
 	QueryLimit        int
 	QueryLimitSet     bool
+	Path              string
+	PathSet           bool
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -201,6 +232,10 @@ func runResultQuery(cmd *cobra.Command, opts resultQueryOptions) error {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected("result too large to deliver: "+msg), opts.JSONOut)
 		}
+		if msg, ok := documentHandleMessage(err); ok && !opts.PathSet {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(msg+"\n"+documentHandleHint(opts.HandleID)), opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -215,29 +250,33 @@ func runResultQuery(cmd *cobra.Command, opts resultQueryOptions) error {
 // nothing was returned. The message carries the size, the limit, and how to
 // narrow the read.
 func outputTooLargeMessage(err error) (string, bool) {
-	var apiErr *apiResponseError
-	if !errors.As(err, &apiErr) {
+	detail, ok := refusalDetail(err)
+	if !ok || detail.Reason != "output_too_large" {
 		return "", false
 	}
-	var body struct {
-		Detail struct {
-			Message string `json:"message"`
-			Reason  string `json:"reason"`
-		} `json:"detail"`
-	}
-	if json.Unmarshal([]byte(apiErr.Body), &body) != nil || body.Detail.Reason != "output_too_large" {
-		return "", false
-	}
-	return body.Detail.Message, true
+	return detail.Message, true
 }
 
 // buildResultQuerySpec assembles the structured query from the query flags,
-// or returns nil when none were passed (paging mode). Field-vs-schema
-// validation happens server-side; this only shapes the request.
+// or returns nil when none were passed (paging mode). With --path it
+// returns a spec that carries only the pointer (path mode); a path read and
+// a relational query are two different reads, so mixing them is refused
+// here, before any call. Field-vs-schema validation happens server-side;
+// this only shapes the request.
 func buildResultQuerySpec(opts resultQueryOptions) (*api.ResultQuerySpec, error) {
-	if len(opts.WhereTerms) == 0 && len(opts.SelectCols) == 0 &&
-		len(opts.GroupByCols) == 0 && len(opts.AggregateTerms) == 0 &&
-		len(opts.OrderByTerms) == 0 && !opts.QueryLimitSet {
+	queryFlagsSet := len(opts.WhereTerms) > 0 || len(opts.SelectCols) > 0 ||
+		len(opts.GroupByCols) > 0 || len(opts.AggregateTerms) > 0 ||
+		len(opts.OrderByTerms) > 0 || opts.QueryLimitSet
+	if opts.PathSet {
+		if queryFlagsSet {
+			return nil, errors.New("--path cannot be combined with --where, --select, " +
+				"--group-by, --aggregate, --order-by or --query-limit: a path read " +
+				"and a query are two different reads; use one or the other")
+		}
+		path := opts.Path
+		return &api.ResultQuerySpec{Path: &path}, nil
+	}
+	if !queryFlagsSet {
 		return nil, nil
 	}
 	spec := &api.ResultQuerySpec{}
@@ -461,9 +500,14 @@ func postResultQuery(
 // printResultQueryResult renders a ResultQueryResult as a human-readable
 // header line plus the pretty-printed rows. The header states the window
 // position + the full/stored counts; a query-mode result additionally prints
-// its coverage caveat when the spill was capped. --json carries the raw
-// envelope.
+// its coverage caveat when the spill was capped. A path read renders its
+// own header (handle, path, value type) and either the one value or, for
+// an array, the paged items. --json carries the raw envelope.
 func printResultQueryResult(w io.Writer, r *ResultQueryResult) {
+	if r.IsPathRead() {
+		printPathReadResult(w, r)
+		return
+	}
 	end := r.Offset + r.ReturnedRows
 	fmt.Fprintf(w, "%s — rows %d..%d of %d (stored %d), returned %d\n",
 		r.HandleID, r.Offset, end, r.TotalRows, r.StoredRows, r.ReturnedRows)
@@ -483,12 +527,5 @@ func printResultQueryResult(w io.Writer, r *ResultQueryResult) {
 		fmt.Fprintln(w, "  (empty window — no rows matched, or the offset is past the end of the stored set)")
 		return
 	}
-	for _, row := range r.Rows {
-		pretty, err := prettyJSON(row)
-		if err == nil {
-			fmt.Fprintln(w, pretty)
-		} else {
-			fmt.Fprintln(w, string(row))
-		}
-	}
+	printRows(w, r.Rows)
 }

@@ -23829,6 +23829,11 @@
             "$ref": "#/components/schemas/AuditEventClass",
             "nullable": true
           },
+          "has_trace": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Has Trace"
+          },
           "limit": {
             "type": "integer",
             "maximum": 1000.0,

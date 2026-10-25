@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.vmware_rest.composites._write import _write_vmomi_sub_op
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_ROW_SCHEMA,
@@ -45,7 +46,6 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     OP_UPDATE_ASSIGNED_LICENSE,
     assignment_row,
     license_row,
-    mask_license_key,
     query_assigned_licenses,
     read_license_inventory,
 )

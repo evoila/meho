@@ -17,6 +17,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/addon"
 	"github.com/evoila/meho/cli/internal/cmd/admin"
 	"github.com/evoila/meho/cli/internal/cmd/agent"
 	agentprincipal "github.com/evoila/meho/cli/internal/cmd/agent-principal"
@@ -192,6 +193,13 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot shadow the
 	// built-in `automation` parent.
 	root.AddCommand(automation.NewRootCmd())
+
+	// #4891 -- the `meho addon` tree: pair / list / show / unpair wrap the
+	// four operator routes under /api/v1/addons/pairings. pair prints the
+	// add-on's client secret once, to stdout only. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot shadow
+	// the built-in `addon` parent.
+	root.AddCommand(addon.NewRootCmd())
 
 	// G6.3-T4 (#381) -- broadcast-detail override management verbs
 	// (overrides list / set / remove) for Initiative #376. Wraps the

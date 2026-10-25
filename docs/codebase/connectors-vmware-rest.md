@@ -3740,14 +3740,15 @@ read. An unset property has no `missingSet` entry and means no triggered
 alarms.
 
 **Every page is read.** vCenter may split a large answer into pages: a
-`RetrieveResult` with some objects and a `token`. Every alarm read follows
-each token with `PropertyCollector.ContinueRetrievePropertiesEx`, on the
-session of the first call (vCenter accepts a token only there and only once),
-until a page comes back without a token; at most 100 pages. A failed page
-fails the whole read: the list or the change fails, the read after a change
-gives `not_verified`, and a failed name read shows in `read_note`, with no
-names of that object type used. So a lost page never leaves names or trigger
-kinds silently empty.
+`RetrieveResult` with some objects and a `token`. Every alarm read goes
+through the shared paged read `vim_retrieve.retrieve_all_pages` (see "Reads
+of many objects read every page" below), which follows each token with
+`PropertyCollector.ContinueRetrievePropertiesEx` on the session of the first
+call, until a page comes back without a token; at most 100 pages. A failed
+page fails the whole read: the list or the change fails, the read after a
+change gives `not_verified`, and a failed name read shows in `read_note`, with
+no names of that object type used. So a lost page never leaves names or
+trigger kinds silently empty.
 
 **Trigger kind.** Each row has `trigger_kind`, from the alarm rule
 (`Alarm.info.expression`): `event` (only event conditions), `metric` (only
@@ -3816,6 +3817,36 @@ the filter enum values and the object types against the pinned 9.0
 `test_connectors_vmware_rest_8_0_spec_reconcile.py` checks the methods
 against 8.0 U1 to U3. `AlarmFilterSpec` is in the type-name list of
 `test_connectors_vmware_rest_composites_write_body_reconcile.py`.
+
+### Reads of many objects read every page (`vim_retrieve.py`, #4862)
+
+A `PropertyCollector.RetrievePropertiesEx` call that asks for many objects
+can come back split into pages: some objects and a `token` for the rest.
+This can happen even when MEHO sets no page size (the pinned `vi-json.yaml`
+says PropertyCollector policy may still limit the number of objects). Every
+read of many objects in one call therefore goes through the shared helper
+`vim_retrieve.retrieve_all_pages`. It sends the first `RetrievePropertiesEx`
+with a `SessionTokenUsed` that records the vCenter session, then sends
+`ContinueRetrievePropertiesEx` with each `token`, pinned to that session
+(vCenter accepts a token only there and only once), until a page comes back
+without a token. The caller gets one `{"objects": [...]}` answer with the
+objects of all pages, so its parser does not change. A failed page fails the
+whole read (no objects of the earlier pages are returned), and an answer
+that has not ended after 100 pages raises `TooManyPagesError` (a
+`RuntimeError`, so a caller that handles a failed call handles it too).
+The reads that use it: the recent tasks (`vmware.tasks.recent`), the VM
+placement of `datastore.usage`, the mounted-datastore check of
+`host.datastore_mount_nfs`, the vApp clean-up of `vm.deploy_from_library`,
+the names of blocking objects in the governed deletes (`read_names`), the
+datastore read of the VM move preview, and the alarm reads. Each of these
+operations lists `POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx`
+on its sub-operation manifest where it has one. On a standalone ESXi host
+the SOAP transport has no `ContinueRetrievePropertiesEx` builder, so a split
+answer makes the read fail there; it never returns a short list. A read of
+one object (one VM, one host, a task poll) fits on one page, because vCenter
+splits an answer only between objects, so those reads do not use the helper.
+`_retrieve_props_by_moid` and `read_many` read in groups of 50 and refuse an
+answer that still carries a token, so they never return a short list either.
 
 ### Version check for typed operations (`_version_gate.py`, #4316)
 
@@ -3894,12 +3925,14 @@ flight-recorder span holds a full key.**
   On vCenter 9, licences are usually managed in VCF Operations
   (`vrops.licensing.*`). The guidance of the write says so; if vCenter 9
   refuses the change, the caller gets the vendor fault as an error.
-- **The mask.** `license_common.mask_license_key` keeps the last 5
-  characters and turns every other letter and digit into `*`; dashes stay,
-  for example `*****-*****-*****-*****-AB12C`. A value of 10 characters or
-  fewer is hidden in full. It is the same "last 5" rule as
-  `vrops.license.info`. The field is `key_masked`: a name with `license`
-  and `key` next to each other would be replaced by the secret-name scrubs.
+- **The mask.** The shared `mask_license_key` in
+  `connectors/_shared/license_key.py` keeps the last 5 characters and turns
+  every other letter and digit into `*`; dashes stay, for example
+  `*****-*****-*****-*****-AB12C`. A value of 10 characters or fewer is
+  hidden in full. It is the same rule `vrops.license.info` and
+  `sddc.license.list` use; the vSphere module has no copy of its own. The
+  field is `key_masked`: a name with `license` and `key` next to each other
+  would be replaced by the secret-name scrubs.
 - **Vendor answers.** `LicenseManager.licenses`, `QueryAssignedLicenses` and
   the `UpdateAssignedLicense` answer hold full keys. The handlers build their
   rows with `license_row` / `assignment_row`, which mask the key; a raw

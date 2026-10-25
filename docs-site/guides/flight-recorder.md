@@ -71,10 +71,31 @@ a byte is stored, and the engine is built to fail closed:
 
 ## Who reads a trace, and how
 
-### Operators — REST and the console
+### Operators — the CLI, REST and the console
 
-An operator reads the trace for one audit row two ways over the same
-tenant-scoped read:
+The quickest way is the CLI. It uses the login token from `meho login`,
+so there is no bearer token to handle:
+
+```bash
+# Which operation runs from the last 30 days still have a stored trace?
+meho audit trace list --op-id 'vmware.*' --since 30d
+
+# Read one trace. The audit id is the first column of the list.
+meho audit trace show <audit_id>
+
+# The redacted headers and bodies are only in the JSON form.
+meho audit trace show <audit_id> --json
+```
+
+`trace list` shows only traces that are still stored: MEHO deletes a
+trace when the tenant's keep time ends (see "Retention" below), so a
+run older than that is not listed even though its audit row still
+exists. `trace show` prints when the trace was recorded, when it will
+be deleted, whether it was withheld from agents, and one line per
+recorded step. When no trace is stored for the row, it says so and
+exits 0.
+
+The same read is available over REST, for scripts without the CLI:
 
 ```bash
 # The audit row id comes from the audit ledger (see the audit guide).
@@ -83,19 +104,21 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```
 
 …or open the audit row in the console drawer and read its **Flight
-recorder** pane (next to Lineage). Both render exactly what was stored —
-the read surface never re-processes, un-redacts, or writes. Two things
-worth knowing:
+recorder** pane (next to Lineage). All three render exactly what was
+stored — the read surface never re-processes, un-redacts, or writes.
+Two things worth knowing:
 
 - **The operator plane sees everything the tenant captured**, including
   a redaction-uncertain trace — but the uncertainty is **surfaced**, as a
-  banner in the pane and a `redaction_uncertain` field in the REST body,
-  so you can see when a trace was withheld from agents.
+  banner in the pane, a `withheld_from_agents` line in the CLI, and a
+  `redaction_uncertain` field in the REST body, so you can see when a
+  trace was withheld from agents.
 - **Absence is unambiguous.** An audit row that does not exist, or lives
   in another tenant, returns `404` (never `403` — existence never leaks
   across tenants). An audit row that exists but has no captured trace —
   because capture was off, or best-effort recording skipped it — returns
-  a `200` empty state.
+  a `200` empty state (the CLI prints "No trace is stored for this audit
+  row." and exits 0).
 
 ### The agent — its own trace as a result handle
 

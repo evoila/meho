@@ -29,8 +29,9 @@ Pairing does three things, all audited and reversible:
    pins both directions (below) and persists the negotiated version.
 3. **Health / liveness** — the pairing's contract compatibility (re-evaluated
    live against the current backplane) and last liveness heartbeat surface in
-   `/api/v1/health` (and therefore the `meho_status` MCP tool + `meho status`
-   CLI) and the `/ui/pairing` console panel.
+   `/api/v1/health` (and therefore the `meho_status` MCP tool and
+   `meho status --json`; the text output of `meho status` does not show
+   pairings) and the `/ui/pairing` console panel.
 
 **Unpair** is reversible: it deletes the Keycloak client (the authoritative
 kill switch) then hard-deletes the pairing row. The row is not soft-kept — an
@@ -260,10 +261,19 @@ keep their separate role gates.
 
 ## Known issues / follow-ups
 
-- **Go CLI verbs** (`meho addon pair/unpair/list`) are not shipped here.
-  Pairing management is REST + console; pairing health already flows to
-  `meho status` via `/api/v1/health` and the `meho_status` MCP tool. Adding
-  the Go verbs is a separate change (OpenAPI snapshot + oapi-codegen regen).
+- **Go CLI verbs shipped (#4891).** `meho addon pair <name>
+  --contract-version <n> --min-backplane-version <n>` pairs an add-on and
+  prints the client id and the one-time client secret (stdout only; `--json`
+  prints the whole `PairAddonResult`). `meho addon list`, `meho addon show
+  <name>` and `meho addon unpair <name>` wrap the other three operator
+  routes. The commands live in `cli/internal/cmd/addon/` and follow the
+  `meho runner-principal` shape (typed generated client, one retry after a
+  401, `--json` and `--backplane` on every verb). Each server error code
+  (`addon_contract_below_backplane_minimum`, `backplane_contract_below_addon_minimum`,
+  `addon_already_paired`, `addon_not_paired`, 403, 503, 502) is printed with
+  one line that says what to do. Pairing health is in `meho status --json`
+  (the `pairings` list from `/api/v1/health`) and in the `meho_status` MCP
+  tool; the text output of `meho status` does not show it.
 - **Heartbeat / capability-declare object-level binding is wired.** Both
   self-service writes resolve the pairing by the caller's
   `service_account_sub` and match the requested name via the shared

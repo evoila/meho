@@ -336,8 +336,10 @@ class ReviewService:
     ) -> ConnectorScope | None:
         """Return the tenant's old copy of *scope* stored under a former product name.
 
-        Callers have already found no tenant rows under ``scope.product``.
-        The probe keys on ``(tenant_id, version, impl_id)`` only
+        Most callers have already found no tenant rows under
+        ``scope.product``; :meth:`delete_connector` asks first, because it
+        removes an old copy before the current one. The probe keys on
+        ``(tenant_id, version, impl_id)`` only
         (:func:`legacy_tenant_products`); when it finds rows under another
         product, the same scope with that product is returned so review
         and delete can reach the copy (#4889). ``None`` for the built-in
@@ -1310,15 +1312,20 @@ class ReviewService:
         :meth:`edit_op` discipline). Re-ingesting the same triple
         afterwards re-registers the connector from scratch.
 
-        When the tenant has rows for the id only under a former product
-        name (#4889), the delete targets that old copy: the operator's
-        only way to remove rows no other route can reach. The built-in
-        row is untouched, so the tenant keeps using it for calls.
+        When the tenant has rows for the id under a former product name
+        (#4889), the delete targets that old copy first, even when the
+        tenant also has a copy under the current product. The old copy
+        can never be called, so removing it first never takes away a
+        working operation; it is also the operator's only way to reach
+        rows no other route can see, and the listing's clean-up hint
+        relies on this order. A second delete then removes the current
+        tenant copy. The built-in row is untouched either way, so the
+        tenant keeps using it for calls.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
-            if tenant_id is not None and not await scope_has_rows(session, scope):
+            if tenant_id is not None:
                 legacy = await self._find_legacy_tenant_copy(scope, session)
                 if legacy is not None:
                     scope = legacy

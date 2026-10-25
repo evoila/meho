@@ -561,13 +561,21 @@ def _legacy_tenant_copy_hint(
     stored ``product`` differs (``vcf-logs`` rows for ``vrli-rest-9.0``)
     can therefore never be called. Such a row is listed so the operator
     can see it, but it is marked not dispatchable and carries this hint
-    naming the clean-up verb. ``None`` for built-in rows and for rows
-    whose product matches the id. Rows with an unparseable id never
-    reach this helper (:func:`_resolves_through_dispatcher` drops them).
+    naming the clean-up verb. ``None`` for built-in rows, for rows whose
+    product matches the id, and for rows whose id does not parse (the
+    dispatcher filter drops those).
+
+    The hint is safe to follow even when the tenant also has a copy
+    under the current product:
+    :meth:`~meho_backplane.operations.ingest.service.ReviewService.delete_connector`
+    removes an old copy before the current one.
     """
     if tenant_uuid is None:
         return None
-    parsed_product, _version, _impl_id = parse_connector_id(connector_id)
+    try:
+        parsed_product, _version, _impl_id = parse_connector_id(connector_id)
+    except ValueError:
+        return None
     if parsed_product == product:
         return None
     return NextStep(
@@ -575,7 +583,8 @@ def _legacy_tenant_copy_hint(
         rationale=(
             f"this copy is stored under the former product name {product!r}; calls "
             f"use the product name {parsed_product!r}, so this copy can never be "
-            f"called. Delete it to remove it from the list."
+            f"called. Delete it to remove it from the list. The delete removes this "
+            f"old copy first and leaves any copy stored under {parsed_product!r} in place."
         ),
     )
 
@@ -598,6 +607,13 @@ async def _emit_db_backed_rows(
     and ``next_step=None`` (the catalog-completion hint only applies
     to the class-side-only path; ingested rows already dispatch).
 
+    One kind of row skips the dispatcher filter: a tenant row stored
+    under a former product name (#4889). The filter probes the product
+    parsed from the id, so without a built-in or current-product copy
+    it would drop the old copy and the operator would never see it or
+    its clean-up hint. Such a row is kept with ``dispatchable=False``
+    and the delete hint instead (:func:`_legacy_tenant_copy_hint`).
+
     Extracted from :func:`list_ingested_connectors` so the DB-side
     emission and the class-side-only emission stay each below the
     code-quality function-size limit.
@@ -608,7 +624,10 @@ async def _emit_db_backed_rows(
         if not _matches_status_filter(row, status):
             continue
         connector_id = build_connector_id(product, version, impl_id)
-        if not await _resolves_through_dispatcher(
+        legacy_hint = _legacy_tenant_copy_hint(
+            connector_id, product=product, tenant_uuid=tenant_uuid
+        )
+        if legacy_hint is None and not await _resolves_through_dispatcher(
             operator=operator,
             connector_id=connector_id,
             source_product=product,
@@ -625,9 +644,6 @@ async def _emit_db_backed_rows(
             version=version,
             enabled_operation_count=enabled_op_count,
             has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
-        )
-        legacy_hint = _legacy_tenant_copy_hint(
-            connector_id, product=product, tenant_uuid=tenant_uuid
         )
         if legacy_hint is not None:
             dispatchable = False

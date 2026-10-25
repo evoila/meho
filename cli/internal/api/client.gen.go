@@ -3696,7 +3696,10 @@ type ConfirmVerifyResponseAnswer string
 // keep working; the listing sets “scope“ explicitly per row and
 // stamps “shadowed_by_tenant_scope“ in a post-pass over the full
 // response. Invariant: within one response no two rows share
-// “(connector_id, scope)“. See :data:`ConnectorScope`.
+// “(connector_id, scope)“, with one exception: a tenant row stored
+// under a former product name (#4889) sits next to the tenant's
+// current copy of the same id; “product“ tells the two apart. See
+// :data:`ConnectorScope`.
 type ConnectorListItem struct {
 	ConnectorId           string                 `json:"connector_id"`
 	DisabledGroupCount    int                    `json:"disabled_group_count"`

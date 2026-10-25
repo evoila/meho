@@ -403,6 +403,32 @@ async def test_delete_removes_only_old_copy_and_builtin_op_still_dispatches() ->
 
 
 @pytest.mark.asyncio
+async def test_delete_with_both_tenant_copies_removes_old_copy_first() -> None:
+    """The listing's delete hint must never take away the tenant's current copy."""
+    tenant_id = uuid.uuid4()
+    await _seed_builtin_copy()
+    await _seed_tenant_copy(tenant_id)
+    await _seed_tenant_copy(tenant_id, product=_PRODUCT)
+    current_before = await _rows(tenant_id, _PRODUCT)
+    assert len(current_before[0]) == _LEGACY_GROUP_COUNT
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    result = await service.delete_connector(_CONNECTOR_ID, tenant_id=tenant_id)
+
+    assert result.groups_deleted == _LEGACY_GROUP_COUNT
+    assert await _rows(tenant_id, _LEGACY_PRODUCT) == ({}, {})
+    assert await _rows(tenant_id, _PRODUCT) == current_before
+    assert await _rows(None, _PRODUCT) == _BUILTIN_BEFORE
+    payload = await _legacy_delete_audit_payload()
+    assert payload["product"] == _LEGACY_PRODUCT
+
+    # The second delete removes the current tenant copy; the built-in copy stays.
+    await service.delete_connector(_CONNECTOR_ID, tenant_id=tenant_id)
+    assert await _rows(tenant_id, _PRODUCT) == ({}, {})
+    assert await _rows(None, _PRODUCT) == _BUILTIN_BEFORE
+
+
+@pytest.mark.asyncio
 async def test_delete_from_another_tenant_leaves_old_copy_alone() -> None:
     owner = uuid.uuid4()
     other = uuid.uuid4()
@@ -444,6 +470,53 @@ async def test_list_does_not_shadow_builtin_and_marks_old_copy_uncallable() -> N
     assert legacy.next_step.verb == f"meho connector delete {_CONNECTOR_ID}"
     assert _LEGACY_PRODUCT in legacy.next_step.rationale
     assert "never be called" in legacy.next_step.rationale
+
+
+@pytest.mark.asyncio
+async def test_list_with_only_old_copy_still_shows_it_with_delete_hint() -> None:
+    """No built-in and no current-product row: the old copy must not be filtered out."""
+    tenant_id = uuid.uuid4()
+    await _seed_tenant_copy(tenant_id)
+
+    items = await list_ingested_connectors(operator=_make_operator(tenant_id=tenant_id))
+
+    tenant_rows = [
+        item for item in items if item.connector_id == _CONNECTOR_ID and item.scope == "tenant"
+    ]
+    assert len(tenant_rows) == 1
+    legacy = tenant_rows[0]
+    assert legacy.product == _LEGACY_PRODUCT
+    assert legacy.tenant_id == tenant_id
+    assert legacy.state == "ingested"
+    assert legacy.dispatchable is False
+    assert legacy.next_step is not None
+    assert legacy.next_step.verb == f"meho connector delete {_CONNECTOR_ID}"
+
+
+@pytest.mark.asyncio
+async def test_list_with_both_tenant_copies_hints_old_copy_and_shadows_builtin() -> None:
+    tenant_id = uuid.uuid4()
+    await _seed_builtin_copy()
+    await _seed_tenant_copy(tenant_id)
+    await _seed_tenant_copy(tenant_id, product=_PRODUCT)
+
+    items = await list_ingested_connectors(operator=_make_operator(tenant_id=tenant_id))
+
+    rows = [item for item in items if item.connector_id == _CONNECTOR_ID]
+    by_scope_product = {(item.scope, item.product): item for item in rows}
+    assert set(by_scope_product) == {
+        ("builtin", _PRODUCT),
+        ("tenant", _PRODUCT),
+        ("tenant", _LEGACY_PRODUCT),
+    }
+    assert by_scope_product[("builtin", _PRODUCT)].shadowed_by_tenant_scope is True
+    current = by_scope_product[("tenant", _PRODUCT)]
+    assert current.next_step is None
+    legacy = by_scope_product[("tenant", _LEGACY_PRODUCT)]
+    assert legacy.dispatchable is False
+    assert legacy.next_step is not None
+    assert legacy.next_step.verb == f"meho connector delete {_CONNECTOR_ID}"
+    assert "old copy first" in legacy.next_step.rationale
 
 
 @pytest.mark.asyncio

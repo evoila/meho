@@ -1012,9 +1012,13 @@ The rule now:
   refused too: the old copy's reads can never be dispatched.
   `enable-reads --prefer builtin` still works for a platform admin,
   because that is the copy calls use.
-- **Delete.** In the tenant scope the delete targets the old copy when
-  the tenant has no rows under the current product. The built-in copy
-  stays, and the audit payload records the deleted `product`. The
+- **Delete.** In the tenant scope the delete targets the old copy
+  first, also when the tenant has a copy under the current product.
+  The old copy can never be called, so removing it first never takes
+  away a working operation, and the list's clean-up hint stays safe to
+  follow. A second delete then removes the current tenant copy. The
+  built-in copy stays, and the audit payload records the deleted
+  `product`. The
   residual probe and the auto-shim walk in `delete_connector.py` use
   the triple parsed from the id, so rows under a former name never keep
   a shim alive and never count as residual.
@@ -1029,7 +1033,13 @@ The rule now:
   when the tenant row has the same `(connector_id, product)`. The old
   tenant row is listed with `dispatchable=false` and a `next_step`
   whose `verb` is `meho connector delete <id>` and whose `rationale`
-  says the copy can never be called. No new list field was added.
+  says the copy can never be called and that the delete removes the
+  old copy first. The old row skips the dispatcher round-trip filter
+  (`_resolves_through_dispatcher`), which probes the product parsed
+  from the id: without a built-in or current-product copy that filter
+  would hide the old copy. When the tenant also has a current copy,
+  two `scope=tenant` rows share the id; `product` tells them apart.
+  No new list field was added.
 
 Do not fix such a copy by renaming its rows to the current product.
 Since #3870 a tenant's own copy is the only copy used for that tenant,

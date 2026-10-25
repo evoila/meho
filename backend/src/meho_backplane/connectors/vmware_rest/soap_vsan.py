@@ -64,10 +64,14 @@ def vsan_soap_action(api_version: str | None) -> str:
 def _argument_xml(name: str, value: Any) -> str:
     """One method argument as XML.
 
-    Only managed object references are supported, because that is all the
-    vSAN operations send today (``cluster``). A later operation that sends
-    another type adds it here, with a test.
+    Two value types are supported, because that is all the vSAN operations
+    send today: a managed object reference (``cluster``) and a true/false
+    value (``fetchFromCache``, #4922), which becomes ``<name>true</name>`` as
+    ``xsd:boolean`` writes it. A later operation that sends another type adds
+    it here, with a test.
     """
+    if isinstance(value, bool):
+        return f"<{name}>{'true' if value else 'false'}</{name}>"
     if isinstance(value, Mapping) and value.get(VIM_TYPE_NAME_KEY) == MOREF_TYPE_NAME:
         mo_type = _xml_escape(str(value.get("type", "")))
         moid = _xml_escape(str(value.get("value", "")))

@@ -13,9 +13,10 @@ The steps are called directly, with an ``httpx.MockTransport``:
 * the parts keep characters whole and join back to the file;
 * text checks, the stored-record check, the one redaction pass over the
   whole text, the redaction check and the redirect path;
-* the one step every read calls: the flight recorder gets the checked
-  copy, no body for a refused file, and a ``401`` is raised with a
-  checked body or none.
+* the steps every read starts and ends with: the flight recorder gets
+  the checked copy only after the last checks pass, no body for a
+  refused file, and a ``401`` is raised with a checked body or none,
+  also when its body cannot be read.
 
 Fixture values are made up.
 """
@@ -38,11 +39,13 @@ from meho_backplane.connectors._shared.api_file_read import (
     ApiFileNotTextError,
     ApiFileRedactedError,
     ApiFileTooLargeError,
+    FetchedApiFile,
     assert_fits_result_handle,
     assert_not_redacted,
     decode_text,
     fetch_checked_api_file,
     fetch_without_redirects,
+    finish_api_file_read,
     redirect_target,
     split_parts,
     text_items,
@@ -51,7 +54,6 @@ from meho_backplane.connectors._shared.api_file_read import (
 from meho_backplane.connectors._shared.api_file_secrets import (
     REDACTED,
     ApiFileFormatError,
-    CheckedApiFile,
     check_api_file,
 )
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -312,7 +314,7 @@ def _recorded_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return recorded
 
 
-async def _fetch_checked(response: httpx.Response) -> tuple[httpx.Response, CheckedApiFile]:
+async def _fetch_checked(response: httpx.Response) -> FetchedApiFile:
     rule = text_redactor(_operator(), connector_id="made-rest-1.0", op_id="made.up.get")
     async with _client(lambda _request: response) as client:
         return await fetch_checked_api_file(
@@ -328,18 +330,21 @@ async def _fetch_checked(response: httpx.Response) -> tuple[httpx.Response, Chec
 
 
 @pytest.mark.asyncio
-async def test_fetch_checked_gives_the_recorder_the_checked_copy(
+async def test_fetch_checked_records_nothing_until_the_read_records_the_checked_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorded = _recorded_calls(monkeypatch)
-    answer, checked = await _fetch_checked(_wire(200, _SECRET_JSON, headers=_JSON))
+    fetched = await _fetch_checked(_wire(200, _SECRET_JSON, headers=_JSON))
 
-    assert answer.status_code == 200
-    assert REDACTED in checked.text
+    assert fetched.response.status_code == 200
+    assert REDACTED in fetched.checked.text
+    assert recorded == []
+    fetched.record(fetched.checked.text.encode())
     (call,) = recorded
     assert call["method"] == "GET"
     assert call["request_headers"] == {"x-made-up": "1"}
-    assert call["response_body"] == checked.text.encode()
+    assert call["response"] is fetched.response
+    assert call["response_body"] == fetched.checked.text.encode()
     assert _SECRET.encode() not in call["response_body"]
 
 
@@ -393,3 +398,118 @@ async def test_fetch_checked_raises_a_401_with_a_checked_body_or_none(
     (call,) = recorded
     assert call["response"].status_code == 401
     assert call["response_body"] == raised.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "body", "headers"),
+    [
+        ("declared over the limit", b"x" * 5000, {"Content-Length": "5000"}),
+        ("streamed over the limit", b"x" * 5000, {}),
+        ("encoding the read cannot bound", b"x", {"Content-Encoding": "br"}),
+        ("cut gzip stream", gzip.compress(b"x" * 100)[:-8], {"Content-Encoding": "gzip"}),
+        (
+            "bytes after the deflate stream",
+            zlib.compress(b"x") + b"tail",
+            {"Content-Encoding": "deflate"},
+        ),
+    ],
+)
+async def test_401_whose_body_cannot_be_read_comes_back_with_no_body(
+    name: str, body: bytes, headers: dict[str, str]
+) -> None:
+    """The dispatcher must see the ``401``, whatever the body holds."""
+    answer = await _fetch(_wire(401, body, headers={**headers, "x-vendor": "kept"}))
+
+    assert answer.status_code == 401, name
+    assert answer.content == b""
+    assert answer.headers["x-vendor"] == "kept"
+    assert "content-encoding" not in answer.headers
+    assert "content-length" not in answer.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "body", "headers"),
+    [
+        ("streamed over the limit", b"x" * 5000, {}),
+        ("encoding the read cannot bound", b"x", {"Content-Encoding": "br"}),
+        ("cut gzip stream", gzip.compress(b"x" * 100)[:-8], {"Content-Encoding": "gzip"}),
+    ],
+)
+async def test_fetch_checked_raises_a_401_whose_body_cannot_be_read_with_no_body(
+    monkeypatch: pytest.MonkeyPatch, name: str, body: bytes, headers: dict[str, str]
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await _fetch_checked(_wire(401, body, headers={**headers, **_JSON}))
+
+    raised = caught.value.response
+    assert raised.status_code == 401, name
+    assert raised.content == b""
+    (call,) = recorded
+    assert call["response"].status_code == 401
+    assert call["response_body"] == b""
+
+
+def _answer_for(body: bytes, items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "path": "/file.json",
+        "status": 200,
+        "size": len(body),
+        "sha256": "0" * 64,
+        "version": None,
+        "parts": len(items),
+    }
+
+
+@pytest.mark.asyncio
+async def test_finish_records_the_checked_copy_only_when_the_last_checks_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The size boundary: the file fits the download limit but not the stored record."""
+    recorded = _recorded_calls(monkeypatch)
+    fetched = await _fetch_checked(_wire(200, _SECRET_JSON, headers=_JSON))
+    body = fetched.checked.text.encode()
+    items = text_items(body)
+    assert recorded == []
+    operator = _operator()
+    common: dict[str, Any] = {"connector_id": "made-rest-1.0", "op_id": "made.up.get"}
+
+    with pytest.raises(ApiFileTooLargeError):
+        finish_api_file_read(
+            fetched, _answer_for(body, items), items, operator, max_bytes=len(body), **common
+        )
+    (refused,) = recorded
+    assert refused["response_body"] == b""
+
+    answer = finish_api_file_read(
+        fetched, _answer_for(body, items), items, operator, max_bytes=4096, **common
+    )
+    assert answer["items"] == items
+    assert [call["response_body"] for call in recorded] == [b"", body]
+    assert _SECRET.encode() not in body
+
+
+@pytest.mark.asyncio
+async def test_finish_records_no_body_when_the_redaction_check_refuses_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _recorded_calls(monkeypatch)
+    wire = b'{"detail": "Authorization: Bearer made-up-token-value-0123456789"}'
+    fetched = await _fetch_checked(_wire(200, wire, headers=_JSON))
+    body = fetched.checked.text.encode()
+    items = text_items(body)
+
+    with pytest.raises(ApiFileRedactedError):
+        finish_api_file_read(
+            fetched,
+            _answer_for(body, items),
+            items,
+            _operator(),
+            connector_id="made-rest-1.0",
+            op_id="made.up.get",
+            max_bytes=4096,
+        )
+    (refused,) = recorded
+    assert refused["response_body"] == b""

@@ -50,14 +50,16 @@ replaced. A copy that the general secret-redaction rules would still
 change stops too; the rules run on the whole text and on the answer, so
 a secret that spans two parts is found as well.
 
-The fetch, the file check and the flight recorder call are the shared
-steps in :mod:`meho_backplane.connectors._shared.api_file_read`
-(:func:`~meho_backplane.connectors._shared.api_file_read.fetch_checked_api_file`).
+The fetch, the file check, the last checks and the flight recorder call
+are the shared steps in :mod:`meho_backplane.connectors._shared.api_file_read`
+(:func:`~meho_backplane.connectors._shared.api_file_read.fetch_checked_api_file`
+and :func:`~meho_backplane.connectors._shared.api_file_read.finish_api_file_read`).
 The flight recorder gets the checked copy of the file, never the body as
-it came, and no body when the file is refused. A ``401`` is raised with
-its body checked the same way (or with no body), so the error result
-never carries a secret and the dispatcher still logs in again and
-retries once.
+it came, and only once every check has passed: a refused file is
+recorded with no body. A ``401`` is raised with its body checked the
+same way (or with no body, also when the body could not be read), so the
+error result never carries a secret and the dispatcher still logs in
+again and retries once.
 """
 
 from __future__ import annotations
@@ -70,9 +72,8 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.api_file_read import (
-    assert_fits_result_handle,
-    assert_not_redacted,
     fetch_checked_api_file,
+    finish_api_file_read,
     redirect_target,
     text_items,
     text_redactor,
@@ -179,7 +180,7 @@ async def hcx_api_file_get_impl(
     max_bytes = get_settings().result_handle_max_record_bytes
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
-    response, checked = await fetch_checked_api_file(
+    fetched = await fetch_checked_api_file(
         client,
         url,
         path=path,
@@ -189,6 +190,7 @@ async def hcx_api_file_get_impl(
         text_rule=None,
         error_text_rule=text_redactor(operator, connector_id=HCX_CONNECTOR_ID, op_id=_OP_ID),
     )
+    response, checked = fetched.response, fetched.checked
     body = checked.text.encode("utf-8")
     items = text_items(body)
     redirect_to, redirect_replaced = _redirect(response)
@@ -206,12 +208,15 @@ async def hcx_api_file_get_impl(
         "redirect_to": redirect_to,
         "parts": len(items),
     }
-    assert_fits_result_handle(
-        answer, items, operator_sub=operator.sub, op_id=_OP_ID, max_bytes=max_bytes
+    return finish_api_file_read(
+        fetched,
+        answer,
+        items,
+        operator,
+        connector_id=HCX_CONNECTOR_ID,
+        op_id=_OP_ID,
+        max_bytes=max_bytes,
     )
-    answer["items"] = items
-    assert_not_redacted(answer, checked.text, operator, connector_id=HCX_CONNECTOR_ID, op_id=_OP_ID)
-    return answer
 
 
 def _redirect(response: httpx.Response) -> tuple[str | None, int]:

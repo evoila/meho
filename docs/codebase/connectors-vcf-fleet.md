@@ -282,14 +282,17 @@ read through this target. Only a `401` is raised, so the dispatcher drops
 the cached login; every other status (for example `404`) is reported in
 `status` with the body as text.
 
-The fetch, the file check and the flight recorder call are one shared
-step, `fetch_checked_api_file` in `connectors/_shared/api_file_read.py`.
-The flight recorder (the stored record of each vendor call) gets the
-checked copy of the file, never the body as it came, and no body when the
-file is refused. A `401` body goes through the same check before the
-error is raised, or the error is raised with no body. So neither the
-stored call record nor the error result can carry a password the
-appliance put in a file.
+The fetch and the file check are one shared step,
+`fetch_checked_api_file` in `connectors/_shared/api_file_read.py`. The
+size check of the stored record, the last redaction check and the flight
+recorder call are a second shared step, `finish_api_file_read`. The
+flight recorder (the stored record of each vendor call) gets the checked
+copy of the file, never the body as it came, and only after every check
+has passed: a file the read refuses, for any reason, is recorded with no
+body. A `401` body goes through the same check before the error is
+raised, or the error is raised with no body, also when the body is too
+big or cannot be decoded. So neither the stored call record nor the
+error result can carry a password the appliance put in a file.
 
 The body is read in a stream. The read asks for `gzip` or `deflate` only
 and decodes the wire chunks itself with `zlib`, in steps that never

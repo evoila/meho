@@ -951,6 +951,28 @@ async def test_flight_recorder_gets_no_body_when_the_file_is_refused(
 
 
 @pytest.mark.asyncio
+async def test_flight_recorder_gets_no_body_when_the_stored_record_does_not_fit(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file fits the download limit, but its stored record does not: no body is recorded."""
+    recorded = _recorded_calls(monkeypatch)
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "1000")
+    get_settings.cache_clear()
+    await _register_and_resolve(_stub_embedding)
+    data = b'"' + b'\\"' * 494 + b'"'
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_login_and_info(mock)
+        mock.get(_SRM_FILE).respond(200, content=data)
+        result = await _dispatch("srm.api_file.get", {"file": "srm"})
+
+    assert result.status == "error"
+    assert "does not fit in one result handle" in result.extras["exception_message"]
+    (call,) = _file_calls(recorded, _SRM_FILE)
+    assert call["response"].status_code == 200
+    assert call["response_body"] == b""
+
+
+@pytest.mark.asyncio
 async def test_401_body_is_checked_before_it_is_raised_and_the_retry_still_runs(
     _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

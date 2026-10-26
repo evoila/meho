@@ -42,9 +42,8 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.api_file_read import (
-    assert_fits_result_handle,
-    assert_not_redacted,
     fetch_checked_api_file,
+    finish_api_file_read,
     redirect_target,
     text_items,
     text_redactor,
@@ -77,12 +76,14 @@ async def dr_api_file_get(
 ) -> dict[str, Any]:
     """``GET`` one API file on the appliance and return it checked, text in parts.
 
-    The fetch, the file check and the flight recorder call are the shared
-    :func:`fetch_checked_api_file`: the recorder gets the checked copy
-    only. A ``401`` is raised as :exc:`httpx.HTTPStatusError`, with a
-    checked body or none, so the dispatcher drops this target's session
-    and dispatches once more. Every other status is reported in
-    ``status``.
+    The fetch and the file check are the shared
+    :func:`fetch_checked_api_file`; the stored-record check, the
+    redaction check and the flight recorder call are the shared
+    :func:`finish_api_file_read`. The recorder gets the checked copy, and
+    only for a file the read returns. A ``401`` is raised as
+    :exc:`httpx.HTTPStatusError`, with a checked body or none, so the
+    dispatcher drops this target's session and dispatches once more.
+    Every other status is reported in ``status``.
     """
     op_id = f"{connector.product}.api_file.get"
     connector_id = connector.connector_id
@@ -91,7 +92,7 @@ async def dr_api_file_get(
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
     text_rule = text_redactor(operator, connector_id=connector_id, op_id=op_id)
-    response, checked = await fetch_checked_api_file(
+    fetched = await fetch_checked_api_file(
         client,
         path,
         path=path,
@@ -101,9 +102,9 @@ async def dr_api_file_get(
         text_rule=text_rule,
         error_text_rule=text_rule,
     )
+    response, checked = fetched.response, fetched.checked
     content_type = response.headers.get("content-type")
-    text = checked.text
-    body = text.encode("utf-8")
+    body = checked.text.encode("utf-8")
     items = text_items(body)
     redirect_to, redirect_replaced = _redirect(response)
     version = await connector.server_version(target, operator)
@@ -121,12 +122,15 @@ async def dr_api_file_get(
         "redirect_to": redirect_to,
         "parts": len(items),
     }
-    assert_fits_result_handle(
-        answer, items, operator_sub=operator.sub, op_id=op_id, max_bytes=max_bytes
+    return finish_api_file_read(
+        fetched,
+        answer,
+        items,
+        operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        max_bytes=max_bytes,
     )
-    answer["items"] = items
-    assert_not_redacted(answer, text, operator, connector_id=connector_id, op_id=op_id)
-    return answer
 
 
 def _redirect(response: httpx.Response) -> tuple[str | None, int]:

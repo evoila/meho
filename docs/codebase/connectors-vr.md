@@ -128,8 +128,9 @@ takes `version` and `build_number`. It never raises: a failure is named
 in `error`. `fingerprint()`, `probe()` and `vr.api_file.get` use it. A
 `401` on this read drops this target's cached session. The flight
 recorder (the stored record of each vendor call) gets the checked copy
-of the file, never the body as it came, and a `401` body is checked
-before the error is raised (see the SRM page for the shared step).
+of the file, never the body as it came, and only after every check has
+passed; a `401` body is checked before the error is raised (see the SRM
+page for the shared steps).
 
 ### `vr.about`
 

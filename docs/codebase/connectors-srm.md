@@ -163,13 +163,16 @@ The vendor-neutral steps live in `connectors/_shared/api_file_read.py`.
 They are the same steps the `fleet.api_file.get` read uses
 (`docs/codebase/connectors-vcf-fleet.md`):
 
-- the fetch, the file check and the flight recorder call are one step,
-  `fetch_checked_api_file`. The flight recorder (the stored record of
-  each vendor call) gets the checked copy of the file, never the body as
-  it came, and no body when the file is refused. A `401` body goes
-  through the same check before the error is raised, or the error is
-  raised with no body; the status and the headers stay, so the login
-  retry still runs;
+- the fetch and the file check are one step, `fetch_checked_api_file`;
+  the size check of the stored record, the last redaction check and the
+  flight recorder call are a second step, `finish_api_file_read`. The
+  flight recorder (the stored record of each vendor call) gets the
+  checked copy of the file, never the body as it came, and only after
+  every check has passed: a file the read refuses, for any reason, is
+  recorded with no body. A `401` body goes through the same check before
+  the error is raised, or the error is raised with no body, also when
+  the body is too big or cannot be decoded; the status and the headers
+  stay, so the login retry still runs;
 - the body is read in a stream; `gzip` and `deflate` are decoded in
   bounded steps, so a small compressed body that decodes past the limit
   stops at the limit; a cut stream is refused;

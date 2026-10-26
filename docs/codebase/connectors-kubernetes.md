@@ -436,6 +436,23 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
 | `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+| `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
+
+**`k8s.cronjob.run` (`ops_cronjob.py`).** Starts a CronJob's job without
+waiting for its schedule, the way `kubectl create job <name>
+--from=cronjob/<cronjob>` does. The Job gets the annotation
+`cronjob.kubernetes.io/instantiate: manual`, the job template's labels and
+annotations, one owner reference to the CronJob (`controller: true`,
+`blockOwnerDeletion` unset because that needs a right on
+`cronjobs/finalizers`) and a copy of `spec.jobTemplate.spec`. Without
+`job_name` the Job uses `generateName: <cronjob>-manual-` and the result
+carries the name the API server chose. A missing CronJob raises
+`WorkloadNotFoundError` before anything is created; a suspended CronJob
+still runs. The params and the result hold only names, so the op is not
+pinned `credential_write`. Its approval preview (`ops_write_preview.py`)
+reads the CronJob and shows the schedule, `suspend`, `concurrencyPolicy`,
+the names of its Jobs that still run and each container's name, image,
+env var names and command size, never an env value or the command text.
 
 **Secret redaction reuses the shipped `credential_write` op-class
 (#1401), not a new mechanism.** `k8s.secret.create` was already in

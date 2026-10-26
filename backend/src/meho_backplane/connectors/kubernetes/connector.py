@@ -140,8 +140,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use for per-namespace pod, deployment and Job drill-in: "
         "``k8s.pod.list`` / ``k8s.pod.info`` / ``k8s.deployment.list`` "
         "/ ``k8s.deployment.info`` / ``k8s.job.list`` / ``k8s.job.info`` "
-        "(did a migration or batch Job finish, and did it work?). The "
-        "right group once the operator "
+        "(did a migration or batch Job finish, and did it work?), and "
+        "``k8s.cronjob.run`` to start a CronJob's job now instead of "
+        "waiting for its schedule. The right group once the operator "
         "knows the namespace (typically picked from the 'inventory' "
         "group first). Pair with the 'logs' group when investigating "
         "a CrashLoopBackOff pod, with 'events' when the failure is "
@@ -1600,6 +1601,17 @@ class KubernetesConnector(Connector):
         )
 
         return await k8s_job_create(self, target, operator, params)
+
+    async def k8s_cronjob_run(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.cronjob.run``."""
+        from meho_backplane.connectors.kubernetes.ops_cronjob import k8s_cronjob_run
+
+        return await k8s_cronjob_run(self, target, operator, params)
 
     async def k8s_secret_read_to_ref(
         self,

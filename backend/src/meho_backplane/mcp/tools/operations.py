@@ -845,7 +845,15 @@ register_mcp_tool(
             "is shown on the approval request instead. An approval-gated op "
             "that writes a credential (for example `vault.kv.put`) is NOT "
             'previewable and stays `status="unavailable"`, so its secret '
-            "params never surface. Arguments mirror "
+            "params never surface. Every preview whose op resolves (ok, "
+            "unavailable, and the error statuses after the op lookup) also "
+            "says the risk level and whether this call will wait for "
+            "approval: `safety_level`, `requires_approval`, and "
+            "`policy_verdict` (what MEHO would do with the call for THIS "
+            "caller and target: `auto-execute`, `needs-approval` or `deny`, "
+            "with `policy_reason` when it is not auto-execute). The verdict "
+            "is decided the same way `call_operation` decides it, but "
+            "nothing is written. Arguments mirror "
             "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
             '(optional; bare string `"rdc-vcenter"` or dict '
@@ -948,15 +956,37 @@ register_mcp_tool(
                 "safety_level": {
                     "type": "string",
                     "description": (
-                        "The op's safety level: safe, caution, dangerous, or "
-                        "destructive (ingested ops, status=ok)."
+                        "The op's risk level: safe, caution, dangerous, or "
+                        "destructive. Present on every preview whose op "
+                        "resolved (every status except unknown_op / "
+                        "unknown_connector)."
                     ),
                 },
                 "requires_approval": {
                     "type": "boolean",
                     "description": (
-                        "True when the op needs a human approval before it "
-                        "runs (ingested ops, status=ok)."
+                        "True when the op is marked as needing a human "
+                        "approval before it runs. Present whenever "
+                        "`safety_level` is."
+                    ),
+                },
+                "policy_verdict": {
+                    "type": "string",
+                    "enum": ["auto-execute", "needs-approval", "deny"],
+                    "description": (
+                        "What MEHO would do with this call for this caller "
+                        "and target: run it at once (auto-execute), wait for "
+                        "a second person's approval (needs-approval), or "
+                        "refuse it (deny). Decided the same way "
+                        "`call_operation` decides it; nothing is written. "
+                        "Present whenever `safety_level` is."
+                    ),
+                },
+                "policy_reason": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "The policy gate's reason for the verdict; null when "
+                        "it gives none (a person's call that runs at once)."
                     ),
                 },
                 "proposed_effect": {

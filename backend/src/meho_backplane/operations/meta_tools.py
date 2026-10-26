@@ -89,7 +89,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import EndpointDescriptor, OperationGroup, PermissionVerdict
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._contract import UnknownOperationError, build_operation_contract
 from meho_backplane.operations._errors import (
@@ -556,6 +556,128 @@ class PreviewOperationBody(BaseModel):
     op_id: str = Field(min_length=1)
     target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreviewOperationResponse(BaseModel):
+    """Response envelope of ``POST /api/v1/operations/preview`` (#4923).
+
+    Types the envelope :func:`preview_operation` returns so the OpenAPI
+    document and the generated clients know its fields. The route serialises
+    only the keys the envelope carries (``response_model_exclude_unset``):
+    an ``error`` envelope has no ``method``, an ingested ``ok`` preview has no
+    ``plan_shown``, and so on. ``extra="allow"`` keeps the keys a
+    target-resolution or rate-limit envelope adds (``duration_ms``,
+    ``retry_after_seconds``, ...) on the wire unchanged.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: Literal["ok", "error", "unavailable", "rate_limited"] = Field(
+        description=(
+            "ok: the would-be request (or the synthetic preview) resolved. "
+            "error: a structured fault, see `error` and `extras.error_code`. "
+            "unavailable: a typed/composite op outside the approval tiers has "
+            "no request to preview. rate_limited: over the per-minute dispatch "
+            "cap for this principal."
+        )
+    )
+    op_id: str | None = Field(default=None, description="Echo of the requested op id.")
+    connector_id: str | None = Field(
+        default=None,
+        description=(
+            "The connector the preview resolved against. May differ from the "
+            "requested id when a sibling catalog serves the target."
+        ),
+    )
+    source_kind: str | None = Field(
+        default=None,
+        description="`ingested`, `typed` or `composite`; absent when the op is unknown.",
+    )
+    method: str | None = Field(
+        default=None,
+        description="Resolved HTTP verb (status=ok); `COMPOSITE` for a synthetic preview.",
+    )
+    resolved_path: str | None = Field(
+        default=None,
+        description=(
+            "Fully resolved request path, placeholders substituted and mount prefix "
+            "applied (status=ok); the op id for a synthetic preview."
+        ),
+    )
+    query: dict[str, Any] | None = Field(
+        default=None, description="Query-string params, or null when there are none (status=ok)."
+    )
+    redacted_body: Any = Field(
+        default=None,
+        description=(
+            "The would-be request body after the connector-boundary redaction "
+            "pipeline; null when the op declares no body (status=ok)."
+        ),
+    )
+    preview_hash: str | None = Field(
+        default=None,
+        description=(
+            "Stable SHA-256 over the resolved request (status=ok). Present it as "
+            "`preview_hash` on the governed call of a destructive-tier op."
+        ),
+    )
+    safety_level: str | None = Field(
+        default=None,
+        description=(
+            "The op's risk level: safe, caution, dangerous or destructive. Present on "
+            "every preview whose op resolved (every status except unknown_op / "
+            "unknown_connector)."
+        ),
+    )
+    requires_approval: bool | None = Field(
+        default=None,
+        description=(
+            "True when the op is marked as needing a human approval before it runs. "
+            "Present whenever `safety_level` is."
+        ),
+    )
+    policy_verdict: PermissionVerdict | None = Field(
+        default=None,
+        description=(
+            "What MEHO would do with this call for this caller and target: run it "
+            "at once (auto-execute), wait for a second person's approval "
+            "(needs-approval) or refuse it (deny). Decided the same way the call "
+            "is decided; nothing is written. Present whenever `safety_level` is."
+        ),
+    )
+    policy_reason: str | None = Field(
+        default=None,
+        description=(
+            "The policy gate's reason for the verdict; null when it gives none "
+            "(a person's call that runs at once)."
+        ),
+    )
+    proposed_effect: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The plan of what the op will change, the same block the approval "
+            "request shows. Present only on a synthetic preview whose plan can be "
+            "built without contacting the target."
+        ),
+    )
+    plan_shown: bool | None = Field(
+        default=None,
+        description=(
+            "Synthetic preview only: true when `proposed_effect` is present. False "
+            "means the plan needs the target and is shown on the approval request."
+        ),
+    )
+    plan_note: str | None = Field(
+        default=None, description="Plain reason the plan is not shown (when `plan_shown` is false)."
+    )
+    error: str | None = Field(
+        default=None,
+        description="Human-readable fault (status=error / unavailable / rate_limited).",
+    )
+    extras: dict[str, Any] | None = Field(
+        default=None,
+        description="Structured fault details, for example `error_code` or `validation_errors`.",
+    )
 
 
 # ---------------------------------------------------------------------------

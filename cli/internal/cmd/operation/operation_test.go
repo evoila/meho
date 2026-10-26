@@ -231,11 +231,12 @@ func TestPrintPreviewResultOkRendersHash(t *testing.T) {
 	}
 }
 
-// TestPrintPreviewResultOkRendersApprovalNeed — an ingested preview that
-// carries requires_approval=true tells the operator, before the real call,
-// that the change needs a human approval (#3973).
-func TestPrintPreviewResultOkRendersApprovalNeed(t *testing.T) {
+// TestPrintPreviewResultOkRendersPolicyLine — a preview that carries the
+// risk level and the policy verdict tells the operator, in one plain line
+// before the real call, whether it waits for approval (#3973 / #4923).
+func TestPrintPreviewResultOkRendersPolicyLine(t *testing.T) {
 	needsApproval := true
+	reason := "requires_approval is True; routed to the approval queue (G11.7-T1)"
 	r := &PreviewResult{
 		Status:           "ok",
 		OpID:             "POST:/vswitch/{vswitch-id}/server",
@@ -247,12 +248,16 @@ func TestPrintPreviewResultOkRendersApprovalNeed(t *testing.T) {
 		PreviewHash:      "abc123def456",
 		SafetyLevel:      "dangerous",
 		RequiresApproval: &needsApproval,
+		PolicyVerdict:    "needs-approval",
+		PolicyReason:     &reason,
 	}
 	var buf bytes.Buffer
 	printPreviewResult(&buf, "hetzner-rest-2026.04", "POST:/vswitch/{vswitch-id}/server", r)
 	out := buf.String()
 	for _, want := range []string{
-		"/vswitch/4321/server", "safety_level:  dangerous", "needs approval", `"server"`,
+		"/vswitch/4321/server",
+		"Risk level: dangerous. This call waits for approval.",
+		`"server"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printPreviewResult missing %q in output:\n%s", want, out)
@@ -261,10 +266,73 @@ func TestPrintPreviewResultOkRendersApprovalNeed(t *testing.T) {
 
 	noApproval := false
 	r.RequiresApproval = &noApproval
+	r.SafetyLevel = "caution"
+	r.PolicyVerdict = "auto-execute"
+	r.PolicyReason = nil
 	buf.Reset()
 	printPreviewResult(&buf, "hetzner-rest-2026.04", "POST:/vswitch/{vswitch-id}/server", r)
-	if strings.Contains(buf.String(), "needs approval") {
-		t.Errorf("requires_approval=false must not print the approval line; got:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "Risk level: caution. This call runs at once.") {
+		t.Errorf("auto-execute must print the runs-at-once line; got:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "waits for approval") {
+		t.Errorf("auto-execute must not say the call waits for approval; got:\n%s", buf.String())
+	}
+}
+
+// TestPolicyLine — the plain line for each verdict, the deny reason, the
+// fallback to requires_approval on an older backplane, and nothing when
+// the op did not resolve (#4923).
+func TestPolicyLine(t *testing.T) {
+	reason := "agent has no grant for this op"
+	yes := true
+	cases := []struct {
+		name string
+		r    PreviewResult
+		want string
+	}{
+		{"auto", PreviewResult{SafetyLevel: "caution", PolicyVerdict: "auto-execute"},
+			"Risk level: caution. This call runs at once."},
+		{"approval", PreviewResult{SafetyLevel: "dangerous", PolicyVerdict: "needs-approval"},
+			"Risk level: dangerous. This call waits for approval."},
+		{"deny with reason", PreviewResult{SafetyLevel: "dangerous", PolicyVerdict: "deny", PolicyReason: &reason},
+			"Risk level: dangerous. This call is refused: agent has no grant for this op"},
+		{"deny without reason", PreviewResult{SafetyLevel: "safe", PolicyVerdict: "deny"},
+			"Risk level: safe. This call is refused."},
+		{"older backplane", PreviewResult{SafetyLevel: "dangerous", RequiresApproval: &yes},
+			"Risk level: dangerous. This call waits for approval."},
+		{"older backplane no approval", PreviewResult{SafetyLevel: "safe"}, "Risk level: safe."},
+		{"op did not resolve", PreviewResult{Status: "error"}, ""},
+	}
+	for _, tc := range cases {
+		if got := policyLine(&tc.r); got != tc.want {
+			t.Errorf("%s: policyLine = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPrintPreviewResultUnavailableRendersPolicyLine — an unavailable
+// preview (a typed op with no request to preview) still says the risk
+// level and whether the call waits for approval (#4923).
+func TestPrintPreviewResultUnavailableRendersPolicyLine(t *testing.T) {
+	errMsg := "preview_unavailable: op 'k8s.about' is source_kind='typed'"
+	no := false
+	r := &PreviewResult{
+		Status:           "unavailable",
+		OpID:             "k8s.about",
+		ConnectorID:      "k8s-1.x",
+		SourceKind:       "typed",
+		Error:            &errMsg,
+		SafetyLevel:      "safe",
+		RequiresApproval: &no,
+		PolicyVerdict:    "auto-execute",
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "k8s-1.x", "k8s.about", r)
+	out := buf.String()
+	for _, want := range []string{"status=unavailable", "Risk level: safe. This call runs at once.", "preview_unavailable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult unavailable missing %q in output:\n%s", want, out)
+		}
 	}
 }
 

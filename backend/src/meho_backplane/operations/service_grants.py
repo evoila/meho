@@ -1177,6 +1177,7 @@ async def consult_and_record_grant(
     connector_id: str,
     preview_hash: str | None = None,
     params: dict[str, Any] | None = None,
+    record: bool = True,
 ) -> uuid.UUID | None:
     """Look up a live standing grant and, on a hit, record its use.
 
@@ -1213,6 +1214,13 @@ async def consult_and_record_grant(
     effect. With no delete grant the call falls through to today's rules,
     so an ordinary grant never changes its verdict. With the mode off the
     delete-grant table is never read.
+
+    ``record=False`` (#4923) only looks the grant up and writes nothing:
+    the preview asks "would a grant clear this call?" without using the
+    grant. A delete grant is then consulted without building its evidence,
+    because that evidence may read the target and the preview never
+    contacts the target; a ``destructive`` delete stays refused here, as it
+    does for a call that presents no preview hash.
     """
     if sandbox_mode_active():
         grant_id = await _consult_delete_grant(
@@ -1222,6 +1230,7 @@ async def consult_and_record_grant(
             connector_id=connector_id,
             preview_hash=preview_hash,
             params=params,
+            record=record,
         )
         if grant_id is not None:
             return grant_id
@@ -1260,6 +1269,8 @@ async def consult_and_record_grant(
     matched_by_selector = grant.target_id is None and (
         grant.target_product is not None or grant.target_name_pattern is not None
     )
+    if not record:
+        return grant.id
     await _record_grant_use(
         operator=operator,
         grant=grant,
@@ -1298,12 +1309,15 @@ async def _consult_delete_grant(
     connector_id: str,
     preview_hash: str | None,
     params: dict[str, Any] | None,
+    record: bool = True,
 ) -> uuid.UUID | None:
     """Sandbox mode only: clear a delete under a live delete grant (#4622).
 
     Returns the grant id when a delete grant covers the dispatch and its
     evidence checks pass, else ``None`` (the caller falls through to
-    today's rules, which park or refuse the delete).
+    today's rules, which park or refuse the delete). With ``record=False``
+    the evidence is neither built nor stored (see
+    :func:`consult_and_record_grant`).
     """
     from meho_backplane.settings import get_settings
 
@@ -1327,6 +1341,8 @@ async def _consult_delete_grant(
         )
     if grant is None:
         return None
+    if not record:
+        return None if descriptor.safety_level == "destructive" else grant.id
     evidence = await _delete_grant_evidence(
         operator=operator,
         descriptor=descriptor,

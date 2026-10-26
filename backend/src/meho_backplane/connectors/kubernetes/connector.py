@@ -647,15 +647,29 @@ class KubernetesConnector(Connector):
 
         ``operator`` is keyword-only with a ``None`` default to keep the
         :class:`Connector` ABC signature unchanged while letting the
-        refresh service forward the per-tenant system operator the
-        scheduler synthesises
-        (:func:`~meho_backplane.topology.scheduler._system_operator`).
-        The forwarded operator flows through :meth:`_get_api_client` so
-        the operator-context Vault → kubeconfig chain reads under the
-        scheduler's synthetic tenant identity. The ``None`` fall-back
-        synthesises the system operator the fingerprint/probe paths
-        already use, so a direct caller (test, future on-demand surface
-        that doesn't yet thread the operator) still works closed-loop.
+        refresh service forward the acting operator. The forwarded
+        operator flows through :meth:`_get_api_client`, which reads the
+        target's kubeconfig from Vault under the operator's own token.
+
+        **The scheduled run cannot read a kubeconfig stored in Vault
+        today (#4952).** The per-tenant system operator the scheduler
+        synthesises
+        (:func:`~meho_backplane.topology.scheduler._system_operator`)
+        has no person's token (``raw_jwt=""``), and MEHO does not read a
+        target's credentials from Vault without one. So the scheduled
+        refresh fails for every Kubernetes target whose credentials live
+        in Vault with an
+        :class:`~meho_backplane.connectors._shared.vault_creds.OperatorTokenRequiredError`,
+        which the scheduler reports as an expected outcome. Such targets
+        are updated only when a logged-in operator runs
+        ``meho topology refresh <target>``. A deployment whose credential
+        store is GCP Secret Manager reads with its own service identity,
+        so its scheduled refreshes work.
+
+        The ``None`` fall-back synthesises the system operator the
+        fingerprint/probe paths already use, so a direct caller (test,
+        future on-demand surface that doesn't yet thread the operator)
+        still works closed-loop.
         """
         from meho_backplane.connectors.kubernetes._topology import build_topology_hints
 

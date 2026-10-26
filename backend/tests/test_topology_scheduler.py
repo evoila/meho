@@ -34,12 +34,10 @@ import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from prometheus_client import REGISTRY
-from structlog.testing import capture_logs
-from structlog.typing import EventDict
 
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.resolver import NoMatchingConnector
@@ -272,24 +270,33 @@ async def test_success_clears_backoff() -> None:
 # ---------------------------------------------------------------------------
 # Expected refusals (#4952)
 # ---------------------------------------------------------------------------
+#
+# The scheduler logs through a module-level ``_log`` proxy. Under the
+# production ``cache_logger_on_first_use=True`` config that proxy caches
+# its bound logger on first use, and a later ``structlog.configure`` in
+# another test orphans it from ``structlog.testing.capture_logs``. So
+# these tests patch ``_log`` itself and assert on the calls, the same way
+# ``tests/test_checks_advisory.py`` does.
+
+_LOG = "meho_backplane.topology.scheduler._log"
 
 
 def _refresh_count(outcome: str) -> float:
     return REGISTRY.get_sample_value("topology_refresh_total", {"outcome": outcome}) or 0.0
 
 
-async def _refresh_twice(target: Target, exc: Exception) -> tuple[list[EventDict], list[EventDict]]:
-    """Run ``_refresh_one_target`` twice with a failing refresh, capturing logs per call.
+async def _refresh_twice(target: Target, exc: Exception) -> tuple[Mock, Mock]:
+    """Run ``_refresh_one_target`` twice with a failing refresh, one logger mock per call.
 
     The first failure puts the target on backoff, so the window is reset
     between the calls to make the second call actually run the refresh.
     """
     state = _SchedulerState()
     with patch(_REFRESH, new=AsyncMock(side_effect=exc)):
-        with capture_logs() as first:
+        with patch(_LOG) as first:
             await _refresh_one_target(target, state)
         state.backoff[target.id].skip_until = 0.0
-        with capture_logs() as second:
+        with patch(_LOG) as second:
             await _refresh_one_target(target, state)
     assert state.backoff[target.id].consecutive_failures == 2
     return first, second
@@ -314,20 +321,19 @@ async def test_expected_refusal_warns_once_without_traceback(exc: Exception, out
 
     first, second = await _refresh_twice(target, exc)
 
-    warnings = [e for e in first if e["event"] == "topology_refresh_target_skipped"]
-    assert len(warnings) == 1
-    line = warnings[0]
-    assert line["log_level"] == "warning"
-    assert "exc_info" not in line
-    assert line["target_id"] == str(target.id)
-    assert line["target_name"] == "k8s-a"
-    assert line["product"] == "faketopo"
-    assert line["outcome"] == outcome
-    assert line["reason"]
-    assert not [e for e in first if e["event"] == "topology_refresh_target_failed"]
+    assert first.warning.call_count == 1
+    assert first.exception.call_count == 0
+    args, kwargs = first.warning.call_args
+    assert args == ("topology_refresh_target_skipped",)
+    assert "exc_info" not in kwargs
+    assert kwargs["target_id"] == str(target.id)
+    assert kwargs["target_name"] == "k8s-a"
+    assert kwargs["product"] == "faketopo"
+    assert kwargs["outcome"] == outcome
+    assert kwargs["reason"]
 
     # The repeat is counted but writes no log line at all.
-    assert second == []
+    assert second.method_calls == []
     assert _refresh_count(outcome) == before + 2
     assert _refresh_count("error") == errors_before
 
@@ -339,13 +345,13 @@ async def test_unexpected_error_logs_traceback_every_time() -> None:
 
     first, second = await _refresh_twice(target, RuntimeError("connector down"))
 
-    for captured in (first, second):
-        failed = [e for e in captured if e["event"] == "topology_refresh_target_failed"]
-        assert len(failed) == 1
-        assert failed[0]["exc_info"] is True
-        assert failed[0]["target_id"] == str(target.id)
-        assert failed[0]["target_name"] == "vc-a"
-        assert not [e for e in captured if e["event"] == "topology_refresh_target_skipped"]
+    for log in (first, second):
+        assert log.exception.call_count == 1
+        assert log.warning.call_count == 0
+        args, kwargs = log.exception.call_args
+        assert args == ("topology_refresh_target_failed",)
+        assert kwargs["target_id"] == str(target.id)
+        assert kwargs["target_name"] == "vc-a"
     assert _refresh_count("error") == errors_before + 2
 
 
@@ -356,17 +362,17 @@ async def test_success_resets_expected_refusal_warning() -> None:
     state = _SchedulerState()
     exc = VaultCredentialsReadError("no token")
 
-    with patch(_REFRESH, new=AsyncMock(side_effect=exc)), capture_logs() as first:
+    with patch(_REFRESH, new=AsyncMock(side_effect=exc)), patch(_LOG) as first:
         await _refresh_one_target(target, state)
     state.backoff[target.id].skip_until = 0.0
     with patch(_REFRESH, new=AsyncMock(return_value=object())):
         await _refresh_one_target(target, state)
     assert target.id not in state.backoff
-    with patch(_REFRESH, new=AsyncMock(side_effect=exc)), capture_logs() as again:
+    with patch(_REFRESH, new=AsyncMock(side_effect=exc)), patch(_LOG) as again:
         await _refresh_one_target(target, state)
 
-    assert [e["event"] for e in first] == ["topology_refresh_target_skipped"]
-    assert [e["event"] for e in again] == ["topology_refresh_target_skipped"]
+    assert first.warning.call_count == 1
+    assert again.warning.call_count == 1
 
 
 # ---------------------------------------------------------------------------

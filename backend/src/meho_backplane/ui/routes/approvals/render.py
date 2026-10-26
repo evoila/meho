@@ -39,6 +39,7 @@ __all__ = [
 #: DaisyUI badge modifier per request status, for the history view's pill.
 #: Pending is the actionable state (warning); approved/rejected are the two
 #: terminal decisions (success / error); expired is a quiet timeout
+#: (neutral); withdrawn means the sender took it back (#4987), also quiet
 #: (neutral). An unknown status falls back to a plain ghost badge rather
 #: than raising, so a future status value degrades to a visible pill
 #: instead of a ``StrictUndefined`` template error.
@@ -47,6 +48,7 @@ STATUS_PILL_CLASS: Final[dict[str, str]] = {
     "approved": "badge-success",
     "rejected": "badge-error",
     "expired": "badge-neutral",
+    "withdrawn": "badge-neutral",
 }
 
 
@@ -137,6 +139,9 @@ def project_request_to_view(
     pass it; the key is always present so the templates stay
     ``StrictUndefined``-safe.
 
+    ``withdrawn_at`` / ``withdraw_reason`` (#4987) say when and why the
+    sender withdrew the request; both are ``None`` on any other row.
+
     ``result_state`` and ``outcome`` (#3543) say whether an approved request
     ran and how it ended. Both are ``None`` for a request that is not
     approved; ``outcome`` is also ``None`` before the run starts.
@@ -157,6 +162,8 @@ def project_request_to_view(
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "decided_at": row.decided_at.isoformat() if row.decided_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "withdrawn_at": row.withdrawn_at.isoformat() if row.withdrawn_at else None,
+        "withdraw_reason": row.withdraw_reason,
         "delegation": delegation.to_payload() if delegation is not None else None,
         "result_state": result_state.value if result_state is not None else None,
         "outcome": project_outcome(resume_outcome(row)),

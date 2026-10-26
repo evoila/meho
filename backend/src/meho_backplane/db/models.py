@@ -6295,7 +6295,7 @@ class ApprovalRequestStatus(StrEnum):
 
     Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
     approval queue parks a ``requires_approval`` dispatch durably; the
-    row walks a simple four-state lifecycle enforced by the service
+    row walks a simple five-state lifecycle enforced by the service
     (:mod:`meho_backplane.operations.approval_queue`).
 
     Members:
@@ -6310,10 +6310,15 @@ class ApprovalRequestStatus(StrEnum):
     * :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a
       decision; the expiry sweep transitioned the row and wrote the
       decision audit row. Terminal.
+    * :attr:`WITHDRAWN` -- the sender took its own pending request back
+      (#4987). Not a decision: ``reviewed_by`` stays NULL, and
+      ``withdrawn_at`` / ``withdraw_reason`` say when and why. The
+      original call was not executed. Terminal.
 
     The enum and the ``CHECK (status IN (...))`` constraint on the DB
-    table move in lock-step (migration ``0023``); the drift guard
-    :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
+    table move in lock-step (migration ``0023``, widened by ``0116``); the
+    drift guard
+    :func:`tests.migrations.test_migration_0116_approval_withdrawn.test_status_check_matches_enum`
     asserts equality at unit-test time.
     """
 
@@ -6321,10 +6326,11 @@ class ApprovalRequestStatus(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     EXPIRED = "expired"
+    WITHDRAWN = "withdrawn"
 
 
 #: Closed ``approval_request.status`` vocabulary derived from the enum --
-#: kept in sync with migration ``0023``'s ``_APPROVAL_REQUEST_STATUSES``
+#: kept in sync with migration ``0116``'s ``_STATUSES_WITH_WITHDRAWN``
 #: literal. The drift guard asserts equality so the two never diverge.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
 
@@ -6619,6 +6625,16 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # When and why the sender withdrew its own pending request (#4987).
+    # Set only on a ``withdrawn`` row; NULL on every other row and on
+    # pre-0116 rows. A withdrawal is not a decision, so ``decided_at`` and
+    # ``reviewed_by`` stay NULL. Added by migration ``0116``.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    withdraw_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

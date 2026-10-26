@@ -10007,7 +10007,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``).",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn`` and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``).",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -10016,11 +10016,11 @@
             "required": false,
             "schema": {
               "type": "string",
-              "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.",
+              "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn. Defaults to 'pending'.",
               "default": "pending",
               "title": "Status"
             },
-            "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+            "description": "Filter by status. One of: pending, approved, rejected, expired, withdrawn. Defaults to 'pending'."
           },
           {
             "name": "work_ref",
@@ -10292,6 +10292,70 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RejectResponseBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/withdraw": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Withdraw Approval Request",
+        "description": "The sender takes back its own pending request (#4987).\n\nNot a decision, so this route is not on the approvals-plane gate and\nnot human-only: a person, an agent or a service principal may withdraw\na request **it sent** (``operator.sub == principal_sub``). The request\nmoves to ``withdrawn`` and the operation never runs. One\n``approval.withdraw`` audit row records it. The response is the updated\nrequest, so a sender without approvals-plane access still sees the\nresult.\n\nHTTP status codes:\n\n* 200 \u2014 withdrawn.\n* 403 \u2014 the caller did not send the request (an approver included).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the request is already closed (decided, expired or withdrawn).\n* 422 \u2014 a reason over 2000 characters.",
+        "operationId": "withdraw_approval_request_api_v1_approvals__request_id__withdraw_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestView"
                 }
               }
             }
@@ -23028,10 +23092,11 @@
           "pending",
           "approved",
           "rejected",
-          "expired"
+          "expired",
+          "withdrawn"
         ],
         "title": "ApprovalRequestStatus",
-        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple four-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``); the drift guard\n:func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`\nasserts equality at unit-test time."
+        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple five-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n* :attr:`WITHDRAWN` -- the sender took its own pending request back\n  (#4987). Not a decision: ``reviewed_by`` stays NULL, and\n  ``withdrawn_at`` / ``withdraw_reason`` say when and why. The\n  original call was not executed. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``, widened by ``0116``); the\ndrift guard\n:func:`tests.migrations.test_migration_0116_approval_withdrawn.test_status_check_matches_enum`\nasserts equality at unit-test time."
       },
       "ApprovalRequestView": {
         "properties": {
@@ -23118,6 +23183,16 @@
             "type": "string",
             "nullable": true,
             "title": "Decided At"
+          },
+          "withdrawn_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Withdrawn At"
+          },
+          "withdraw_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Withdraw Reason"
           },
           "created_at": {
             "type": "string",
@@ -36824,6 +36899,21 @@
         ],
         "title": "VaultStatus",
         "description": "Federation-chain status for the deployment's credential backend.\n\nThe field is named ``vault`` on :class:`HealthResponse` for wire\ncompatibility (it predates the credential-backend seam), but the value\nreflects whichever backend ``config.credentialBackend`` selects: the\nVault OIDC-login + KV read on a Vault install, or the configured\nbackend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM\ninstall) through the credential-backend seam.\n\n``reachable`` is true when the backend was reached \u2014 on Vault, the OIDC\nlogin succeeded (TCP + TLS + JWT forward); on a seam backend, the store\nwas addressable (config resolved, backend registered). ``read_ok`` is\ntrue when the probe secret read succeeded. ``detail`` carries a short\nstructured string for the CLI to render on failure paths \u2014 a class name\nor error code, never an unbounded exception message or a secret value."
+      },
+      "WithdrawRequestBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Reason",
+            "description": "Optional reason why the sender takes the request back.",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "WithdrawRequestBody",
+        "description": "POST body for ``\u2026/withdraw`` (#4987)."
       },
       "_AnnotateEdgeRequest": {
         "properties": {

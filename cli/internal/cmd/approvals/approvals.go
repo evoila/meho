@@ -17,6 +17,10 @@
 //   - `meho approvals reject <id> [--reason TEXT] [--json]` — reject via
 //     POST /api/v1/approvals/{id}/decide. Role: operator. Aborts the
 //     paused agent run.
+//   - `meho approvals withdraw <id> [--reason TEXT] [--json]` — the sender
+//     takes back its own pending request via
+//     POST /api/v1/approvals/{id}/withdraw (#4987). Any principal kind,
+//     but only for a request it sent.
 //
 // Authentication piggybacks on the token meho login wrote — same pattern
 // as `meho agent`, `meho audit`, `meho conventions`.
@@ -87,14 +91,16 @@ func routeRequestError(
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approvals",
-		Short: "Manage approval requests (list / show / approve / reject)",
+		Short: "Manage approval requests (list / show / approve / reject / withdraw)",
 		Long: "Manage pending approval requests wired by G11.2-T5. An " +
 			"approval request is created when the policy gate issues a " +
 			"needs-approval verdict on a connector operation. Use list " +
 			"to see pending requests, show to inspect the proposed " +
 			"effect, and approve or reject to decide. On approve, the " +
 			"paused agent run resumes. On reject, the run aborts. Both " +
-			"read and write verbs require the operator role. Tenant " +
+			"read and write verbs require the operator role. The " +
+			"sender of a pending request can take it back with " +
+			"withdraw; that needs no role, only that you sent it. Tenant " +
 			"scoping is enforced server-side via the JWT.",
 		SilenceUsage: true,
 	}
@@ -102,6 +108,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newApproveCmd())
 	cmd.AddCommand(newRejectCmd())
+	cmd.AddCommand(newWithdrawCmd())
 	return cmd
 }
 

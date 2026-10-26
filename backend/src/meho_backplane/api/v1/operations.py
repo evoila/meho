@@ -59,6 +59,7 @@ from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
     OperationDescriptor,
     PreviewOperationBody,
+    PreviewOperationResponse,
     UnknownConnectorError,
     UnknownOperationError,
     call_operation,
@@ -566,11 +567,11 @@ async def _run_result_query_body(
         raise _read_rejected(exc) from exc
 
 
-@router.post("/preview")
+@router.post("/preview", response_model_exclude_unset=True)
 async def post_preview(
     body: PreviewOperationBody,
     operator: Operator = _require_operator,
-) -> dict[str, Any]:
+) -> PreviewOperationResponse:
     """Resolve an op + params to the literal would-be HTTP request, without sending.
 
     Delegates to :func:`preview_operation` (#1683). The read-only diagnosis
@@ -593,8 +594,19 @@ async def post_preview(
     200, no target-failure 4xx remains. The body is redacted
     through the same connector-boundary pipeline the response path uses;
     nothing is written to the audit row.
+
+    Every envelope whose op resolved also carries the risk level and the
+    policy verdict for this caller and target (#4923): ``safety_level``,
+    ``requires_approval``, ``policy_verdict`` (``auto-execute`` /
+    ``needs-approval`` / ``deny`` — what ``/call`` would do with the same
+    arguments, decided by the same policy gate) and ``policy_reason``
+    (the gate's reason, or ``null`` when it gives none). The envelope is
+    typed as :class:`PreviewOperationResponse` for OpenAPI and the generated
+    clients; only the keys the envelope carries are serialised, so the wire
+    shape of every preview status is unchanged.
     """
-    return await preview_operation(operator, body.model_dump())
+    envelope = await preview_operation(operator, body.model_dump())
+    return PreviewOperationResponse.model_validate(envelope)
 
 
 @router.get("/governed-subops", response_model=GovernedSubopsResponse)

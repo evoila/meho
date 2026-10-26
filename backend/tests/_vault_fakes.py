@@ -104,6 +104,17 @@ class _FakeTokenAuth:
     lookup_accessor_payload: Any = None
     raise_on_lookup_accessor: Exception | None = None
     lookup_accessor_calls: list[str] = field(default_factory=list)
+    # Token roles (``vault.token.role.read`` / ``vault.token.role.list``).
+    # ``role_payloads`` maps a role name to the ``{"data": {...}}`` body
+    # ``read_role`` returns; an unmapped name raises ``raise_on_read_role``
+    # when set. ``roles_payload`` is the LIST body; ``raise_on_list_roles``
+    # models the empty-store 404 (``InvalidPath``).
+    role_payloads: dict[str, Any] = field(default_factory=dict)
+    raise_on_read_role: Exception | None = None
+    read_role_calls: list[str] = field(default_factory=list)
+    roles_payload: Any = None
+    raise_on_list_roles: Exception | None = None
+    list_roles_calls: int = 0
 
     def revoke_self(self, mount_point: str = "token") -> None:
         _ = mount_point
@@ -143,6 +154,20 @@ class _FakeTokenAuth:
         if self.raise_on_lookup_accessor is not None:
             raise self.raise_on_lookup_accessor
         return self.lookup_accessor_payload
+
+    def read_role(self, role_name: str, mount_point: str = "token") -> Any:
+        _ = mount_point
+        self.read_role_calls.append(role_name)
+        if self.raise_on_read_role is not None:
+            raise self.raise_on_read_role
+        return self.role_payloads.get(role_name)
+
+    def list_roles(self, mount_point: str = "token") -> Any:
+        _ = mount_point
+        self.list_roles_calls += 1
+        if self.raise_on_list_roles is not None:
+            raise self.raise_on_list_roles
+        return self.roles_payload
 
 
 @dataclass
@@ -707,7 +732,7 @@ class _FakeSysBackend:
 
 @dataclass
 class _FakeAdapter:
-    """In-process stand-in for hvac's ``client.adapter`` raw GET seam.
+    """In-process stand-in for hvac's ``client.adapter`` raw GET / POST seam.
 
     The Vault cluster-node reads (``vault.sys.ha_status`` /
     ``vault.sys.raft.autopilot_state``) have no hvac helper, so the
@@ -721,6 +746,12 @@ class _FakeAdapter:
     payloads: dict[str, Any] = field(default_factory=dict)
     raise_on_get: dict[str, Exception] = field(default_factory=dict)
     get_calls: list[str] = field(default_factory=list)
+    # Raw POST seam (``vault.token.role.write`` posts its own body so only
+    # the given fields reach Vault). ``post_calls`` records the path and
+    # the JSON body; ``raise_on_post`` maps a path to the exception to
+    # raise instead of the 204 answer.
+    raise_on_post: dict[str, Exception] = field(default_factory=dict)
+    post_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def get(self, url: str, **_kwargs: Any) -> Any:
         self.get_calls.append(url)
@@ -728,6 +759,13 @@ class _FakeAdapter:
         if exc is not None:
             raise exc
         return self.payloads.get(url)
+
+    def post(self, url: str, **kwargs: Any) -> Any:
+        self.post_calls.append({"url": url, "json": kwargs.get("json")})
+        exc = self.raise_on_post.get(url)
+        if exc is not None:
+            raise exc
+        return _DeleteResponse()
 
 
 @dataclass

@@ -525,6 +525,8 @@ caveat). The contract a deploy must satisfy is therefore:
 | Write (`vault.kv.patch`) | same | `read` + `update` on `secret/data/…/{{identity…}}/*` (§6.1); it reads before it writes and never needs `create` |
 | Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
 | Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
+| Write (`vault.token.role.write` create or change a token role) | same | `create` + `update` on `auth/token/roles/<role>` (§6.4) |
+| Read (`vault.token.role.read` / `vault.token.role.list`) | same | `read` on `auth/token/roles/<role>`; `list` on `auth/token/roles` (§6.4) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked
@@ -558,6 +560,50 @@ approval flow, run the §6.2 `sys/capabilities-self` probe under **that
 operator's** token (and, once a reviewer is designated, theirs too).
 Both must return `["create","read","update"]` on the target's
 `secret/data/…` path for an approved write to land.
+
+### 6.4 Token roles (`vault.token.role.write` / `.read` / `.list`)
+
+A token role is a saved set of rules in Vault for making tokens: which
+policies a token may get, whether it has a parent token, and how long it
+lives between renewals. MEHO manages them with three operations on the
+core `token` auth backend. They run under the same identity chain as §6.3
+(the target's `vault_role`, else the deployment's fallback roles), so the
+grants below go into the policy of the role that will manage token roles,
+not into the shared read policy of every operator:
+
+```hcl
+# List the token role names (`vault.token.role.list`).
+path "auth/token/roles" {
+  capabilities = ["list"]
+}
+
+# Create or change one token role (`vault.token.role.write`) and read it
+# (`vault.token.role.read`). Replace <role> with the role name this
+# identity may manage, or end the path with a `*` glob to cover every
+# token role.
+path "auth/token/roles/<role>" {
+  capabilities = ["create", "update", "read"]
+}
+```
+
+Notes:
+
+- **`create` *and* `update` are both required** for `vault.token.role.write`.
+  Vault asks for `create` when the role does not exist yet and `update`
+  when it does; the write is unconditional, so it can be either.
+- **Park-time check.** Before MEHO asks for approval, it runs the §6.2
+  `sys/capabilities-self` probe on `auth/token/roles/<role>` under the
+  target's role. When `create` or `update` is missing, the call is refused
+  with `error_code: "write_capability_denied"` and no approval request is
+  written, like a KV write. Add the stanza above, then call the operation
+  again.
+- **Only the fields given are sent.** A write that names one setting leaves
+  the other settings of an existing role as they are. Check the whole role
+  with `vault.token.role.read` (needs `read` on the role path).
+- **Nothing here lets the identity make tokens.** Making a token from a
+  role is a separate operation with its own grant on `auth/token/create`
+  (and `auth/token/create/<role>`); this section only covers the role
+  settings.
 
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 

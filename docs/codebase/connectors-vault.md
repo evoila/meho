@@ -354,6 +354,9 @@ target registration) is documented in
   | `vault.token.revoke_accessor` | `auth.token.revoke_accessor` | dangerous | True | `other` |
   | `vault.token.list_accessors` | `auth.token.list_accessors` | safe | False | `other` |
   | `vault.token.lookup_accessor` | `auth.token.lookup_accessor` | safe | False | `other` |
+  | `vault.token.role.write` | `adapter.post` on `/v1/auth/token/roles/<role_name>` | dangerous | True | `write` |
+  | `vault.token.role.read` | `auth.token.read_role` | safe | False | `other` |
+  | `vault.token.role.list` | `auth.token.list_roles` | safe | False | `read` |
 
   `token.create` mints a client token in its **response** →
   `credential_mint` (aggregate-only broadcast; the token reaches only the
@@ -382,8 +385,35 @@ target registration) is documented in
   legitimately-empty case, so an unknown accessor's `404` surfaces as the
   underlying `hvac.exceptions.InvalidPath` rather than being swallowed.
 
-  Both groups register from `ops_identity.py` / `ops_token.py` spec
-  tables, composed by the thin
+  **Token roles** (`ops_token_role.py` / `ops_token_role_schemas.py`)
+  are saved sets of rules in Vault for making tokens: which policies a
+  token may get (`allowed_policies` / `disallowed_policies`), whether it
+  has a parent token (`orphan`), whether it can be renewed (`renewable`),
+  and how long it lives between renewals (`token_period`,
+  `token_explicit_max_ttl`). They live on the core `token` backend under
+  `auth/token/roles/<role_name>` and hold no secret, so nothing is
+  redacted. `role.write` sends **only the fields the caller gives**:
+  Vault's token-role write changes just the fields in the request body
+  and keeps the others, but hvac's `auth.token.create_or_update_role`
+  always sends `orphan` and `renewable` (they have defaults), so a change
+  to one field would silently reset those two. The handler therefore
+  posts the body itself through `client.adapter.post` on the same API
+  path hvac uses, and returns `{role_name, written, settings}` where
+  `settings` is exactly what was sent. The `role_name` schema accepts the
+  name shape Vault itself accepts (letters, digits, `_`, `-`, `.`), so a
+  name can never carry a `/` that points the call at another Vault path.
+  `role.read` unwraps Vault's `data` envelope (durations come back as
+  seconds); an unknown role surfaces the underlying
+  `hvac.exceptions.InvalidPath` like `lookup_accessor`. `role.list`
+  normalises the empty-store `404` to `{"keys": []}` like
+  `list_accessors`. `role.write` registers a park-time permission
+  preflight on `auth/token/roles/<role_name>` (see the preflight section
+  below). All three log in through `vault_client_for_target`, so the
+  target's `extras["vault_role"]` decides which Vault role makes the
+  change.
+
+  Both groups register from `ops_identity.py` / `ops_token.py` /
+  `ops_token_role.py` spec tables, composed by the thin
   `register_vault_identity_token_operations()` registrar
   (`ops_identity_token.py`), which is queued from the package `__init__`
   as its own lifespan registrar entry (independent of the KV / sys / auth
@@ -599,14 +629,17 @@ exercised by calling it directly in the unit suite. The policy reads
 
 The identity write ops (`identity.entity.write` / `entity_alias.write` /
 `group.write` / `group.delete`) and the token write ops
-(`token.create` / `token.revoke_accessor`) (G3.15-T4 #1412) likewise
+(`token.create` / `token.revoke_accessor`, and `token.role.write`, whose
+`allowed_policies` decide what a token made from the role can do)
+(G3.15-T4 #1412) likewise
 register `requires_approval=True` — each is a privilege assignment,
 privilege-plumbing membership change, irreversible removal, or a secret
 mint. `requires_approval` / `safety_level` are carried per-op in the
-`IDENTITY_OP_SPECS` / `TOKEN_OP_SPECS` rows. The identity reads
-(`entity.read` / `group.read` / `list`) and `token.list_accessors` stay
-`requires_approval=False`, registered `safe` so create-if-absent flows
-do not stall. The integration tests drive the gated writes via the
+`IDENTITY_OP_SPECS` / `TOKEN_OP_SPECS` / `TOKEN_ROLE_OP_SPECS` rows. The
+identity reads (`entity.read` / `group.read` / `list`),
+`token.list_accessors` and the token-role reads (`token.role.read` /
+`token.role.list`) stay `requires_approval=False`, registered `safe` so
+create-if-absent flows do not stall. The integration tests drive the gated writes via the
 approvals-API resume path (`dispatch(..., _approved=True)`), the same
 path that runs once a human approves.
 
@@ -688,6 +721,20 @@ proceeds); a non-write op short-circuits to `None`. Unit + dispatcher
 integration coverage in `test_connectors_vault.py`,
 `test_operations_preview.py`, and `test_operations_dispatcher.py`.
 
+The probe itself is the shared `vault_capability_preflight(operator,
+op_id, auth_path, required, target)` in `ops.py`;
+`vault_kv_write_capability_preflight` only picks the KV path and
+requirement and calls it. **`vault.token.role.write`** registers a second
+preflight on the same hook (`ops_token_role.py`, wired at import time
+like the KV preview builders): it probes `auth/token/roles/<role_name>`
+under the target's role for `create` + `update` (Vault asks for `create`
+when the role is new and `update` when it exists). When either is
+missing, the call is refused with `write_capability_denied` before any
+approval request is written, exactly like a KV write. The policy lines a
+deployment adds are in
+[`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+§6.4. Coverage in `test_connectors_vault_token_role.py`.
+
 ## JSONFlux result-handle path (`vault.kv.list`)
 
 `vault.kv.list` is the only set-shaped op on the v0.2 Vault surface
@@ -725,7 +772,8 @@ raw >50-key list once a handle is produced.
    KV-v2 group and then calls `register_vault_auth_operations` (auth
    read) + `register_vault_auth_write_operations` (auth write).
    `register_vault_identity_token_operations` composes the `identity` +
-   `token` groups from their per-module spec tables.
+   `token` groups from their per-module spec tables (`ops_identity.py`,
+   `ops_token.py`, `ops_token_role.py`).
 2. At FastAPI lifespan startup, `run_typed_op_registrars()` invokes
    all registrars, which upsert the `endpoint_descriptor` rows. Upsert
    is idempotent: a restart against unchanged descriptions is a no-op

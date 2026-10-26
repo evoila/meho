@@ -329,6 +329,14 @@ def test_unknown_values_are_never_zero_by_default() -> None:
         ServerRecord.model_validate(bare)
 
 
+def test_zero_cores_or_memory_is_refused() -> None:
+    for field in ("cores", "memory_configured_mb"):
+        zero = _linux_vm()
+        zero[field] = 0
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            ServerRecord.model_validate(zero)
+
+
 def test_kubernetes_workload_validates() -> None:
     record = KubernetesWorkloadRecord.model_validate(_k8s_workload())
     assert record.replicas == 3

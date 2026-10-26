@@ -200,7 +200,7 @@ class ServerRecord(_Record):
     server_type: Literal["virtual", "physical"] | None = None
     hypervisor: str | None = Field(default=None, description="For example 'VMware' or 'Hyper-V'.")
     cores: int | None = Field(default=None, ge=1, description="Processor cores allocated.")
-    memory_configured_mb: int | None = Field(default=None, ge=0, description="Configured RAM.")
+    memory_configured_mb: int | None = Field(default=None, ge=1, description="Configured RAM.")
     memory_assigned_mb: int | None = Field(
         default=None, ge=0, description="RAM assigned now (differs with dynamic memory)."
     )

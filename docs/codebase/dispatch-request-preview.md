@@ -227,7 +227,9 @@ named-pattern catalogue and policy resolution.
 ## Surfaces
 
 - **REST:** `POST /api/v1/operations/preview` (`OPERATOR`), body
-  `PreviewOperationBody` (same fields as `CallOperationBody`).
+  `PreviewOperationBody` (same fields as `CallOperationBody`), response
+  `PreviewOperationResponse` (typed for OpenAPI and the generated clients;
+  only the keys the envelope carries are sent, and extra keys pass through).
 - **MCP:** the `preview_operation` tool (`op_class="read"` — a read-only
   inspection, unlike `call_operation`'s `"tool_call"` envelope).
 - **CLI:** regenerated from the OpenAPI snapshot (`cd cli && make

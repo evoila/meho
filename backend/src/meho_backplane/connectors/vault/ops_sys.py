@@ -712,8 +712,8 @@ async def register_vault_sys_typed_operations(
         summary="Show the health of every raft server in a HashiCorp Vault cluster.",
         description=(
             "Reads GET /v1/sys/storage/raft/autopilot/state and returns "
-            "healthy, failure_tolerance, leader, voters, and one row per "
-            "raft server under 'servers'. A sealed standby shows as "
+            "healthy, failure_tolerance, leader, and one row per raft "
+            "server under 'servers'. A sealed standby shows as "
             "healthy=false. Raft storage only. Read-only; no secret "
             "content. Needs 'read' on 'sys/storage/raft/autopilot/state'."
         ),

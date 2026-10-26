@@ -18,7 +18,12 @@ Coverage:
   (``data.Nodes``) and the bare (``Nodes``) body shape.
 * ``autopilot_state`` turns the ``servers`` map into a sorted list,
   keeps ``healthy: false`` for an unhealthy server, and returns the
-  cluster's ``failure_tolerance``.
+  cluster's ``failure_tolerance``. Vault's ``voters`` list is dropped so
+  ``servers`` is the only list in the answer.
+* A large ``autopilot_state`` answer goes through the real JSONFlux
+  reducer: the server rows become a stored result and ``healthy`` /
+  ``failure_tolerance`` / ``leader`` stay inline, with the
+  ``result_scalars`` hint read off the persisted descriptor row.
 * Neither answer carries fields outside the documented row shape, so no
   secret or unexpected value leaks through.
 * A 403 from Vault surfaces as MEHO's normal Vault permission error;
@@ -57,7 +62,9 @@ from meho_backplane.connectors.vault.ops_sys_cluster import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -368,7 +375,7 @@ async def test_autopilot_state_reports_unhealthy_server_and_failure_tolerance(
     assert body["healthy"] is False
     assert body["failure_tolerance"] == 1
     assert body["leader"] == "vault_1"
-    assert body["voters"] == ["vault_1", "vault_2", "vault_3"]
+    assert "voters" not in body
     servers = body["servers"]
     assert [s["id"] for s in servers] == ["vault_1", "vault_2", "vault_3"]
     by_id = {s["id"]: s for s in servers}
@@ -393,7 +400,7 @@ async def test_autopilot_state_rows_carry_only_documented_fields(
 
     body = _ok_body(await _dispatch_vault(_OP_AUTOPILOT_STATE, {}))
 
-    assert set(body) == {"healthy", "failure_tolerance", "leader", "voters", "servers"}
+    assert set(body) == {"healthy", "failure_tolerance", "leader", "servers"}
     assert set(body["servers"][0]) == {
         "id",
         "name",
@@ -423,6 +430,51 @@ async def test_autopilot_state_without_servers_returns_empty_list(
 
     assert body["servers"] == []
     assert body["failure_tolerance"] == 2
+
+
+async def test_autopilot_state_large_cluster_reduces_rows_and_keeps_verdict(
+    monkeypatch: pytest.MonkeyPatch, _registered_sys_ops: None
+) -> None:
+    """The server rows reduce to a stored result; the cluster verdict stays inline.
+
+    ``servers`` must be the only list in the answer. With Vault's
+    ``voters`` list copied too, the reducer saw a dict with two lists,
+    treated it as a detail object and passed the whole document through
+    unreduced, so a large answer became a document handle that cannot be
+    filtered by row (``healthy=false``). The ``result_scalars`` hint is
+    read off the persisted descriptor row, exactly as the dispatcher
+    lifts it, so a drift between registration and behaviour fails here.
+    """
+    fake = install_fake_client(monkeypatch)
+    template = _AUTOPILOT_BODY["servers"]["vault_2"]
+    servers = {
+        f"vault_{i}": {**template, "id": f"vault_{i}", "name": f"vault_{i}", "healthy": i != 7}
+        for i in range(60)
+    }
+    fake.adapter.payloads[RAFT_AUTOPILOT_STATE_API_PATH] = {
+        "data": {**_AUTOPILOT_BODY, "servers": servers, "voters": sorted(servers)}
+    }
+    body = _ok_body(await _dispatch_vault(_OP_AUTOPILOT_STATE, {}))
+    row, _ = await _descriptor(_OP_AUTOPILOT_STATE)
+    assert row.llm_instructions is not None
+    context = {
+        "op_id": _OP_AUTOPILOT_STATE,
+        "result_scalars": row.llm_instructions["result_scalars"],
+    }
+    reducer = JsonFluxReducer(
+        admission_guard=AdmissionGuard(), sample_size=5, sample_byte_budget=4096
+    )
+
+    reduced, handle = await reducer.reduce(dict(body), None, context)
+
+    assert handle is not None, "60 server rows must become a stored result"
+    assert handle.total_rows == 60
+    assert reduced["source_key"] == "servers"
+    assert reduced["row_count"] == 60
+    assert "servers" not in reduced
+    assert reduced["healthy"] is False
+    assert reduced["failure_tolerance"] == 1
+    assert reduced["leader"] == "vault_1"
 
 
 # ---------------------------------------------------------------------------

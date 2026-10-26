@@ -160,14 +160,19 @@ target registration) is documented in
   - `vault.sys.raft.autopilot_state` —
     `GET /v1/sys/storage/raft/autopilot/state`. Returns `healthy`,
     `failure_tolerance` (how many more nodes may fail before Vault
-    stops), `leader`, `voters`, and `{servers: [...]}` with one row per
-    raft server sorted by id (`id`, `name`, `address`, `status`,
+    stops), `leader`, and `{servers: [...]}` with one row per raft
+    server sorted by id (`id`, `name`, `address`, `status`,
     `node_status`, `node_type`, `healthy`, `last_contact`, `last_index`,
     `last_term`, `stable_since`, `version`). Vault returns `servers` as
     a map keyed by raft id; the handler turns it into a list so the
-    answer is set-shaped. Only clusters with raft storage answer; a
-    Vault on another storage backend returns an error, which surfaces
-    as `connector_error`.
+    answer is set-shaped. Vault's `voters` id list is left out on
+    purpose: a second top-level list would stop the result reduction
+    from finding the server rows, and each row's `status` already says
+    whether the server is the leader, a voter or a non-voter. The
+    `result_scalars` hint keeps `healthy`, `failure_tolerance` and
+    `leader` next to the reduced rows. Only clusters with raft storage
+    answer; a Vault on another storage backend returns an error, which
+    surfaces as `connector_error`.
 
     Both live in `ops_sys_cluster.py` (split out to keep `ops_sys.py`
     small) and are registered from

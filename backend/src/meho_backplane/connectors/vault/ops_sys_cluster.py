@@ -152,7 +152,6 @@ VAULT_SYS_RAFT_AUTOPILOT_STATE_RESPONSE_SCHEMA: dict[str, Any] = {
             ),
         },
         "leader": {"type": ["string", "null"], "description": "Raft id of the leader."},
-        "voters": {"type": "array", "items": {"type": "string"}},
         "servers": {
             "type": "array",
             "description": "One row per raft server, sorted by id.",
@@ -227,10 +226,11 @@ VAULT_SYS_RAFT_AUTOPILOT_STATE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "parameter_hints": {},
     "output_shape": (
         "{'healthy': <bool>, 'failure_tolerance': <int>, 'leader': <id>, "
-        "'voters': [<id>, ...], 'servers': [{'id', 'name', 'address', "
-        "'status', 'node_status', 'node_type', 'healthy', 'last_contact', "
-        "'last_index', 'last_term', 'stable_since', 'version'}, ...]}. A "
-        "server with healthy=false needs attention. On a 403: the normal "
+        "'servers': [{'id', 'name', 'address', 'status', 'node_status', "
+        "'node_type', 'healthy', 'last_contact', 'last_index', 'last_term', "
+        "'stable_since', 'version'}, ...]}. A server with healthy=false "
+        "needs attention; its 'status' says whether it is the leader, a "
+        "voter or a non-voter. On a 403: the normal "
         "Vault permission error (the meho Vault role needs 'read' on "
         "'sys/storage/raft/autopilot/state')."
     ),
@@ -299,7 +299,11 @@ async def vault_sys_raft_autopilot_state(
 
     Vault returns ``servers`` as a map keyed by raft id. The handler
     turns it into a list of rows sorted by id so the answer is
-    set-shaped and goes through the usual result reduction.
+    set-shaped and goes through the usual result reduction. Vault's
+    ``voters`` id list is not copied: a second top-level list would make
+    the reducer treat the answer as a detail object and skip the row
+    reduction, and each row's ``status`` already says whether the server
+    is the leader, a voter or a non-voter.
 
     Raises
     ------
@@ -331,11 +335,9 @@ async def vault_sys_raft_autopilot_state(
         (_pick(entry, _RAFT_SERVER_FIELDS) for entry in entries),
         key=lambda row: str(row.get("id") or ""),
     )
-    voters = data.get("voters")
     return {
         "healthy": data.get("healthy"),
         "failure_tolerance": data.get("failure_tolerance"),
         "leader": data.get("leader"),
-        "voters": list(voters) if isinstance(voters, list) else [],
         "servers": servers,
     }

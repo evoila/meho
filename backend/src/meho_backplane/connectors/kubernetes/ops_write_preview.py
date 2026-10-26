@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Approval previews for ``k8s.secret.create`` and ``k8s.job.create`` (#4850).
+"""Approval previews for ``k8s.secret.create``, ``k8s.job.create`` (#4850)
+and ``k8s.cronjob.run``.
 
-Both ops are pinned ``credential_write``
+The first two ops are pinned ``credential_write``
 (:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`): a Secret's
 values ride in the params, and a Job's pod template can hold secrets in its
 ``env`` values or its command line. For such an op the generic echo of
 params is turned off, so without these builders the approver saw only the op
-id and the target.
+id and the target. ``k8s.cronjob.run`` takes only names, but its params say
+nothing about what will run: the builder reads the CronJob and shows it.
 
 =====================  ========================================================
 op_id                  preview
@@ -20,6 +22,11 @@ op_id                  preview
                        containers, init_containers}``; each container
                        is ``{name, image, env_var_names, env_from,
                        command_bytes?}``
+``k8s.cronjob.run``    ``{cronjob, namespace, job_name, schedule, suspend,
+                       concurrency_policy, active_jobs, containers,
+                       init_containers}``; containers as above.
+                       ``active_jobs`` names this CronJob's Jobs that
+                       still run. Read from the cluster at park time.
 =====================  ========================================================
 
 What is never shown
@@ -35,12 +42,16 @@ What is never shown
 * A Job ``command`` / ``args``: only their size in bytes, because a command
   line can hold a token (the guest ``program.run`` preview does the same).
 
-The builders read only ``ctx.params`` and do no network calls.
+The Secret and Job builders read only ``ctx.params`` and do no network
+calls. The CronJob builder reads the CronJob once; a missing CronJob raises,
+and the park then stores the ``preview_unavailable`` marker with the reason.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from kubernetes_asyncio import client
 
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -152,10 +163,46 @@ async def _job_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
+async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``k8s.cronjob.run`` — what the CronJob's template runs, never a value.
+
+    Reads the CronJob through the connector. Declines (``None``) when no
+    Kubernetes connector or target resolved, so the generic echo applies.
+    """
+    from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+    from meho_backplane.connectors.kubernetes.ops_cronjob import model_to_json, read_cronjob
+
+    connector = ctx.connector_instance
+    if not isinstance(connector, KubernetesConnector) or ctx.target is None:
+        return None
+    cronjob_name = str(ctx.params.get("cronjob") or "")
+    namespace = str(ctx.params.get("namespace") or "")
+    api_client = await connector._get_api_client(ctx.target, ctx.operator)
+    cronjob = await read_cronjob(client.BatchV1Api(api_client), namespace, cronjob_name)
+    spec = cronjob.spec
+    pod_spec = model_to_json(spec.job_template.spec.template.spec)
+    if not isinstance(pod_spec, dict):
+        pod_spec = {}
+    active = cronjob.status.active if cronjob.status is not None else None
+    return {
+        "resource": "cronjob_run",
+        "cronjob": cronjob_name,
+        "namespace": namespace,
+        "job_name": ctx.params.get("job_name") or f"{cronjob_name}-manual-<random>",
+        "schedule": spec.schedule,
+        "suspend": bool(spec.suspend),
+        "concurrency_policy": spec.concurrency_policy,
+        "active_jobs": [ref.name for ref in active or [] if ref.name],
+        "containers": _containers(pod_spec, "containers"),
+        "init_containers": _containers(pod_spec, "initContainers"),
+    }
+
+
 def _register_kubernetes_write_preview_builders() -> None:
-    """Wire the Secret and Job create previews. Called at import time."""
+    """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
+    register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
 
 
 _register_kubernetes_write_preview_builders()

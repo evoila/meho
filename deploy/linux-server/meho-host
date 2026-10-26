@@ -63,10 +63,13 @@ readonly JOURNAL_SINCE=-24h
 # reason, with "|" between them, so an empty field keeps its place.
 readonly POD_TEMPLATE='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.status.reason}{"\n"}{end}'
 # kubectl prints the values of every Secret of a namespace with this
-# template, decoded, one key=value per line. The $-names are the template's
-# own, not shell variables.
+# template, decoded, one key=value per line. Helm's release records
+# (type helm.sh/release.v1, one per revision) are left out: each holds the
+# whole gzipped release as one line of hundreds of KB, which never appears
+# in a log and would cost sed hundreds of MB of memory as a rule. The
+# $-names are the template's own, not shell variables.
 # shellcheck disable=SC2016
-readonly SECRET_VALUES_TEMPLATE='{{range .items}}{{range $key, $value := .data}}{{$key}}={{base64decode $value}}{{"\n"}}{{end}}{{end}}'
+readonly SECRET_VALUES_TEMPLATE='{{range .items}}{{if ne .type "helm.sh/release.v1"}}{{range $key, $value := .data}}{{$key}}={{base64decode $value}}{{"\n"}}{{end}}{{end}}{{end}}'
 # EXPIRES in the table of "rke2 certificate check", for example
 # "Jun 12, 2026 11:12 UTC" (the Go layout "Jan 02, 2006 15:04 MST"). A row
 # is read by this date and by its STATUS at the end, so a space in SUBJECT or
@@ -518,10 +521,11 @@ secret_values() {
 scrub_bundle() {
     local work=$1 secrets_file=$2 script=$3 names key name value
     names="$(any_case password)|$(any_case token)|$(any_case secret)"
-    # "key" counts only as a word of its own (api_key, unseal-key, KEY), so
-    # that keycloak is not a key name: support needs Keycloak's addresses.
+    # "key" counts when it ends the name or when a digit, "_", "." or "-"
+    # follows it (api_key, apiKey, unseal-key, KEY_ID), so that keycloak is
+    # not a key name: support needs Keycloak's addresses.
     key=$(any_case key)
-    name="([A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*|([A-Za-z0-9_.-]*[0-9_.-])?${key}([0-9_.-][A-Za-z0-9_.-]*)?)"
+    name="([A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*|[A-Za-z0-9_.-]*${key}([0-9_.-][A-Za-z0-9_.-]*)?)"
     {
         printf '%s\n' "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
         printf '%s\n' "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"

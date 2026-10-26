@@ -443,6 +443,7 @@ class SupportBundleTests(HostTestCase):
             "2026-10-23T11:00:05Z short values such as abc stay\n"
             f'{{"event": "login", "user": "approver", "password": "{approver_pass}"}}\n'
             f'{{"token":"{token}"}}\n'
+            f'{{"apiKey": "{token}", "keycloak_url": "http://meho-keycloak:8080"}}\n'
             f"token:{token}\n",
         )
         self.host.answer(
@@ -473,6 +474,7 @@ class SupportBundleTests(HostTestCase):
         self.assertIn("short values such as abc stay", log)
         self.assertIn('{"event": "login", "user": "approver", "password": "[removed]"}', log)
         self.assertIn('{"token":"[removed]"}', log)
+        self.assertIn('{"apiKey": "[removed]", "keycloak_url": "http://meho-keycloak:8080"}', log)
         self.assertIn("token:[removed]", log)
         self.assertIn("Db-Password: [removed]", files["rke2-server.journal.txt"])
         self.assertIn("api_secret_key=[removed]", files["node.txt"])
@@ -482,6 +484,12 @@ class SupportBundleTests(HostTestCase):
         # and the files with the values and the sed rules are gone.
         calls = self.host.calls()
         self.assertIn("sed -E -i -f ", calls)
+        # The fake kubectl does not run the template, so the test checks
+        # that it leaves Helm's release records out.
+        self.assertIn(
+            'get secrets -o go-template={{range .items}}{{if ne .type "helm.sh/release.v1"}}',
+            calls,
+        )
         for value in secrets:
             with self.subTest(value=value):
                 self.assertNotIn(value, calls)

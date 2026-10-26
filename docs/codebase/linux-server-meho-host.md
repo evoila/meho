@@ -126,14 +126,19 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
    - The value of any variable whose name holds PASSWORD, TOKEN, SECRET or
      KEY, in any case, written as `NAME=value`, `NAME: value` (with or
      without the space) or as the JSON pair `"name": "value"` (MEHO's own
-     logs are JSON lines), becomes `[removed]`. `key` counts only as a word
-     of its own (`api_key`, `unseal-key`, `KEY`), so `keycloak` is not a key
-     name and Keycloak's addresses and image names stay readable.
+     logs are JSON lines), becomes `[removed]`. `key` counts when it ends
+     the name or when a digit, `_`, `.` or `-` follows it (`api_key`,
+     `apiKey`, `unseal-key`, `KEY_ID`), so `keycloak` is not a key name and
+     Keycloak's addresses and image names stay readable.
    - Every known secret value becomes `[removed]` wherever it appears, for
      example in a log line. The values come from the core's Secrets in
      namespace `meho`: `kubectl get secrets -o go-template=...` decodes
      them straight into the root-only values file, the way `install.sh`
-     reads the first-login Secret. Keys with `user` in the name hold plain
+     reads the first-login Secret. Helm's release records (Secrets of type
+     `helm.sh/release.v1`, one per revision) are left out: each holds the
+     whole gzipped release as one line of hundreds of KB, which never
+     appears in a log and would cost `sed` hundreds of MB of memory as a
+     rule. Keys with `user` in the name hold plain
      names such as `admin`, and values shorter than 8 characters are words,
      so both stay: removing "admin" everywhere would also hit
      `client-admin.crt` and `/admin/realms/`. A value on more than one line,
@@ -158,8 +163,8 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
 `tests/host_harness.py` builds a fake installed machine for each test, the
 way `tests/harness.py` does for `install.sh`: `MEHO_TEST_ROOT` is a temporary
 root folder with the `kubectl` and `rke2` stubs at their real places, and `PATH` holds
-only stubs and links to a few real tools (`bash`, `awk`, `sed`, `grep`,
-`find`, `tar`, `gzip` and some coreutils). The `date` stub answers "now"
+only stubs and logging wrappers of a few real tools (`bash`, `awk`, `sed`,
+`grep`, `find`, `tar`, `gzip` and some coreutils). The `date` stub answers "now"
 (2026-10-23 12:00 UTC) and the bundle's time stamp from files, and passes
 every other call on to the real `date`, which parses the certificate dates.
 `certificate_table`, `pod_line` and `df_answer` build the stubs' answers.

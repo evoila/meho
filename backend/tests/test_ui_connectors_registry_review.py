@@ -59,6 +59,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -322,6 +323,26 @@ def _edit_headers(token: str) -> dict[str, str]:
     return {"X-CSRF-Token": token, "HX-Request": "true"}
 
 
+def _read_op_governance(op_id: str = _OP_ID) -> tuple[str, bool, bool]:
+    """Return the stored ``(safety_level, requires_approval, is_enabled)`` of *op_id*."""
+
+    async def _do() -> tuple[str, bool, bool]:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(EndpointDescriptor).where(
+                        EndpointDescriptor.tenant_id == _TENANT_A,
+                        EndpointDescriptor.impl_id == _IMPL_ID,
+                        EndpointDescriptor.op_id == op_id,
+                    ),
+                )
+            ).scalar_one()
+            return row.safety_level, row.requires_approval, row.is_enabled
+
+    return asyncio.run(_do())
+
+
 # ---------------------------------------------------------------------------
 # Authentication boundary
 # ---------------------------------------------------------------------------
@@ -492,6 +513,92 @@ def test_op_edit_persists_and_reread_reflects_it() -> None:
     assert reread.status_code == 200, reread.text
     # The re-read group body shows ``dangerous`` selected on the op's select.
     assert "dangerous" in reread.text
+
+
+# ---------------------------------------------------------------------------
+# AC (#4961): an edit that sends only one field leaves the other flags alone
+# ---------------------------------------------------------------------------
+
+
+def _patch_op(data: dict[str, str]) -> int:
+    """PATCH the seeded op as a tenant_admin with *data*; return the status code."""
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.patch(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}",
+            data=data,
+            headers=_edit_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    return response.status_code
+
+
+def test_op_edit_safety_level_only_keeps_approval_and_enabled() -> None:
+    """A risk-level-only edit must not touch ``requires_approval`` / ``is_enabled``.
+
+    Each micro-form in the row sends only its own field. FastAPI 0.147+
+    turns an omitted ``bool`` form field into ``False``, so the toggles are
+    read as text and an omitted toggle stays "no edit" on every FastAPI
+    version.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(
+        tenant_id=_TENANT_A,
+        safety_level="safe",
+        requires_approval=True,
+        enabled=True,
+    )
+
+    status = _patch_op({"safety_level": "dangerous"})
+
+    assert status == 200
+    assert _read_op_governance() == ("dangerous", True, True)
+
+
+def test_op_edit_requires_approval_only_keeps_enabled() -> None:
+    """Flipping ``requires_approval`` alone leaves ``is_enabled`` as it was."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(
+        tenant_id=_TENANT_A,
+        safety_level="caution",
+        requires_approval=True,
+        enabled=True,
+    )
+
+    status = _patch_op({"requires_approval": "false"})
+
+    assert status == 200
+    assert _read_op_governance() == ("caution", False, True)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"requires_approval": "yes"},
+        {"is_enabled": "1"},
+        {"is_enabled": "True"},
+    ],
+)
+def test_op_edit_rejects_non_literal_flag_text(data: dict[str, str]) -> None:
+    """A toggle value other than ``"true"`` / ``"false"`` is refused with 422."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(
+        tenant_id=_TENANT_A,
+        safety_level="safe",
+        requires_approval=True,
+        enabled=True,
+    )
+
+    status = _patch_op(data)
+
+    assert status == 422
+    # Nothing was written.
+    assert _read_op_governance() == ("safe", True, True)
 
 
 # ---------------------------------------------------------------------------

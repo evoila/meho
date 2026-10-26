@@ -25527,12 +25527,12 @@
             "title": "Safety Level"
           },
           "requires_approval": {
-            "type": "boolean",
+            "type": "string",
             "nullable": true,
             "title": "Requires Approval"
           },
           "is_enabled": {
-            "type": "boolean",
+            "type": "string",
             "nullable": true,
             "title": "Is Enabled"
           },

@@ -132,6 +132,9 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   newest first, at most 500 rows. The enablement flag is read through a
   60s per-tenant TTL cache. A read-class dispatch or a disabled tenant
   pays nothing on the gate.
+- **`0` disables the advisory.** `REFLEX_ADVISORY_WINDOW_MINUTES` (default
+  30) short-circuits before session resolution or I/O when `0`. The gate
+  has no global knob — it is OFF unless a tenant opts in.
 
 ## Which claims count (#4091)
 
@@ -163,9 +166,6 @@ claim wins:
 | `other_op_class` | an active claim for this target, another `planned_op_class` | announce with the op's class |
 | `other_target` | active claims, none naming this target | announce with this target |
 | `no_claim` | no active claim at all | announce first |
-- **`0` disables the advisory.** `REFLEX_ADVISORY_WINDOW_MINUTES` (default
-  30) short-circuits before session resolution or I/O when `0`. The gate
-  has no global knob — it is OFF unless a tenant opts in.
 
 ## Enablement store — why a `tenant` column
 

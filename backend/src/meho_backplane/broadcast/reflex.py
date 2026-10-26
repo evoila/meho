@@ -138,7 +138,7 @@ _ANNOUNCE_NUDGES: Final[dict[ClaimGap, str]] = {
     ),
     "other_op_class": (
         "You are running a '{op_class}' operation, but your active announce "
-        "claim for this target declared another planned_op_class. Call "
+        "claim declared another planned_op_class. Call "
         "meho_broadcast_announce with planned_op_class '{op_class}' so "
         "concurrent operators and agents can see your intent."
     ),

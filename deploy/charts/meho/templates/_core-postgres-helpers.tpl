@@ -18,7 +18,8 @@ stay. Empty = the reference is unchanged.
 Usage: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) }}
 */}}
 {{- define "meho.core.image" -}}
-{{- $image := .image -}}
+{{- /* The old call shape (`include "meho.core.image" .Values.image`) would render `%!s(<nil>)` silently. */ -}}
+{{- $image := required "meho.core.image takes (dict \"image\" .Values.image \"global\" .Values.global)" .image -}}
 {{- $repository := $image.repository -}}
 {{- with and .global .global.imageRegistry -}}
 {{- $parts := splitList "/" $repository -}}

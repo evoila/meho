@@ -35,6 +35,7 @@ _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "host.detach_from_vds": schemas.HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
     "host.disk_mark_flash": schemas.HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA,
     "host.evacuate": schemas.HOST_EVACUATE_PARAMETER_SCHEMA,
+    "host.maintenance.exit": schemas.HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA,
     "host.service_control": schemas.HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
     "resource_pool.create": schemas.RESOURCE_POOL_CREATE_PARAMETER_SCHEMA,
     "resource_pool.delete": schemas.RESOURCE_POOL_DELETE_PARAMETER_SCHEMA,

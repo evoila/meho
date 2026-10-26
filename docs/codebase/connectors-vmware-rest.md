@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 73 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 74 hand-authored composites
 that orchestrate cross-spec workflows: 16 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -18,7 +18,7 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880`) and 57 write
+reservation read `vm.resource_allocation.show` / `#3880`) and 58 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -175,7 +175,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vm_power_composite`, `vm_power_bulk_composite`,
   `vm_resize_composite`, `vm_nic_repoint_composite`,
   `vm_device_cdrom_composite`,
-  `host_evacuate_composite`, `host_detach_from_vds_composite`,
+  `host_evacuate_composite`, `host_maintenance_exit_composite`,
+  `host_detach_from_vds_composite`,
   `network_portgroup_create_composite`,
   `network_portgroup_security_set_composite`,
   `network_portgroup_vlan_set_composite`,
@@ -491,9 +492,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 73
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 74
   `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 45 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
   writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -1166,12 +1167,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 73 `vmware.composite.*` rows with
+   queued registrar and upserts: the 74 `vmware.composite.*` rows with
    `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 57 writes, all `requires_approval=True`
-   (34 `safety_level="dangerous"`; 12 `safety_level="caution"` —
+   service principals), and 58 writes, all `requires_approval=True`
+   (35 `safety_level="dangerous"`; 12 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1560,7 +1561,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 73 composites (16 reads + 57 writes) land as `source_kind="composite"`
+The 74 composites (16 reads + 58 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1657,7 +1658,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 73 composites are hand-authored aggregators the connector ships as
+The 74 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -1779,6 +1780,7 @@ enum) are:
 | `vm.disk.attach` | `attached`, `invalid_vmdk_path`, `invalid_unit`, `controller_not_found`, `unit_in_use`, `timeout` (#3256; the first four are pre-write fail-closed refusals; `timeout` when the `ReconfigVM_Task` add poll gives up; a task *fault* raises `connector_error`) |
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted`, `timeout`, `not_in_cluster` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; a task *fault* raises `connector_error`, #2970; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, #4895; `not_in_cluster` is a pre-change refusal) |
+| `host.maintenance.exit` | `exited`, `unchanged`, `not_connected`, `timeout` (the exit is the vim `ExitMaintenanceMode_Task`, polled, #4967; `unchanged` and `not_connected` are pre-change refusals; a task *fault* raises `connector_error`; a poll `timeout` is a status with the task id and a `warning` issue, not a failure) |
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
@@ -2530,8 +2532,9 @@ manifests are in `_governed_subops.py`.
 
 ### AI guidance of the host and cluster operations
 
-The twelve host and cluster multi-step operations (`host.evacuate`,
-`host.detach_from_vds`, `host.datastore_mount_nfs`, `host.disk_mark_flash`,
+The thirteen host and cluster multi-step operations (`host.evacuate`,
+`host.maintenance.exit`, `host.detach_from_vds`, `host.datastore_mount_nfs`,
+`host.disk_mark_flash`,
 `host.service_control`, `cluster.drs_recommendations`, `cluster.patch`, the
 three DRS rule operations and `resource_pool.create` / `.delete`) keep their
 AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
@@ -3662,6 +3665,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | --- | --- | --- |
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.evacuate` | `{host, tolerate_partial_failure, vsan_mode, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
+| `host.maintenance.exit` | `{host, name, connection_state, in_maintenance_mode, ha_state, resolved, total_resolved, what_happens_next, unavailable?}` | live read (vim `RetrievePropertiesEx` on the host + `GET:/vcenter/vm`); a failed read is listed under `unavailable`, never blocks the park |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
@@ -3816,6 +3820,85 @@ shelf-gated lane checks each rule against the pinned 8.0 and 9.0
 `vcenter.yaml` and the 9.0 `vi-json.yaml`) and
 `test_connectors_vmware_rest_vm_relocate_dispatch.py` (a person's call
 waits for approval with the copy size on the row).
+
+### Ending maintenance mode on a host waits for approval (#4967)
+
+A host leaves maintenance mode only after a second person approves it. Before
+this change, MEHO had no typed operation for it, and the generic older-API
+call `POST:/HostSystem/{moId}/ExitMaintenanceMode_Task` was `caution` without
+approval, so a person's call ran at once. `host.evacuate` (the mirror
+operation, which enters maintenance mode) already waited for approval.
+
+**The typed operation.** `vmware.composite.host.maintenance.exit`
+(`host_maintenance_exit_composite` in `composites/_write.py`, group `host`,
+`dangerous` with `requires_approval: true`, on `vmware-rest-8.0` and
+`vmware-rest-9.0`). One input, `host` (the host moid). Steps:
+
+1. One vim `RetrievePropertiesEx` read of the host's `name`,
+   `runtime.connectionState`, `runtime.inMaintenanceMode` and
+   `runtime.dasHostState` (the vSphere HA state; absent on a host outside
+   an HA cluster). A host that is not `connected` is refused before any
+   change (`not_connected`). A host that is not in maintenance mode
+   answers `unchanged` and sends nothing, so the call is safe to run
+   twice. When vCenter leaves `inMaintenanceMode` out, MEHO sends the
+   exit and lets vCenter decide.
+2. `ExitMaintenanceMode_Task` with `{"timeout": 0}` through the governed
+   vim seam (`_run_host_maintenance_task`, the same call `cluster.patch`
+   sends as its last step), polled to a terminal state.
+3. The host is read again. The answer carries `in_maintenance_mode`,
+   `connection_state`, `ha_state`, `name` and `maintenance_task`. A poll
+   timeout (`_MAINTENANCE_TASK_TIMEOUT_SECONDS`, 600 s) is the `timeout`
+   status with the task id and a `warning` issue, not a failure. A
+   faulted task is a failed call (`connector_error`, with the fault text).
+
+The vim method and the reads are the `_VIM_SUB_OPS_HOST_MAINTENANCE_EXIT`
+manifest, so the reconcile lanes check them against the pinned
+`vi-json.yaml` files (`ExitMaintenanceModeRequestType` and its required
+`timeout`; `HostRuntimeInfo` and `ClusterDasFdmHostState`).
+
+**The preview.** `_host_maintenance_exit_preview` in
+`composites/_write_preview.py` shows the approver the host (name,
+connection state, maintenance state, HA state), the VMs registered on the
+host with their power state (`resolved` / `total_resolved`, capped like the
+other live-read previews), and `what_happens_next`: vSAN copies back the
+data that changed while the host was away, and DRS may move running VMs
+onto the host. A failed read never blocks the approval: the preview keeps
+what it has and lists what is missing under `unavailable` (the fault class
+only, never the fault text).
+
+**The generic call is closed too.** `ingest_safety.py`
+(`is_vmware_host_maintenance_exit`, used by `_requires_vmware_safety_floor`)
+puts `POST:/HostSystem/{moId}/ExitMaintenanceMode_Task` in the `dangerous`
+risk level with `requires_approval: true` on the 8.0 and 9.0 catalogs, with
+or without the `/api` mount and with any spelling of the path parameter. A
+floor only raises a level; a row that is already `destructive` stays
+`destructive`. The generic *enter* call keeps its level: it goes with the
+`host.maintenance.enter` row of the host power-state work.
+
+**Running installs.** Rows already in the database change only on the next
+ingest. To get the new level, run the catalog ingest again for `vmware/8.0`
+and `vmware/9.0` (the same `--spec` ingest of `vi-json.yaml` the install
+used before). The level is part of the row's body hash, so only the changed
+row is updated.
+
+**One approval is enough.** `cluster.patch` and `host.maintenance.exit`
+send the exit as a governed sub-step (`_write_vmomi_sub_op` →
+`enforce_subop_policy`) with the shared sub-op posture (`dangerous`,
+`requires_approval=False`, an in-memory descriptor). The raised generic row
+does not reach that gate, so the approved resume runs the exit at once and
+no second approval row is written. A test proves it for both operations.
+
+Tests: `test_connectors_vmware_rest_composites_write.py` (the handler on a
+recording double and, through `respx`, on the vCenter 8 and 9 VI-JSON
+paths), `test_connectors_vmware_rest_composites_write_preview.py` (the
+preview, with and without a failed read),
+`test_connectors_vmware_rest_host_maintenance_exit_approval.py` (the floor
+on a hand-made spec for 8.0 and 9.0, the typed-op pin; the shelf-gated lane
+checks the rule against the pinned `vi-json` files),
+`test_connectors_vmware_rest_host_maintenance_exit_spec_reconcile.py` (the
+body and the reads against the vendor files) and
+`test_connectors_vmware_rest_composites_write_e2e.py` (park → approve →
+resume for both operations, one approval row).
 
 ### Alarms: list, acknowledge, reset to green (`#4383`, part 1)
 

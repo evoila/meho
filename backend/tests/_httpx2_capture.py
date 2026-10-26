@@ -145,7 +145,7 @@ def ca_common_names(ssl_context: ssl.SSLContext) -> set[str]:
     """Return the common names of the CA certificates loaded into an SSL context.
 
     A ``truststore`` context (what ``httpx2`` builds on macOS and Windows,
-    and on Linux before ``httpx2`` 2.15) leaves certificate checks to the
+    and on Linux before ``httpx2`` 2.15.1) leaves certificate checks to the
     operating system store and loads no CA file of its own. It cannot list
     its CAs and raises ``NotImplementedError``. The helper returns an empty
     set for it, so a test CA is never reported as trusted there.

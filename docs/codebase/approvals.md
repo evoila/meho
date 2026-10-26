@@ -1338,7 +1338,8 @@ host changes.
 
 Every credential write that can wait for approval now has a builder.
 Each builder shows what changes and never a secret value. These nine
-got one in #4850:
+got one in #4850; `k8s.secret.update` came later with its own builder
+(`connectors/kubernetes/ops_secret_write_preview.py`):
 
 | Op | Who waits for approval | The approver sees | Never shown |
 |---|---|---|---|
@@ -1346,11 +1347,20 @@ got one in #4850:
 | `vault.auth.userpass.update_password` | every call | mount, username, `sets_password` | the password |
 | `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
+| `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
 | `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
 | `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
+
+`k8s.secret.delete` is not a credential write (its params are only the
+Secret's name and namespace). It is `destructive`, so its preview must carry
+a `blast_radius` block: the approver sees the Secret (namespace, name, type,
+key names) and every Pod, Deployment, StatefulSet, DaemonSet and CronJob in
+the namespace that uses it, never a value. A missing Secret fails the
+preview, so nothing waits for approval. See
+[`connectors-kubernetes.md`](connectors-kubernetes.md).
 
 Each builder copies the fields it shows by name. It never walks the
 whole params, so a new or extra field (a password in an open

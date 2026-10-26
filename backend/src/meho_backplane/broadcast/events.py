@@ -230,6 +230,10 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "vault.kv.put",
         "vault.kv.patch",
         "k8s.secret.create",
+        # The values of an existing Secret ride in the same params shape as
+        # k8s.secret.create (inline maps or store refs), so the same pin
+        # keeps them off the approval row and the broadcast.
+        "k8s.secret.update",
         "k8s.job.create",
         # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
         # the password from Vault (it is never an inline param), so the

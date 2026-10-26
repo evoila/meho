@@ -417,12 +417,16 @@ The single-call write ops live in `ops_write.py` (caution-class
 handlers + the annotate/label kind dispatch table),
 `ops_write_dangerous.py` (dangerous-class handlers + the delete dispatch
 table), and `ops_write_meta.py` (the JSON-Schema parameter shapes +
-`KubernetesOp` registration rows for **all** write ops, split out so each
+`KubernetesOp` registration rows for the write ops above, split out so each
 handler file stays under the 600-line code-quality cap and the
-operator-facing surface reads in one place). Handlers are bound-method
+operator-facing surface reads in one place). The two Secret change ops
+(`k8s.secret.update` / `k8s.secret.delete`) keep their handlers, schemas
+and rows together in `ops_secret_write.py`, with their previews in
+`ops_secret_write_preview.py`. Handlers are bound-method
 shims on `KubernetesConnector` forwarding to module-level functions --
 the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
-`safety_level` caution|dangerous and `requires_approval=True`.
+`safety_level` caution|dangerous (`k8s.secret.delete`: destructive) and
+`requires_approval=True`.
 
 | op_id                  | safety    | k8s call                                                          |
 | ---------------------- | --------- | ---------------------------------------------------------------- |
@@ -436,6 +440,8 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
 | `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+| `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
+| `k8s.secret.delete`    | **destructive** | `CoreV1Api.delete_namespaced_secret`. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_secret_write.py`. |
 
 **Secret redaction reuses the shipped `credential_write` op-class
 (#1401), not a new mechanism.** `k8s.secret.create` was already in
@@ -515,6 +521,70 @@ raises from aiohttp). The discovery reads that
 `DynamicClient` makes before the apply go through the same unchecked
 path, but a denied discovery read still ends in an error (usually
 `ResourceNotFoundError`), not a false success.
+
+### Change or delete an existing Secret -- `k8s.secret.update` / `k8s.secret.delete`
+
+`k8s.secret.create` only creates (a second create answers 409), and
+`k8s.delete` accepts only pod / job / replicaset. So a credential change
+(a new token or password in a Secret a workload already reads) and the
+removal of a Secret had no governed path. `ops_secret_write.py` adds the
+two ops in the `config` group, next to `k8s.secret.create`.
+
+**`k8s.secret.update` (dangerous, `requires_approval=True`).**
+
+- Takes `name`, `namespace`, `mode` and the same value inputs as
+  `k8s.secret.create`: `string_data`, `data`, `string_data_secret_ref`,
+  `data_secret_ref` and the two `*_secret_mount` fields. At least one value
+  input is required. The ref maps are resolved through the same
+  `_resolve_secret_refs` helper (its error message now names the calling
+  op). The guidance tells the agent to prefer the `*_secret_ref` inputs, so
+  the value never passes through the caller.
+- It reads the Secret first. A missing Secret raises
+  `KubernetesSecretNotFoundError` naming `k8s.secret.create`; an
+  `immutable: true` Secret raises `KubernetesSecretImmutableError` ("delete
+  it and create it again"). It never creates.
+- `mode: patch` (default) sends only the given keys as a strategic merge
+  patch (`patch_namespaced_secret` with a dict body), so every other key,
+  the type, labels and annotations stay.
+- `mode: replace` sends the read object back through
+  `replace_namespaced_secret` with the new `data` / `stringData` maps. The
+  type, labels, annotations and `resourceVersion` ride along, so the Secret
+  ends with exactly the given keys, and a change by someone else between the
+  read and the write makes the API server answer 409
+  (`KubernetesSecretConflictError`, a `ConnectorUpstreamError`). Nothing is
+  lost without notice.
+- Result: `{name, namespace, type, mode, data_keys, keys_set, keys_removed,
+  updated}`. Key names only, never a value.
+- The op is pinned in `_CREDENTIAL_WRITE_OPS` like `k8s.secret.create`.
+  While it waits for approval its params live in the approval hand-off
+  store, not on the approval row, and the broadcast is aggregate-only.
+- Its preview (`_secret_update_preview`) shows `name`, `namespace`, `mode`,
+  the key names that are set, the `*_secret_ref` paths and mounts, the key
+  names the Secret has now and, in `replace` mode, the key names that will
+  be removed. It reads the Secret for the current key names, never a value.
+  Without a connector it shows the params-derived part only.
+
+**`k8s.secret.delete` (destructive, `requires_approval=True`).**
+
+- Takes `name` and `namespace`. Result: `{name, namespace, deleted}`.
+- Destructive means: the caller runs `preview_operation`, then
+  `call_operation` with the returned `preview_hash`; a person's call waits
+  until a second person approves; an agent's call is refused (see
+  `approvals.md`).
+- Its preview (`_secret_delete_preview`) reads the Secret and fills the
+  `blast_radius` block: `object` is the Secret (namespace, name, type and
+  key names); `children` lists what uses the Secret in the same namespace:
+  Pods, and the pod templates of Deployments, StatefulSets, DaemonSets and
+  CronJobs. A pod spec uses a Secret through a volume (also a projected
+  volume), `env` with `secretKeyRef`, `envFrom` with `secretRef`, or
+  `imagePullSecrets`, in containers and init containers
+  (`secret_uses_in_pod_spec`). `irreversibility` is `permanent`: the values
+  are gone and Kubernetes keeps no copy.
+- A missing Secret makes the preview fail with a clear message, so the
+  destructive gate refuses to park the call (`blast_radius_required`) and
+  nothing waits for approval.
+
+Tests: `tests/test_connectors_k8s_secret_write.py`.
 
 ### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
 

@@ -601,6 +601,28 @@ def test_op_edit_rejects_non_literal_flag_text(data: dict[str, str]) -> None:
     assert _read_op_governance() == ("safe", True, True)
 
 
+@pytest.mark.parametrize("flag", ["requires_approval", "is_enabled"])
+def test_op_edit_rejects_empty_flag_next_to_valid_field(flag: str) -> None:
+    """An empty toggle value is refused with 422, even next to a valid edit.
+
+    FastAPI hands an empty form value to the handler as ``None``, the same
+    as an omitted field. The handler must still tell the two apart: the
+    whole request is refused and the valid ``safety_level`` is not saved.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(
+        tenant_id=_TENANT_A,
+        safety_level="safe",
+        requires_approval=True,
+        enabled=True,
+    )
+
+    status = _patch_op({"safety_level": "dangerous", flag: ""})
+
+    assert status == 422
+    assert _read_op_governance() == ("safe", True, True)
+
+
 # ---------------------------------------------------------------------------
 # AC: is_enabled=true on a shim connector surfaces the warning inline
 # ---------------------------------------------------------------------------

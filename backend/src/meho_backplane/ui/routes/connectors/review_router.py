@@ -136,28 +136,39 @@ async def _edit_handler(
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``PATCH .../{connector_id}/operations/{op_id:path}`` -- one per-op edit."""
+    # FastAPI hands an EMPTY form value (``requires_approval=``) to the
+    # handler as ``None``, the same as an omitted field. The raw form
+    # (already parsed and cached by Starlette) tells the two apart, so an
+    # empty toggle is refused instead of being read as "no edit".
+    form = await request.form()
     return await submit_op_edit(
         request,
         connector_id=connector_id,
         op_id=op_id,
         custom_description=custom_description,
         safety_level=safety_level,
-        requires_approval=_parse_flag(requires_approval, field="requires_approval"),
-        is_enabled=_parse_flag(is_enabled, field="is_enabled"),
+        requires_approval=_parse_flag(
+            requires_approval,
+            submitted="requires_approval" in form,
+            field="requires_approval",
+        ),
+        is_enabled=_parse_flag(is_enabled, submitted="is_enabled" in form, field="is_enabled"),
         session_ctx=session_ctx,
         operator=operator,
     )
 
 
-def _parse_flag(value: str | None, *, field: str) -> bool | None:
+def _parse_flag(value: str | None, *, submitted: bool, field: str) -> bool | None:
     """Turn a toggle's submitted text into a flag; an omitted field is ``None``.
 
     ``None`` means "do not change this field" all the way down to
     :func:`~meho_backplane.operations.ingest._internals.apply_op_overrides`.
     The row template submits exactly ``"true"`` / ``"false"``; anything
-    else is a hand-crafted request and is refused with 422.
+    else -- including an empty value, which FastAPI delivers as ``None``
+    while *submitted* is true -- is a hand-crafted request and is refused
+    with 422.
     """
-    if value is None:
+    if not submitted:
         return None
     if value == "true":
         return True
@@ -165,7 +176,7 @@ def _parse_flag(value: str | None, *, field: str) -> bool | None:
         return False
     raise HTTPException(
         status_code=422,
-        detail=f"{field} must be 'true' or 'false', got {value!r}",
+        detail=f"{field} must be 'true' or 'false', got {value or ''!r}",
     )
 
 

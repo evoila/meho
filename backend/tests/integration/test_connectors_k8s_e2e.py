@@ -170,6 +170,8 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.delete",
     "k8s.secret.create",
     "k8s.job.create",
+    # Start a CronJob's job now (caution, approval-gated).
+    "k8s.cronjob.run",
     # G3.14-T2 exec op (websocket pod-exec, approval-gated).
     "k8s.exec",
     # #3496 governed guest-cluster kubeconfig read (credential_read,

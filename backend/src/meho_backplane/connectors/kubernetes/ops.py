@@ -185,9 +185,10 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     ``k8s.persistentvolume.list`` / ``k8s.persistentvolumeclaim.list``)
     + ``CUSTOM_RESOURCE_OPS`` (#2830 generic CR reads: ``k8s.crd.list``
     / ``k8s.cr.list`` / ``k8s.cr.info``) + ``k8s.logs`` (T5) +
-    ``k8s.exec`` + the write ops + ``SECRET_READ_OPS`` (#3496:
-    ``k8s.secret.read_to_ref``) + ``SECRET_WRITE_OPS`` (``k8s.secret.update``
-    / ``k8s.secret.delete``).
+    ``k8s.exec`` + the write ops + ``CRONJOB_OPS`` (``k8s.cronjob.run``:
+    start a CronJob's job now) + ``SECRET_READ_OPS`` (#3496 governed
+    guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``) +
+    ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``).
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -204,6 +205,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     """
     from meho_backplane.connectors.kubernetes.ops_config import CONFIG_OPS
     from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
+    from meho_backplane.connectors.kubernetes.ops_cronjob import CRONJOB_OPS
     from meho_backplane.connectors.kubernetes.ops_customresource import CUSTOM_RESOURCE_OPS
     from meho_backplane.connectors.kubernetes.ops_events import EVENT_OPS
     from meho_backplane.connectors.kubernetes.ops_job import JOB_OPS
@@ -266,6 +268,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         logs_op,
         _exec_op(),
         *WRITE_CAUTION_OPS,
+        *CRONJOB_OPS,
         *WRITE_DANGEROUS_OPS,
         *SECRET_READ_OPS,
         *SECRET_WRITE_OPS,

@@ -12,10 +12,10 @@ rc-series release step reconciles against.
 
 | Measurement | Value | How measured |
 |---|---|---|
-| Date | 2026-10-24 (row 90 added; rows 85–89 added 2026-10-23; rows 82–84 added 2026-10-13; row 81 added 2026-10-12; rows 79–80 added 2026-10-07; row 78 added 2026-10-04; rows 1–77 measured 2026-09-22) | — |
-| CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`); rows 79–80: the v0.35.19 release-cutting PR (`[0.35.19]`); row 81: the v0.35.20 release-cutting PR (`[0.35.20]`); rows 82–83: the v0.35.21 release-cutting PR (`[0.35.21]`); row 84: the v0.35.22 release-cutting PR (`[0.35.22]`); rows 85–89: the v0.36.0 release-cutting PR (`[0.36.0]`); row 90: the v0.37.0 release-cutting PR (`[0.37.0]`) | `git log -1 --oneline` |
-| `### Security` headings | **90** | `grep -cE "^### Security" CHANGELOG.md` |
-| Ledger rows below | **90** | must equal the heading count |
+| Date | 2026-10-24 (rows 90–91 added; rows 85–89 added 2026-10-23; rows 82–84 added 2026-10-13; row 81 added 2026-10-12; rows 79–80 added 2026-10-07; row 78 added 2026-10-04; rows 1–77 measured 2026-09-22) | — |
+| CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`); rows 79–80: the v0.35.19 release-cutting PR (`[0.35.19]`); row 81: the v0.35.20 release-cutting PR (`[0.35.20]`); rows 82–83: the v0.35.21 release-cutting PR (`[0.35.21]`); row 84: the v0.35.22 release-cutting PR (`[0.35.22]`); rows 85–89: the v0.36.0 release-cutting PR (`[0.36.0]`); row 90: the v0.37.0 release-cutting PR (`[0.37.0]`); row 91: the follow-up notes PR for #4865 (`[0.37.0]`) | `git log -1 --oneline` |
+| `### Security` headings | **91** | `grep -cE "^### Security" CHANGELOG.md` |
+| Ledger rows below | **91** | must equal the heading count |
 | Published GHSAs on `evoila/meho` | **1** (GHSA-v2v2-4gh2-m4q8, row 82, published 2026-10-13) | `gh api /repos/evoila/meho/security-advisories --jq 'length'` |
 | Externally reported vulnerabilities cited in CHANGELOG | 0 | every entry cites an internal tracker item, an internal review finding, or a scanner alert |
 | Age of `SECURITY.md` policy | since the first commit (`1684c8ca`, 2026-05-09) | `git log --diff-filter=A -- SECURITY.md` |
@@ -88,6 +88,7 @@ the private finding behind the fix.
 
 | # | Version | Line | Summary | Class | Disposition |
 |---|---|---|---|---|---|
+| 91 | 0.37.0 | 128 | Two bullets: `filelock` 4.2.4 (CVE-2026-112940, high) (#4865); Pillow 12.3.0 CVE-2026-112398 (critical) added to the dated image-scan exception until 2026-11-30, because `fastembed` 0.9.0 allows only Pillow below 13 and MEHO never opens image files (#4865). | dep | N/A — upstream advisory (Pillow: dated image-scan exception until 2026-11-30; fix tracked in #4729) |
 | 90 | 0.37.0 | 113 | For tenants with the flight recorder on, the trace store (and the agent-readable copy) kept the request and answer bodies of seven typed deployment and depot operations (`sddc.domain.validate`, `sddc.domain.create`, `installer.sddc.spec.validate`, `installer.sddc.bringup.start`, `installer.sddc.bringup.retry`, `installer.composite.sddc.bringup`, `installer.system.depot.set`), which hold deployment passwords and licence keys; 0.37.0 keeps those bodies out of traces; traces written before the upgrade keep them until they expire (#4856). | vuln | Owed — decision pending |
 | 85 | 0.36.0 | 118 | `meho admin keycloak bootstrap-clients` mapped one fixed tenant and the role `tenant_admin` into every token of the shared `meho-cli` and `meho-mcp` Keycloak clients, so every person who logged in through them was a tenant admin. Roles now come from five Keycloak login groups through user attribute mappers; a run of the new command replaces the old fixed-value mappers (#4590 / #4596). | vuln | Owed — decision pending |
 | 86 | 0.36.0 | 128 | The REST routes that create and revoke service-principal standing grants (a person's approval given in advance) checked only the role, so an agent, service-principal or runner token with `operator` could create or revoke one. They now answer 403 `human_principal_required` to every non-human caller, and the console grant form does the same (#4616 / #4619, #4622 / #4687). | vuln | Owed — decision pending |
@@ -184,10 +185,10 @@ the private finding behind the fix.
 | Class | Rows | Disposition today |
 |---|---|---|
 | vuln — MEHO-code vulnerability | **45** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77, 79, 80, 82, 84–88, 90; rows 4 and 79 also carry a dependency bump) | 44 × Owed — decision pending; 1 published (row 82); 0 exempt |
-| dep — dependency / base-image CVE patch | **9** (rows 34, 44, 45, 46, 51, 78, 81, 83, 89) | N/A — upstream advisory |
+| dep — dependency / base-image CVE patch | **10** (rows 34, 44, 45, 46, 51, 78, 81, 83, 89, 91) | N/A — upstream advisory |
 | hardening — no demonstrated vulnerability | **32** (rows 1, 6, 10, 11, 13, 14, 16–18, 22, 23, 27–29, 36, 41, 42, 48, 50, 52, 53, 55–58, 60, 61, 63, 66, 70, 72, 75) | N/A — hardening |
 | docs — docs-only or non-vulnerability | **4** (rows 19, 39, 49, 54) | N/A — no vulnerability |
-| **Total** | **90** | |
+| **Total** | **91** | |
 
 **Gate 2 status at this snapshot: open.** 44 rows await **publication**
 (`security-advisories` returns 1: GHSA-v2v2-4gh2-m4q8, published for

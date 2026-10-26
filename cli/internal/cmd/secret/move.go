@@ -155,17 +155,5 @@ func decodeMoveResult(raw json.RawMessage) (map[string]any, error) {
 // printErrorTrailer surfaces the dispatcher error + extras envelope on the
 // non-ok branch. Mirrors the keycloak sibling helper.
 func printErrorTrailer(w io.Writer, r *dispatch.CallResult) {
-	if r.Error != nil && *r.Error != "" {
-		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
-	} else {
-		fmt.Fprintf(w, "meho: connector status=%s\n", r.Status)
-	}
-	if len(r.Extras) > 0 && string(r.Extras) != "null" {
-		fmt.Fprintln(w, "extras:")
-		if pretty, err := dispatch.PrettyJSON(r.Extras); err == nil {
-			fmt.Fprintln(w, pretty)
-		} else {
-			fmt.Fprintln(w, string(r.Extras))
-		}
-	}
+	dispatch.WriteErrorTrailer(w, r)
 }

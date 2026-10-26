@@ -3156,8 +3156,10 @@ class VmwareRestConnector(HttpConnector):
         Delegates to
         :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health.host_vsan_health_impl`
         (imported lazily to keep this module off the typed-ops import at
-        class-load time). Returns
-        ``{"cluster": ..., "overall_health": ..., "groups": [...]}``.
+        class-load time). Returns ``{"cluster": ..., "overall_health": ...,
+        "groups": [...], "checked_at": ..., "from_cache": ...}``; after a
+        fresh check that timed out, also ``fresh_check`` and ``note``
+        (#4922).
         """
         from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (
             host_vsan_health_impl,
@@ -3250,6 +3252,40 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await snapshot_list_impl(self, operator, target, params)
+
+    async def vm_question_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.question.get`` -- the question a VM waits on, and its running tasks.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_question.vm_question_get_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (
+            vm_question_get_impl,
+        )
+
+        return await vm_question_get_impl(self, operator, target, params)
+
+    async def vm_question_answer(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.question.answer`` -- answer the question a VM waits on.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_question.vm_question_answer_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (
+            vm_question_answer_impl,
+        )
+
+        return await vm_question_answer_impl(self, operator, target, params)
 
     async def object_collect(
         self,
@@ -3372,6 +3408,23 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await sso_admin_api_file_get_impl(self, operator, target, params)
+
+    async def vm_hardware_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.hardware.show`` -- one VM's CPU, memory, CD drives and controllers.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware.vm_hardware_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
+            vm_hardware_show_impl,
+        )
+
+        return await vm_hardware_show_impl(self, operator, target, params)
 
     async def license_list(
         self,

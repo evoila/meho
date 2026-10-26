@@ -31,8 +31,8 @@ resolved VM + host group sets).
 ``vmware.composite.*``    preview stored in ``proposed_effect["preview"]``
 ========================  ====================================================
 ``vm.power.bulk``         ``{action, filter, resolved, total_resolved}``
-``host.evacuate``         ``{host, tolerate_partial_failure, resolved,
-                          total_resolved}``
+``host.evacuate``         ``{host, tolerate_partial_failure, vsan_mode,
+                          resolved, total_resolved}``
 ``host.detach_from_vds``  ``{host, dvs, fallback_network, resolved,
                           total_resolved}``
 ``cluster.patch``         ``{cluster, resolved, total_resolved}``
@@ -215,6 +215,7 @@ from meho_backplane.connectors.vmware_rest.composites._vm_allocation import read
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
     _NIC_BACKING_DISTRIBUTED_PORTGROUP,
+    _VSAN_MODE_DEFAULT,
     _list_child_resource_pool_ids,
     _read_cdrom,
     _read_ethernet_nic,
@@ -336,6 +337,7 @@ async def _host_evacuate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "host": host,
         "tolerate_partial_failure": bool(ctx.params.get("tolerate_partial_failure", False)),
+        "vsan_mode": str(ctx.params.get("vsan_mode") or _VSAN_MODE_DEFAULT),
         **_capped_resolution(rows, _vm_identity),
     }
 
@@ -1790,9 +1792,9 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 def _register_vmware_write_preview_builders() -> None:
     """Wire the 51 write-composite park-time preview builders. Import-time.
 
-    The 13 read composites register no builder — they are
-    ``requires_approval=False`` and never park, so a preview would be
-    dead code.
+    The read composites register no builder here. The one read that can
+    wait for approval, the ``caution`` ``vm.guest.file.read``, registers
+    its own in :mod:`._guest_file_read_preview` (#4850).
     """
     for op_id, builder in _WRITE_PREVIEW_BUILDERS.items():
         register_preview_builder(op_id, builder)

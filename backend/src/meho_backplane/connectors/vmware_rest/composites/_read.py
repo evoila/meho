@@ -145,6 +145,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     unwrap_vim_value,
     vim_moref,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 
 from .schemas import DATASTORE_USAGE_MAX_VM_NAMES
 
@@ -176,6 +177,9 @@ _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 # singleton (``configurationEx`` + optional ``drsRecommendation``) -- the
 # same vim seam the vm.migrate DRS lookup uses (#2970).
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# The datastore-usage placement read asks for every VM in one call and follows
+# the continuation pages vCenter may send (#4862).
+_OP_CONTINUE_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
 _OP_POST_QUERY_EVENTS = "POST:/EventManager/{moId}/QueryEvents"
 _OP_POST_QUERY_AVAILABLE_PERF_METRIC = "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric"
 _OP_POST_QUERY_PERF = "POST:/PerformanceManager/{moId}/QueryPerf"
@@ -289,6 +293,7 @@ _SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
     _OP_GET_DATASTORE,
     _OP_LIST_VMS,
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
 )
 _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
     _OP_LIST_NETWORK,
@@ -971,15 +976,18 @@ async def _read_vm_placement(
 
     1. ``GET:/vcenter/vm`` (global, unfiltered) -- every VM's moid + name.
     2. one ``RetrievePropertiesEx`` over every VM moid reading
-       ``datastore`` (the union of datastores the VM's files sit on). A VM
-       with disks spanning two datastores therefore appears under both --
-       genuine placement, unlike the ignored-filter global list.
+       ``datastore`` (the union of datastores the VM's files sit on), with
+       every continuation page vCenter sends (#4862, through
+       :func:`~meho_backplane.connectors.vmware_rest.vim_retrieve.retrieve_all_pages`).
+       A VM with disks spanning two datastores therefore appears under
+       both -- genuine placement, unlike the ignored-filter global list.
 
     VM-listing order is preserved so the per-datastore ``vm_names`` sample
     is deterministic. Returns ``({}, None)`` when there are no VMs. The
-    read is **best-effort** (#1908): any transport error returns
-    ``(None, note)`` so the caller nulls enrichment on every row while
-    keeping the capacity data the storage-usage use case needs.
+    read is **best-effort** (#1908): any transport error, a failed page
+    or an answer that never ends returns ``(None, note)`` so the caller
+    nulls enrichment on every row while keeping the capacity data the
+    storage-usage use case needs.
     """
     try:
         vms_raw = await _read_sub_op(connector, target, operator, _OP_LIST_VMS)
@@ -996,17 +1004,15 @@ async def _read_vm_placement(
                 names_by_moid[moid] = name
         if not names_by_moid:
             return {}, None
-        retrieve = await _read_sub_op(
+        retrieve = await retrieve_all_pages(
             connector,
             target,
             operator,
-            _OP_RETRIEVE_PROPERTIES,
-            path_params={"moId": _PROPERTY_COLLECTOR_MOID},
-            body=retrieve_properties_body(
+            retrieve_properties_body(
                 _VIRTUAL_MACHINE_MO_TYPE, list(names_by_moid), [_PROP_VM_DATASTORE]
             ),
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, RuntimeError) as exc:
         return None, (
             f"vm-placement enrichment skipped: authoritative placement read "
             f"failed with {type(exc).__name__}: {exc}"

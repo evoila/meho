@@ -7,9 +7,11 @@ Two Robot acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.hetzner_robot.HetznerRobotConnector` instance
 with a stub credentials loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 10 curated
+:class:`~meho_backplane.db.models.Target` row, the 10 curated read
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.hetzner_robot.core_ops.ROBOT_CORE_OPS`, and a
+:data:`~meho_backplane.connectors.hetzner_robot.core_ops.ROBOT_CORE_OPS`
+(the two vSwitch membership writes are left out; they wait for approval and
+have their own tests), and a
 :mod:`respx`-mocked Hetzner Robot REST surface answering each of the 10 curated
 read ops.
 
@@ -78,6 +80,7 @@ __all__ = [
     "ROBOT_CANARY_FINGERPRINT",
     "ROBOT_CANARY_OPERATOR_TENANT",
     "ROBOT_CANARY_SERVERS",
+    "ROBOT_CORE_READ_OPS",
     "ROBOT_FORCE_HANDLE_LIST_OP_ID",
     "ROBOT_FORCE_HANDLE_PARAMS",
     "ROBOT_SANDBOX_TARGET_NAME",
@@ -87,6 +90,11 @@ __all__ = [
     "ingested_robot_canary_sandbox",
     "robot_acceptance_operator",
 ]
+
+#: The curated read ops this canary seeds and dispatches. The two vSwitch
+#: membership writes wait for a human approval, so they are covered by
+#: ``tests/test_connectors_hetzner_robot_vswitch_governance.py`` instead.
+ROBOT_CORE_READ_OPS = tuple(op for op in ROBOT_CORE_OPS if op.op_id.startswith("GET:"))
 
 #: Tenant the Robot dispatch tests act under.
 ROBOT_CANARY_OPERATOR_TENANT: UUID = UUID("00000000-0000-0000-0000-0000000000fe")
@@ -323,11 +331,11 @@ class IngestedRobotCanary:
 
 
 async def _insert_robot_descriptors() -> None:
-    """Seed the 10 curated Robot core ops + their groups as enabled rows.
+    """Seed the 10 curated Robot read ops + their groups as enabled rows.
 
     One :class:`OperationGroup` per entry in :data:`ROBOT_CORE_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor` per
-    entry in :data:`ROBOT_CORE_OPS` (``is_enabled=True``,
+    entry in :data:`ROBOT_CORE_READ_OPS` (``is_enabled=True``,
     ``source_kind='ingested'``, ``handler_ref=None``).
 
     Rows use ``product=ROBOT_PRODUCT="hetzner"`` matching what
@@ -352,7 +360,7 @@ async def _insert_robot_descriptors() -> None:
             await session.flush()
             group_ids[group.group_key] = group_row.id
 
-        for op in ROBOT_CORE_OPS:
+        for op in ROBOT_CORE_READ_OPS:
             method, path = op.op_id.split(":", 1)
             descriptor = EndpointDescriptor(
                 tenant_id=None,

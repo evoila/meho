@@ -28,6 +28,9 @@ Coverage matrix (G8.1-T1 acceptance criteria):
 * #4668 — ``principal`` matches part of the user id **or** part of the stored
   name, case-insensitively, with LIKE metacharacters escaped on both;
   ``principal_sub`` matches the user id exactly and never the name.
+* #4855 — ``has_trace=True`` keeps only ``operation_execution`` rows with a
+  ``dispatch_trace`` row in the caller's tenant; ``has_trace=False`` keeps the
+  other rows; ``None`` returns every row.
 * :class:`InvalidCursorError` propagates when a tampered cursor is passed.
 * ``target_name`` denormalization via LEFT JOIN works (and is None when the
   audit row has no ``target_id``).
@@ -51,7 +54,7 @@ from meho_backplane.audit_query import (
     query_audit,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, Target
+from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target, Tenant
 from meho_backplane.settings import get_settings
 
 
@@ -93,6 +96,7 @@ async def _seed_audit_row(
     agent_session_id: uuid.UUID | None = None,
     parent_audit_id: uuid.UUID | None = None,
     work_ref: str | None = None,
+    event_class: AuditEventClass = AuditEventClass.LEGACY_REQUEST,
 ) -> uuid.UUID:
     """Insert one :class:`AuditLog` row and return its ``id``."""
     row_id = uuid.uuid4()
@@ -111,9 +115,34 @@ async def _seed_audit_row(
             agent_session_id=agent_session_id,
             parent_audit_id=parent_audit_id,
             work_ref=work_ref,
+            event_class=event_class.value,
         ),
     )
     return row_id
+
+
+async def _seed_tenant(s: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Insert the :class:`Tenant` row ``dispatch_trace.tenant_id`` references."""
+    s.add(Tenant(id=tenant_id, slug=f"t-{tenant_id.hex[:8]}", name="Tenant"))
+
+
+async def _seed_trace(
+    s: AsyncSession,
+    *,
+    audit_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Insert one :class:`DispatchTrace` header for *audit_id*, owned by *tenant_id*."""
+    now = datetime.now(UTC)
+    s.add(
+        DispatchTrace(
+            id=uuid.uuid4(),
+            audit_id=audit_id,
+            tenant_id=tenant_id,
+            created_at=now,
+            expires_at=now + timedelta(days=7),
+        ),
+    )
 
 
 async def _seed_target(s: AsyncSession, *, tenant_id: uuid.UUID, name: str) -> uuid.UUID:
@@ -1261,3 +1290,150 @@ async def test_lineage_populated_from_row(session: AsyncSession) -> None:
     entry = result.rows[0]
     assert entry.agent_session_id == session_id
     assert entry.parent_audit_id == parent_id
+
+
+# ---------------------------------------------------------------------------
+# has_trace filter (#4855)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_has_trace_fixture(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    other_tenant_id: uuid.UUID,
+) -> dict[str, uuid.UUID]:
+    """Seed the rows the three ``has_trace`` cases are checked against.
+
+    In the caller's tenant: an operation run with a trace, an operation run
+    without one, a legacy row and a policy row that each have a trace row,
+    and an operation run whose trace header belongs to the other tenant.
+    """
+    await _seed_tenant(session, tenant_id=tenant_id)
+    await _seed_tenant(session, tenant_id=other_tenant_id)
+    base = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    rows = {
+        "op_with_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=1),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+        ),
+        "op_without_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=2),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+        ),
+        "legacy_with_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=3),
+        ),
+        "policy_with_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=4),
+            event_class=AuditEventClass.POLICY_DECISION,
+        ),
+        "op_with_foreign_trace": await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=base + timedelta(seconds=5),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+        ),
+    }
+    await _seed_trace(session, audit_id=rows["op_with_trace"], tenant_id=tenant_id)
+    await _seed_trace(session, audit_id=rows["legacy_with_trace"], tenant_id=tenant_id)
+    await _seed_trace(session, audit_id=rows["policy_with_trace"], tenant_id=tenant_id)
+    await _seed_trace(session, audit_id=rows["op_with_foreign_trace"], tenant_id=other_tenant_id)
+    await session.commit()
+    return rows
+
+
+async def test_has_trace_true_keeps_only_operation_rows_with_a_trace_in_tenant(
+    session: AsyncSession,
+) -> None:
+    """#4855: ``has_trace=True`` returns the rows the trace route serves a trace for."""
+    tenant_id = uuid.uuid4()
+    rows = await _seed_has_trace_fixture(session, tenant_id=tenant_id, other_tenant_id=uuid.uuid4())
+
+    result = await query_audit(
+        AuditQueryFilters(has_trace=True),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert [r.id for r in result.rows] == [rows["op_with_trace"]]
+
+
+async def test_has_trace_false_keeps_the_other_rows(session: AsyncSession) -> None:
+    """#4855: ``has_trace=False`` is the exact complement of ``has_trace=True``."""
+    tenant_id = uuid.uuid4()
+    rows = await _seed_has_trace_fixture(session, tenant_id=tenant_id, other_tenant_id=uuid.uuid4())
+
+    result = await query_audit(
+        AuditQueryFilters(has_trace=False),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert {r.id for r in result.rows} == {
+        rows["op_without_trace"],
+        rows["legacy_with_trace"],
+        rows["policy_with_trace"],
+        rows["op_with_foreign_trace"],
+    }
+
+
+async def test_has_trace_unset_returns_every_row(session: AsyncSession) -> None:
+    """#4855: no ``has_trace`` means no filter -- the same rows as before."""
+    tenant_id = uuid.uuid4()
+    rows = await _seed_has_trace_fixture(session, tenant_id=tenant_id, other_tenant_id=uuid.uuid4())
+
+    result = await query_audit(
+        AuditQueryFilters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert {r.id for r in result.rows} == set(rows.values())
+
+
+async def test_has_trace_combines_with_the_other_filters(session: AsyncSession) -> None:
+    """#4855: ``has_trace`` narrows on top of ``since`` and ``op_id``, like the CLI list."""
+    tenant_id = uuid.uuid4()
+    await _seed_tenant(session, tenant_id=tenant_id)
+    base = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    old_with_trace = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=base - timedelta(days=40),
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        payload={"op_id": "vmware.vm.list"},
+    )
+    recent_with_trace = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=base - timedelta(days=1),
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        payload={"op_id": "vmware.vm.list"},
+    )
+    other_op_with_trace = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=base - timedelta(days=1),
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        payload={"op_id": "k8s.pod.list"},
+    )
+    for audit_id in (old_with_trace, recent_with_trace, other_op_with_trace):
+        await _seed_trace(session, audit_id=audit_id, tenant_id=tenant_id)
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(has_trace=True, op_id="vmware.*", since=base - timedelta(days=30)),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert [r.id for r in result.rows] == [recent_with_trace]

@@ -18,6 +18,10 @@ tests drive the real connector over respx:
 
 The vCenter answers are hand-made fixtures in the shape of the vendor types
 (``VsanClusterHealthSummary``, ``VsanFault``, ``ManagedObjectNotFound``).
+
+#4922 adds the stored result: ``from_cache: true`` sends ``fetchFromCache``
+on both transports, and a fresh check that ends with a read timeout is
+followed by one cached read.
 """
 
 from __future__ import annotations
@@ -47,12 +51,28 @@ from meho_backplane.connectors.vmware_rest.soap_vsan import (
     vsan_soap_action,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
-from meho_backplane.operations._errors import result_connector_error, result_connector_not_found
+from meho_backplane.operations._errors import (
+    result_connector_error,
+    result_connector_not_found,
+    result_connector_timeout,
+)
 from meho_backplane.settings import get_settings
 
 _OP_ID = "vmware.host.vsan_health"
 _BASE = "https://vc-vsan.test.invalid"
 _CLUSTER = "domain-c7"
+_CHECKED_AT = "2026-10-25T18:30:12.345Z"
+_CLUSTER_BODY = {
+    "cluster": {
+        "_typeName": "ManagedObjectReference",
+        "type": "ClusterComputeResource",
+        "value": _CLUSTER,
+    }
+}
+_TIMEOUT_NOTE_LEAD = (
+    "The fresh vSAN check did not finish within 30 seconds. "
+    "A host of the cluster may be down or in maintenance mode."
+)
 _SOAP_ENV = "http://schemas.xmlsoap.org/soap/envelope/"
 _XSI = "http://www.w3.org/2001/XMLSchema-instance"
 
@@ -75,6 +95,7 @@ _OLD_VIJSON_91_URL = (
 #: A ``VsanClusterHealthSummary`` as the VI-JSON API sends it (9.x).
 _VIJSON_SUMMARY: dict[str, Any] = {
     "_typeName": "VsanClusterHealthSummary",
+    "timestamp": _CHECKED_AT,
     "overallHealth": "red",
     "overallHealthDescription": "vSAN object health",
     "groups": [
@@ -200,8 +221,18 @@ _SOAP_SUMMARY_XML = _soap_envelope(
     + "</groups>"
     "<overallHealth>red</overallHealth>"
     "<overallHealthDescription>vSAN object health</overallHealthDescription>"
+    f"<timestamp>{_CHECKED_AT}</timestamp>"
     "</returnval></VsanQueryVcClusterHealthSummaryResponse>"
 )
+
+#: What ``vmware.host.vsan_health`` returns for a fresh read of that summary.
+_EXPECTED_FRESH_ANSWER: dict[str, Any] = {
+    "cluster": _CLUSTER,
+    "overall_health": "red",
+    "groups": _EXPECTED_GROUPS,
+    "checked_at": _CHECKED_AT,
+    "from_cache": False,
+}
 
 _VSAN_FAULT_TEXT = "The vSAN health check could not run on the cluster."
 
@@ -325,8 +356,25 @@ def _mock_vcenter_session(mock: respx.MockRouter, vim_version: str) -> None:
     )
 
 
-async def _vsan_health(connector: VmwareRestConnector, target: _StubTarget) -> dict[str, Any]:
-    return await connector.host_vsan_health(_make_operator(), target, {"cluster": _CLUSTER})
+async def _vsan_health(
+    connector: VmwareRestConnector, target: _StubTarget, **params: Any
+) -> dict[str, Any]:
+    return await connector.host_vsan_health(
+        _make_operator(), target, {"cluster": _CLUSTER, **params}
+    )
+
+
+def _read_timeout_then(*answers: httpx.Response) -> Any:
+    """A respx side effect: the first call times out on read, the next ones answer."""
+    calls: list[httpx.Request] = []
+
+    def _effect(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("read timed out", request=request)
+        return answers[min(len(calls) - 2, len(answers) - 1)]
+
+    return _effect
 
 
 # ---------------------------------------------------------------------------
@@ -403,14 +451,78 @@ async def test_vcenter_9_reads_health_on_the_vsan_vi_json_path() -> None:
     assert vsan.call_count == 1
     assert not old_path.called
     assert not soap.called
-    assert json.loads(vsan.calls[0].request.content) == {
-        "cluster": {
-            "_typeName": "ManagedObjectReference",
-            "type": "ClusterComputeResource",
-            "value": _CLUSTER,
-        }
+    assert json.loads(vsan.calls[0].request.content) == _CLUSTER_BODY
+    assert result == _EXPECTED_FRESH_ANSWER
+
+
+@pytest.mark.asyncio
+async def test_vcenter_9_from_cache_sends_fetch_from_cache() -> None:
+    """#4922: ``from_cache: true`` puts ``fetchFromCache: true`` in the VI-JSON body."""
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            _mock_vcenter_session(mock, "9.1.0.0")
+            vsan = mock.post(_VIJSON_91_URL).respond(200, json=_VIJSON_SUMMARY)
+            result = await _vsan_health(connector, _StubTarget(), from_cache=True)
+    finally:
+        await _close(connector)
+
+    assert vsan.call_count == 1
+    assert json.loads(vsan.calls[0].request.content) == {**_CLUSTER_BODY, "fetchFromCache": True}
+    assert result == {**_EXPECTED_FRESH_ANSWER, "from_cache": True}
+
+
+@pytest.mark.asyncio
+async def test_vcenter_9_fresh_check_timeout_falls_back_to_the_stored_result() -> None:
+    """#4922: a read timeout is followed by exactly one call with ``fetchFromCache: true``."""
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            _mock_vcenter_session(mock, "9.1.0.0")
+            vsan = mock.post(_VIJSON_91_URL).mock(
+                side_effect=_read_timeout_then(httpx.Response(200, json=_VIJSON_SUMMARY))
+            )
+            result = await _vsan_health(connector, _StubTarget())
+    finally:
+        await _close(connector)
+
+    assert vsan.call_count == 2
+    assert json.loads(vsan.calls[0].request.content) == _CLUSTER_BODY
+    assert json.loads(vsan.calls[1].request.content) == {**_CLUSTER_BODY, "fetchFromCache": True}
+    assert result == {
+        **_EXPECTED_FRESH_ANSWER,
+        "from_cache": True,
+        "fresh_check": "timed_out",
+        "note": f"{_TIMEOUT_NOTE_LEAD} This is the last stored result.",
     }
-    assert result == {"cluster": _CLUSTER, "overall_health": "red", "groups": _EXPECTED_GROUPS}
+
+
+@pytest.mark.asyncio
+async def test_vcenter_9_stored_result_failing_too_is_a_timeout_with_the_plain_text() -> None:
+    """#4922: when the cached read fails as well, the answer is ``connector_timeout``, explained."""
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    fault = {"_typeName": "VsanFault", "faultstring": _VSAN_FAULT_TEXT}
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            _mock_vcenter_session(mock, "9.1.0.0")
+            vsan = mock.post(_VIJSON_91_URL).mock(
+                side_effect=_read_timeout_then(httpx.Response(500, json=fault))
+            )
+            with pytest.raises(httpx.ReadTimeout) as raised:
+                await _vsan_health(connector, _StubTarget())
+    finally:
+        await _close(connector)
+
+    assert vsan.call_count == 2
+    result = result_connector_timeout(_OP_ID, raised.value, 1.0)
+    assert result.status == "error"
+    assert result.error == "connector_timeout: ReadTimeout"
+    assert result.extras["error_code"] == "connector_timeout"
+    assert result.extras["phase"] == "read"
+    assert result.extras["configured_timeout"] == 30.0
+    assert result.extras["exception_message"] == (
+        f"{_TIMEOUT_NOTE_LEAD} The last stored result could not be read either."
+    )
 
 
 @pytest.mark.asyncio
@@ -554,8 +666,30 @@ async def test_vcenter_8_reads_health_over_vsan_soap() -> None:
     assert '<VsanQueryVcClusterHealthSummary xmlns="urn:vsan">' in body
     assert '<_this type="VsanVcClusterHealthSystem">vsan-cluster-health-system</_this>' in body
     assert f'<cluster type="ClusterComputeResource">{_CLUSTER}</cluster>' in body
+    assert "<fetchFromCache>" not in body
     # A group with one test comes back as a list, as on VI-JSON.
-    assert result == {"cluster": _CLUSTER, "overall_health": "red", "groups": _EXPECTED_GROUPS}
+    assert result == _EXPECTED_FRESH_ANSWER
+
+
+@pytest.mark.asyncio
+async def test_vcenter_8_from_cache_sends_fetch_from_cache_in_soap() -> None:
+    """#4922: on vCenter 8.0 ``from_cache: true`` is ``<fetchFromCache>true</fetchFromCache>``."""
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    router = _Vcenter80([httpx.Response(200, text=_SOAP_SUMMARY_XML)])
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            _mock_vcenter_80(mock, router)
+            result = await _vsan_health(connector, _StubTarget(), from_cache=True)
+    finally:
+        await _close(connector)
+
+    assert len(router.vsan_requests) == 1
+    body = router.vsan_requests[0].content.decode("utf-8")
+    assert (
+        f'<cluster type="ClusterComputeResource">{_CLUSTER}</cluster>'
+        "<fetchFromCache>true</fetchFromCache></VsanQueryVcClusterHealthSummary>"
+    ) in body
+    assert result == {**_EXPECTED_FRESH_ANSWER, "from_cache": True}
 
 
 @pytest.mark.asyncio
@@ -703,13 +837,42 @@ def test_build_vsan_envelope_for_the_health_summary() -> None:
     ) in envelope
 
 
-def test_build_vsan_envelope_refuses_argument_types_it_cannot_send() -> None:
-    with pytest.raises(TypeError, match="fetchFromCache"):
+def test_build_vsan_envelope_sends_true_false_values() -> None:
+    """#4922: a true/false argument is written as ``xsd:boolean`` text, after the cluster."""
+    envelope = build_vsan_envelope(
+        "VsanVcClusterHealthSystem",
+        "vsan-cluster-health-system",
+        "VsanQueryVcClusterHealthSummary",
+        {"cluster": vim_moref("ClusterComputeResource", "domain-c7"), "fetchFromCache": True},
+    )
+    assert (
+        '<cluster type="ClusterComputeResource">domain-c7</cluster>'
+        "<fetchFromCache>true</fetchFromCache></VsanQueryVcClusterHealthSummary>"
+    ) in envelope
+    assert "<includeObjUuids>false</includeObjUuids>" in build_vsan_envelope(
+        "VsanVcClusterHealthSystem",
+        "vsan-cluster-health-system",
+        "VsanQueryVcClusterHealthSummary",
+        {"includeObjUuids": False},
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("vmCreateTimeout", 120),
+        ("perspective", "defaultView"),
+        ("fields", ["objectHealth"]),
+        ("spec", {"_typeName": "VsanClusterHealthQuerySpec"}),
+    ],
+)
+def test_build_vsan_envelope_refuses_argument_types_it_cannot_send(name: str, value: Any) -> None:
+    with pytest.raises(TypeError, match=name):
         build_vsan_envelope(
             "VsanVcClusterHealthSystem",
             "vsan-cluster-health-system",
             "VsanQueryVcClusterHealthSummary",
-            {"fetchFromCache": True},
+            {name: value},
         )
 
 

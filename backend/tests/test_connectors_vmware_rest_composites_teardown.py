@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -683,4 +684,43 @@ async def test_folder_unreadable_children_fails(gate: GateRecorder) -> None:
     conn.unreadable[("Folder", "group-v100")] = {"childEntity"}
     with pytest.raises(Exception, match="could not read childEntity"):
         await _call(_teardown.folder_delete_composite, conn, folder="group-v100")
+    assert gate.calls == []
+
+
+# ===========================================================================
+# Names of the blocking objects: every page is read (#4862)
+# ===========================================================================
+
+
+async def test_folder_delete_blockers_show_names_from_a_later_page(gate: GateRecorder) -> None:
+    conn = VimFake()
+    conn.page_size = 1
+    _folder(conn, children=[("VirtualMachine", "vm-7"), ("VirtualMachine", "vm-8")])
+    conn.add("VirtualMachine", "vm-7", name="example-vm-a")
+    conn.add("VirtualMachine", "vm-8", name="example-vm-b")
+    out = await _call(_teardown.folder_delete_composite, conn, folder="group-v100")
+    assert out["status"] == "precondition_failed"
+    assert {(b["moid"], b["name"]) for b in out["blockers"]} == {
+        ("vm-7", "example-vm-a"),
+        ("vm-8", "example-vm-b"),
+    }
+    # The name read's token went once, on the session of the first call.
+    assert conn.continue_calls == [("<token-1>", "<session-1>")]
+    assert conn._pending == {}
+    assert gate.calls == []
+
+
+async def test_folder_delete_blockers_have_no_names_when_a_page_fails(
+    gate: GateRecorder,
+) -> None:
+    """The name read is best effort: a lost page gives no names, never half of them."""
+    conn = VimFake()
+    conn.page_size = 1
+    conn.fail_continue = httpx.ConnectError("page lost")
+    _folder(conn, children=[("VirtualMachine", "vm-7"), ("VirtualMachine", "vm-8")])
+    conn.add("VirtualMachine", "vm-7", name="example-vm-a")
+    conn.add("VirtualMachine", "vm-8", name="example-vm-b")
+    out = await _call(_teardown.folder_delete_composite, conn, folder="group-v100")
+    assert out["status"] == "precondition_failed"
+    assert [(b["moid"], b["name"]) for b in out["blockers"]] == [("vm-7", None), ("vm-8", None)]
     assert gate.calls == []

@@ -152,6 +152,50 @@ _ABOUT_INSTRUCTIONS: dict[str, object] = {
 }
 
 
+_API_FILE_GET_INSTRUCTIONS: dict[str, object] = {
+    "when_to_call": (
+        "Call to fetch one API description page or file that an Aria Automation 8 "
+        "appliance serves, for example to pin the 8.18 Swagger file of a service or "
+        "the reference of the Orchestrator inside the appliance. Start with a "
+        "documented landing page: '/automation/api-docs' (one page for all Swagger "
+        "files), '/automation-ui/api-docs' (one card per service) or '/vco/api/docs/' "
+        "(the Orchestrator reference). Then read the file paths that the page loads."
+    ),
+    "parameter_hints": {
+        "path": (
+            "A documentation path only: a landing page, '/<service>/api/swagger' and "
+            "every path under it (for example with '?apiVersion=<date>' or "
+            "'?group=<date>'), '/vco/api/docs' and every path under it, or a Swagger "
+            "or OpenAPI file at its usual place (a part named 'api-docs', "
+            "'swagger-resources' or 'swagger-config', or a file named swagger.json, "
+            "swagger.yaml, openapi.json or openapi.yaml). Any other path, '..', '//', "
+            "a percent sign, a scheme or a host is refused before a request is sent."
+        ),
+    },
+    "output_shape": (
+        "{path, status, content_type, redirect_path, size, sha256, secrets_replaced, "
+        "parts, text_parts: [{index, text}], version, build, iaas_api_version, "
+        "version_error}. version and build come from the Orchestrator inside the "
+        "appliance (GET /vco/api/about); iaas_api_version is the IaaS API date label "
+        "(GET /iaas/api/about). A large answer comes back as a result handle whose rows "
+        "are the text parts: page it with result_query (offset, limit; a small limit "
+        "such as 2). The text is the checked copy of the file: the parsed file (JSON, "
+        "YAML, XML or HTML) written back, with every value under a secret name "
+        "replaced by [REDACTED:param_name]; secrets_replaced counts the replaced "
+        "values. Join the text of all parts in index order to get the copy; its "
+        "SHA-256 equals sha256."
+    ),
+    "next_step": (
+        "On a landing page, find the file paths the page loads and read each one "
+        "with this same operation. On a 3xx status, read redirect_path next. On 403 "
+        "or 404 the file is not served at that path; report the status. A file that "
+        "does not parse, or is JavaScript, CSS or plain text, is refused; report it "
+        "instead of retrying. A file too big for one stored result, or text that "
+        "MEHO's redaction would still change, stops with an error that says why."
+    ),
+}
+
+
 #: Per-op ``llm_instructions`` keyed by the dot-form op id, consumed by
 #: :mod:`meho_backplane.connectors.vra8.typed_ops`.
 VRA8_READ_LLM_INSTRUCTIONS: dict[str, dict[str, object]] = {
@@ -161,4 +205,5 @@ VRA8_READ_LLM_INSTRUCTIONS: dict[str, dict[str, object]] = {
     "vcfa.vra8.blueprint.list": _BLUEPRINT_LIST_INSTRUCTIONS,
     "vcfa.vra8.catalog-item.list": _CATALOG_ITEM_LIST_INSTRUCTIONS,
     "vcfa.vra8.about": _ABOUT_INSTRUCTIONS,
+    "vcfa.vra8.api_file.get": _API_FILE_GET_INSTRUCTIONS,
 }

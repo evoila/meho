@@ -55,8 +55,8 @@ from sqlalchemy import Select, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import GatewayCommand, GatewayCommandStatus
-from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.runner.satellite_tier import REMOTE_WRITE_SAFETY_LEVELS
+from meho_backplane.runner.work_item_signing import params_digest
 
 __all__ = [
     "GATEWAY_COMMAND_DEFAULT_TTL",
@@ -184,13 +184,14 @@ async def enqueue_command(
     the minting transaction (#2500).
 
     Every row carries its capability binding (#2500): ``params_hash``
-    (defaulting to ``compute_params_hash(params)`` so it always matches the
-    stored params), ``expires_at`` (bounded by
+    (defaulting to :func:`~meho_backplane.runner.work_item_signing.params_digest`
+    of *params* so it always matches the stored params; the runner checks
+    this digest again and holds no server key), ``expires_at`` (bounded by
     :func:`bound_capability_expiry`), and the optional ``mint_audit_id``
     lineage. The mint path (:func:`meho_backplane.operations.gateway_commands.mint_gateway_command`)
-    passes an explicit ``params_hash`` (the one it also stamped on the mint
-    audit row) and ``mint_audit_id``; direct enqueues (tests) get the
-    computed hash and a default TTL.
+    passes an explicit ``params_hash`` (the same digest it signs) and
+    ``mint_audit_id``; direct enqueues (tests) get the computed digest and a
+    default TTL.
 
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed.
@@ -229,7 +230,7 @@ async def enqueue_command(
         status=GatewayCommandStatus.PENDING.value,
         enqueued_by_sub=enqueued_by_sub,
         enqueued_at=datetime.now(UTC),
-        params_hash=params_hash if params_hash is not None else compute_params_hash(params),
+        params_hash=params_hash if params_hash is not None else params_digest(params),
         expires_at=bound_capability_expiry(expires_at),
         mint_audit_id=mint_audit_id,
         safety_level=safety_level,
@@ -295,7 +296,7 @@ def _params_hash_intact(row: GatewayCommand, *, tenant_id: uuid.UUID, runner_id:
     ``approve_request`` runs. Returns ``True`` when the row's params still
     hash to its bound ``params_hash``.
     """
-    if compute_params_hash(row.params) == row.params_hash:
+    if params_digest(row.params) == row.params_hash:
         return True
     structlog.get_logger(__name__).error(
         "gateway_command_params_hash_mismatch",

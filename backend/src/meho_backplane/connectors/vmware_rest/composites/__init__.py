@@ -212,7 +212,12 @@ register_typed_op_registrar(register_vmware_composite_operations_8_0)
 # blast-radius #3198) onto the per-op hook in
 # :mod:`meho_backplane.operations._preview` — mirrors how
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
-from meho_backplane.connectors.vmware_rest.composites import _write_preview  # noqa: E402,F401
+# Same for the guest file read (#4850): a caution read, so an agent's call
+# waits for approval.
+from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402,F401
+    _guest_file_read_preview,
+    _write_preview,
+)
 
 __all__ = [
     "alarm_acknowledge_composite",

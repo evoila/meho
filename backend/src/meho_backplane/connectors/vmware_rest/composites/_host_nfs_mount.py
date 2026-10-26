@@ -38,6 +38,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -106,9 +107,11 @@ async def read_mounted_nas_datastores(
     """Read the host's mounted NAS datastores (``[]`` when it has none).
 
     Two ungated ``RetrievePropertiesEx`` reads: the host's ``datastore`` MoRef
-    list, then each ``Datastore.info`` (batched into one call). Non-NAS
-    datastores (VMFS / vSAN — no ``info.nas``) are dropped, so the result is
-    exactly the NFS mounts the export matcher compares against.
+    list, then each ``Datastore.info`` (batched into one call, every page read
+    through :func:`~meho_backplane.connectors.vmware_rest.vim_retrieve.retrieve_all_pages`).
+    Non-NAS datastores (VMFS / vSAN — no ``info.nas``) are dropped, so the
+    result is exactly the NFS mounts the export matcher compares against. A
+    failed page fails the read, so the mount is never sent on a short list.
     """
     listing = await connector._post_vmomi_json(
         target,
@@ -119,11 +122,11 @@ async def read_mounted_nas_datastores(
     ds_moids = _extract_host_datastore_moids(listing)
     if not ds_moids:
         return []
-    infos = await connector._post_vmomi_json(
+    infos = await retrieve_all_pages(
+        connector,
         target,
-        _VMOMI_RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(_DATASTORE_MO_TYPE, ds_moids, [_PROP_DATASTORE_INFO]),
+        operator,
+        retrieve_properties_body(_DATASTORE_MO_TYPE, ds_moids, [_PROP_DATASTORE_INFO]),
     )
     return _extract_nas_datastores(infos)
 

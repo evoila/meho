@@ -235,3 +235,46 @@ func TestOutputTooLargeMessageIgnoresOtherReasons(t *testing.T) {
 		t.Fatal("a transport error must not be treated as output_too_large")
 	}
 }
+
+// A failed or refused call has an audit row that says why it failed. The
+// text output must show its id on every status, not only on ok (#4833).
+func TestCallFailureRendersAuditReceipt(t *testing.T) {
+	const auditID = "77777777-7777-7777-7777-777777777777"
+	for _, status := range []string{"error", "denied", "rate_limited"} {
+		t.Run(status, func(t *testing.T) {
+			out, err := executeDeliveryCall(t, callDeliveryResponse(t, map[string]any{
+				"status": status, "op_id": "vault.kv.read", "error": "connection refused",
+				"extras":   map[string]any{"error_code": "connector_error"},
+				"audit_id": auditID, "delivery": "complete",
+			}), false)
+			if !errors.Is(err, errOpError) {
+				t.Fatalf("status=%s must retain structured-failure exit: %v", status, err)
+			}
+			for _, want := range []string{
+				"status=" + status,
+				"meho: connector error: connection refused",
+				"extras:",
+				"audit receipt: " + auditID + "\n",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("status=%s render missing %q: %q", status, want, out)
+				}
+			}
+		})
+	}
+}
+
+// An old backplane, or a call that got no committed row, sends audit_id
+// null on failure. No receipt line is invented.
+func TestCallFailureNullReceiptPrintsNoLine(t *testing.T) {
+	out, err := executeDeliveryCall(t, callDeliveryResponse(t, map[string]any{
+		"status": "error", "op_id": "vault.kv.read", "error": "connection refused",
+		"audit_id": nil,
+	}), false)
+	if !errors.Is(err, errOpError) {
+		t.Fatalf("status=error must retain structured-failure exit: %v", err)
+	}
+	if strings.Contains(out, "audit receipt:") {
+		t.Errorf("null receipt must not invent an audit receipt: %q", out)
+	}
+}

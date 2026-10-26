@@ -112,10 +112,17 @@ def parse_bool_env(value: str | None) -> bool:
 
 
 #: Default delete-shaped op-id patterns a service-principal standing grant
-#: may never cover (#3151). The list lives in :mod:`meho_backplane.delete_names`
-#: so the contract check and the grant check read the same signs.
-#: Overridable via ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
-_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = DELETE_SHAPED_OP_ID_PATTERNS
+#: may never cover (#3151). The delete signs live in
+#: :mod:`meho_backplane.delete_names` so the contract check and the grant
+#: check read the same signs. ``POST:/vswitch/*`` (#3973) adds the Hetzner
+#: Robot vSwitch writes sent as POST (add servers, rename or change the
+#: VLAN): each changes a private network that several servers share, so it
+#: always waits for a human, like a delete. Overridable via
+#: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
+_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
+    *DELETE_SHAPED_OP_ID_PATTERNS,
+    "POST:/vswitch/*",
+)
 
 
 def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:

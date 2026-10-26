@@ -21,9 +21,10 @@ Flow (:func:`_plan` is shared with the park-time preview):
 4. ``UpdateAssignedLicense(entity, licenseKey, entityDisplayName)`` through
    the governed VI-JSON seam :func:`._write._write_vmomi_sub_op`. The gate
    gets the asset id, the licence name and the masked key, never the key. An
-   error keeps its class, so the dispatcher still sorts it (a new login, a
-   403, a 429 ...), but every key in what it carries is masked first
-   (:func:`_hide_key_in_error`).
+   error is raised as it is. The tag ``license-key`` makes the dispatcher
+   replace the vendor's text in the error result and the audit row
+   (:mod:`meho_backplane.operations._vendor_text`), so a fault that repeats
+   the key does not show it.
 
 ``UpdateAssignedLicense`` is synchronous (no vCenter task). Its answer is the
 licence now assigned; the result shows it masked.
@@ -31,13 +32,12 @@ licence now assigned; the result shows it masked.
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-import httpx
 import structlog
 
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.vmware_rest.composites._write import _write_vmomi_sub_op
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_ROW_SCHEMA,
@@ -45,13 +45,10 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     OP_RETRIEVE_PROPERTIES,
     OP_UPDATE_ASSIGNED_LICENSE,
     assignment_row,
-    hide_license_keys,
     license_row,
-    mask_license_key,
     query_assigned_licenses,
     read_license_inventory,
 )
-from meho_backplane.connectors.vmware_rest.soap import attach_soap_fault, soap_fault_of
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
 
 if TYPE_CHECKING:
@@ -228,76 +225,6 @@ def _entity_name(asset: dict[str, Any] | None) -> str | None:
     return assignment_row(asset)["entity_name"] if asset is not None else None
 
 
-#: How many linked errors (cause and context) :func:`_hide_key_in_error` walks.
-_MAX_LINKED_ERRORS: Final = 8
-
-
-def _request_without_body(request: httpx.Request) -> httpx.Request:
-    """The same method, URL and timeouts, with no body and no headers."""
-    return httpx.Request(request.method, request.url, extensions=request.extensions)
-
-
-def _response_with_keys_hidden(
-    response: httpx.Response, request: httpx.Request, key: str
-) -> httpx.Response:
-    """A copy of *response* whose text has every licence key masked."""
-    try:
-        text = response.text
-    except httpx.StreamError:
-        text = ""
-    return httpx.Response(
-        response.status_code,
-        headers={"content-type": response.headers.get("content-type", "application/json")},
-        content=hide_license_keys(text, key).encode("utf-8"),
-        request=request,
-    )
-
-
-def _hide_key_in_http_error(err: httpx.HTTPError, key: str) -> None:
-    """Drop the request body of *err* and mask its vendor answer, in place."""
-    try:
-        request = _request_without_body(err.request)
-    except RuntimeError:  # httpx raises it when no request is attached
-        return
-    err.request = request
-    if isinstance(err, httpx.HTTPStatusError):
-        err.response = _response_with_keys_hidden(err.response, request, key)
-
-
-def _hide_key_in_error(exc: BaseException, key: str) -> None:
-    """Mask *key* in everything *exc* carries, in place. Its class stays.
-
-    The dispatcher picks the result by the error's class and status: a
-    ``ConnectorAuthError`` gives ``connector_auth_failed``, a 401 a new login
-    and one retry, a 403 or 429 its own result. So the class must not change.
-    But the dispatcher also copies text out of the error into the result and
-    the audit row: the message, the vendor answer of an HTTP error (also when
-    that error is the cause of a ``ConnectorAuthError``), and the SOAP fault
-    the single-host path attaches. This masks the key in each of them, along
-    the cause and context chain. It also drops the request body (it held the
-    key) from every HTTP error, and masks the text a JSON parse error keeps.
-    """
-    pending: list[BaseException] = [exc]
-    seen: set[int] = set()
-    while pending and len(seen) < _MAX_LINKED_ERRORS:
-        node = pending.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        node.args = tuple(
-            hide_license_keys(arg, key) if isinstance(arg, str) else arg for arg in node.args
-        )
-        fault = soap_fault_of(node)
-        if fault is not None and fault.faultstring:
-            masked = hide_license_keys(fault.faultstring, key)
-            attach_soap_fault(node, replace(fault, faultstring=masked))
-        if isinstance(node, httpx.HTTPError):
-            _hide_key_in_http_error(node, key)
-        if isinstance(node, json.JSONDecodeError):
-            node.doc = hide_license_keys(node.doc, key)
-        pending.extend(link for link in (node.__cause__, node.__context__) if link is not None)
-
-
 async def _update_assigned_license(
     connector: VmwareRestConnector,
     target: Any,
@@ -306,14 +233,12 @@ async def _update_assigned_license(
     selected: dict[str, Any],
     entity_id: str,
 ) -> tuple[OperationResult | None, Any]:
-    """Gate, then send ``UpdateAssignedLicense``. An error is re-raised with keys masked.
+    """Gate, then send ``UpdateAssignedLicense``.
 
     The full key is only in the request body. The gate params name the asset
-    and the licence by name and masked key. Any error is re-raised as it is
-    (same object, same class, so the dispatcher's auth recovery and its
-    403 / 429 results still work), after :func:`_hide_key_in_error` has
-    masked every key in its message, its vendor answer and its attached
-    SOAP fault.
+    and the licence by name and masked key. An error is raised as it is; the
+    dispatcher hides the vendor's text of this operation (see the module
+    docstring).
     """
     key: str = selected["licenseKey"]
     name = selected.get("name")
@@ -321,23 +246,19 @@ async def _update_assigned_license(
     display_name = _entity_name(plan.asset)
     if display_name is not None:
         body["entityDisplayName"] = display_name
-    try:
-        return await _write_vmomi_sub_op(
-            connector,
-            target,
-            operator,
-            op_id=OP_UPDATE_ASSIGNED_LICENSE,
-            vmomi_path=f"/LicenseAssignmentManager/{plan.assignment_manager}/UpdateAssignedLicense",
-            body=body,
-            params={
-                "entity_id": entity_id,
-                "license_name": name,
-                "key_masked": mask_license_key(key),
-            },
-        )
-    except Exception as exc:
-        _hide_key_in_error(exc, key)
-        raise
+    return await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=OP_UPDATE_ASSIGNED_LICENSE,
+        vmomi_path=f"/LicenseAssignmentManager/{plan.assignment_manager}/UpdateAssignedLicense",
+        body=body,
+        params={
+            "entity_id": entity_id,
+            "license_name": name,
+            "key_masked": mask_license_key(key),
+        },
+    )
 
 
 async def license_assign_composite(
@@ -352,8 +273,7 @@ async def license_assign_composite(
     Op-id: ``vmware.composite.license.assign``. A refusal or ``unchanged``
     returns before any write. A policy gate returns its
     :class:`OperationResult` as is (nothing on the wire). An error of the
-    write keeps its class, so the dispatcher sorts it as usual, and every
-    key in it is masked.
+    write is raised as it is, so the dispatcher sorts it as usual.
     """
     entity_id: str = params["entity_id"]
     plan = await _plan(connector, target, operator, params)

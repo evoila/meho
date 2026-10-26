@@ -598,6 +598,18 @@ not a raised exception, so an SSE consumer always sees a terminal frame.
 
 All fronts require the `operator` role and are tenant-scoped via the JWT.
 
+The run input has one size limit on every front: 65,536 characters
+(`RUN_INPUT_MAX_CHARS` in `agent/invocation.py`, the same size as the
+knowledge and memory body caps). REST declares it as `max_length` on
+`AgentRunRequest.input`, so a longer body is a 422 (`string_too_long`,
+`ctx.max_length`) before the route runs. MCP declares it as `maxLength` on
+`meho_agents_run.input`; the dispatcher renders a `maxLength` violation as
+`<field>: at most <n> characters` instead of repeating the value. The CLI
+checks `--input` with `utf8.RuneCountInString` before it sends, so a
+too-long input is one short error line, not a 422 body that echoes the
+input. The console keeps its own, smaller prompt limit (`INPUT_MAX` in
+`ui/routes/agents/run.py`).
+
 ### Why the SSE events route is a POST that starts a fresh run
 
 The issue's literal shape was `GET …/runs/{handle}/events`. SSE needs the
@@ -656,6 +668,16 @@ a raised exception across the boundary, and never a launched loop.
   This is a best-effort boundary guard, not a parser: a phrasing it
   misses degrades to the old behaviour; a phrasing it catches turns a
   fabricated success into an honest typed failure.
+
+  The check runs at the start of every run, so it is kept fast. It
+  reads only the first 16,384 characters (16 KiB) of each text
+  (`_MAX_SCANNED_CHARS`), and its time grows in line with the length it
+  reads. So it takes at most a few milliseconds for any prompt. A
+  runbook instruction after the first 16 KiB of a longer text is not seen.
+  When a text is cut, a hit that the cut reaches is not used either: the
+  words after the cut could change what it means ("use the runbooks page"
+  cut to "use the runbook"). So the cut can make the check miss an
+  instruction, but it never refuses a run that the full text allows.
 
   Capability (`toolset_admits_runbook_execution` in `agent/toolset.py`)
   is intersected explicitly: `RUNBOOK_EXECUTION_META_TOOL_NAMES` is an

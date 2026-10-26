@@ -195,6 +195,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
     vm_resource_allocation_show_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
+    VM_CDROM_TOOLS_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
@@ -1040,11 +1043,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.host.evacuate",
         handler=host_evacuate_composite,
-        summary="Move every VM off a host with DRS, then put the host into maintenance mode.",
+        summary="Move every running VM off a host, then put the host into maintenance mode.",
         description=(
-            "Moves each VM on the host to where DRS recommends (vm.migrate), then puts the host "
-            "into maintenance mode. If a VM cannot move, it stops before maintenance mode, unless "
-            "tolerate_partial_failure is set."
+            "With DRS fully automated, vCenter moves the running VMs as part of the "
+            "maintenance-mode request. Otherwise MEHO moves each running VM where DRS recommends "
+            "(vm.migrate) and stops before maintenance mode if one cannot move, unless "
+            "tolerate_partial_failure is set. vsan_mode sets the vSAN data option."
         ),
         parameter_schema=HOST_EVACUATE_PARAMETER_SCHEMA,
         response_schema=HOST_EVACUATE_RESPONSE_SCHEMA,
@@ -1987,6 +1991,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.content_library.item.delete"
         ],
     ),
+    # Add a CD drive and unmount the VMware Tools installer; the rows live in
+    # their own module.
+    *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

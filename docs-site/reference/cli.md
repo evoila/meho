@@ -19,6 +19,61 @@ Every command accepts the global flags below.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Some commands have their own `--work-ref` flag (for example `operation call`, or the filter on `audit query`). On those commands the flag means what that command says, and only `$MEHO_WORK_REF` is sent as the header.
 
+## `meho addon`
+
+Manage add-on pairings (pair / list / show / unpair)
+
+```
+meho addon
+```
+
+### `meho addon list`
+
+List the add-on pairings of your tenant (operator)
+
+```
+meho addon list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw PairedAddonListResponse JSON instead of the human table
+
+### `meho addon pair`
+
+Pair an add-on with MEHO (tenant_admin)
+
+```
+meho addon pair <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--contract-version` — contract version the add-on speaks (required; MEHO speaks version 1 today)
+- `--json` — emit the whole PairAddonResult JSON, with client_secret, instead of the human summary
+- `--min-backplane-version` — oldest MEHO contract version the add-on accepts (required)
+- `--owner-sub` — OIDC sub of the pairing's owner (defaults to the caller)
+
+### `meho addon show`
+
+Show one add-on pairing by name (operator)
+
+```
+meho addon show <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw PairedAddonRead JSON instead of the human summary
+
+### `meho addon unpair`
+
+Remove an add-on pairing (tenant_admin)
+
+```
+meho addon unpair <name> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit a {"name","unpaired"} JSON object instead of the human summary
+
 ## `meho admin`
 
 Deployer-side install-time provisioning verbs
@@ -221,7 +276,7 @@ meho agent run <name> [flags]
 
 - `--async` — return a run handle immediately instead of blocking for the result
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--input` — the user prompt to run the agent on (required)
+- `--input` — the user prompt to run the agent on (required; at most 65536 characters)
 - `--json` — emit the raw run response JSON instead of the human summary
 - `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --work-ref`
 
@@ -245,7 +300,7 @@ meho agent run-events <name> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--input` — the user prompt to run the agent on (required)
+- `--input` — the user prompt to run the agent on (required; at most 65536 characters)
 - `--json` — emit one raw JSON object per event instead of a compact human line
 
 ### `meho agent run-list`
@@ -606,7 +661,7 @@ meho argocd repo list [flags]
 
 ## `meho audit`
 
-Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex)
+Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)
 
 ```
 meho audit
@@ -697,6 +752,42 @@ meho audit show <audit-id> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+
+### `meho audit trace`
+
+List the operation runs that have a stored flight-recorder trace, or read one trace
+
+```
+meho audit trace
+```
+
+#### `meho audit trace list`
+
+List the operation runs that still have a stored trace
+
+```
+meho audit trace list [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
+- `--json` — print the route's AuditQueryResult JSON unchanged instead of the table
+- `--limit` — max rows per page (1..1000, server default 100 when omitted)
+- `--op-id` — narrow to one op-id (glob with * wildcards, e.g. 'vmware.*')
+- `--since` — earliest run time; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
+- `--target` — narrow to one target (name or alias; server-side resolution)
+- `--until` — latest run time; accepts the same shorthand as --since
+
+#### `meho audit trace show`
+
+Print the stored flight-recorder trace of one operation run
+
+```
+meho audit trace show <audit-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the route's AuditTraceResult JSON unchanged (includes redacted headers and bodies)
 
 ### `meho audit who-touched`
 
@@ -1013,7 +1104,7 @@ meho broadcast watch [flags]
 
 ## `meho connector`
 
-spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable)
+spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)
 
 ```
 meho connector
@@ -1037,6 +1128,18 @@ meho connector catalog list [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
+
+### `meho connector delete`
+
+Remove a connector from your tenant (its operations and groups; the built-in copy stays)
+
+```
+meho connector delete <connector_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--confirm` — skip the interactive confirmation prompt
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
 
 ### `meho connector disable`
 
@@ -1103,7 +1206,7 @@ meho connector enable-reads <connector_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--confirm` — skip the interactive confirmation prompt
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
-- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant or builtin (default: stop with an error that asks you to pick one)
+- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a former product name; the copy delete removes first) (default: stop with an error that asks you to pick one)
 
 ### `meho connector ingest`
 
@@ -1161,7 +1264,7 @@ meho connector review <connector_id> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human render
-- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant or builtin (default: stop with an error that asks you to pick one)
+- `--prefer` — which connector to use when the id matches both a built-in connector and one in your tenant: tenant, builtin, or legacy (your tenant's old copy stored under a former product name; the copy delete removes first) (default: stop with an error that asks you to pick one)
 
 ## `meho conventions`
 
@@ -3457,7 +3560,7 @@ meho operation preview <connector_id> <op_id> [flags]
 
 ### `meho operation result-query`
 
-Page or query rows back from a JSONFlux result handle
+Page or query rows back from a result handle, or read a document handle by path
 
 ```
 meho operation result-query <handle_id> [flags]
@@ -3470,6 +3573,7 @@ meho operation result-query <handle_id> [flags]
 - `--limit` — paging: page size; default 50, max 500 (matches the result_query MCP tool)
 - `--offset` — paging: zero-based index of the first row to return (advance by --limit)
 - `--order-by` — query: sort term "<field> [asc|desc]" (repeatable, max 4)
+- `--path` — path: RFC 6901 JSON Pointer into a document handle ("" is the whole document, /a/0/b one step per /); an array value pages with --offset / --limit
 - `--query-limit` — query: max output rows (clamps to 500); the result flags truncation when more matched
 - `--select` — query: projection column to return (repeatable; omit for all columns)
 - `--where` — query: WHERE predicate "<field> <op> [value]" (repeatable; op = != < <= > >= IN 'IS NULL')

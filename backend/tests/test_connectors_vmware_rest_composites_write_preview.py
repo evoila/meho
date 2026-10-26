@@ -1096,17 +1096,20 @@ async def test_host_evacuate_park_resolves_vm_set_on_host(
 ) -> None:
     recorder = await _bootstrap_registry(stub_embedding_service)
     recorder.responses["/vcenter/vm"] = {
-        "value": [{"vm": "vm-a", "name": "app-a", "cluster": "domain-c1"}]
+        "value": [{"vm": "vm-a", "name": "app-a", "power_state": "POWERED_ON"}]
     }
 
-    _, row = await _park("vmware.composite.host.evacuate", {"host": "host-1"})
+    _, row = await _park(
+        "vmware.composite.host.evacuate", {"host": "host-1", "vsan_mode": "evacuateAllData"}
+    )
 
     assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.host.evacuate") == {
         "op_class": "other",
         "preview": {
             "host": "host-1",
             "tolerate_partial_failure": False,
-            "resolved": [{"vm": "vm-a", "name": "app-a"}],
+            "vsan_mode": "evacuateAllData",
+            "resolved": [{"vm": "vm-a", "name": "app-a", "power_state": "POWERED_ON"}],
             "total_resolved": 1,
         },
         "preview_populated": True,

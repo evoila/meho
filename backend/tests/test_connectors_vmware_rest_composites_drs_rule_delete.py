@@ -608,3 +608,36 @@ async def test_agent_principal_is_refused() -> None:
     assert "destructive" in (result.error or "")
     assert "ReconfigureComputeResource_Task" not in conn.methods()
     assert await _approval_count() == 0
+
+
+# ===========================================================================
+# The VM names on the approval card: every page is read (#4862)
+# ===========================================================================
+
+
+async def test_delete_shows_vm_names_from_a_later_page(gate: GateRecorder) -> None:
+    conn = VimFake()
+    conn.page_size = 1
+    _cluster(conn, [_anti_affinity_rule()])
+    out = await _call(conn, cluster=_CLUSTER, rule_name="keep-apart")
+
+    assert out["status"] == "deleted"
+    assert out["object"]["vms"] == [
+        {"vm": "vm-1", "name": "name-vm-1"},
+        {"vm": "vm-2", "name": "name-vm-2"},
+    ]
+    assert conn.continue_calls == [("<token-1>", "<session-1>")]
+    assert conn._pending == {}
+
+
+async def test_delete_shows_no_vm_names_when_a_page_fails(gate: GateRecorder) -> None:
+    """The name read is best effort: a lost page gives no names, never half of them."""
+    conn = VimFake()
+    conn.page_size = 1
+    conn.fail_continue = httpx.ConnectError("page lost")
+    _cluster(conn, [_anti_affinity_rule()])
+    out = await _call(conn, cluster=_CLUSTER, rule_name="keep-apart")
+
+    assert out["status"] == "deleted"
+    assert out["object"]["vms"] == [{"vm": "vm-1", "name": None}, {"vm": "vm-2", "name": None}]
+    _validate(out)

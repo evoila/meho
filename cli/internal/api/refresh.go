@@ -100,9 +100,16 @@ func (b *tokenBox) refresh(ctx context.Context) error {
 	// across rotations. Narrowing the scope on refresh (e.g. back to
 	// ["openid"]) is what Keycloak rejects with invalid_scope for
 	// offline sessions (#2902).
+	// AuthStyleInParams: the CLI is a public client, so client_id goes
+	// in the form body. The zero value ("auto-detect") would send a
+	// refused refresh twice — once with an Authorization header, then
+	// again with the id in the body.
 	cfg := oauth2.Config{
 		ClientID: b.current.ClientID,
-		Endpoint: oauth2.Endpoint{TokenURL: doc.TokenEndpoint},
+		Endpoint: oauth2.Endpoint{
+			TokenURL:  doc.TokenEndpoint,
+			AuthStyle: oauth2.AuthStyleInParams,
+		},
 	}
 
 	// Push httpClient into the oauth2 ctx so the refresh POST uses

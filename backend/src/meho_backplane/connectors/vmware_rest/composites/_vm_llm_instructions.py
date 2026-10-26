@@ -446,10 +446,16 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         ),
         "parameter_hints": {"cdrom": "CD-ROM device id, e.g. '16000'."},
         "output_shape": (
-            "{status: removed|updated|disconnected|invalid_request, vm, cdrom, action, "
-            "current_backing: {type, iso_file, ...}, state, requested_backing, guidance}."
+            "{status: removed|updated|disconnected|invalid_request|result_unknown, vm, "
+            "cdrom, action, current_backing: {type, iso_file, ...}, state, "
+            "requested_backing, guidance}. On result_unknown also running_tasks, "
+            "tasks_error and vm_question."
         ),
-        "next_step": "Check the VM with vmware.vm.info.",
+        "next_step": (
+            "Check the VM with vmware.vm.info. On result_unknown the change may still run: "
+            "do not start it again. If vm_question is set, show it to the user and answer "
+            "it with vmware.vm.question.answer."
+        ),
     },
     _P + "folder.create": {
         "when_to_call": "Call to create a VM folder under a parent VM folder.",

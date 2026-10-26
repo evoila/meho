@@ -5,7 +5,9 @@
 
 A licence key is a secret. Every read that returns licence keys shows each
 key through :func:`mask_license_key`, so all of them show a key the same way.
-Today these are ``vrops.license.info`` and ``sddc.license.list``.
+Today these are ``vrops.license.info``, ``sddc.license.list`` and the vSphere
+operations ``vmware.license.list``, ``vmware.license.assigned.list`` and
+``vmware.composite.license.assign``.
 
 Masking the key in the result is not enough on its own: the flight recorder
 records the raw vendor answer before the handler masks it. So each of these

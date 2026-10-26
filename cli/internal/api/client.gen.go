@@ -683,6 +683,7 @@ const (
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
 	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
 	TargetCreateProductRke2       TargetCreateProduct = "rke2"
+	TargetCreateProductSalt       TargetCreateProduct = "salt"
 	TargetCreateProductSddc       TargetCreateProduct = "sddc"
 	TargetCreateProductSrm        TargetCreateProduct = "srm"
 	TargetCreateProductTempo      TargetCreateProduct = "tempo"
@@ -690,7 +691,9 @@ const (
 	TargetCreateProductVcd        TargetCreateProduct = "vcd"
 	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
 	TargetCreateProductVmware     TargetCreateProduct = "vmware"
+	TargetCreateProductVr         TargetCreateProduct = "vr"
 	TargetCreateProductVrli       TargetCreateProduct = "vrli"
+	TargetCreateProductVro        TargetCreateProduct = "vro"
 	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 	TargetCreateProductWindns     TargetCreateProduct = "windns"
 	TargetCreateProductWinsrv     TargetCreateProduct = "winsrv"
@@ -820,12 +823,14 @@ const (
 // Defines values for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer.
 const (
 	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferBuiltin EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "builtin"
+	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferLegacy  EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "legacy"
 	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferTenant  EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "tenant"
 )
 
 // Defines values for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer.
 const (
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferBuiltin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferLegacy  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "legacy"
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferTenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
 )
 
@@ -1251,7 +1256,7 @@ type AgentRunRequest struct {
 	// Async Return a run handle immediately instead of blocking for the result.
 	Async *bool `json:"async,omitempty"`
 
-	// Input The user prompt to run the agent on.
+	// Input The user prompt to run the agent on. At most 65536 characters.
 	Input string `json:"input"`
 }
 
@@ -1622,6 +1627,22 @@ type ApprovalResumeOutcomeView struct {
 	ResumedAt    *string             `json:"resumed_at"`
 }
 
+// ApprovalsStatus The approval settings in force (#4830).
+//
+// “custody“ is the state of the approval key: “configured“,
+// “missing“ or “malformed“. “effective_posture“ says whether a
+// second person must approve (“four_eyes_enforced“) or one operator
+// may approve their own request (“single_operator_break_glass“).
+// “delegated_decision_posture“ says whether a decision made on
+// someone else's instruction is allowed. The three values come from
+// :func:`meho_backplane.features.build_features_block`; they are state
+// words only, never a key value.
+type ApprovalsStatus struct {
+	Custody                  string `json:"custody"`
+	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
+	EffectivePosture         string `json:"effective_posture"`
+}
+
 // ApproveRequestBody POST body for “…/approve“.
 type ApproveRequestBody struct {
 	// Async Async governed dispatch (#3079). When true, the decision is still recorded synchronously, but the resumed op is dispatched on a background task and the route returns HTTP 202 + a durable run handle immediately instead of blocking for the resumed op's full duration. Poll / cancel via ``/api/v1/operations/runs/{handle}``. Default false — the response is byte-identical to the pre-#3079 inline resume.
@@ -1879,6 +1900,7 @@ type AuditQueryRequest struct {
 	//   with it on they write a decision or execution class, or no row
 	//   (#3757, :mod:`meho_backplane.audit_cutover`).
 	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
+	HasTrace      *bool               `json:"has_trace"`
 	Limit         *int                `json:"limit,omitempty"`
 	OpClass       *string             `json:"op_class"`
 	OpId          *string             `json:"op_id"`
@@ -3629,7 +3651,11 @@ type ConfirmVerifyResponseAnswer string
 // about what verb closes the workflow). It is a :class:`NextStep`
 // object on “state="registered"“ rows and “None“ on
 // “state="ingested"“ rows (no operator action remains for an
-// ingested connector). The hint is computed against the curated
+// ingested connector) — with one exception: a tenant row stored under
+// a former product name (“vcf-logs“ rows for “vrli-rest-9.0“,
+// #4889) can never be called, so it ships “dispatchable=False“ plus
+// a “next_step“ naming “meho connector delete <id>“ as the
+// clean-up. For registered rows the hint is computed against the curated
 // connector-spec catalog (#743): when the catalog carries an entry
 // for the registry's “(product, version)“ the verb points at
 // “meho connector ingest --catalog ...“; otherwise it points at
@@ -3658,7 +3684,9 @@ type ConfirmVerifyResponseAnswer string
 // “tenant_id“, but surfacing it directly lets a consumer key on it
 // without re-deriving. “shadowed_by_tenant_scope“ is the precedence
 // marker: within a single response, a “"builtin"“ row carries
-// “True“ when a “"tenant"“ row shares its “connector_id“ — i.e.
+// “True“ when a “"tenant"“ row shares its “connector_id“ **and**
+// “product“ (the rule dispatch uses; a tenant row under a former
+// product name, #4889, shares the id but shadows nothing) — i.e.
 // the built-in copy is *shadowed* by a tenant-scoped twin that
 // :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
 // first (tenant-wins dispatch precedence). The two fields exist because
@@ -3671,7 +3699,10 @@ type ConfirmVerifyResponseAnswer string
 // keep working; the listing sets “scope“ explicitly per row and
 // stamps “shadowed_by_tenant_scope“ in a post-pass over the full
 // response. Invariant: within one response no two rows share
-// “(connector_id, scope)“. See :data:`ConnectorScope`.
+// “(connector_id, scope)“, with one exception: a tenant row stored
+// under a former product name (#4889) sits next to the tenant's
+// current copy of the same id; “product“ tells the two apart. See
+// :data:`ConnectorScope`.
 type ConnectorListItem struct {
 	ConnectorId           string                 `json:"connector_id"`
 	DisabledGroupCount    int                    `json:"disabled_group_count"`
@@ -4512,8 +4543,23 @@ type DashboardReadState string
 // “bool | None“ for forward compatibility with response decoders
 // that were generated against the chassis-stage shape, but the
 // handler now always populates it from the probe.
+//
+// “revision“, “head“ and “detail“ (#4830) carry the probe's
+// values, so an operator can confirm an upgrade from “meho status“
+// without a shell into the pod: “revision“ is the revision stamped
+// in the database, “head“ the revision this build expects, and
+// “detail“ the same text “/ready“ shows for the “db“ check.
+// “revision“ is “None“ when the database has no revision or could
+// not be read; “head“ is “None“ when the migration scripts could
+// not be loaded. After a rollback “revision“ is newer than “head“
+// while “migrated“ stays “True“ (“docs/codebase/migrations.md“,
+// "Rollback contract"). The defaults keep older response decoders
+// working.
 type DbStatus struct {
-	Migrated *bool `json:"migrated"`
+	Detail   *string `json:"detail"`
+	Head     *string `json:"head"`
+	Migrated *bool   `json:"migrated"`
+	Revision *string `json:"revision"`
 }
 
 // DecideRequestBody POST body for “/decide“ — the operator-decision path.
@@ -5458,6 +5504,16 @@ type EventSourceUpdate struct {
 	Status *EventSourceStatus `json:"status,omitempty"`
 }
 
+// FeatureStatus One gated feature from “/ready“'s “features“ block (#4830).
+//
+// “configured“ is the feature's state; “missing_env“ lists the
+// names of the settings it still needs. Names only, never values.
+type FeatureStatus struct {
+	Configured bool      `json:"configured"`
+	MissingEnv *[]string `json:"missing_env,omitempty"`
+	Name       string    `json:"name"`
+}
+
 // FilterPredicate One “WHERE“ clause term: “field op value“.
 //
 // “value“ is omitted for “IS NULL“, a list for “IN“ (each element
@@ -5717,7 +5773,28 @@ type HTTPValidationError struct {
 // instance lets a standing grant made in the web console cover a delete
 // by a service principal. “meho status“ prints one line when it is on.
 // The default “"off"“ keeps older response decoders working.
+//
+// “readiness“, “approvals“ and “features“ (#4830) let an operator
+// confirm an upgrade through MEHO: the same checks “/ready“ returns
+// (:class:`ReadinessStatus`), the approval settings in force
+// (:class:`ApprovalsStatus`) and the gated features with the names of
+// the settings they still need (:class:`FeatureStatus`). The route is
+// OPERATOR-gated, so unlike “/ready“ no metrics token is needed.
+// “None“ / empty defaults keep older response decoders working; the
+// handler always fills them.
 type HealthResponse struct {
+	// Approvals The approval settings in force (#4830).
+	//
+	// ``custody`` is the state of the approval key: ``configured``,
+	// ``missing`` or ``malformed``. ``effective_posture`` says whether a
+	// second person must approve (``four_eyes_enforced``) or one operator
+	// may approve their own request (``single_operator_break_glass``).
+	// ``delegated_decision_posture`` says whether a decision made on
+	// someone else's instruction is allowed. The three values come from
+	// :func:`meho_backplane.features.build_features_block`; they are state
+	// words only, never a key value.
+	Approvals *ApprovalsStatus `json:"approvals,omitempty"`
+
 	// Db Database migration status.
 	//
 	// ``migrated`` is ``True`` when the DB-migration-state probe reports
@@ -5730,10 +5807,23 @@ type HealthResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
-	Db                  DbStatus  `json:"db"`
-	GrantedScopes       *[]string `json:"granted_scopes,omitempty"`
-	McpProtocolVersion  *string   `json:"mcp_protocol_version,omitempty"`
-	McpSessionIdCapture string    `json:"mcp_session_id_capture"`
+	//
+	// ``revision``, ``head`` and ``detail`` (#4830) carry the probe's
+	// values, so an operator can confirm an upgrade from ``meho status``
+	// without a shell into the pod: ``revision`` is the revision stamped
+	// in the database, ``head`` the revision this build expects, and
+	// ``detail`` the same text ``/ready`` shows for the ``db`` check.
+	// ``revision`` is ``None`` when the database has no revision or could
+	// not be read; ``head`` is ``None`` when the migration scripts could
+	// not be loaded. After a rollback ``revision`` is newer than ``head``
+	// while ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,
+	// "Rollback contract"). The defaults keep older response decoders
+	// working.
+	Db                  DbStatus         `json:"db"`
+	Features            *[]FeatureStatus `json:"features,omitempty"`
+	GrantedScopes       *[]string        `json:"granted_scopes,omitempty"`
+	McpProtocolVersion  *string          `json:"mcp_protocol_version,omitempty"`
+	McpSessionIdCapture string           `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -5751,8 +5841,17 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
-	Operator    OperatorIdentity `json:"operator"`
-	Pairings    *[]PairingHealth `json:"pairings,omitempty"`
+	Operator OperatorIdentity `json:"operator"`
+	Pairings *[]PairingHealth `json:"pairings,omitempty"`
+
+	// Readiness The ``/ready`` verdict and its checks (#4830).
+	//
+	// Built from :func:`meho_backplane.health.readiness_snapshot`, the
+	// helper the web console's dashboard already uses, so ``meho status``
+	// and ``meho_status`` show the same checks as ``/ready`` — which a
+	// deployment may block at its ingress, and which hides its
+	// ``features`` block from callers without the metrics token.
+	Readiness   *ReadinessStatus `json:"readiness,omitempty"`
 	SandboxMode *string          `json:"sandbox_mode,omitempty"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -6288,6 +6387,9 @@ type KindFilterValue string
 // and write an audit row per poll. The facet honours this handler's
 // constraints — an in-memory clock read; no connector, no credential,
 // no secret.
+//
+// “db“ shares :class:`DbStatus` with the deep check, so it carries
+// the migration revision too (#4830). It still never touches Vault.
 type LivenessResponse struct {
 	// Db Database migration status.
 	//
@@ -6301,6 +6403,18 @@ type LivenessResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
+	//
+	// ``revision``, ``head`` and ``detail`` (#4830) carry the probe's
+	// values, so an operator can confirm an upgrade from ``meho status``
+	// without a shell into the pod: ``revision`` is the revision stamped
+	// in the database, ``head`` the revision this build expects, and
+	// ``detail`` the same text ``/ready`` shows for the ``db`` check.
+	// ``revision`` is ``None`` when the database has no revision or could
+	// not be read; ``head`` is ``None`` when the migration scripts could
+	// not be loaded. After a rollback ``revision`` is newer than ``head``
+	// while ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,
+	// "Rollback contract"). The defaults keep older response decoders
+	// working.
 	Db DbStatus `json:"db"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
@@ -7210,6 +7324,25 @@ type ReadDocsRequest struct {
 
 // ReadDocsRequestMode defines model for ReadDocsRequest.Mode.
 type ReadDocsRequestMode string
+
+// ReadinessCheck One readiness check, as “/ready“ reports it (#4830).
+type ReadinessCheck struct {
+	Detail *string `json:"detail,omitempty"`
+	Name   string  `json:"name"`
+	Ok     bool    `json:"ok"`
+}
+
+// ReadinessStatus The “/ready“ verdict and its checks (#4830).
+//
+// Built from :func:`meho_backplane.health.readiness_snapshot`, the
+// helper the web console's dashboard already uses, so “meho status“
+// and “meho_status“ show the same checks as “/ready“ — which a
+// deployment may block at its ingress, and which hides its
+// “features“ block from callers without the metrics token.
+type ReadinessStatus struct {
+	Checks *[]ReadinessCheck `json:"checks,omitempty"`
+	Ready  bool              `json:"ready"`
+}
 
 // ReassignRunRequest Request body for “meho_runbook_reassign“ -- transfer ownership of a run.
 //
@@ -10642,7 +10775,7 @@ type EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams struct {
 
 // EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams defines parameters for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost.
 type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams struct {
-	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.
 	Prefer        *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
 	Authorization *string                                                                   `json:"authorization,omitempty"`
 }
@@ -10662,7 +10795,7 @@ type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams struct {
 
 // GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
 type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
-	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.
 	Prefer        *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
 	Authorization *string                                                           `json:"authorization,omitempty"`
 }

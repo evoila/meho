@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""vSphere licences: the shared vCenter reads, the key mask and the row shapes.
+"""vSphere licences: the shared vCenter reads and the row shapes.
 
 Three operations use this module:
 
@@ -13,8 +13,9 @@ Three operations use this module:
 A licence key is a secret. The vCenter answers these reads get hold every
 key in clear, so:
 
-* no row built here holds a full key. :func:`mask_license_key` keeps the
-  last five characters and hides every other letter and digit;
+* no row built here holds a full key. The shared
+  :func:`~meho_backplane.connectors._shared.license_key.mask_license_key`
+  keeps the last five characters and hides every other letter and digit;
 * nothing here logs a key;
 * the three operations carry the tag :data:`LICENSE_KEY_TAG`. Its ``key``
   token is a secret tag token of the flight recorder
@@ -32,10 +33,10 @@ both can import it without an import cycle.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.vmware_rest.vim_body import (
     fault_type_name,
     retrieve_properties_body,
@@ -57,10 +58,8 @@ __all__ = [
     "OP_UPDATE_ASSIGNED_LICENSE",
     "LicenseInventory",
     "assignment_row",
-    "hide_license_keys",
     "is_evaluation",
     "license_row",
-    "mask_license_key",
     "query_assigned_licenses",
     "read_license_inventory",
 ]
@@ -102,49 +101,9 @@ _LICENSE_MANAGER_MOID: Final = "LicenseManager"
 _PROP_LICENSES: Final = "licenses"
 _PROP_ASSIGNMENT_MANAGER: Final = "licenseAssignmentManager"
 
-#: How many characters of a key stay visible. The same rule as
-#: ``vrops.license.info``.
-_VISIBLE_KEY_CHARS: Final = 5
 #: The key vSphere shows for its built-in evaluation licence.
 _EVALUATION_KEY: Final = "00000-00000-00000-00000-00000"
 _EVALUATION_EDITION: Final = "eval"
-#: A key in the vSphere shape: five groups of five letters or digits.
-_KEY_SHAPE: Final = re.compile(
-    r"(?<![A-Za-z0-9])[A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4}(?![A-Za-z0-9])"
-)
-
-
-def mask_license_key(key: object) -> str | None:
-    """Return *key* with only its last 5 characters visible.
-
-    Every other letter and digit becomes ``*``. Dashes stay, so a vSphere
-    key keeps its shape: ``*****-*****-*****-*****-AB12C``. A key of 10
-    characters or fewer is hidden in full. A value that is not a non-empty
-    string gives ``None``.
-    """
-    if not isinstance(key, str) or not key:
-        return None
-    if len(key) <= 2 * _VISIBLE_KEY_CHARS:
-        return "*" * len(key)
-    head, tail = key[:-_VISIBLE_KEY_CHARS], key[-_VISIBLE_KEY_CHARS:]
-    return "".join(char if char == "-" else "*" for char in head) + tail
-
-
-def _mask_match(match: re.Match[str]) -> str:
-    return mask_license_key(match.group(0)) or ""
-
-
-def hide_license_keys(text: str, *keys: str) -> str:
-    """Return *text* with every licence key in it masked.
-
-    Masks each of *keys* wherever it appears (any letter case), then every
-    other value in the vSphere key shape. Use it on vendor fault text before
-    that text reaches a result, an audit row or a log line.
-    """
-    for key in keys:
-        if key:
-            text = re.sub(re.escape(key), _mask_match, text, flags=re.IGNORECASE)
-    return _KEY_SHAPE.sub(_mask_match, text)
 
 
 def is_evaluation(info: dict[str, Any]) -> bool:

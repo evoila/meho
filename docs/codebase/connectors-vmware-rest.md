@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 71 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 73 hand-authored composites
 that orchestrate cross-spec workflows: 16 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -18,7 +18,7 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880`) and 55 write
+reservation read `vm.resource_allocation.show` / `#3880`) and 57 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -60,9 +60,11 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 `content_library.delete`, `content_library.item.delete`, plus the caution
 `datastore.dir.create` (see **Governed teardown deletes**), the destructive
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
-VM snapshot writes `vm.snapshot.create` (caution) + `vm.snapshot.delete`
-(destructive) (see **VM snapshot operations**), the licence assign
-`license.assign` (see **vSphere licences**), and the two caution alarm changes
+CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
+`vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
+Tools installer unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
++ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
+assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
 `alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
@@ -147,6 +149,25 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   a cluster id that does not exist gives `not_found`. It never returns
   empty health fields that look like a healthy cluster. How the call is
   sent: see "vSAN calls" below.
+  The stored result (`#4922`): by default vSAN runs a fresh health check
+  for every call. While a host of the cluster is in maintenance mode or
+  powered off, that check can take longer than the 30-second read limit
+  of the shared HTTP client (`adapters/http.py`), and the call failed
+  with `connector_timeout` and no health data. Now `from_cache: true`
+  sends vSAN's `fetchFromCache: true`, so vCenter answers with its last
+  stored summary in well under a second. The answer always carries
+  `checked_at` (the summary's `timestamp`, the time of the check the
+  result comes from; a stored result keeps the time of its check) and
+  `from_cache`. Without `from_cache`, a fresh check that ends with
+  `httpx.ReadTimeout` is followed by exactly one call with
+  `fetchFromCache: true`; its result is returned with `from_cache: true`,
+  `fresh_check: "timed_out"` and a plain `note` ("The fresh vSAN check did
+  not finish within 30 seconds. A host of the cluster may be down or in
+  maintenance mode. This is the last stored result."). When that call
+  fails too, the operation raises the read timeout again with the same
+  plain text, so the answer is `connector_timeout` as before, now with
+  the explanation in `exception_message`. A timed-out `from_cache: true`
+  call is not retried. The shared 30-second limit itself is unchanged.
 - **Write composites** (`composites/_write.py`) — the module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
@@ -470,10 +491,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 71
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 73
   `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 44 dangerous/destructive
-  writes + 11 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 45 dangerous/destructive
+  writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -663,6 +684,55 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
       session-scoped read cursor that the op removes before it returns. It
       changes no inventory or configuration, and vCenter needs only the
       `System.View` privilege to create it.
+- **`vmware.vm.question.get`** and **`vmware.vm.question.answer`**
+  (`typed_ops_vm_question.py`, handlers `vm_question_get` /
+  `vm_question_answer`; the shared read is in `vm_wait_state.py`) — read
+  and answer the question a VM waits on.
+  vCenter can stop a VM change and wait until someone answers a question
+  in the VM; until then the change runs on, and a second try fails with
+  "Another task is already in progress".
+  - **Read** (`safe`). By `vm` moid or `name`. One PropertyCollector read
+    of `name`, `runtime.question` and `recentTask` on the VM, then one
+    `Task.info` read of those tasks (only when there are any). Returns
+    `{vm, name, pending, question: {id, text, choices: [{key, label,
+    summary}], default_choice, messages} | null, running_tasks: [{task,
+    operation, state, progress, start_time}], tasks_error}`;
+    `running_tasks` keeps only `queued` and `running` tasks.
+    - The question read must succeed. When vCenter could not read
+      `runtime.question` (a `missingSet` fault, for example no permission),
+      the read raises and names the fault type, so a read failure never
+      looks like "no question".
+    - The task read is best effort. When `recentTask` was unreadable or the
+      `Task.info` read fails, `running_tasks` is empty and `tasks_error`
+      says why; the question is still returned.
+    - When a long `running_tasks` list makes JSONFlux reduce the result to
+      a handle, the `result_objects` hint keeps the `question` (`id`,
+      `text`, `choices`, `default_choice`, `messages`) inline, so the caller
+      still has what it needs to answer. The inline copy is bounded: a
+      question with many long choices is cut, `result_object_truncations`
+      names the cut field, and `result_object_note` says how to get the
+      whole question. The reducer stores it complete with the rows, so
+      `result_query` with `path="/question"` returns every choice.
+    - When vCenter answers the `Task.info` read but could not read the
+      `info` of one task (a `missingSet` fault), or left a task out, that
+      task may still run: `running_tasks` is empty and `tasks_error` names
+      the fault, so an unreadable task never looks like "no running task".
+  - **Answer** (`dangerous`, waits for approval). Params `vm` (moid only,
+    checked against `[A-Za-z0-9-]+` because it goes into the URL path, and
+    percent-encoded), `question_id` and `answer` (a choice key). It reads
+    the question again first: a different question id or no question
+    returns `question_gone`, a key that is not a choice returns
+    `invalid_answer`, and nothing is sent in both cases. Then it POSTs
+    `VirtualMachine.AnswerVM` (`{questionId, answerChoice}`) on the VI-JSON
+    base `/sdk/vim25/{release}` through `_post_vmomi_json` (the ingested
+    `/api/VirtualMachine/...` form 404s on vCenter 9.x). A
+    `ConcurrentAccess` or `InvalidArgument` fault means someone closed the
+    question in the meantime and also returns `question_gone`. A question
+    vCenter could not read raises before anything is sent; a failed task
+    read does not stop the answer.
+  - **Approval preview.** A preview builder shows the approver the
+    question text, the label of the chosen answer, whether the question
+    is still open, the running tasks and `tasks_error`.
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input
@@ -1096,17 +1166,17 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 71 `vmware.composite.*` rows with
+   queued registrar and upserts: the 73 `vmware.composite.*` rows with
    `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 55 writes, all `requires_approval=True`
-   (33 `safety_level="dangerous"`; 11 `safety_level="caution"` —
+   service principals), and 57 writes, all `requires_approval=True`
+   (34 `safety_level="dangerous"`; 12 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
-   `vm.snapshot.create`;
+   `vm.tools.installer.unmount`, `vm.snapshot.create`;
    and 11 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
@@ -1490,7 +1560,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 71 composites (16 reads + 55 writes) land as `source_kind="composite"`
+The 73 composites (16 reads + 57 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1536,12 +1606,42 @@ calls another composite via `dispatch_child`. Two-level nesting:
 
 ```text
 host.evacuate                                            # depth 0 (top-level dispatch)
-  ├─ GET:/vcenter/vm                                     # depth 0 (direct session read)
-  └─ vmware.composite.vm.migrate (× N)                  # depth 1 (dispatch_child of a composite)
-       ├─ vim RetrievePropertiesEx (drsRecommendation)  # depth 1 (direct vmomi read, #2970)
-       └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 1 (direct session write, gated)
-  └─ vim POST:/HostSystem/{moId}/EnterMaintenanceMode_Task # depth 0 (gated vmomi write + Task poll, #2970)
+  ├─ vim RetrievePropertiesEx (HostSystem.parent)        # depth 0: the host's cluster (#4895)
+  ├─ vim RetrievePropertiesEx (configurationEx)          # depth 0: the cluster's DRS config
+  ├─ GET:/vcenter/vm?hosts=<host>                        # depth 0 (direct session read)
+  ├─ vmware.composite.vm.migrate (× running VMs)        # depth 1 (dispatch_child of a composite;
+  │    ├─ vim RetrievePropertiesEx (drsRecommendation)  #   skipped when DRS is fully automated)
+  │    └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 1 (direct session write, gated)
+  ├─ vim POST:/HostSystem/{moId}/EnterMaintenanceMode_Task # depth 0 (gated vmomi write + Task poll, #2970)
+  └─ GET:/vcenter/vm?hosts=<host>                        # depth 0: which VMs left, which stayed
 ```
+
+**What `host.evacuate` does (#4895).** The vCenter VM listing rows
+(`Vcenter.VM.Summary`: `vm`, `name`, `power_state`, `cpu_count`,
+`memory_size_mib`) carry no cluster field, so the handler reads the
+cluster once from the host's `parent` property. A host outside a cluster
+is refused before any change (`not_in_cluster`). It then reads the
+cluster's `configurationEx` and picks `drsConfig` in code (vCenter 8.0
+refuses the nested path, #3617). When DRS is on and fully automated, it
+sends no per-VM move: vCenter moves the running VMs itself as part of the
+maintenance-mode task. Otherwise it moves every running VM (`power_state`
+`POWERED_ON`) through the recursive `vm.migrate` with that cluster; a VM
+DRS has no suggestion for is `no_recommendation` and stops the call before
+maintenance mode unless `tolerate_partial_failure` is set. Powered-off VMs
+are never moved (MEHO does not send `evacuatePoweredOffVms`) and may stay
+on the host. The maintenance body is `{"timeout": 0, "maintenanceSpec":
+{"vsanMode": {"objectAction": <vsan_mode>}}}` — `vsan_mode` is
+`ensureObjectAccessibility` (vCenter's own default), `evacuateAllData` or
+`noAction`; `cluster.patch` keeps the plain `{"timeout": 0}` body. After
+the task the handler lists the host's VMs again, and that listing alone
+decides: `migrated_vms` are the VMs that are gone (moved by MEHO or by
+vCenter, see `moved_by`), `remaining_vms` the VMs still listed with the
+reason (`powered_off`, `no_recommendation`, `still_listed_after_move` when
+`vm.migrate` reported a move the host does not show, `not_moved`,
+`not_attempted`), `failed_vms` only the VMs MEHO tried to move and that are
+still there. When the 600 s poll ends
+while the task still runs, the answer is `status: timeout` with
+`maintenance_task` and a `warning` issue — the call did not fail.
 
 `composite_depth_var` (default cap 8) handles the one nesting level
 naturally. Post-`#2256` the **audit** tree is two-level, not three:
@@ -1557,7 +1657,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 71 composites are hand-authored aggregators the connector ships as
+The 73 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -1678,7 +1778,7 @@ enum) are:
 | `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
 | `vm.disk.attach` | `attached`, `invalid_vmdk_path`, `invalid_unit`, `controller_not_found`, `unit_in_use`, `timeout` (#3256; the first four are pre-write fail-closed refusals; `timeout` when the `ReconfigVM_Task` add poll gives up; a task *fault* raises `connector_error`) |
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
-| `host.evacuate` | `evacuated`, `partial`, `aborted` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; fault/timeout raises `connector_error`, #2970) |
+| `host.evacuate` | `evacuated`, `partial`, `aborted`, `timeout`, `not_in_cluster` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; a task *fault* raises `connector_error`, #2970; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, #4895; `not_in_cluster` is a pre-change refusal) |
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
@@ -1692,7 +1792,7 @@ enum) are:
 | `network.portgroup.vlan.set` | `set`, `unchanged`, `invalid_vlan_spec`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled; reconfigures an **existing** portgroup's `defaultPortConfig.vlan` to a trunk `NumericRange[]` or a single access VLAN — the given spec **replaces** the current config, there is no merge. Idempotent: the current VLAN is read + normalised (ranges sorted + merged-adjacent) first and a request that already matches returns `unchanged` with no write / no task; `invalid_vlan_spec` refuses both/neither VLAN mode (or `replace=false`) before any write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries normalised `before` / `after` VLAN views) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
-| `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
+| `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request`, `result_unknown` (the change timed out and may still run; carries `running_tasks`, `vm_question` and an `error` issue) |
 | `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `partial`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value (a limit of `0` included — `-1` clears) or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); `partial` when the task succeeded but the re-read `after` does not match every requested field; `vm_not_found` on a promoted `ManagedObjectNotFound`; a task *fault* raises `connector_error` like `vm.disk.grow`. Carries `before` / `after` allocation views) |
 | `network.portgroup.delete` / `folder.delete` | `deleted`, `unchanged`, `precondition_failed`, `still_present`, `timeout` (#3339; vim `Destroy_Task` polled; `precondition_failed` before any write when something still uses the object -- listed in `blockers`; a task *fault* raises `connector_error`) |
 | `host.standard_portgroup.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339; synchronous `RemovePortGroup` -- a vim fault raises) |
@@ -1766,6 +1866,14 @@ a host-pinning ISO:
   (`PATCH` the backing — requires a `backing` param, e.g.
   `{type: CLIENT_DEVICE}` to un-pin a host-local ISO), or `disconnect`
   (`POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect`).
+  When the write times out, the result is `result_unknown`, not a plain
+  timeout: vCenter may still run the change, often because it waits on a
+  question in the VM (for example a locked CD-ROM door). The result names
+  the VM's queued or running tasks and the pending question, read with
+  `vm_wait_state.read_vm_wait_state` (best effort: when only the task
+  read fails, the question is kept and `tasks_error` says what could not
+  be read), and carries an `error` issue, so the call is recorded as
+  failed. Answer the question with `vmware.vm.question.answer`.
 
 All three register a live-read **from->to** preview builder in
 `_write_preview.py`, so the parked approval row names the current state
@@ -1967,6 +2075,67 @@ in `composites/_vm_allocation.py` and ride the `/sdk/vim25` seam:
   `RetrievePropertiesEx` / `ReconfigVM_Task` `vm.disk.grow` reconciles, so no
   new vim op_id is introduced. vCenter targets only (the standalone-ESXi SOAP
   transport has no `ReconfigVM_Task` builder).
+
+### VM hardware read, CD drive add and Tools installer unmount
+
+Three operations replace raw vCenter calls that people used often for VM
+hardware. All three call vSphere REST on the connector session, so they need
+no catalog ingest. Every path exists on vCenter 8.0 and 9.0, and all three are
+on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`). The read names the
+VM by id (`vm`, such as `vm-42`) or by `name`, like `vmware.vm.info`: an
+unknown name gives `not_found`, a name that fits two VMs is an error. The two
+changes take the VM id (`vm`) only, and no name. A change waits for approval,
+and it must then run on the VM the approver saw. A name looked up again after
+approval could point to another VM (for example after a rename). So get the
+id from the read first.
+
+- **`vmware.vm.hardware.show`** (typed read, `safe`, no approval;
+  `typed_ops_vm_hardware.py` with its schemas in `_vm_hardware_schemas.py`,
+  handler `vm_hardware_show`, group `vmware-vm-hardware`). Reads, all `GET`
+  under `/vcenter/vm/{vm}`:
+  `hardware/cpu` and `hardware/memory` (must work; a 404 gives `not_found`),
+  `hardware/cdrom` and `hardware/cdrom/{cdrom}`, `hardware/disk` and
+  `hardware/disk/{disk}`, `hardware/adapter/scsi`, `/sata` and `/nvme` with
+  `.../{adapter}` for the bus, and `tools/installer`.
+  Answer: `cpu` (count, cores per socket, hot add / remove), `memory`
+  (`size_mib`, hot add, step and limit), `cdroms` (backing type, ISO file,
+  host device, state, `connected`, `start_connected`), `disks` (type, address,
+  `capacity_bytes`, `vmdk_file`), `disk_controllers` (kind, adapter, type,
+  bus, sharing, `devices`) and `tools_installer_mounted`. The vSphere REST
+  controller resources do not list their devices, so the read joins them
+  itself: a disk or CD drive sits on the controller of the same kind and bus
+  number (`Disk.Info.scsi.bus`, `Cdrom.Info.sata.bus`, and so on). Each
+  controller's `devices` lists them by unit, with id, label, and for a disk
+  its size and VMDK file. The CD drive, disk, controller and installer reads
+  are best effort: a failed part is `null` and `read_notes` says why. When a
+  list works but one drive or disk cannot be read, that row keeps its id
+  with `null` fields and `read_notes` names it.
+- **`vmware.composite.vm.cdrom.add`** (`dangerous`, waits for approval;
+  `composites/_vm_cdrom_tools.py`). One `POST /vcenter/vm/{vm}/hardware/cdrom`
+  with a top-level `Cdrom.CreateSpec`: an ISO file backing when `iso_file` is
+  set (then `start_connected` defaults to true), else a client device backing
+  (an empty drive). Optional `type` (IDE or SATA) and `allow_guest_control`.
+  It reads the new drive back (`cdrom_info`). vCenter answers HTTP 400 for an
+  IDE drive on a running VM or a suspended VM; the answer is then
+  `status="refused"` with vCenter's error, and nothing changed. Not safe to
+  run twice: each call adds a drive.
+- **`vmware.composite.vm.tools.installer.unmount`** (`caution`, waits for
+  approval; same module). Reads `GET /vcenter/vm/{vm}/tools/installer` first.
+  When the installer is not mounted it sends nothing (`not_mounted`), so it is
+  safe to run twice. Else `POST .../tools/installer?action=disconnect`, then it
+  reads again: `unmounted`, or `still_mounted` when it still reads as mounted.
+  vCenter refuses the call for a VM that is off (`refused`).
+
+The two changes go through the shared write seam (`_write._write_sub_op`), so
+each REST write is checked by policy like the other composite writes. Their
+approval previews are registered in their own module: the cdrom add shows the
+drive to add and the drives the VM has now; the unmount shows whether the
+installer is mounted now. The `vm` id goes into the URL path, so it must match
+`^vm-[0-9]+$`; a device id from vCenter is checked and percent-encoded too.
+`test_connectors_vmware_rest_vm_hardware_reconcile.py` checks every REST call
+of the three operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
+skips without the vendor spec files). Tests use saved responses
+(`test_connectors_vmware_rest_typed_vm_hardware.py`).
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 
@@ -2847,9 +3016,9 @@ content-library byte source in `library_download.py`):
    the PUT's `Content-Length` is the download response's own `Content-Length`
    (the `File.Info.size` is not guaranteed set before the download completes).
    A `*` device-URL host is substituted with the host the client connected to
-   (the `HttpNfcLeaseDeviceUrl.url` spec contract). **Before a byte streams,
-   the device host's certificate is pinned to the lease's `sslThumbprint`**
-   (see the hardening note below).
+   (the `HttpNfcLeaseDeviceUrl.url` spec contract). Before disk bytes stream,
+   the upload checks the lease certificate or thumbprint, or uses verified
+   TLS when neither is supplied (see the certificate checks below).
 6. `HttpNfcLeaseComplete` on success; `HttpNfcLeaseAbort` on any failure after
    the lease exists — vCenter then removes the half-created inventory objects,
    so a failed import never leaves a partial VM behind.
@@ -2863,36 +3032,47 @@ library lookup, no second import. An approved power-on with no saved
 envelope (a request saved before #4217) is refused before anything runs
 (`composite_resume_unsupported`).
 
-**Version-agnostic (AC5).** Every schema + method is core vim25 (`OvfManager`
-/ `HttpNfcLease` predate 9.0), and the engine reads only the pre-9.0
-`HttpNfcLeaseDeviceUrl` fields (`key` / `importKey` / `url` / `sslThumbprint`)
-— never the 9.0-only `sslCertificate` — so it works on the VCF 5.x
-migration-source fleet (#3056) as well as 9.0+.
+**Version support (AC5).** The core vim25 methods (`OvfManager` and
+`HttpNfcLease`) predate 9.0. Older lease fields remain sufficient for the
+VCF 5.x migration-source fleet (#3056). On 9.0+, the engine prefers the
+optional `sslCertificate` when present. Older leases use their thumbprint
+or verified TLS as described below.
 
-**Device-host thumbprint pinning (#3284).** Each disk PUT streams to an
-*absolute* per-device ESXi upload URL, not to `target.host`, so the pooled
-client's per-target SSRF host re-screen (keyed to `target.host`) does not run
-for the device host — a deliberate bypass, since screening would wrongly
-block a legitimate private ESXi host. The replacement control is certificate
-thumbprint pinning: `plan_transfers` captures each device URL's
-`HttpNfcLeaseDeviceUrl.sslThumbprint` (a SHA-1 hash of the DER certificate in
-colon-separated hex — the vim thumbprint convention `HostConnectSpec.sslThumbprint`
-documents), and `ovf_transfer.verify_device_thumbprint` opens a pre-flight
-`VERIFY_NONE` handshake to the device host and **refuses to stream a byte**
-unless the presented certificate hashes to that attestation. A mismatch — or
-a handshake that cannot obtain a certificate — raises `DeviceThumbprintError`,
-which `_run_transfer` catches before `httpx.HTTPError`, aborts the lease, and
-maps to a distinct `import_error` with a `security`-category issue (no disk
-bytes flowed). **Missing-thumbprint policy: fail-open.** An empty / absent
-`sslThumbprint` skips pinning and falls back to the pooled client's existing
-TLS trust, because the vim spec sanctions an empty value ("Empty if no SSL
-thumbprint is available or needed") — a conformant lease that omits the field
-must still import, and pinning is a strict improvement layered on top of the
-pre-existing "device URLs are trusted vendor data" posture, never a new gate
-that fails closed on legitimate traffic. The SSRF host screen stays off for
-device-URL PUTs; pinning is the replacement, comparison is
-colon/case-insensitive, and the 64-hex-char case is accepted as SHA-256 for
-forward-compatibility.
+**Device-host certificate checks.** Each disk PUT goes to the ESXi URL
+returned by vCenter's lease. `plan_transfers` keeps its `sslCertificate` and
+`sslThumbprint`. When the optional PEM certificate is supplied, its SHA-256
+hash takes precedence. Invalid supplied PEM fails; it never falls back to a
+weaker hash. The certificate field was added in
+[vSphere 9](https://developer.broadcom.com/xapis/vsan-management-api/latest/vim.HttpNfcLease.DeviceUrl.html).
+Older servers can supply only a thumbprint. SHA-256 thumbprints remain supported;
+legacy SHA-1 thumbprints work only when the host crypto policy allows them.
+Hashing authenticates the peer, so it never bypasses that policy.
+
+A fresh client checks the selected hash on the actual upload TLS connection,
+before sending HTTP headers, the lease token, or disk bytes. Every new
+connection checks again. There is no separate preflight connection. This
+supports self-signed ESXi certificates. A missing certificate, bad hash,
+blocked algorithm, or mismatch raises `DeviceThumbprintError`; the engine
+aborts the lease and returns a security issue.
+
+Lease metadata comes from the vCenter control-plane session. Its authenticity
+requires normal TLS verification or the target's CA pin. The explicit
+`verify_tls=false` override without a CA pin leaves that session open to
+interception. Checking the upload against its lease does not repair that risk.
+Use verified control-plane TLS to trust the lease certificate or thumbprint.
+
+When the lease has neither certificate nor hash, the upload requires normal
+CA and hostname checks, using the target's CA pin or the default trust store.
+A target with TLS checks disabled and no CA pin cannot upload without lease
+certificate material. All device URLs must use HTTPS. The per-disk client
+carries no vCenter login cookies and follows no redirects. Private ESXi
+addresses remain supported.
+
+The transport wraps HTTPcore's network stream. It checks the peer after
+`start_tls` and blocks every write until that check passes. This follows the
+[HTTPcore network backend API](https://www.encode.io/httpcore/network-backends/).
+Real TLS tests cover self-signed matches, changed certificates, reconnects,
+missing hashes, CA pins, hostname checks, and redirects.
 
 **Envelope.** Item resolution (id passthrough or name find, ambiguity-refusing)
 reuses `_resolve_deploy_library_item`, and the outcome maps onto the **same**
@@ -3481,7 +3661,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | Composite | Preview | Depth |
 | --- | --- | --- |
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
-| `host.evacuate` | `{host, tolerate_partial_failure, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
+| `host.evacuate` | `{host, tolerate_partial_failure, vsan_mode, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
@@ -3677,14 +3857,15 @@ read. An unset property has no `missingSet` entry and means no triggered
 alarms.
 
 **Every page is read.** vCenter may split a large answer into pages: a
-`RetrieveResult` with some objects and a `token`. Every alarm read follows
-each token with `PropertyCollector.ContinueRetrievePropertiesEx`, on the
-session of the first call (vCenter accepts a token only there and only once),
-until a page comes back without a token; at most 100 pages. A failed page
-fails the whole read: the list or the change fails, the read after a change
-gives `not_verified`, and a failed name read shows in `read_note`, with no
-names of that object type used. So a lost page never leaves names or trigger
-kinds silently empty.
+`RetrieveResult` with some objects and a `token`. Every alarm read goes
+through the shared paged read `vim_retrieve.retrieve_all_pages` (see "Reads
+of many objects read every page" below), which follows each token with
+`PropertyCollector.ContinueRetrievePropertiesEx` on the session of the first
+call, until a page comes back without a token; at most 100 pages. A failed
+page fails the whole read: the list or the change fails, the read after a
+change gives `not_verified`, and a failed name read shows in `read_note`, with
+no names of that object type used. So a lost page never leaves names or
+trigger kinds silently empty.
 
 **Trigger kind.** Each row has `trigger_kind`, from the alarm rule
 (`Alarm.info.expression`): `event` (only event conditions), `metric` (only
@@ -3753,6 +3934,36 @@ the filter enum values and the object types against the pinned 9.0
 `test_connectors_vmware_rest_8_0_spec_reconcile.py` checks the methods
 against 8.0 U1 to U3. `AlarmFilterSpec` is in the type-name list of
 `test_connectors_vmware_rest_composites_write_body_reconcile.py`.
+
+### Reads of many objects read every page (`vim_retrieve.py`, #4862)
+
+A `PropertyCollector.RetrievePropertiesEx` call that asks for many objects
+can come back split into pages: some objects and a `token` for the rest.
+This can happen even when MEHO sets no page size (the pinned `vi-json.yaml`
+says PropertyCollector policy may still limit the number of objects). Every
+read of many objects in one call therefore goes through the shared helper
+`vim_retrieve.retrieve_all_pages`. It sends the first `RetrievePropertiesEx`
+with a `SessionTokenUsed` that records the vCenter session, then sends
+`ContinueRetrievePropertiesEx` with each `token`, pinned to that session
+(vCenter accepts a token only there and only once), until a page comes back
+without a token. The caller gets one `{"objects": [...]}` answer with the
+objects of all pages, so its parser does not change. A failed page fails the
+whole read (no objects of the earlier pages are returned), and an answer
+that has not ended after 100 pages raises `TooManyPagesError` (a
+`RuntimeError`, so a caller that handles a failed call handles it too).
+The reads that use it: the recent tasks (`vmware.tasks.recent`), the VM
+placement of `datastore.usage`, the mounted-datastore check of
+`host.datastore_mount_nfs`, the vApp clean-up of `vm.deploy_from_library`,
+the names of blocking objects in the governed deletes (`read_names`), the
+datastore read of the VM move preview, and the alarm reads. Each of these
+operations lists `POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx`
+on its sub-operation manifest where it has one. On a standalone ESXi host
+the SOAP transport has no `ContinueRetrievePropertiesEx` builder, so a split
+answer makes the read fail there; it never returns a short list. A read of
+one object (one VM, one host, a task poll) fits on one page, because vCenter
+splits an answer only between objects, so those reads do not use the helper.
+`_retrieve_props_by_moid` and `read_many` read in groups of 50 and refuse an
+answer that still carries a token, so they never return a short list either.
 
 ### Version check for typed operations (`_version_gate.py`, #4316)
 
@@ -3831,12 +4042,14 @@ flight-recorder span holds a full key.**
   On vCenter 9, licences are usually managed in VCF Operations
   (`vrops.licensing.*`). The guidance of the write says so; if vCenter 9
   refuses the change, the caller gets the vendor fault as an error.
-- **The mask.** `license_common.mask_license_key` keeps the last 5
-  characters and turns every other letter and digit into `*`; dashes stay,
-  for example `*****-*****-*****-*****-AB12C`. A value of 10 characters or
-  fewer is hidden in full. It is the same "last 5" rule as
-  `vrops.license.info`. The field is `key_masked`: a name with `license`
-  and `key` next to each other would be replaced by the secret-name scrubs.
+- **The mask.** The shared `mask_license_key` in
+  `connectors/_shared/license_key.py` keeps the last 5 characters and turns
+  every other letter and digit into `*`; dashes stay, for example
+  `*****-*****-*****-*****-AB12C`. A value of 10 characters or fewer is
+  hidden in full. It is the same rule `vrops.license.info` and
+  `sddc.license.list` use; the vSphere module has no copy of its own. The
+  field is `key_masked`: a name with `license` and `key` next to each other
+  would be replaced by the secret-name scrubs.
 - **Vendor answers.** `LicenseManager.licenses`, `QueryAssignedLicenses` and
   the `UpdateAssignedLicense` answer hold full keys. The handlers build their
   rows with `license_row` / `assignment_row`, which mask the key; a raw
@@ -3859,24 +4072,15 @@ flight-recorder span holds a full key.**
   the `outcome`. The parameter schema has `additionalProperties: false`, so a
   key cannot be passed in.
 - **Errors of the write.** A fault of `UpdateAssignedLicense` can echo the
-  key (the vSphere `InvalidLicense` fault has a `licenseContent` field), and
-  the dispatcher copies text out of an error into the result and the audit
-  row. So `_hide_key_in_error` masks the key in place in everything the error
-  carries, and then the same error is raised again:
-  - its message;
-  - the vendor answer of an HTTP error, also when that error is the cause of
-    a `ConnectorAuthError` (the VI-JSON `NoPermission` / `InvalidLogin` /
-    `NotAuthenticated` path, whose answer the `connector_auth_failed` result
-    shows);
-  - the SOAP fault the single-host path attaches;
-  - the text a JSON parse error keeps.
-
-  It also drops the request body (it held the key) from every HTTP error,
-  keeping the method, URL and timeouts. Masking uses `hide_license_keys`
-  (the key itself, and any value in the 5x5 key shape). The class, the
-  status and the auth fields stay, so the dispatcher sorts the error as
-  before: `connector_auth_failed`, a new login and one retry on a 401, the
-  403 and 429 results, `connector_error` with the masked `upstream_fault`.
+  key (the vSphere `InvalidLicense` fault has a `licenseContent` field). The
+  handler raises the error as it is, so the dispatcher sorts it as before:
+  `connector_auth_failed`, a new login and one retry on a 401, the 403 and
+  429 results, `connector_error` with `upstream_fault`. The tag
+  `license-key` marks the operation as one that sends a secret, so the
+  dispatcher's shared rule replaces the vendor's text in the error result
+  and the audit row (#4854, `operations/_vendor_text.py`; see
+  `docs/codebase/error-message-shape.md`). The fault type and the HTTP
+  status stay. The handler has no masking code of its own.
 - **Assign flow.** One property read (inventory and
   `LicenseAssignmentManager`); pick the licence (`license_not_found`, or
   `license_ambiguous` with the masked `candidates`); `QueryAssignedLicenses`
@@ -4051,6 +4255,11 @@ a key; flight-recorder spans, with a control case without the tag),
     dropped the idle session) makes the call log in again and retry once.
     SOAP has no list marker, so a list with one entry comes back as a
     single dict; the operation turns its list fields back into lists.
+    The codec writes two argument types (`_argument_xml`): a managed
+    object reference (`<cluster type="ClusterComputeResource">domain-c7</cluster>`)
+    and, since `#4922`, a true/false value as `xsd:boolean` text
+    (`<fetchFromCache>true</fetchFromCache>`). Any other type raises
+    `TypeError`; an operation that needs one adds it there, with a test.
   - An unknown version stays on VI-JSON. A legacy `/rest` session
     (vcsim) mounts the same `/vsan/...` path on `/rest`.
 

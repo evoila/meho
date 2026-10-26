@@ -93,6 +93,62 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## The params hash on requests and audit rows
+
+Two kinds of rows carry a keyed hash of a call's params:
+
+- **The approval request** (`approval_request.params_hash`) binds the exact
+  call. It is HMAC-SHA256 with a server key over every value
+  (`compute_params_hash` in `operations/_validate.py`). Before an approved
+  call runs, MEHO checks the params against it (`params_hash_matches`), so a
+  call that changed any value, a password too, does not match.
+  The request also keeps the params themselves, because MEHO runs the
+  approved call with them:
+  - For most operations they are stored in plain form in
+    `approval_request.params`.
+  - For a `credential_write` operation they are not on the request row.
+    They are encrypted in `approval_execution_payload` instead (see
+    "Credential-write execution custody" below).
+- **Audit rows** (`payload.params_hash` on dispatch, MCP and hosted-agent
+  tool rows, and `operation_run.params_hash`) store the hash, not the params.
+  They use the same keyed hash, but each secret-named value (`password`,
+  `client_secret`, `api_key` and similar, the names the broadcast scrub
+  uses) is replaced by a fixed marker first (`compute_audit_params_hash`).
+  Two calls with the same other values get the same hash. For a call without
+  secret-named values, both hashes are equal.
+
+The server key is derived from `DATABASE_URL` (HMAC-SHA256 under a fixed
+label). Every install has that value, the key is never stored, and there is
+no new setting. What follows:
+
+- Hashes can be compared inside one install. Rows written before the keyed
+  hash hold a plain SHA-256: they stay readable, but they do not match new
+  hashes. The column format (64 hex characters) is unchanged, so there is no
+  migration.
+- A request that was already waiting for approval when MEHO was upgraded
+  holds the plain hash. The approval check accepts it for the request's own
+  params, so the request can still be approved.
+- When `DATABASE_URL` changes (for example a new database password), the key
+  changes: new hashes no longer match older ones, and a request that waits
+  for approval at that moment must be asked for again.
+- A client cannot compute these hashes itself, because they need the server
+  key. To match a request to a call, use the `approval_request_id` the call
+  returns, or the `preview_hash` of a destructive call.
+
+The satellite work item is the exception: `gateway_command.params_hash` is a
+plain SHA-256 (`params_digest`), because the runner checks it again and holds
+no server key. That row stores the params themselves anyway.
+
+The effect rows a satellite forwards (`gateway.command.effect`) are audit rows
+like the others:
+
+- `params_hash` is the same audit hash, computed from the command's stored
+  params. When no command matches the record's digest, it is the keyed hash
+  of the runner's digest (`compute_audit_digest_hash`).
+- `record_hash` and `signature` hold keyed hashes too.
+- The plain values stay where they are checked: with the runner, in the chain
+  head (`runner_effect_chain`) and on the `gateway_command` row.
+
 ## Credential-write execution custody (#3537)
 
 For every operation classified as `credential_write`, the parked
@@ -1269,6 +1325,53 @@ in an `additionalProperties` representation) never reaches the durable
 row. `keycloak.role_mapping.assign` populates
 `{resource, username, id, realm, granted_roles}` (the granted realm role
 names). Further connectors register their own builders as needed.
+
+## Credential writes: what the approver sees (#4850)
+
+A credential write is an op pinned `credential_write` in
+`broadcast/events.py` (`_CREDENTIAL_WRITE_OPS`). When it waits for
+approval, the generic echo of params is turned off (invariant 3). So the
+approver sees only what a bespoke preview builder shows. Without one,
+the approver sees the op id, the target and the reason
+`credential_write_redacted`, and does not know which account, secret or
+host changes.
+
+Every credential write that can wait for approval now has a builder.
+Each builder shows what changes and never a secret value. These nine
+got one in #4850:
+
+| Op | Who waits for approval | The approver sees | Never shown |
+|---|---|---|---|
+| `keycloak.user.reset_password` | every call | user (`username` / `id`), realm, Vault path of the new password (`password_secret_ref`, mount, field), `temporary` | the password |
+| `vault.auth.userpass.update_password` | every call | mount, username, `sets_password` | the password |
+| `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
+| `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
+| `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
+| `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
+| `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
+| `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
+| `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
+
+Each builder copies the fields it shows by name. It never walks the
+whole params, so a new or extra field (a password in an open
+`HostCommissionSpec`, say) does not reach the stored request. All nine
+read only the params (and the target's version for Holodeck) and make
+no network calls. The builders live next to their connectors:
+`keycloak/ops_write_preview.py`, `vault/userpass_write_preview.py`,
+`kubernetes/ops_write_preview.py`, `sddc_manager/host_commission_preview.py`,
+`holodeck/router_patch_preview.py` and
+`vmware_rest/composites/_guest_file_read_preview.py`.
+
+**CI keeps it that way.** `tests/test_credential_write_preview_conformance.py`
+runs every typed-op registrar. It takes each registered op that is in
+`_CREDENTIAL_WRITE_OPS` and can wait for approval (`requires_approval`,
+or a `safety_level` above `safe`), and fails when the op has no builder.
+An op that must stay without a preview goes into
+`_NO_PREVIEW_CREDENTIAL_WRITES` in that test, with the reason. The list
+is empty today. Two credential writes have no builder and are not in the
+sweep: `vmware.composite.vm.guest.env.read` and
+`vmware.composite.vm.guest.process.list`. They are `safe`, so no call of
+theirs waits for approval by default.
 
 ## Catalog `safety_level` on every envelope (#1855)
 

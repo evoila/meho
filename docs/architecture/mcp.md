@@ -202,7 +202,7 @@ payload          ← {op_id, params_hash, op_class}
 
 Fail-closed: audit write failure → MCP call fails with JSON-RPC `INTERNAL_ERROR` (-32603). Compliance-critical.
 
-`params_hash` is SHA256 of canonicalized (sorted-keys JSON) arguments — content-addressable, deterministic, doesn't leak the args.
+`params_hash` is a keyed hash (HMAC-SHA256 with a server key) of the canonicalized (sorted-keys JSON) arguments, with secret-named values such as `password` left out ([`compute_audit_params_hash`](../../backend/src/meho_backplane/operations/_validate.py)). It is deterministic and does not reveal the arguments.
 
 ## Target-reference shape convention
 

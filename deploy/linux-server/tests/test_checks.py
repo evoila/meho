@@ -33,6 +33,7 @@ PASSING_LINES = {
         "[ok]   the pod range 10.42.0.0/16 and the service range 10.43.0.0/16"
         " are free on this machine"
     ),
+    "nftables": "[ok]   nftables is ready for the MEHO host firewall",
 }
 
 

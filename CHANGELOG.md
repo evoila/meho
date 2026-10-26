@@ -850,15 +850,6 @@ OpenBao; all three are off by default.
   `cli-release.yml` calls it on every `v*` tag. A manual run on `main`
   builds the download of the main commit as a workflow artifact. The
   v0.36.0 tag is the first run of this new signed download job.
-- Install from your own image registry, with no internet (#4100). Two
-  new chart settings reach every pod, in the chart and in every
-  subchart, the `helm test` pods too: `global.imageRegistry` replaces
-  the registry host of every image (the path, the tag and the digest
-  stay), and `global.imagePullSecrets` gives every pod the login for
-  your registry. Both are empty by default, and then the chart renders
-  exactly what it rendered before. The older `imagePullSecrets` setting
-  now also reaches the `helm test` pods. The recipe is in
-  `docs/deploying.md`, "Install with no internet".
 - The install now makes the passwords and keys for the built-in parts
   of the core (#4041 / #4599). When `corePostgres.enabled` or
   `coreKeycloak.enabled` is on, a Job named `<release>-core-secrets`

@@ -118,30 +118,38 @@ The steps:
    source, and write `library/<name>` for a one-word Docker Hub name.
    `--all` copies every CPU type. `--preserve-digests` keeps the digest, so
    the chart's `@sha256:` addresses still work, even though you copy to a
-   tag:
+   tag. First log in once: `skopeo login` asks for the password and writes
+   the login to a file, so the password is never on a command line:
 
    ```bash
-   skopeo copy --all --preserve-digests \
+   skopeo login --authfile registry-auth.json -u <user> harbor.example.com
+   skopeo copy --all --preserve-digests --dest-authfile registry-auth.json \
      docker://quay.io/keycloak/keycloak@sha256:<digest> \
      docker://harbor.example.com/meho/keycloak/keycloak:<tag>
    ```
 
-3. Create the login and install:
+3. Create the pull secret from the same login file, and install. If the
+   pods should use a login that may only pull, log in with that one into a
+   second file and use that file here.
 
    ```bash
-   kubectl create secret docker-registry registry-login -n <namespace> \
-     --docker-server=harbor.example.com --docker-username=<user> --docker-password=<password>
+   kubectl create secret generic registry-login -n <namespace> \
+     --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=registry-auth.json
    helm install meho oci://ghcr.io/evoila/meho-chart --version <version> -n <namespace> -f values.yaml \
      --set global.imageRegistry=harbor.example.com/meho \
      --set 'global.imagePullSecrets[0].name=registry-login'
    ```
 
-4. Check that no pod waits for an image, and that every image comes from
-   your registry:
+4. Check that no pod waits for an image, and that every pod asks for an
+   image from your registry. Read the images from the pod spec: the status
+   can show an image id (`sha256:…`) or another name the node knows for the
+   same image.
 
    ```bash
    kubectl get pods -n <namespace>     # no ErrImagePull or ImagePullBackOff
-   kubectl get pods -n <namespace> -o jsonpath='{..image}' | tr ' ' '\n' | sort -u
+   kubectl get pods -n <namespace> \
+     -o jsonpath='{.items[*].spec.containers[*].image} {.items[*].spec.initContainers[*].image}' \
+     | tr ' ' '\n' | sort -u
    ```
 
 ## Install paths

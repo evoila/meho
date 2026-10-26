@@ -88,14 +88,17 @@ class SigningKeyUnavailableError(Exception):
 def params_digest(params: dict[str, Any]) -> str:
     """Return the stable SHA-256 hex digest over the canonicalised *params*.
 
-    An **edge-safe mirror** of
-    :func:`meho_backplane.operations._validate.compute_params_hash`: identical
-    canonicalisation (``json.dumps(..., sort_keys=True, default=str,
-    separators=(",", ":"))`` then SHA-256) so the digest the centre signs and
-    the digest the runner recomputes over the params it is about to execute
-    agree byte-for-byte. Duplicated here — rather than imported — because
-    ``operations._validate`` pulls the DB stack, which must never load on the
-    DB-free runner. The two are pinned equal by a unit test.
+    The work-item digest: the centre stamps it on the ``gateway_command``
+    row and signs it (:func:`sign_remote_write_item`), and the runner
+    computes it again over the params it is about to execute. Both ends use
+    the same canonicalisation (``json.dumps(..., sort_keys=True, default=str,
+    separators=(",", ":"))`` then SHA-256), so they agree byte-for-byte.
+
+    It has no key on purpose: the runner holds no server secret, and the
+    command row carries the params themselves anyway. The audit records use
+    the keyed :func:`meho_backplane.operations._validate.compute_audit_params_hash`
+    instead. This module must not import ``operations._validate``: it pulls
+    the DB stack, which must never load on the DB-free runner.
     """
     canonical = json.dumps(params, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

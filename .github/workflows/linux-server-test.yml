@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-# Tests of the form-2 install scripts in deploy/linux-server/ (#4733).
+# Tests of the form-2 scripts in deploy/linux-server/: the install script
+# (#4733) and the scripts that build and check the download (#4734).
 #
 # shellcheck checks every shell script there: the *.sh files and any file
 # that starts with a shell shebang, so a script without an extension (for
 # example meho-host) is checked too. The unit tests are Python unittest
-# suites that run install.sh against a fake machine: stub commands on PATH
-# and a temporary root folder. They need no root, no RKE2 and no network.
-# One step checks that the upstream local-path manifest the tests compare
-# against is the real v0.0.37 file.
+# suites. They run install.sh against a fake machine (stub commands on PATH
+# and a temporary root folder), and the functions of packaging/ against
+# stub registry tools and small image archives built in Python. They need
+# no root, no RKE2 and no network. One step checks that the upstream
+# local-path manifest the tests compare against is the real v0.0.37 file.
+#
+# The chart's values files are a trigger too: a test checks that every
+# image repository of the chart has a licence line for the download
+# (deploy/linux-server/packaging/image-sources.txt).
 #
 # Advisory (non-required) and path-scoped, like plugin-test.yml: a required
 # check would need the `changes`-job + job-`if:` shape ci.yml uses.
@@ -21,6 +27,8 @@ on:
     branches: [main]
     paths:
       - 'deploy/linux-server/**'
+      - 'deploy/charts/meho/values.yaml'
+      - 'deploy/charts/meho/charts/*/values.yaml'
       - '.github/workflows/linux-server-test.yml'
   workflow_dispatch:
 
@@ -46,7 +54,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
 

@@ -11,6 +11,7 @@ tests check that:
 * the op runs end to end through ``dispatch`` on a database with no ingested
   spec, against saved vendor answers (respx, no live system);
 * the licence key never appears in clear text in the result;
+* the result matches the published response schema, also for an empty key;
 * the op is ``safe`` with ``requires_approval=False``;
 * only the 9.x connector registers it (the 8.x connector reuses
   ``VROPS_TYPED_OPS``, which does not hold it).
@@ -30,16 +31,17 @@ from uuid import UUID
 
 import pytest
 import respx
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vcf_operations import (
     VcfOperationsConnector,
     register_vcf_operations_typed_operations,
 )
-from meho_backplane.connectors.vcf_operations.connector import _mask_license_key
 from meho_backplane.connectors.vcf_operations.typed_ops import (
     VROPS_9_ONLY_TYPED_OPS,
     VROPS_LICENSE_INFO_OP,
@@ -185,7 +187,7 @@ async def test_license_info_dispatches_and_masks_the_key(
         "licensed": True,
         "expirationDate": 1744473856630,
         "licenseName": "license-name",
-        "licenseKey": "************************EEEEE",
+        "licenseKey": "*****-*****-*****-*****-EEEEE",
     }
     assert _LICENSE_KEY not in json.dumps(result.result)
     for route in (edition_route, info_route):
@@ -207,18 +209,52 @@ async def test_license_info_without_a_key_passes_through(monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize(
+    ("license_key", "masked"),
+    [
+        pytest.param(_LICENSE_KEY, "*****-*****-*****-*****-EEEEE", id="key"),
+        pytest.param("", None, id="empty-key"),
+        pytest.param(None, None, id="null-key"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_license_info_matches_the_published_schema(
+    monkeypatch: pytest.MonkeyPatch, license_key: Any, masked: Any
+) -> None:
+    """``licenseKey`` is text, or null when the vendor sends an empty key or no text."""
+    connector = VcfOperationsConnector()
+    info = {**_INFO_RESPONSE, "licenseKey": license_key}
+
+    async def _fake_get_json(target: Any, path: str, **_: Any) -> dict[str, Any]:
+        return _EDITION_RESPONSE if path == _EDITION_PATH else info
+
+    monkeypatch.setattr(connector, "_get_json", _fake_get_json)
+    result = await connector.license_info(_make_operator(), _Target(), {})
+
+    assert result["licenseKey"] == masked
+    schema = VROPS_LICENSE_INFO_OP.response_schema
+    Draft202012Validator.check_schema(schema)
+    assert list(Draft202012Validator(schema).iter_errors(result)) == []
+
+
+@pytest.mark.parametrize(
     ("value", "masked"),
     [
-        (_LICENSE_KEY, "************************EEEEE"),
+        (_LICENSE_KEY, "*****-*****-*****-*****-EEEEE"),
+        ("ABCDEFGHIJK", "******GHIJK"),
         ("short-key", "*********"),
         ("0123456789", "**********"),
-        ("", ""),
+        ("", None),
         (None, None),
+        (12345, None),
     ],
 )
 def test_mask_license_key(value: Any, masked: Any) -> None:
-    """A key shows at most its last 5 characters; a short key is hidden in full."""
-    assert _mask_license_key(value) == masked
+    """A key shows at most its last 5 characters; a short key is hidden in full.
+
+    Dashes stay, so a key keeps its five-group shape. A value that is not a
+    non-empty string gives ``None``.
+    """
+    assert mask_license_key(value) == masked
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ from meho_backplane.operations import (
 from meho_backplane.operations._audit import policy_decision_var
 from meho_backplane.operations._handler_resolve import reset_handler_cache
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from tests._vcfa_provisioning_support import (
     BASE_URL,
@@ -721,9 +722,12 @@ async def test_create_register_403_is_an_upstream_error(
         routes = _mount_user_flow(mock)
         routes["register"].respond(403, json={"message": "Missing right API Tokens: Manage"})
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
-    # An upstream 403 is the dispatcher's authorization-denied envelope.
+    # An upstream 403 is the dispatcher's authorization-denied envelope. The
+    # op holds a secret (its tags), so the vendor's text is withheld (#4854).
     assert result["extras"]["error_code"] == "connector_http_403"
-    assert "API Tokens: Manage" in result["extras"]["upstream_message"]
+    assert result["extras"]["http_status"] == 403
+    assert result["extras"]["upstream_message"] == VENDOR_TEXT_WITHHELD
+    assert "API Tokens: Manage" not in json.dumps(result)
     assert vault_writes == []
 
 
@@ -774,7 +778,7 @@ async def test_revoke_unknown_token_is_unchanged(vcfa: VcfAutomationConnector) -
 async def test_unapproved_dispatch_parks_without_touching_the_appliance(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _capabilities(monkeypatch, ["create", "update"])
+    _capabilities(monkeypatch, ["read", "update"])
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock)
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
@@ -874,7 +878,7 @@ async def test_park_refused_when_the_target_role_may_not_write(
     assert not any(route.called for route in routes.values())
     extras = await _assert_park_refused(result)
     assert extras["path"] == "secret/data/example/vcfa-target"
-    assert extras["required"] == ["create", "update"]
+    assert extras["required"] == ["read", "update"]
     assert extras["granted"] == ["read"]
     # Probed under the named Vault target (its role), not the caller's identity.
     assert [(t.name, paths) for t, paths in probes] == [
@@ -921,7 +925,7 @@ async def test_park_refused_when_the_probe_fails(
 async def test_park_refused_for_a_non_vault_target(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    probes = _capabilities(monkeypatch, ["create", "update"])
+    probes = _capabilities(monkeypatch, ["read", "update"])
     result = await run(
         "vcfa.provider.api_token.create",
         {**_CREATE_PARAMS, "vault_target": TARGET_NAME},

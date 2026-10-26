@@ -290,6 +290,7 @@ from meho_backplane.operations._audit import (
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
+    with_audit_receipt,
 )
 from meho_backplane.operations._branches import (
     dispatch_composite,
@@ -357,11 +358,13 @@ from meho_backplane.operations._request_preview import (
 )
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
+    compute_audit_params_hash,
     compute_params_hash,
     ingested_schema_for_validation,
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations._vendor_text import withhold_vendor_text
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -379,6 +382,7 @@ from meho_backplane.operations.dispatch_limits import (
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
+    full_result_capture_var,
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
@@ -1834,7 +1838,13 @@ async def _audit_error_and_return(
     #3864: when the row commits, the returned result carries its ``audit_id``,
     the same receipt the success path returns. So an approver, and the stored
     result of an approved run, can point at the row that records the failure.
+
+    #4854: for an operation that sends a secret, the vendor's text is replaced
+    first (:func:`~meho_backplane.operations._vendor_text.withhold_vendor_text`).
+    Every error result passes here, so the caller's answer, the audit row and
+    the stored approval result all hold the same text.
     """
+    result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,
@@ -1850,9 +1860,7 @@ async def _audit_error_and_return(
         handle_metadata=handle_metadata,
         error_extras=_error_extras_for_audit(result),
     )
-    if receipt is not None and result.audit_id is None:
-        return result.model_copy(update={"audit_id": receipt})
-    return result
+    return with_audit_receipt(result, receipt)
 
 
 async def _evict_connector_credentials(connector_instance: Connector | None, target: Any) -> None:
@@ -2433,6 +2441,13 @@ async def _reduce_or_error(
         target=target,
         audit_id=audit_id,
     )
+    # #4117: the sensor runner asks for the full redacted payload beside the
+    # shortened result. Filled before the reduce so a reducer failure still
+    # leaves the capture usable; every other caller leaves the var unset.
+    capture = full_result_capture_var.get()
+    if capture is not None:
+        capture.payload = raw
+        capture.captured = True
     try:
         return await _DEFAULT_REDUCER.reduce(
             raw,
@@ -2877,8 +2892,12 @@ async def _audit_denied_and_return(
     gets its own ``denied`` execution row from :func:`_audit_returned_result`
     when the handler returns the refusal (#4275); this row records the step's
     decision, so the step keeps its own record (#3733).
+
+    #4669: when the row commits, the returned result carries its ``audit_id``,
+    like an error result does. The parent operation's own row replaces it on
+    the caller's answer for a sub-op (:func:`_audit_returned_result`).
     """
-    await audit_safe(
+    receipt = await audit_safe(
         audit_id=uuid.uuid4(),
         event_class=AuditEventClass.POLICY_DECISION,
         operator=operator,
@@ -2889,7 +2908,7 @@ async def _audit_denied_and_return(
         duration_ms=duration_ms,
         error_extras=_error_extras_for_audit(result),
     )
-    return result
+    return with_audit_receipt(result, receipt)
 
 
 async def _handle_needs_approval(
@@ -3041,7 +3060,9 @@ async def _handle_needs_approval(
                 op_id=op_id,
                 target=target,
                 params=params,
-                params_hash=params_hash,
+                # The approval check needs every value, so the request
+                # stores the full hash, not the audit hash in ``params_hash``.
+                params_hash=compute_params_hash(params),
                 run_id=run_id,
                 proposed_effect=proposed_effect,
                 preview_hash=preview_hash,
@@ -3194,7 +3215,10 @@ async def dispatch(
     if "reveal_secret" in params:
         params = {key: value for key, value in params.items() if key != "reveal_secret"}
     credential_read = classify_op(op_id) == "credential_read"
-    params_hash = compute_params_hash(params)
+    # The hash every audit row of this dispatch carries: keyed, with
+    # secret-named values left out. A parked approval stores the full
+    # approval hash instead (``_handle_needs_approval``).
+    params_hash = compute_audit_params_hash(params)
     product, version, impl_id = parse_connector_id(connector_id)
 
     # --- Step 2: descriptor lookup ----------------------------------------
@@ -3268,7 +3292,7 @@ async def dispatch(
         _rate_retry = await check_dispatch_rate_limit(operator.tenant_id, operator.sub, _rate_limit)
         if _rate_retry is not None:
             duration_ms = _elapsed_ms(started)
-            await audit_rejection_safe(
+            receipt = await audit_rejection_safe(
                 audit_id=uuid.uuid4(),
                 operator=operator,
                 descriptor=descriptor,
@@ -3277,12 +3301,15 @@ async def dispatch(
                 result_status="rate_limited",
                 duration_ms=duration_ms,
             )
-            return result_rate_limited(
-                op_id,
-                kind="rate",
-                limit=_rate_limit,
-                retry_after_seconds=_rate_retry,
-                duration_ms=duration_ms,
+            return with_audit_receipt(
+                result_rate_limited(
+                    op_id,
+                    kind="rate",
+                    limit=_rate_limit,
+                    retry_after_seconds=_rate_retry,
+                    duration_ms=duration_ms,
+                ),
+                receipt,
             )
         _conc_cap = resolve_dispatch_concurrency_cap(_limit_settings, operator.tenant_id)
         _conc_retry, _dispatch_slot_key = await acquire_dispatch_slot(
@@ -3293,7 +3320,7 @@ async def dispatch(
         )
         if _conc_retry is not None:
             duration_ms = _elapsed_ms(started)
-            await audit_rejection_safe(
+            receipt = await audit_rejection_safe(
                 audit_id=uuid.uuid4(),
                 operator=operator,
                 descriptor=descriptor,
@@ -3302,12 +3329,15 @@ async def dispatch(
                 result_status="rate_limited",
                 duration_ms=duration_ms,
             )
-            return result_rate_limited(
-                op_id,
-                kind="concurrency",
-                limit=_conc_cap,
-                retry_after_seconds=_conc_retry,
-                duration_ms=duration_ms,
+            return with_audit_receipt(
+                result_rate_limited(
+                    op_id,
+                    kind="concurrency",
+                    limit=_conc_cap,
+                    retry_after_seconds=_conc_retry,
+                    duration_ms=duration_ms,
+                ),
+                receipt,
             )
 
     # --- Step 4: policy gate ---------------------------------------------
@@ -3349,7 +3379,7 @@ async def dispatch(
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
-                await audit_safe(
+                receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
@@ -3359,7 +3389,9 @@ async def dispatch(
                     result_status="denied",
                     duration_ms=duration_ms,
                 )
-                return result_denied(op_id, gate_reason or "policy denied", duration_ms)
+                return with_audit_receipt(
+                    result_denied(op_id, gate_reason or "policy denied", duration_ms), receipt
+                )
             if verdict == PermissionVerdict.NEEDS_APPROVAL:
                 # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
                 # synchronous "request" audit row) and return an
@@ -3385,7 +3417,7 @@ async def dispatch(
                 # to execution. Any unexpected verdict (a future enum member, a
                 # bug in the resolver) denies rather than silently executing.
                 duration_ms = _elapsed_ms(started)
-                await audit_safe(
+                receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
@@ -3395,10 +3427,13 @@ async def dispatch(
                     result_status="denied",
                     duration_ms=duration_ms,
                 )
-                return result_denied(
-                    op_id,
-                    gate_reason or f"unexpected policy verdict {verdict!r}; denied",
-                    duration_ms,
+                return with_audit_receipt(
+                    result_denied(
+                        op_id,
+                        gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+                        duration_ms,
+                    ),
+                    receipt,
                 )
 
             # --- Opt-in announce gate (#3133) --------------------------
@@ -3418,7 +3453,7 @@ async def dispatch(
             )
             if announce_block is not None:
                 duration_ms = _elapsed_ms(started)
-                await audit_safe(
+                receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
@@ -3428,7 +3463,9 @@ async def dispatch(
                     result_status="denied",
                     duration_ms=duration_ms,
                 )
-                return result_announce_required(op_id, announce_block, duration_ms)
+                return with_audit_receipt(
+                    result_announce_required(op_id, announce_block, duration_ms), receipt
+                )
         else:
             # Approval-queue resume path: the gate is skipped because an
             # operator already approved this exact call. Stamp the row with

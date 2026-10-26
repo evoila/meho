@@ -513,8 +513,6 @@ def _xml_text(element: Any, tag: str) -> str | None:
 # with the literal ``never`` for non-expiring leases. Binding states are
 # ``active`` / ``free`` / ``backup`` plus failover transitional states.
 _LEASE_HEADER_RE = re.compile(r"^lease\s+(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+\{")
-_LEASE_STARTS_RE = re.compile(r"^starts\s+(?P<val>.+?)\s*;\s*$")
-_LEASE_ENDS_RE = re.compile(r"^ends\s+(?P<val>.+?)\s*;\s*$")
 _LEASE_BINDING_RE = re.compile(r"^binding\s+state\s+(?P<state>\S+?)\s*;")
 _LEASE_HW_RE = re.compile(r"^hardware\s+ethernet\s+(?P<mac>[0-9A-Fa-f:]+)\s*;")
 _LEASE_HOSTNAME_RE = re.compile(r'^client-hostname\s+"(?P<hostname>[^"]*)"\s*;')
@@ -566,6 +564,26 @@ def _effective_binding_state(
     return raw_state
 
 
+def _lease_statement_value(line: str, keyword: str) -> str | None:
+    """Read one timestamp statement with a single pass over its whitespace."""
+    if not line.startswith(keyword):
+        return None
+    rest = line[len(keyword) :]
+    if not rest or not rest[0].isspace():
+        return None
+    body = rest.lstrip()
+    leading = len(rest) - len(body)
+    value, separator, tail = body.rpartition(";")
+    if not separator or tail.strip() or "\n" in value:
+        return None
+    value = value.rstrip()
+    if value:
+        return value
+    # The former matcher accepts a whitespace-only value when at least two
+    # spaces follow the keyword: one for the separator and one for the value.
+    return " " if leading >= 2 else None
+
+
 def _apply_lease_body_line(current: dict[str, Any], line: str) -> None:
     """Apply one in-block statement line to the lease dict under construction.
 
@@ -573,10 +591,10 @@ def _apply_lease_body_line(current: dict[str, Any], line: str) -> None:
     ``hardware ethernet`` / ``client-hostname`` statements; any other line
     (``cltt``, ``tstp``, ``next binding state``, options) is ignored.
     """
-    if starts := _LEASE_STARTS_RE.match(line):
-        current["starts"] = _lease_timestamp(starts.group("val"))
-    elif ends := _LEASE_ENDS_RE.match(line):
-        current["ends"] = _lease_timestamp(ends.group("val"))
+    if (starts := _lease_statement_value(line, "starts")) is not None:
+        current["starts"] = _lease_timestamp(starts)
+    elif (ends := _lease_statement_value(line, "ends")) is not None:
+        current["ends"] = _lease_timestamp(ends)
     elif binding := _LEASE_BINDING_RE.match(line):
         current["binding_state"] = binding.group("state")
     elif hardware := _LEASE_HW_RE.match(line):

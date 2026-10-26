@@ -941,14 +941,14 @@ The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
 not the product.
 
 **Not yet:** the setup Job `vault-init-<hash>` (the first start, the key
-and login setup, the policies) and the unlock after a restart (#4046).
-Until they land, the server runs empty and locked.
+and login setup, the policies). Until it lands, the server runs empty and
+locked, and nothing makes the Secret `<release>-core-vault-unseal`.
 
 **What it renders.**
 
 | Object | Shape |
 | --- | --- |
-| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data` |
+| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data`; a second container `unseal` (below) |
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
@@ -965,6 +965,36 @@ waits until the pod is ready before it rolls out a change, so a locked pod
 would keep the old version and be replaced, locked again, right after
 someone unlocks it. Keep the line: the field cannot be changed after the
 first install.
+
+**Unseal after a restart (#4046).** The `unseal` container (same image,
+same security settings, `coreVault.unseal.resources`) checks `bao status`
+every 5 seconds. When the server is sealed and `/unseal/key` exists, it runs
+`tr -d '[:space:]' </unseal/key | bao write sys/unseal key=-` against
+`127.0.0.1:8200`. The key file is the Secret `<release>-core-vault-unseal`,
+mounted only in this container, `optional: true` and without `subPath`.
+The Secret's `key` value is the key alone. White space around it (such as
+the line break `echo` adds) is dropped, so the setup Job (#4044 part 2),
+the installers and an operator restoring by hand can write it either way;
+without the `tr`, a key with a line break never unseals.
+
+- The mode is whether the Secret exists; there is no mode value. Secret
+  present: self-unseal. Secret absent: "keyholder at boot", the pod stays
+  not ready and `/ready` says `vault: sealed`.
+- The key goes from the file through a pipe into `bao` on every pass, and
+  the call's output is thrown away. The key is never on a command line, in a shell variable or
+  in a log, and nothing keeps it: a deleted Secret takes effect on the next
+  pass once the kubelet removes the file (about one to two minutes on a
+  running pod).
+- The log has fixed lines only, printed when the state changes
+  (`unseal: unsealed`, `unseal: sealed, no unseal key in /unseal ...`).
+- No RBAC, no CronJob. NOTES print the `kubectl get secret` command for the
+  key, never the key.
+- Switching modes, the trade-off and recovery mode: the operator page
+  `docs-site/install/openbao-unseal-key.md`.
+- Cluster check: `scripts/ci/check-openbao-unseal.sh <namespace> <release>`
+  (pod restart, keyholder mode, server process restart without the Secret,
+  and a search for the key in pod logs and `helm get`). Checked on RKE2
+  v1.37.1 with the CIS profile, after install and after an upgrade.
 
 **Audit.** OpenBao refuses audit devices made through the API, so the
 device is in the config file. The lines go to the container log, which the
@@ -1456,7 +1486,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-4-way pytest stride matrix (`python-unit-shard`). The required-context
+4-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1617,7 +1647,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
+| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
@@ -1626,7 +1656,7 @@ workflow files, this doc, and the changelog.
 The four `python-unit-shard` legs run on `meho-runners-ci-heavy`
 (dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
 rdc-gitops#55; four shards fit the 5-pod ceiling). `python-integration`,
-`python-migration-tests` and the push-only `python-coverage-combine` run
+`python-migration-tests` and the nightly `python-coverage-combine` run
 on the dense `meho-runners-ci` pool (4-core): they pull their test images
 from the internal image mirror or read the private vendor spec shelf.
 
@@ -1657,9 +1687,10 @@ Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
 ~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
 monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=660`, scaled from the old 1320 s
-whole-suite budget) is the PR-level early-warning gate that fires well
-below the cap. `python-lint` and the fan-in carry 10 and 5 minutes.
+perf-budget-guard step (`budget_s=900`; 660 s until 2026-10-24, scaled
+from the old 1320 s whole-suite budget) is the PR-level early-warning
+gate that fires well below the cap. `python-lint` and the fan-in carry
+10 and 5 minutes.
 `go-lint-test` and `helm-lint-template` carry 10 minutes;
 `python-integration` carries 60 minutes for the container-pull + DinD
 spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
@@ -1674,29 +1705,57 @@ The required unit lane was a single `python-lint-test` job running ruff +
 ruff format + mypy + the whole ~13k-test unit sweep serially (~19-min
 wall) — the biggest single contributor to PR wall-time. #3251 split it
 into three cooperating jobs, mirroring the #3172/#3177 coverage-sweep
-shape (deterministic file-stride matrix + fan-in):
+shape (deterministic file-level matrix + fan-in):
 
 - **`python-lint`** — ruff check + ruff format --check + mypy. Whole-tree
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **4-way stride matrix**.
-  Each shard runs `find tests -name 'test_*.py' -not -path
-  'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk 'NR %
-  4 == shard - 1'` — the sorted test-file list, every fourth file. The
-  stride (not contiguous blocks) spreads heavyweight suites across shards,
-  and the four residues partition the file set **exactly** (union == full,
-  pairwise disjoint). #3251 started with 3 shards. #4655 raised the count
-  to 4 when the slowest shard reached the 660 s per-shard budget (579 s
-  as a middle value and up to 605 s on `main`; 663 s on a pull request).
-  The budget stayed at 660 s:
-  the rule in `ci.yml` is to measure, then add shards, not to raise the
-  budget. To change the count again, edit the matrix and `TOTAL` in the
-  pytest step together. File-level sharding is strictly coarser than what
-  xdist `--dist loadscope` already does across workers (whole modules stay
-  together, conftest semantics identical to a full run), so an xdist-safe
-  suite is shard-safe — proven live by the `python-coverage` sweep, which
-  runs the identical split over a superset of these files. `fail-fast:
+- **`python-unit-shard`** — the pytest sweep as a **4-way matrix split by
+  measured file time**. Each shard lists the test files with `find tests
+  -name 'test_*.py' -not -path 'tests/integration/*' -not -path
+  'tests/migrations/*' | sort` and pipes the list into
+  `tests/_unit_shard_split.py --shard N --total 4`. The splitter reads the
+  measured seconds per test file from `tests/_unit_shard_durations.json`,
+  sorts the files slowest first, and gives each file to the shard with
+  the least time so far (a file without a measurement counts as the
+  median; every file also carries a small fixed cost for import and
+  collection, so files whose tests all skip still spread out). The same
+  list always gives the same split, and the four shards partition the
+  file set **exactly** (union == full, pairwise disjoint;
+  `tests/test_unit_shard_split.py` pins both). The splitter prints the
+  file count and the predicted seconds per shard on stderr, so the shard
+  log shows when the measurements drift from the real wall. Each shard
+  writes its per-test times with `-o junit_family=xunit1 --junitxml` and
+  uploads them as the artifact `python-unit-shard-junit-<N>`. To refresh
+  the measurements, download the four artifacts of one green run and
+  pass them to `tests/_unit_shard_split.py --measure`; the module
+  docstring has the exact commands. Take the numbers from CI, not from a
+  laptop: tests that need Docker or the spec shelf skip locally but run
+  in CI, and a local measurement put all of them into one shard (584 s
+  against 443 s for the lightest). #3251 started with 3 shards and gave
+  every N-th file of
+  the sorted list to one shard. #4655 raised the count to 4 when the
+  slowest shard reached the 660 s per-shard budget (579 s as a middle
+  value and up to 605 s on `main`; 663 s on a pull request). #4809
+  replaced the every-N-th-file rule with the measured split when shard 4
+  ran 613 s as a middle value against 465 s for shard 2, and the merge
+  queue dropped pull requests whose tests had all passed. The budget
+  stayed at 660 s: the rule in `ci.yml` is to measure, then rebalance or
+  add shards, not to raise the budget. On 2026-10-24 the budget went to
+  900 s. From the measured split until that day, the slowest good shard
+  took 625 s, even when every heavy runner was busy (2 jobs per node).
+  That afternoon every heavy runner was busy again. Four shards that
+  passed every test took 674-710 s, and the merge queue dropped good pull
+  requests. With few runners busy, the four shards of one run took
+  448-515 s. So the extra time came from the busy runners, not from
+  slower tests. To change the count, edit the
+  matrix and `TOTAL` in the pytest step together. File-level sharding is
+  strictly coarser than what xdist `--dist loadscope` already does across
+  workers (whole modules stay together, conftest semantics identical to a
+  full run), so an xdist-safe suite is shard-safe — proven live by the
+  `python-coverage` sweep, which runs a file-level split (every N-th
+  file) over a superset of these files. `fail-fast:
   false` so one red shard does not cancel the others; each shard keeps
   `--maxfail=1` for fast per-shard feedback. Each shard also arms a
   per-test hang guard, `--timeout=180 --timeout-method=signal` (#4270):
@@ -1734,8 +1793,8 @@ Because the required context string is unchanged and stays on a job, the
 edit** — the required name simply moved from the monolithic job onto the
 fan-in (the `python-coverage-combine` technique that kept quality-gate.yml
 byte-identical). No escape-hatch label (the coverage lane's
-`ci-coverage-validate`) is needed: the coverage lane is push-only and must
-be *forced* onto a PR, whereas the unit lane runs on every PR by default,
+`ci-coverage-validate`) is needed: the coverage lane runs once a night and
+must be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
 
 ### Docs-only fast path (#3252)
@@ -1883,9 +1942,11 @@ reason.
 
 `ci.yml` deliberately does **not** build the backplane container image.
 [`image.yml`](../../.github/workflows/image.yml) runs on PRs that touch
-`backend/**` or `.github/workflows/image.yml` (path-filtered, see
-`image.yml`'s `on.pull_request.paths`) with `push: false` — the
-Dockerfile + dep-resolution gate. PRs that don't touch the backend
+`backend/**`, `.github/workflows/image.yml` or `.trivyignore`
+(path-filtered, see `image.yml`'s `on.pull_request.paths`) with
+`push: false` — the Dockerfile + dep-resolution gate — plus a trivy scan
+of `backend/uv.lock` on a hosted runner (the `lock-scan` job; see
+`docs/codebase/backend.md`). PRs that don't touch the backend
 (chart-only, CLI-only, docs-only) skip the image build by design,
 because the gate's inputs haven't changed and rebuilding would add zero
 signal. Repeating the build in `ci.yml` would double the cost for
@@ -1902,31 +1963,46 @@ fails the central CI check, but it does not duplicate the publish
 path. Migration backward-compat (`migration-compat.yml`), dependency
 license scan (`dependency-license-check.yml`), secret scan
 (`secret-scan.yml`), and the SAST stack (`security-scan.yml`) all stay
-in their dedicated workflows.
+in their dedicated workflows. There, the `Semgrep SAST` job sends every
+finding of its four rule packs (error, warning and info) to the GitHub
+Security tab and shows new ones as annotations on pull requests, but it
+fails only on a finding from an error-level rule.
 
 ### Coverage handoff to SonarCloud
 
-On pushes to `main`, the Python job runs
-`COVERAGE_CORE=sysmon uv run pytest ... --cov=meho_backplane --cov-report=xml tests/`
-and uploads `backend/coverage.xml` as the `python-coverage` artefact.
+Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
+has a `schedule` trigger (`cron: '17 6 * * *'`, UTC). That run is a full
+CI run on `main`. The 8 `python-coverage` shards and the
+`python-coverage-combine` job run only in that run, or on a PR that
+carries the `ci-coverage-validate` label; their `if:` conditions allow
+`schedule` and the label, never `push` or `merge_group`. The combine job
+uploads `backend/coverage.xml` as the `python-coverage` artefact.
 [`quality-gate.yml`](../../.github/workflows/quality-gate.yml) listens
-on `workflow_run: workflows: ["CI"]`, downloads that exact artefact
-name via `actions/download-artifact@v4`, and feeds the XML into the
-SonarCloud scan. The workflow name (`CI`) and the artefact name
-(`python-coverage`) are the load-bearing contract between the two
-workflows — changing either side without the other would silently lose
-coverage reporting in SonarCloud.
+on `workflow_run: workflows: ["CI"]`, runs only when the CI run's event
+is `schedule` and its conclusion is `success`, downloads that exact
+artefact name, and feeds the XML into the SonarCloud scan. The workflow
+name (`CI`), the artefact name (`python-coverage`) and the event filter
+are the load-bearing contract between the two workflows — changing one
+side without the other would silently lose coverage reporting in
+SonarCloud, or make SonarCloud import 0% backend coverage from a run
+that never produced the file.
 
-`--cov` runs on **both push and PR** as of the post-#799 state. #726
-originally gated `--cov` to push-only on the belief that pytest-cov
+Why nightly: a push run on `main` used to start 8 coverage shards next
+to the 4 unit shards, so every merge filled the 12-runner heavy pool.
+Coverage took about 3,000 heavy-runner minutes a day, and the next merge
+cancelled most of it. Meanwhile the merge queue's unit shards waited for
+a runner or ran over their time budget. Coverage is not a required
+check, so one analysis a day is enough. The nightly run has its own
+concurrency group, so a merge does not cancel it.
+
+History: #726 gated `--cov` to push-only on the belief that pytest-cov
 was the unit job's dominant cost; the #771 diagnostic (#793) disproved
 that — the real cost was per-test descriptor re-embedding (fixed in
-#799), not coverage instrumentation. With the embedding re-fetch
-eliminated and sysmon's overhead, `--cov` adds only ~1 min (pytest
-~8m33s with cov vs ~7m35s without; run 26245676016), so the unit job
-stays ~9.3 min — under the Goal #11 10-min budget — while PRs gain
-SonarCloud Clean-as-You-Code new-code-coverage decoration on every PR
-instead of updating one merge late. The `quality-gate.yml` whole-job
+#799) — and `--cov` ran on every PR for a while. #1982 then took
+coverage out of the required unit lane for good (the OOM story in
+[`sonarcloud.md`](sonarcloud.md)), #1987 gave it its own non-required,
+push-only job, #3172 sharded that job, and #4910 moved it to the nightly
+run. The `quality-gate.yml` whole-job
 `continue-on-error` means a missing or late artefact never blocks a
 merge. `COVERAGE_CORE=sysmon` (#739) swaps coverage.py's default C
 tracer for the PEP 669 `sys.monitoring` backend (Python 3.12+,
@@ -2047,7 +2123,7 @@ their isolation posture:
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
-| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
 | `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
@@ -2122,11 +2198,14 @@ GitHub settings, which a PR cannot edit. Effective settings recorded
 ### Signing, deployment and cache separation
 
 Untrusted PR jobs carry no signing or deployment identity: cosign
-signing lives in `image.yml` (fork-guarded) and the `chart.yml` publish
-job (`push`-only), and `pr-smoke.yml` exports its buildx cache to an
-isolated `pr-smoke` scope so an unmerged PR-head build can never seed the
-default cache the cosign-signed `image.yml` release build restores from
-(#3475). The CI cluster is recorded as separate from the automation
+signing lives in `image.yml` (fork-guarded), the `chart.yml` publish
+job (`push`-only), `cli-release.yml` (tag-only) and the `publish` job of
+`linux-download.yml` (tag-only, called by `cli-release.yml`; it signs the
+form-2 download's `SHA256SUMS-linux`, see
+[linux-server-download.md](linux-server-download.md)), and `pr-smoke.yml`
+exports its buildx cache to an isolated `pr-smoke` scope so an unmerged
+PR-head build can never seed the default cache the cosign-signed
+`image.yml` release build restores from (#3475). The CI cluster is recorded as separate from the automation
 cluster; verifying the firewall/routing that a compromised CI runner
 could traverse is an infra check, tracked outside this repo.
 
@@ -2371,6 +2450,28 @@ isolation keeps an unmerged PR-head build from writing the default cache
 scope the cosign-signed `image.yml` release build restores from; the
 release image's trust chain never depends on cache produced by unmerged
 code, while the per-PR build keeps its warm-cache read.
+
+## Dependabot waits 7 days before it takes a new version
+
+Every entry in `.github/dependabot.yml` has a `cooldown` block with
+`default-days: 7`. Dependabot opens a version-update pull request for a
+new release (a GitHub Action, a Python package in `backend/uv.lock`, or
+a base image in a Dockerfile) only when that release is at least 7 days
+old.
+
+- **Why.** A new release can carry harmful code, for example when an
+  attacker takes over a maintainer's account. Such releases are usually
+  found and removed within a few days. The wait skips them.
+- **Security updates are not delayed.** Dependabot's `cooldown` applies
+  to version updates only. A security update still comes at once.
+- **Without the block, Dependabot already waits 3 days** on github.com.
+  The block makes the wait visible in the file and sets it to 7 days.
+- **A manual upgrade does not wait.** `uv lock --upgrade` or a hand
+  edit of a Dockerfile digest can still take a release that is younger
+  than 7 days. The matching uv setting (`exclude-newer` in
+  `backend/pyproject.toml`) is not set yet; it needs a lock file in
+  which every locked version is already 7 days old, otherwise
+  `uv lock` moves packages back.
 
 ## Dependencies
 

@@ -176,7 +176,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     Composition: ``k8s.about`` (T1 canary) + ``CORE_OPS`` (T2 inventory:
     ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list``) +
     ``WORKLOAD_OPS`` (T3 workload: ``k8s.pod.{list,info}`` /
-    ``k8s.deployment.{list,info}``) + ``NETWORK_OPS`` (T4 network:
+    ``k8s.deployment.{list,info}``) + ``JOB_OPS`` (Job reads:
+    ``k8s.job.{list,info}``) + ``NETWORK_OPS`` (T4 network:
     ``k8s.service.list`` / ``k8s.ingress.list``) + ``CONFIG_OPS`` (T4
     config: ``k8s.configmap.list`` keys-only / ``k8s.configmap.info``
     full data) + ``EVENT_OPS`` (T4 observability: ``k8s.event.list``)
@@ -184,8 +185,10 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     ``k8s.persistentvolume.list`` / ``k8s.persistentvolumeclaim.list``)
     + ``CUSTOM_RESOURCE_OPS`` (#2830 generic CR reads: ``k8s.crd.list``
     / ``k8s.cr.list`` / ``k8s.cr.info``) + ``k8s.logs`` (T5) +
-    ``k8s.exec`` + the write ops + ``SECRET_READ_OPS`` (#3496 governed
-    guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``).
+    ``k8s.exec`` + the write ops + ``CRONJOB_OPS`` (``k8s.cronjob.run``:
+    start a CronJob's job now) + ``SECRET_READ_OPS`` (#3496 governed
+    guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``) +
+    ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``).
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -202,8 +205,10 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     """
     from meho_backplane.connectors.kubernetes.ops_config import CONFIG_OPS
     from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
+    from meho_backplane.connectors.kubernetes.ops_cronjob import CRONJOB_OPS
     from meho_backplane.connectors.kubernetes.ops_customresource import CUSTOM_RESOURCE_OPS
     from meho_backplane.connectors.kubernetes.ops_events import EVENT_OPS
+    from meho_backplane.connectors.kubernetes.ops_job import JOB_OPS
     from meho_backplane.connectors.kubernetes.ops_logs import (
         K8S_LOGS_LLM_INSTRUCTIONS,
         K8S_LOGS_PARAMETER_SCHEMA,
@@ -211,6 +216,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     )
     from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_read import SECRET_READ_OPS
+    from meho_backplane.connectors.kubernetes.ops_secret_write import SECRET_WRITE_OPS
     from meho_backplane.connectors.kubernetes.ops_storage import STORAGE_OPS
     from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
     from meho_backplane.connectors.kubernetes.ops_write_meta import (
@@ -253,6 +259,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         _K8S_ABOUT_OP,
         *CORE_OPS,
         *WORKLOAD_OPS,
+        *JOB_OPS,
         *NETWORK_OPS,
         *CONFIG_OPS,
         *EVENT_OPS,
@@ -261,8 +268,10 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         logs_op,
         _exec_op(),
         *WRITE_CAUTION_OPS,
+        *CRONJOB_OPS,
         *WRITE_DANGEROUS_OPS,
         *SECRET_READ_OPS,
+        *SECRET_WRITE_OPS,
     )
 
 

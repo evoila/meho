@@ -42,6 +42,7 @@ from meho_backplane.operations.ingest.exceptions import (
     AmbiguousConnectorScopeError,
     InvalidSchemaError,
     InvalidSpecError,
+    LegacyTenantConnectorCopyError,
     LlmOutputInvalid,
     OpIdCollision,
     ProductImplIdMismatch,
@@ -55,6 +56,7 @@ __all__ = [
     "build_catalog_entry_not_found_detail",
     "build_catalog_entry_typed_connector_detail",
     "build_catalog_entry_upstream_not_spec_detail",
+    "build_connector_legacy_tenant_copy_detail",
     "build_connector_scope_ambiguous_detail",
     "build_invalid_schema_detail",
     "build_invalid_spec_detail",
@@ -148,6 +150,33 @@ def build_connector_scope_ambiguous_detail(
         ],
         "message": str(exc),
     }
+
+
+def build_connector_legacy_tenant_copy_detail(
+    exc: LegacyTenantConnectorCopyError,
+) -> dict[str, Any]:
+    """Structured detail for :class:`LegacyTenantConnectorCopyError` (#4889).
+
+    Emitted by every ``connector_id``-taking review / enable / disable /
+    edit route (and the MCP siblings) when the operator's tenant holds
+    rows for the id only under a former product name, so the copy can
+    never be called and must not be enabled or silently skipped in
+    favour of the built-in row. REST carries it as ``409 Conflict``
+    (same class as the ambiguous-scope sibling: the id resolves, but
+    not to a usable row); MCP as ``-32602`` with this dict as ``data``.
+
+    Body shape (T11 convention, see
+    :doc:`docs/codebase/error-message-shape.md`):
+
+    * ``detail`` — the stable classifier ``"connector_legacy_tenant_copy"``.
+    * ``connector_id`` — the id the operator typed.
+    * ``legacy_product`` / ``product`` — the former product name the rows
+      carry and the product the id resolves to today.
+    * ``tenant_id`` — the operator's own tenant (not an info leak).
+    * ``message`` — the rendered text: what the old copy is, why it is
+      never used, and the ``prefer=legacy`` / ``connector delete`` way out.
+    """
+    return dict(exc.detail)
 
 
 def build_catalog_entry_not_found_detail(

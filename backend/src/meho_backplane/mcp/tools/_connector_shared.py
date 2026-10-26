@@ -34,6 +34,7 @@ from meho_backplane.operations.ingest import (
     ConnectorNotFoundError,
     InvalidSchemaError,
     InvalidSpecError,
+    LegacyTenantConnectorCopyError,
     LlmOutputInvalid,
     OpIdCollision,
     ProductImplIdMismatch,
@@ -41,6 +42,7 @@ from meho_backplane.operations.ingest import (
     UnsupportedSpecError,
     UpstreamNotSpecError,
     VersionMismatchError,
+    build_connector_legacy_tenant_copy_detail,
     build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
@@ -91,34 +93,37 @@ _TENANT_ID_PROPERTY: Final[dict[str, Any]] = {
 #: read/write tools (``review`` / ``enable_reads``). Disambiguates a
 #: ``connector_id`` that maps to BOTH a tenant-curated row and a built-in
 #: row (G0.26-T? #2029): ``"tenant"`` targets the operator's tenant row,
-#: ``"builtin"`` the built-in scope. Omitted → the #1801 fail-loud
+#: ``"builtin"`` the built-in scope, ``"legacy"`` the tenant's old copy
+#: under a former product name (#4889). Omitted → the #1801 fail-loud
 #: ``-32602`` ambiguity error. The built-in scope keeps its
 #: ``tenant_admin`` gate, re-checked in the service resolver.
 _PREFER_PROPERTY: Final[dict[str, Any]] = {
     "type": ["string", "null"],
-    "enum": ["tenant", "builtin", None],
+    "enum": ["tenant", "builtin", "legacy", None],
     "description": (
         "Disambiguate a connector_id that resolves to BOTH a "
         "tenant-curated row and a built-in (tenant_id IS NULL) row. "
         "'tenant' targets the operator's tenant row; 'builtin' the "
-        "built-in scope (tenant_admin only). Omit for the default "
-        "fail-loud ambiguous-scope error carrying the candidate list."
+        "built-in scope (tenant_admin only); 'legacy' the tenant's old "
+        "copy stored under a former product name (the copy a delete "
+        "removes first). Omit for the default fail-loud ambiguous-scope "
+        "error carrying the candidate list."
     ),
 }
 
 
-def _coerce_prefer(raw: Any) -> Literal["tenant", "builtin"] | None:
+def _coerce_prefer(raw: Any) -> Literal["tenant", "builtin", "legacy"] | None:
     """Narrow the ``prefer`` selector from JSON-RPC to the service Literal.
 
     The JSON-Schema-validated value is always ``"tenant"`` /
-    ``"builtin"`` / ``None`` (the ``enum`` in :data:`_PREFER_PROPERTY`
+    ``"builtin"`` / ``"legacy"`` / ``None`` (the ``enum`` in :data:`_PREFER_PROPERTY`
     constrains it before this handler runs), so the :func:`cast` is
     sound — it documents that the schema validator, not this helper,
     owns the value-space check, the same trust ``_list_handler`` places
     in its validated ``status`` literal. Keeps the handler symmetric
     with :func:`_coerce_tenant_id`.
     """
-    return cast("Literal['tenant', 'builtin'] | None", raw)
+    return cast("Literal['tenant', 'builtin', 'legacy'] | None", raw)
 
 
 def _coerce_tenant_id(raw: Any) -> UUID | None:
@@ -259,6 +264,26 @@ def raise_invalid_params_for_ambiguous_scope(
     raise McpInvalidParamsError(
         str(exc),
         data=build_connector_scope_ambiguous_detail(exc),
+    ) from exc
+
+
+def raise_invalid_params_for_legacy_tenant_copy(
+    exc: LegacyTenantConnectorCopyError,
+) -> NoReturn:
+    """Map :class:`LegacyTenantConnectorCopyError` onto :class:`McpInvalidParamsError`.
+
+    The review / enable / enable_reads / disable / edit tools raise this
+    when the operator's tenant holds rows for the ``connector_id`` only
+    under a former product name (#4889). The REST siblings render it as a
+    structured ``409``; MCP's only structured handler-error channel is
+    ``-32602``, so the wire code differs while the ``data`` envelope is
+    identical (one builder, shared with the route). The message is
+    load-bearing — it names the old copy and how to review or delete it —
+    so it is forwarded verbatim.
+    """
+    raise McpInvalidParamsError(
+        str(exc),
+        data=build_connector_legacy_tenant_copy_detail(exc),
     ) from exc
 
 

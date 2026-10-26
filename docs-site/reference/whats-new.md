@@ -9,6 +9,74 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.37.0](https://github.com/evoila/meho/releases/tag/v0.37.0) — 2026-10-24
+
+- **Security fix: deployment passwords in traces.** For tenants with the
+  flight recorder on, MEHO kept the full request and answer of seven
+  deployment and depot operations in its traces. They hold deployment
+  passwords and licence keys. MEHO now leaves them out. Traces written
+  before the upgrade keep them until they expire: check your trace
+  retention, and change those passwords and keys if needed.
+- **More VMware work through MEHO.** VM snapshots, a VM's hardware and
+  CD drives, vSphere licences, the vCenter appliance's local accounts
+  and vCenter alarms. Every change waits for approval. A second person
+  approves snapshot deletes, licence assignments and appliance password
+  changes.
+- **Licence keys stay masked.** The vSphere, SDDC Manager and VCF
+  Operations licence reads show only the last 5 characters of a key.
+  `sddc.license.list` now returns `key_masked` instead of `key`, so
+  scripts that read `key` must change.
+- **New connectors and reads.** Site Recovery Manager, eight HCX reads,
+  GitHub repository create and view, VCF Automation operations for
+  networks, deployments and image names, and a VCF Operations property
+  read.
+- **Two 0.36.0 problems fixed.** A `vault.kv.patch` with the right Vault
+  rights waits for approval again, and sensors check their rule against
+  the full result, so they no longer turn `unknown` when an answer is
+  shortened.
+- **Before you upgrade.** No database migration. If you come from
+  0.35.x, do the 0.36.0 steps first.
+
+## [v0.36.0](https://github.com/evoila/meho/releases/tag/v0.36.0) — 2026-10-23
+
+- **Security fixes: logins, grants and secrets.** Everyone who used the
+  shared CLI and MCP logins was an admin. Now each person's role comes
+  from one Keycloak login group. Agent and service logins could create
+  standing grants; now only a person can. Approval requests and some
+  SDDC Manager and BIND reads showed passwords and keys. Now MEHO hides
+  them, and these reads wait for approval.
+- **Security fixes in the image and the CLI.** The image gets newer
+  `certifi` and `aiohttp` versions, and the CLI is built with Go
+  1.26.10. The image still has 27 known Pillow findings. MEHO never
+  opens image files, and the image scan skips these findings until 30
+  November 2026, while the fix is prepared.
+- **More risky work waits for a second person.** A VM move that copies
+  disks, every delete loaded from a vendor API file, and the delete of a
+  content-library item now wait until a second person approves. After
+  the upgrade, load the vCenter connectors again, so their stored
+  operations get the new rules.
+- **Only registered agents post announcements.** Broadcast now carries
+  agent announcements only. A person's own login can still read them.
+  The audit log stays the record of operations, approvals and checks.
+- **A clearer audit log.** Every audit record now says what kind of
+  event it is. A multi-step operation that waits or is refused, and
+  every tool call of a hosted agent, now leave a record.
+- **Short, citable evidence from knowledge and memory.** Knowledge base
+  entries keep their earlier texts, and search returns the matching
+  passages with a link to the exact text. Memory search returns short
+  snippets with a link to the full entry.
+- **The AI knows more about each operation.** Many vCenter, SDDC
+  Manager, NSX, VCF Automation, Holodeck and other operations now say
+  what they take and return, with an example call. `search_operations`
+  can show what one operation needs.
+- **New connector and reads.** A new HCX connector, VCF Installer 9.0
+  support, three new VCF Installer reads, `vmware.tasks.history` for
+  older vCenter tasks, and new Keycloak and pfSense operations.
+- **Before you upgrade.** The upgrade runs 12 database steps, so back up
+  the database first. Several changes can break scripts; read Breaking
+  changes in the full notes. The Helm chart can now also run its own
+  PostgreSQL, Keycloak and OpenBao, all off by default.
+
 ## [v0.35.22](https://github.com/evoila/meho/releases/tag/v0.35.22) — 2026-10-13
 
 - **Security fix: the audit clean-up now runs on time.** MEHO keeps

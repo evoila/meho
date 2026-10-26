@@ -40,6 +40,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
 
+from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.retrieval.embedding import (
     BAKED_MODEL_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
@@ -111,16 +112,16 @@ def parse_bool_env(value: str | None) -> bool:
 
 
 #: Default delete-shaped op-id patterns a service-principal standing grant
-#: may never cover (#3151). Case-sensitive ``fnmatchcase`` globs over the
-#: exact op id: raw HTTP DELETE ops (``DELETE:*``) plus the dotted typed
-#: delete/destroy/remove/purge families. Overridable via
+#: may never cover (#3151). The delete signs live in
+#: :mod:`meho_backplane.delete_names` so the contract check and the grant
+#: check read the same signs. ``POST:/vswitch/*`` (#3973) adds the Hetzner
+#: Robot vSwitch writes sent as POST (add servers, rename or change the
+#: VLAN): each changes a private network that several servers share, so it
+#: always waits for a human, like a delete. Overridable via
 #: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
 _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
-    "DELETE:*",
-    "*.delete",
-    "*.destroy",
-    "*.remove",
-    "*.purge",
+    *DELETE_SHAPED_OP_ID_PATTERNS,
+    "POST:/vswitch/*",
 )
 
 

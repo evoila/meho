@@ -86,7 +86,7 @@ before its code ran. The `result_status` says how it ended.
 - The `parent_audit_id` filter finds direct children only, one link at a time. The replay view
   (console, REST, `meho audit replay`) follows the whole chain (`audit_query/replay.py:91`).
 
-**5. What changes for the code that reads `result_status`? Two help texts and one doc table.**
+**5. What changes for the code that reads `result_status`? Two help texts and two doc tables.**
 
 - Audit query filters (REST, console, MCP `query_audit`, CLI `meho audit query`): no new value. The
   query reads the status code, not `payload.result_status` (`audit_query/query.py:314-340`, `:405-423`):
@@ -136,6 +136,9 @@ While the operation runs, its step records point to an id with no row yet, as on
 or scheduled repair job is needed. "No missing parent, ever" is not possible: a step must be
 recorded when it ends, and the operation's row can only be saved when the operation ends. Such rows
 stay visible: the replay view shows them as loose rows, and a query for their parent id finds no row.
+A standing check lists them ([#4670](https://github.com/evoila/meho/issues/4670)): the read-only
+operation `audit.loose_rows`, a sensor template that warns once an hour, and a `loose_row_count` on
+every replay view. See `docs/codebase/audit_query.md`, "Loose rows: the standing check".
 
 **Retry.** A caller that got no answer or `audit_commit_failed` must not simply run the operation
 again. Earlier steps may write again, and a step may ask for a second approval. A new audit id does

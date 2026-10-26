@@ -148,10 +148,13 @@ def _seed_audit_row(
     second: int = 0,
     op_id: str = "vsphere.vm.list",
     op_class: str = "read",
+    principal_name: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``audit_log`` row for *operator_sub*; return its id."""
     resolved_id = uuid.uuid4()
     payload: dict[str, Any] = {"op_id": op_id, "op_class": op_class}
+    if principal_name is not None:
+        payload["principal_name"] = principal_name
 
     async def _do() -> uuid.UUID:
         sessionmaker = get_sessionmaker()
@@ -226,13 +229,25 @@ def test_my_recent_unauthenticated_redirects_to_login() -> None:
 
 
 def test_my_recent_returns_only_session_operator_rows() -> None:
-    """AC3: only the session operator's own rows appear; a peer's never do."""
+    """AC3: only the session operator's own rows appear; a peer's never do.
+
+    #4668: the console ``principal`` filter also matches names, but
+    my-recent matches the user id exactly. A peer whose stored name
+    contains the session operator's id must stay out.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_audit_row(
         tenant_id=_TENANT_A, operator_sub=_OPERATOR_SELF, second=0, op_id="self.op.mine"
     )
     _seed_audit_row(
         tenant_id=_TENANT_A, operator_sub=_OPERATOR_OTHER, second=1, op_id="other.op.theirs"
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        operator_sub=_OPERATOR_OTHER,
+        second=2,
+        op_id="other.op.named",
+        principal_name=f"{_OPERATOR_SELF} lookalike",
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OPERATOR_SELF)
     with respx.mock(assert_all_called=False):
@@ -244,6 +259,7 @@ def test_my_recent_returns_only_session_operator_rows() -> None:
     # The self operator's row is present; the peer operator's is not.
     assert "self.op.mine" in body
     assert "other.op.theirs" not in body
+    assert "other.op.named" not in body
     # The self-scope label echoes the operator sub.
     assert _OPERATOR_SELF in body
 

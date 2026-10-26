@@ -117,9 +117,20 @@ preview_dispatch(operator, connector_id, op_id, target, params)
                      tenant, op).redacted   ◄── SAME pipeline the response path uses
         ▼
 {status: ok, op_id, connector_id, source_kind, method,
- resolved_path, query, redacted_body, preview_hash
+ resolved_path, query, redacted_body, preview_hash,
+ safety_level, requires_approval, policy_verdict, policy_reason   ◄── #3973 / #4923
  [, proposed_effect | plan_shown, plan_note]}
 ```
+
+After the descriptor lookup, every envelope — `ok`, `unavailable`, and the
+`error` statuses after the lookup — gets four more fields (#4923):
+`safety_level` and `requires_approval` from the descriptor, and
+`policy_verdict` / `policy_reason` from the same `policy_gate` the
+dispatcher runs at Step 4, called with `decide_only=True`. The verdict is
+what MEHO would do with this call for this caller and this target:
+`auto-execute` (runs at once), `needs-approval` (waits for a second
+person), or `deny` (refused, with the reason). Only the `unknown_op` /
+`unknown_connector` envelope has no descriptor and so no fields.
 
 The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
 **never** called: there is no network egress, no audit row, no broadcast
@@ -129,19 +140,35 @@ so a pure builder (e.g. `vault.kv.delete`) populates while a live-read
 blast-radius builder declines rather than dialling out. A declined plan is
 not silent (#4028): the envelope carries `plan_shown=false` and a plain
 `plan_note` that says the plan is built at send time and shown on the
-approval request. The policy gate
-(dispatch Step 4) is deliberately skipped — a preview reveals only what
-*would* be sent (and the body is redacted), so it carries no side effect to
-authorize, the same posture as `search_operations` over the same
-descriptors. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
+approval request. The policy gate (dispatch Step 4) runs in **decide-only**
+mode (#4923): it returns the verdict and writes nothing — no audit row, no
+approval request, and no standing-grant use. A service principal whose
+standing grant would clear the call sees `auto-execute`, but the grant is
+not used until the real call. In sandbox mode a delete grant is consulted
+without building its evidence (that may read the target); a `destructive`
+delete therefore previews as `needs-approval` even when a delete grant
+would later clear the real call, because the preview presents no hash of
+its own. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 ## Envelope shape
 
 | `status` | meaning | extra fields |
 |---|---|---|
-| `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed) |
-| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031) |
-| `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested` |
+| `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed). Plus the four governance fields below |
+| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` also carries the four governance fields below |
+| `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
+
+**Governance fields (#3973 / #4923).** Every envelope whose op resolved
+carries, unhashed: `safety_level` (`safe` / `caution` / `dangerous` /
+`destructive`) and `requires_approval` from the descriptor, `policy_verdict`
+(`auto-execute` / `needs-approval` / `deny`) from the dispatcher's own
+policy gate for this caller and target, and `policy_reason` (the gate's
+reason, or `null` when it gives none — a person's call that runs at once).
+The CLI prints them as one plain line, for example
+"Risk level: dangerous. This call waits for approval." Why: before #4923 a
+preview looked the same whether the call would run at once or wait for
+approval, and an operator in a lab only found out with a second command
+(`meho operation search --op-id`).
 
 Operator-input faults come back **inside** the envelope (not as
 exceptions), mirroring the dispatcher's never-raises contract so the REST
@@ -200,7 +227,9 @@ named-pattern catalogue and policy resolution.
 ## Surfaces
 
 - **REST:** `POST /api/v1/operations/preview` (`OPERATOR`), body
-  `PreviewOperationBody` (same fields as `CallOperationBody`).
+  `PreviewOperationBody` (same fields as `CallOperationBody`), response
+  `PreviewOperationResponse` (typed for OpenAPI and the generated clients;
+  only the keys the envelope carries are sent, and extra keys pass through).
 - **MCP:** the `preview_operation` tool (`op_class="read"` — a read-only
   inspection, unlike `call_operation`'s `"tool_call"` envelope).
 - **CLI:** regenerated from the OpenAPI snapshot (`cd cli && make
@@ -211,7 +240,7 @@ named-pattern catalogue and policy resolution.
 - `operations._branches` — the shared request resolver.
 - `operations._lookup` — `parse_connector_id`, `lookup_descriptor`,
   `count_known_ops`.
-- `operations._validate` — `validate_params`.
+- `operations._validate` — `validate_params`, `policy_gate` (decide-only).
 - `operations._handler_resolve` — `get_or_create_connector_instance`.
 - `connectors.resolve_connector_or_label` — the same yes/no/ambiguous
   connector resolution the dispatcher and the target-probe route use.

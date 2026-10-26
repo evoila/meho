@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The CI coverage path keeps every shard's data (#4758).
+"""The CI coverage path keeps every shard's data (#4758) and runs once a night (#4910).
 
 Two things lose a whole shard's coverage while every check stays green:
 
@@ -15,6 +15,12 @@ Two things lose a whole shard's coverage while every check stays green:
   that report.
 
 These tests pin both.
+
+The coverage shards run once a night on the ``schedule`` trigger, not after
+every push to ``main`` (#4910): on push they filled the whole heavy runner
+pool and starved the merge queue's unit shards. ``quality-gate.yml`` must
+analyze only that nightly run, because no other run uploads the Python
+coverage file. The last tests pin that trigger shape on both workflows.
 """
 
 from __future__ import annotations
@@ -27,13 +33,33 @@ import yaml
 
 from tests import conftest
 
-_CI_YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+_WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+_CI_YML = _WORKFLOWS / "ci.yml"
+_QUALITY_GATE_YML = _WORKFLOWS / "quality-gate.yml"
+
+_COVERAGE_JOBS = ["python-coverage", "python-coverage-combine"]
+_VALIDATE_LABEL = "contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')"
+_FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
+
+
+def _load(path: Path) -> dict[Any, Any]:
+    with path.open() as fh:
+        return cast("dict[Any, Any]", yaml.safe_load(fh))
+
+
+def _triggers(workflow: dict[Any, Any]) -> dict[str, Any]:
+    # PyYAML reads the bare ``on:`` key as the boolean True.
+    return cast("dict[str, Any]", workflow.get("on", workflow.get(True)))
 
 
 @pytest.fixture(scope="module")
-def ci_jobs() -> dict[str, Any]:
-    with _CI_YML.open() as fh:
-        return cast("dict[str, Any]", yaml.safe_load(fh)["jobs"])
+def ci_workflow() -> dict[Any, Any]:
+    return _load(_CI_YML)
+
+
+@pytest.fixture(scope="module")
+def ci_jobs(ci_workflow: dict[Any, Any]) -> dict[str, Any]:
+    return cast("dict[str, Any]", ci_workflow["jobs"])
 
 
 def _step(job: dict[str, Any], name: str) -> dict[str, Any]:
@@ -138,3 +164,33 @@ def test_worker_save_tolerates_no_started_coverage(monkeypatch: pytest.MonkeyPat
     _use_fake_coverage(monkeypatch, None)
 
     conftest._save_worker_coverage_data()
+
+
+def test_ci_runs_once_a_night_on_a_schedule(ci_workflow: dict[Any, Any]) -> None:
+    schedule = _triggers(ci_workflow)["schedule"]
+    assert len(schedule) == 1, "one nightly cron line"
+    minute, hour, day, month, weekday = schedule[0]["cron"].split()
+    assert (day, month, weekday) == ("*", "*", "*"), "daily, not weekly or monthly"
+    assert hour.isdigit(), "one fixed hour"
+    assert minute.isdigit() and minute != "0", "GitHub delays runs at the full hour"
+
+
+@pytest.mark.parametrize("job_id", _COVERAGE_JOBS)
+def test_coverage_jobs_run_on_the_schedule_and_the_label_only(
+    ci_jobs: dict[str, Any], job_id: str
+) -> None:
+    condition = ci_jobs[job_id]["if"]
+    assert "github.event_name == 'schedule'" in condition
+    assert "github.event_name == 'pull_request'" in condition
+    assert _VALIDATE_LABEL in condition
+    assert _FORK_GUARD in condition, "a fork PR must not reach the internal pool"
+    assert "'push'" not in condition, "coverage no longer runs after every merge"
+    assert "merge_group" not in condition, "the merge queue never runs coverage"
+
+
+def test_quality_gate_analyzes_only_green_nightly_runs() -> None:
+    job = _load(_QUALITY_GATE_YML)["jobs"]["sonarcloud"]
+    condition = job["if"]
+    assert "github.event.workflow_run.conclusion == 'success'" in condition
+    assert "github.event.workflow_run.event == 'schedule'" in condition
+    assert "'push'" not in condition, "a push run has no python-coverage artifact"

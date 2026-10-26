@@ -26,6 +26,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.github.composites import (
+    branch_commit_files_composite,
+    git_ref_view_composite,
+    git_tree_view_composite,
     pr_status_summary_composite,
     project_item_add_composite,
     project_item_set_field_composite,
@@ -42,6 +45,7 @@ from meho_backplane.operations.typed_register import (
     clear_typed_op_registrars,
 )
 from meho_backplane.settings import get_settings
+from tests.test_operation_contracts import OperationContract, check_operation
 
 _EXPECTED_OP_IDS: tuple[str, ...] = (
     "gh.composite.pr_status_summary",
@@ -49,6 +53,11 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "gh.composite.project_item_add",
     "gh.composite.project_item_set_field",
     "gh.composite.sub_issue_add",
+    "gh.composite.repo_view",
+    "gh.composite.repo_create",
+    "gh.composite.git_ref_view",
+    "gh.composite.git_tree_view",
+    "gh.composite.branch_commit_files",
 )
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
@@ -67,6 +76,21 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "gh.composite.sub_issue_add": (
         "meho_backplane.connectors.github.composites._sub_issues.sub_issue_add_composite"
     ),
+    "gh.composite.repo_view": (
+        "meho_backplane.connectors.github.composites._read.repo_view_composite"
+    ),
+    "gh.composite.repo_create": (
+        "meho_backplane.connectors.github.composites._repos.repo_create_composite"
+    ),
+    "gh.composite.git_ref_view": (
+        "meho_backplane.connectors.github.composites._git.git_ref_view_composite"
+    ),
+    "gh.composite.git_tree_view": (
+        "meho_backplane.connectors.github.composites._git.git_tree_view_composite"
+    ),
+    "gh.composite.branch_commit_files": (
+        "meho_backplane.connectors.github.composites._git.branch_commit_files_composite"
+    ),
 }
 
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
@@ -75,6 +99,11 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "gh.composite.project_item_add": "board",
     "gh.composite.project_item_set_field": "board",
     "gh.composite.sub_issue_add": "issues",
+    "gh.composite.repo_view": "repos",
+    "gh.composite.repo_create": "repos",
+    "gh.composite.git_ref_view": "git",
+    "gh.composite.git_tree_view": "git",
+    "gh.composite.branch_commit_files": "git",
 }
 
 # Governance posture per op: reads are safe, the three writes are caution;
@@ -86,6 +115,11 @@ _EXPECTED_SAFETY_BY_OP: dict[str, str] = {
     "gh.composite.project_item_add": "caution",
     "gh.composite.project_item_set_field": "caution",
     "gh.composite.sub_issue_add": "caution",
+    "gh.composite.repo_view": "safe",
+    "gh.composite.repo_create": "caution",
+    "gh.composite.git_ref_view": "safe",
+    "gh.composite.git_tree_view": "safe",
+    "gh.composite.branch_commit_files": "dangerous",
 }
 
 
@@ -554,7 +588,107 @@ def test_new_handlers_are_module_level_coroutines() -> None:
         project_item_add_composite,
         project_item_set_field_composite,
         sub_issue_add_composite,
+        git_ref_view_composite,
+        git_tree_view_composite,
+        branch_commit_files_composite,
     ):
         assert inspect.iscoroutinefunction(handler), handler
         assert "<locals>" not in handler.__qualname__, handler
         assert handler.__qualname__ != "<lambda>", handler
+
+
+# ---------------------------------------------------------------------------
+# gh.composite.repo_view
+# ---------------------------------------------------------------------------
+
+_REPO_VIEW_OP_ID = "gh.composite.repo_view"
+
+
+@pytest.mark.asyncio
+async def test_repo_view_is_a_safe_read_that_runs_at_once(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``gh.composite.repo_view`` is ``safe`` with ``requires_approval=False``."""
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "gh.composite.repo_view"
+                )
+            )
+        ).scalar_one()
+    assert row.safety_level == "safe"
+    assert row.requires_approval is False
+    assert row.handler_ref == _EXPECTED_HANDLER_REF_BY_OP["gh.composite.repo_view"]
+
+
+@pytest.mark.asyncio
+async def test_repo_view_meets_every_operation_contract_rule(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The row passes the operation contract rules with no gap."""
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    contract = await _load_contract("gh.composite.repo_view")
+    assert check_operation(contract) == {}
+
+
+# ---------------------------------------------------------------------------
+# gh.composite.repo_create
+# ---------------------------------------------------------------------------
+
+
+async def _load_contract(op_id: str) -> OperationContract:
+    """Build the contract of one registered gh-rest composite from its row."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == op_id))
+        ).scalar_one()
+        group = (
+            await fresh.execute(select(OperationGroup).where(OperationGroup.id == row.group_id))
+        ).scalar_one()
+    return OperationContract(
+        connector="gh-rest",
+        op_id=row.op_id,
+        summary=row.summary,
+        description=row.description,
+        parameter_schema=dict(row.parameter_schema),
+        response_schema=row.response_schema,
+        llm_instructions=row.llm_instructions,
+        safety_level=row.safety_level,
+        requires_approval=row.requires_approval,
+        group_text=group.when_to_use,
+    )
+
+
+@pytest.mark.asyncio
+async def test_repo_create_is_a_caution_write_that_waits_for_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``gh.composite.repo_create`` is ``caution`` with ``requires_approval=True``."""
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "gh.composite.repo_create"
+                )
+            )
+        ).scalar_one()
+    assert row.safety_level == "caution"
+    assert row.requires_approval is True
+    assert row.handler_ref == _EXPECTED_HANDLER_REF_BY_OP["gh.composite.repo_create"]
+    assert row.parameter_schema["properties"]["visibility"]["enum"] == ["private", "public"]
+
+
+@pytest.mark.asyncio
+async def test_repo_create_meets_every_operation_contract_rule(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The row passes the operation contract rules with no gap."""
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    contract = await _load_contract("gh.composite.repo_create")
+    assert check_operation(contract) == {}

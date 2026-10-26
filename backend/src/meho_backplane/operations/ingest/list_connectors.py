@@ -521,8 +521,13 @@ def _mark_shadowed_builtin_rows(
     (:func:`~meho_backplane.operations._lookup.lookup_descriptor`). This
     post-pass mirrors that precedence on the listing so a consumer knows
     which twin ``call_operation`` resolves: a ``scope="builtin"`` row
-    whose ``connector_id`` also appears on a ``scope="tenant"`` row in
-    the same response is flagged shadowed.
+    whose ``(connector_id, product)`` also appears on a ``scope="tenant"``
+    row in the same response is flagged shadowed.
+
+    The match includes ``product`` because dispatch keys on the full
+    triple: a tenant row stored under a former product name (#4889)
+    shares the id but is never used, so it does not shadow anything —
+    the built-in row stays the one calls reach and keeps ``False``.
 
     Runs over the full response (DB-backed + class-side rows) so the
     marker reflects exactly what the caller sees. Built on
@@ -531,15 +536,57 @@ def _mark_shadowed_builtin_rows(
     twin pair are rewritten, so single-scope responses are returned
     untouched.
     """
-    tenant_scoped_ids = {item.connector_id for item in items if item.scope == "tenant"}
-    if not tenant_scoped_ids:
+    tenant_scoped_keys = {
+        (item.connector_id, item.product) for item in items if item.scope == "tenant"
+    }
+    if not tenant_scoped_keys:
         return items
     return [
         item.model_copy(update={"shadowed_by_tenant_scope": True})
-        if item.scope == "builtin" and item.connector_id in tenant_scoped_ids
+        if item.scope == "builtin" and (item.connector_id, item.product) in tenant_scoped_keys
         else item
         for item in items
     ]
+
+
+def _legacy_tenant_copy_hint(
+    connector_id: str,
+    *,
+    product: str,
+    tenant_uuid: UUID | None,
+) -> NextStep | None:
+    """Return the delete hint for a tenant row stored under a former product name (#4889).
+
+    Dispatch reads the product from ``connector_id``; a tenant row whose
+    stored ``product`` differs (``vcf-logs`` rows for ``vrli-rest-9.0``)
+    can therefore never be called. Such a row is listed so the operator
+    can see it, but it is marked not dispatchable and carries this hint
+    naming the clean-up verb. ``None`` for built-in rows, for rows whose
+    product matches the id, and for rows whose id does not parse (the
+    dispatcher filter drops those).
+
+    The hint is safe to follow even when the tenant also has a copy
+    under the current product:
+    :meth:`~meho_backplane.operations.ingest.service.ReviewService.delete_connector`
+    removes an old copy before the current one.
+    """
+    if tenant_uuid is None:
+        return None
+    try:
+        parsed_product, _version, _impl_id = parse_connector_id(connector_id)
+    except ValueError:
+        return None
+    if parsed_product == product:
+        return None
+    return NextStep(
+        verb=f"meho connector delete {connector_id}",
+        rationale=(
+            f"this copy is stored under the former product name {product!r}; calls "
+            f"use the product name {parsed_product!r}, so this copy can never be "
+            f"called. Delete it to remove it from the list. The delete removes this "
+            f"old copy first and leaves any copy stored under {parsed_product!r} in place."
+        ),
+    )
 
 
 async def _emit_db_backed_rows(
@@ -560,6 +607,13 @@ async def _emit_db_backed_rows(
     and ``next_step=None`` (the catalog-completion hint only applies
     to the class-side-only path; ingested rows already dispatch).
 
+    One kind of row skips the dispatcher filter: a tenant row stored
+    under a former product name (#4889). The filter probes the product
+    parsed from the id, so without a built-in or current-product copy
+    it would drop the old copy and the operator would never see it or
+    its clean-up hint. Such a row is kept with ``dispatchable=False``
+    and the delete hint instead (:func:`_legacy_tenant_copy_hint`).
+
     Extracted from :func:`list_ingested_connectors` so the DB-side
     emission and the class-side-only emission stay each below the
     code-quality function-size limit.
@@ -570,7 +624,10 @@ async def _emit_db_backed_rows(
         if not _matches_status_filter(row, status):
             continue
         connector_id = build_connector_id(product, version, impl_id)
-        if not await _resolves_through_dispatcher(
+        legacy_hint = _legacy_tenant_copy_hint(
+            connector_id, product=product, tenant_uuid=tenant_uuid
+        )
+        if legacy_hint is None and not await _resolves_through_dispatcher(
             operator=operator,
             connector_id=connector_id,
             source_product=product,
@@ -588,6 +645,8 @@ async def _emit_db_backed_rows(
             enabled_operation_count=enabled_op_count,
             has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
         )
+        if legacy_hint is not None:
+            dispatchable = False
         items.append(
             ConnectorListItem(
                 connector_id=connector_id,
@@ -602,6 +661,7 @@ async def _emit_db_backed_rows(
                 operation_count=op_counts.get("total", 0),
                 enabled_operation_count=enabled_op_count,
                 state="ingested",
+                next_step=legacy_hint,
                 kind=kind,
                 dispatchable=dispatchable,
                 scope="tenant" if tenant_uuid is not None else "builtin",

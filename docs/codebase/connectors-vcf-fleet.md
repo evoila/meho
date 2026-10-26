@@ -226,7 +226,7 @@ LCM spec (the #2272 datetime-crash artifact):
   (the vSphere typed-reads envelope shape).
 
 Both ops meet the VMware operation-contract check
-(`backend/tests/test_vmware_operation_contracts.py`): a short summary and
+(`backend/tests/test_operation_contracts.py`): a short summary and
 description, one example call (`{}`) each, and a response schema with a
 description per field. The `environments[]` row fields (`environmentId`,
 `environmentName`, `environmentStatus`, `products`) are the names the op

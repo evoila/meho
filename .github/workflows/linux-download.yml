@@ -1,0 +1,277 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Builds the download of install form 2, meho-linux-<version>-amd64.tar
+# (#4734). It is the one file that installs MEHO on a Linux server with no
+# internet: install.sh, RKE2, the chart, every image, helm, the meho CLI and
+# the licence texts. deploy/linux-server/build-download.sh builds it and
+# deploy/linux-server/check-download.sh checks it. See
+# docs/codebase/linux-server-download.md.
+#
+# Two ways to run it:
+#   * workflow_call from cli-release.yml, after its `release` job, on every
+#     v* tag. The build waits until chart.yml and image.yml have published
+#     and signed the chart and the image of the tag. The `publish` job then
+#     writes SHA256SUMS-linux, signs it with cosign keyless signing and
+#     attaches the tar, SHA256SUMS-linux and SHA256SUMS-linux.cosign.bundle
+#     to the GitHub release of the tag.
+#   * workflow_dispatch on main. It builds the download of the main commit
+#     (its published chart, its image sha-<commit> and a CLI built from the
+#     commit) and keeps it as a workflow artifact for 3 days. No release
+#     changes.
+#
+# Runner: GitHub-hosted ubuntu-latest. The build needs about 6 GB of disk
+# and zstd, and it runs no pull-request code (no pull_request trigger).
+#
+# Permissions: read-only by default. Only `publish`, the job that signs and
+# attaches, gets contents: write and id-token: write. It runs no repository
+# code.
+
+name: linux-download
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, for example v0.36.0.
+        required: true
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and check the form-2 download
+    runs-on: ubuntu-latest
+    # Up to 60 minutes of waiting for chart.yml and image.yml on a tag, then
+    # about 20 minutes of downloads, packing and checks.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      file: ${{ steps.plan.outputs.file }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install regctl
+        # The registry tool that fetches the images by digest. Pinned version
+        # and checksum: the sha256 is the digest GitHub records for the
+        # release file.
+        run: |
+          set -euo pipefail
+          REGCTL_VER=v0.11.6
+          REGCTL_SHA=8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd
+          curl -fsSL -o "${RUNNER_TEMP}/regctl" \
+            "https://github.com/regclient/regclient/releases/download/${REGCTL_VER}/regctl-linux-amd64"
+          echo "${REGCTL_SHA}  ${RUNNER_TEMP}/regctl" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${RUNNER_TEMP}/regctl" "${HOME}/.local/bin/regctl"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          "${HOME}/.local/bin/regctl" version
+
+      - name: Install cosign
+        # Same pin as cli-release.yml and chart.yml (cosign v3.0.6).
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Decide what to build
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT}" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "::error::Run this workflow on main. Only main commits have a published chart and image."
+              exit 1
+            fi
+            # chart.yml publishes every main commit as 0.1.<YYYYMMDD>-<short sha>.
+            CHART_VERSION=$(regctl tag ls ghcr.io/evoila/meho-chart \
+              | awk -v sha="${GITHUB_SHA}" '/^0\.1\.[0-9]{8}-[0-9a-f]{7,40}$/ { split($0, part, "-"); if (index(sha, part[2]) == 1) print }' \
+              | sort | tail -n 1)
+            if [[ -z "${CHART_VERSION}" ]]; then
+              echo "::error::chart.yml has not published the chart of ${GITHUB_SHA} yet. Run this workflow again when chart.yml is done."
+              exit 1
+            fi
+            VERSION=${CHART_VERSION}
+            IMAGE_TAG=sha-${GITHUB_SHA}
+            SIGNER_REF=refs/heads/main
+            WAIT_SECONDS=0
+            RETENTION=3
+          else
+            if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::The tag '${TAG}' is not like v0.36.0."
+              exit 1
+            fi
+            VERSION=${TAG#v}
+            CHART_VERSION=${VERSION}
+            IMAGE_TAG=${TAG}
+            SIGNER_REF=refs/tags/${TAG}
+            WAIT_SECONDS=3600
+            RETENTION=1
+          fi
+          {
+            echo "version=${VERSION}"
+            echo "chart-version=${CHART_VERSION}"
+            echo "image-tag=${IMAGE_TAG}"
+            echo "signer-ref=${SIGNER_REF}"
+            echo "wait-seconds=${WAIT_SECONDS}"
+            echo "retention=${RETENTION}"
+            echo "file=meho-linux-${VERSION}-amd64.tar"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Building meho-linux-${VERSION}-amd64.tar: chart ${CHART_VERSION}, image ${IMAGE_TAG}, signed at ${SIGNER_REF}."
+
+      - name: Take the Linux CLI from the release job
+        # cli-release.yml's `release` job uploads the GoReleaser archive and
+        # GoReleaser's SHA256SUMS. The archive is checked against that file.
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: meho-cli-linux-amd64
+          path: ${{ runner.temp }}/cli
+
+      - name: Unpack the Linux CLI
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/cli"
+          ARCHIVE="meho_${VERSION}_linux_amd64.tar.gz"
+          grep -qE "^[0-9a-f]{64}  ${ARCHIVE}\$" SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          tar -xzf "${ARCHIVE}" meho
+          echo "MEHO_CLI_BINARY=${RUNNER_TEMP}/cli/meho" >> "${GITHUB_ENV}"
+
+      - name: Set up Go
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          # Same Go as cli-release.yml.
+          go-version: '1.26'
+          check-latest: true
+          cache-dependency-path: cli/go.sum
+
+      - name: Build the Linux CLI of this commit
+        # The same build settings as the `meho` build in cli/.goreleaser.yaml.
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        working-directory: cli
+        run: |
+          set -euo pipefail
+          DATE=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)
+          PKG=github.com/evoila/meho/cli/internal/version
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X ${PKG}.Version=v${VERSION} -X ${PKG}.Commit=${GITHUB_SHA} -X ${PKG}.Date=${DATE}" \
+            -o "${RUNNER_TEMP}/cli/meho" ./cmd/meho
+          echo "MEHO_CLI_BINARY=${RUNNER_TEMP}/cli/meho" >> "${GITHUB_ENV}"
+
+      - name: Build the download
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          MEHO_CHART_VERSION: ${{ steps.plan.outputs.chart-version }}
+          MEHO_IMAGE_TAG: ${{ steps.plan.outputs.image-tag }}
+          MEHO_SIGNER_REF: ${{ steps.plan.outputs.signer-ref }}
+          MEHO_WAIT_SECONDS: ${{ steps.plan.outputs.wait-seconds }}
+        run: deploy/linux-server/build-download.sh "${VERSION}" "${RUNNER_TEMP}/download"
+
+      - name: Check the download
+        # The layout of the form-2 design (tar -tf), the size limit, the
+        # pinned RKE2 and Helm files, and that every image in the archive is
+        # there under its pinned or registry digest, and that the images
+        # are exactly the chart's images plus the two local-path images.
+        env:
+          FILE: ${{ steps.plan.outputs.file }}
+        run: deploy/linux-server/check-download.sh "${RUNNER_TEMP}/download/${FILE}"
+
+      - name: Write SHA256SUMS-linux
+        env:
+          FILE: ${{ steps.plan.outputs.file }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/download"
+          sha256sum "${FILE}" > SHA256SUMS-linux
+          sha256sum -c SHA256SUMS-linux
+          {
+            echo "## Form-2 download"
+            echo ""
+            echo "- File: \`${FILE}\` ($(stat -c %s "${FILE}") bytes)"
+            echo "- sha256: \`$(cut -d ' ' -f 1 SHA256SUMS-linux)\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Keep the download as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: meho-linux-download
+          path: |
+            ${{ runner.temp }}/download/${{ steps.plan.outputs.file }}
+            ${{ runner.temp }}/download/SHA256SUMS-linux
+          if-no-files-found: error
+          retention-days: ${{ steps.plan.outputs.retention }}
+          # The tar holds compressed files only; zip compression would only
+          # cost time.
+          compression-level: 0
+
+  publish:
+    name: Sign SHA256SUMS-linux and attach the download to the release
+    # Only for a release (workflow_call from cli-release.yml on a v* tag);
+    # a manual run keeps the artifact and changes no release.
+    if: github.event_name != 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Attach the files to the release.
+      contents: write
+      # Mint the GitHub OIDC token for cosign keyless signing.
+      id-token: write
+    steps:
+      - name: Get the download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: meho-linux-download
+          path: ${{ runner.temp }}/download
+
+      - name: Check the download against SHA256SUMS-linux
+        working-directory: ${{ runner.temp }}/download
+        run: sha256sum -c SHA256SUMS-linux
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Sign SHA256SUMS-linux
+        # The same keyless signing as SHA256SUMS-mcpb in cli-release.yml. The
+        # certificate names this workflow file at the tag:
+        # https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/<tag>
+        working-directory: ${{ runner.temp }}/download
+        env:
+          COSIGN_YES: "true"
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes --bundle=SHA256SUMS-linux.cosign.bundle SHA256SUMS-linux
+          # Check the signature with the command docs/RELEASING.md gives.
+          cosign verify-blob \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/linux-download.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle SHA256SUMS-linux.cosign.bundle \
+            SHA256SUMS-linux
+
+      - name: Attach the download to the release
+        # GoReleaser created the release in cli-release.yml's `release` job.
+        # Same pinned action as the .mcpb attach step there; it streams the
+        # file, so the tar of about 1.8 GiB is not read into memory.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            ${{ runner.temp }}/download/${{ needs.build.outputs.file }}
+            ${{ runner.temp }}/download/SHA256SUMS-linux
+            ${{ runner.temp }}/download/SHA256SUMS-linux.cosign.bundle
+          fail_on_unmatched_files: true

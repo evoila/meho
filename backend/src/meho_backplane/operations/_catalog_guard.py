@@ -55,7 +55,7 @@ from meho_backplane.connectors import (
 )
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor
-from meho_backplane.operations._audit import audit_rejection_safe
+from meho_backplane.operations._audit import audit_rejection_safe, with_audit_receipt
 from meho_backplane.operations._errors import result_unqualified_target_version
 from meho_backplane.operations._lookup import lookup_descriptor
 
@@ -181,7 +181,7 @@ async def select_catalog_for_target(
         return choice
 
     duration_ms = (time.monotonic() - started) * 1000.0
-    await audit_rejection_safe(
+    receipt = await audit_rejection_safe(
         audit_id=uuid.uuid4(),
         operator=operator,
         descriptor=descriptor,
@@ -190,12 +190,15 @@ async def select_catalog_for_target(
         result_status="unqualified_target_version",
         duration_ms=duration_ms,
     )
-    return result_unqualified_target_version(
-        descriptor.op_id,
-        reason=choice.reason,
-        target_product=choice.target_product,
-        target_version=choice.target_version,
-        duration_ms=duration_ms,
+    return with_audit_receipt(
+        result_unqualified_target_version(
+            descriptor.op_id,
+            reason=choice.reason,
+            target_product=choice.target_product,
+            target_version=choice.target_version,
+            duration_ms=duration_ms,
+        ),
+        receipt,
     )
 
 

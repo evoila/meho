@@ -325,6 +325,7 @@ def record_vendor_call(
     response: Any,
     request_body: Any = None,
     request_content_type: str | None = None,
+    response_body: Any = None,
 ) -> None:
     """Capture one generic-connector vendor HTTP call as a span (F7).
 
@@ -336,6 +337,12 @@ def record_vendor_call(
     raise into the dispatch. Headers and bodies are **redacted at capture** --
     no raw byte reaches the :class:`SpanInput`. Any error is logged and
     swallowed.
+
+    *response_body*, when not ``None``, is recorded in place of the raw
+    response bytes. A connector hands over a body it has already masked
+    (:meth:`HttpConnector.trace_response_body`) when its vendor answers can
+    carry a secret in a field the shared engine does not know by shape, for
+    example a stored pairing password. The shared redaction still runs on it.
     """
     scope = _active_capture_var.get()
     if start is None or scope is None:
@@ -347,6 +354,7 @@ def record_vendor_call(
             response=response,
             request_body=request_body,
             request_content_type=request_content_type,
+            response_body=response_body,
         )
         scope.add(
             SpanInput(
@@ -417,13 +425,15 @@ def _redact_vendor_call(
     response: Any,
     request_body: Any,
     request_content_type: str | None,
+    response_body: Any = None,
 ) -> tuple[Any, str, bool]:
     """Cap + redact one vendor call. Returns ``(redaction, safe_url, truncated)``."""
     op = _op_context_var.get()
     request_url = getattr(getattr(response, "request", None), "url", None)
     response_content_type = header_value(response, "content-type")
     req_body, req_truncated = cap_body(request_body)
-    resp_body, resp_truncated = cap_body(response_content(response))
+    raw_response_body = response_content(response) if response_body is None else response_body
+    resp_body, resp_truncated = cap_body(raw_response_body)
     redaction = redact_span(
         op_id=op.op_id if op else None,
         connector_id=op.connector_id if op else None,

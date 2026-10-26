@@ -94,7 +94,13 @@ class AuditQueryFilters(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     target: str | None = None
+    # Partial, case-insensitive match on the user id (``operator_sub``) or
+    # the name (``payload['principal_name']``) -- #4668.
     principal: str | None = None
+    # Exact match on the user id only. Not on the REST body or the MCP
+    # input schema: the "my recent" views set it from the caller's own
+    # token so the result never widens to another person's rows.
+    principal_sub: str | None = None
     op_id: str | None = None
     op_class: str | None = None
     result_status: str | None = None
@@ -108,6 +114,12 @@ class AuditQueryFilters(BaseModel):
     # default) applies no class filter, so a query returns every class --
     # the same rows it returned before the column existed.
     event_class: AuditEventClass | None = None
+    # Whether the row has a stored flight-recorder trace (#4855). ``True``
+    # keeps only the ``operation_execution`` rows with a ``dispatch_trace``
+    # row for the same audit id and tenant: the rows the trace route
+    # returns a trace for. ``False`` keeps the other rows. ``None`` (the
+    # default) applies no filter.
+    has_trace: bool | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 

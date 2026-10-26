@@ -40,6 +40,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from kubernetes_asyncio.client.models import (
+    V1ConfigMapEnvSource,
+    V1ConfigMapKeySelector,
     V1Container,
     V1ContainerPort,
     V1ContainerState,
@@ -53,9 +55,12 @@ from kubernetes_asyncio.client.models import (
     V1DeploymentSpec,
     V1DeploymentStatus,
     V1DeploymentStrategy,
+    V1EnvFromSource,
     V1EnvVar,
+    V1EnvVarSource,
     V1LabelSelector,
     V1ListMeta,
+    V1ObjectFieldSelector,
     V1ObjectMeta,
     V1Pod,
     V1PodCondition,
@@ -63,8 +68,11 @@ from kubernetes_asyncio.client.models import (
     V1PodSpec,
     V1PodStatus,
     V1PodTemplateSpec,
+    V1ResourceFieldSelector,
     V1ResourceRequirements,
     V1RollingUpdateDeployment,
+    V1SecretEnvSource,
+    V1SecretKeySelector,
     V1Volume,
     V1VolumeMount,
 )
@@ -79,6 +87,7 @@ from meho_backplane.connectors.kubernetes.ops_workload import (
     WORKLOAD_OPS,
     AmbiguousPrefixError,
     WorkloadNotFoundError,
+    _container_row,
     container_status_row,
     deployment_info,
     deployment_row,
@@ -483,6 +492,83 @@ def test_container_status_row_picks_state_branch() -> None:
     assert container_status_row(cs_terminated)["state"] == "terminated"
 
 
+def test_container_status_row_running_has_image_id_and_no_reason() -> None:
+    """A running container reports the digest it runs and no reason."""
+    row = container_status_row(_make_container_status(name="app", state_label="running"))
+    assert row["image_id"] == "sha256:abcdef"
+    assert row["state"] == "running"
+    assert row["reason"] is None
+    assert row["message"] is None
+    assert row["exit_code"] is None
+    assert row["last_state"] is None
+    assert row["last_reason"] is None
+    assert row["last_exit_code"] is None
+
+
+def test_container_status_row_waiting_carries_reason_and_message() -> None:
+    """``ImagePullBackOff`` plus the pull error text come through."""
+    cs = V1ContainerStatus(
+        name="migrate",
+        image="registry.example.com/app:does-not-exist",
+        image_id="",
+        ready=False,
+        restart_count=0,
+        state=V1ContainerState(
+            waiting=V1ContainerStateWaiting(
+                reason="ImagePullBackOff",
+                message='Back-off pulling image "registry.example.com/app:does-not-exist"',
+            )
+        ),
+    )
+    row = container_status_row(cs)
+    assert row["state"] == "waiting"
+    assert row["image_id"] == ""
+    assert row["reason"] == "ImagePullBackOff"
+    assert row["message"] == 'Back-off pulling image "registry.example.com/app:does-not-exist"'
+    assert row["exit_code"] is None
+
+
+def test_container_status_row_crashloop_carries_last_termination() -> None:
+    """``CrashLoopBackOff`` says why the container stopped the last time."""
+    cs = V1ContainerStatus(
+        name="app",
+        image="app:1.0",
+        image_id="registry.example.com/app@sha256:0123",
+        ready=False,
+        restart_count=5,
+        state=V1ContainerState(waiting=V1ContainerStateWaiting(reason="CrashLoopBackOff")),
+        last_state=V1ContainerState(
+            terminated=V1ContainerStateTerminated(exit_code=137, reason="OOMKilled")
+        ),
+    )
+    row = container_status_row(cs)
+    assert row["state"] == "waiting"
+    assert row["reason"] == "CrashLoopBackOff"
+    assert row["message"] is None
+    assert row["last_state"] == "terminated"
+    assert row["last_reason"] == "OOMKilled"
+    assert row["last_exit_code"] == 137
+
+
+def test_container_status_row_terminated_carries_exit_code() -> None:
+    """A terminated container reports reason, message and exit code."""
+    cs = V1ContainerStatus(
+        name="job",
+        image="job:1.0",
+        image_id="registry.example.com/job@sha256:4567",
+        ready=False,
+        restart_count=0,
+        state=V1ContainerState(
+            terminated=V1ContainerStateTerminated(exit_code=1, reason="Error", message="boom")
+        ),
+    )
+    row = container_status_row(cs)
+    assert row["state"] == "terminated"
+    assert row["reason"] == "Error"
+    assert row["message"] == "boom"
+    assert row["exit_code"] == 1
+
+
 def test_pod_info_carries_per_container_statuses_and_volumes() -> None:
     """``pod_info`` projects spec + status + container statuses + volumes."""
     now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)
@@ -634,6 +720,153 @@ def test_deployment_info_carries_status_block_and_conditions() -> None:
     assert info["status"]["observed_generation"] == 1
     assert info["conditions"][0]["type"] == "Available"
     assert info["conditions"][0]["reason"] == "MinimumReplicasAvailable"
+
+
+# ---------------------------------------------------------------------------
+# env sources (#4890)
+# ---------------------------------------------------------------------------
+
+
+_SOURCED_ENV: list[V1EnvVar] = [
+    V1EnvVar(name="LOG_LEVEL", value="info"),
+    V1EnvVar(
+        name="DATABASE_URL",
+        value_from=V1EnvVarSource(
+            secret_key_ref=V1SecretKeySelector(name="app-db", key="url", optional=False)
+        ),
+    ),
+    V1EnvVar(
+        name="FEATURE_FLAGS",
+        value_from=V1EnvVarSource(
+            config_map_key_ref=V1ConfigMapKeySelector(name="app-config", key="flags", optional=True)
+        ),
+    ),
+    V1EnvVar(
+        name="POD_IP",
+        value_from=V1EnvVarSource(field_ref=V1ObjectFieldSelector(field_path="status.podIP")),
+    ),
+    V1EnvVar(
+        name="MEM_LIMIT",
+        value_from=V1EnvVarSource(
+            resource_field_ref=V1ResourceFieldSelector(
+                container_name="app", resource="limits.memory"
+            )
+        ),
+    ),
+]
+
+_ENV_FROM: list[V1EnvFromSource] = [
+    V1EnvFromSource(secret_ref=V1SecretEnvSource(name="app-secrets", optional=False)),
+    V1EnvFromSource(
+        prefix="CFG_", config_map_ref=V1ConfigMapEnvSource(name="app-config", optional=True)
+    ),
+]
+
+_EXPECTED_ENV: list[dict[str, Any]] = [
+    {"name": "LOG_LEVEL", "value": "info"},
+    {
+        "name": "DATABASE_URL",
+        "value": None,
+        "value_from": {"secret_key_ref": {"name": "app-db", "key": "url", "optional": False}},
+    },
+    {
+        "name": "FEATURE_FLAGS",
+        "value": None,
+        "value_from": {
+            "config_map_key_ref": {"name": "app-config", "key": "flags", "optional": True}
+        },
+    },
+    {"name": "POD_IP", "value": None, "value_from": {"field_ref": {"field_path": "status.podIP"}}},
+    {
+        "name": "MEM_LIMIT",
+        "value": None,
+        "value_from": {
+            "resource_field_ref": {"container_name": "app", "resource": "limits.memory"}
+        },
+    },
+]
+
+_EXPECTED_ENV_FROM: list[dict[str, Any]] = [
+    {"kind": "secret_ref", "name": "app-secrets", "optional": False, "prefix": None},
+    {"kind": "config_map_ref", "name": "app-config", "optional": True, "prefix": "CFG_"},
+]
+
+
+def _sourced_container() -> V1Container:
+    return V1Container(name="app", image="app:1.0", env=_SOURCED_ENV, env_from=_ENV_FROM)
+
+
+def test_pod_info_env_names_every_source_kind_and_env_from() -> None:
+    """Each env entry keeps name + value and names its source; envFrom is listed."""
+    pod = V1Pod(
+        metadata=V1ObjectMeta(name="app-x", namespace="default"),
+        spec=V1PodSpec(containers=[_sourced_container()], init_containers=[_sourced_container()]),
+        status=V1PodStatus(phase="Running"),
+    )
+    info = pod_info(pod)
+    for container in (info["containers"][0], info["init_containers"][0]):
+        assert container["env"] == _EXPECTED_ENV
+        assert container["env_from"] == _EXPECTED_ENV_FROM
+
+
+def test_deployment_info_env_names_every_source_kind_and_env_from() -> None:
+    """``k8s.deployment.info`` uses the same container shape for its pod template."""
+    dep = _make_deployment(name="app")
+    dep.spec.template.spec.containers = [_sourced_container()]
+    info = deployment_info(dep)
+    assert info["containers"][0]["env"] == _EXPECTED_ENV
+    assert info["containers"][0]["env_from"] == _EXPECTED_ENV_FROM
+
+
+def test_container_row_literal_env_and_no_env_from_keep_their_shape() -> None:
+    """A literal value shows as before, with no ``value_from`` key; ``env_from`` is empty."""
+    container = V1Container(name="app", image="app:1.0", env=[V1EnvVar(name="A", value="1")])
+    row = _container_row(container)
+    assert row["env"] == [{"name": "A", "value": "1"}]
+    assert row["env_from"] == []
+
+
+@pytest.mark.asyncio
+async def test_k8s_pod_info_env_sources_make_no_secret_read_and_leak_no_value() -> None:
+    """The op lists the pod only; it never reads a Secret or ConfigMap.
+
+    The result holds the names, keys and field paths written in the
+    pod definition and nothing else, so no secret value can appear.
+    """
+    pod = V1Pod(
+        metadata=V1ObjectMeta(name="app-x", namespace="default"),
+        spec=V1PodSpec(containers=[_sourced_container()]),
+        status=V1PodStatus(phase="Running"),
+    )
+    connector = _make_connector()
+    with (
+        _patch_kubeconfig(),
+        patch("meho_backplane.connectors.kubernetes.ops_workload.client.CoreV1Api") as core_v1_cls,
+    ):
+        core_v1 = core_v1_cls.return_value
+        core_v1.list_namespaced_pod = AsyncMock(return_value=_pod_list([pod]))
+        core_v1.read_namespaced_secret = AsyncMock(
+            return_value=MagicMock(data={"url": "cG9zdGdyZXM6Ly9zZWNyZXQ="})
+        )
+        core_v1.read_namespaced_config_map = AsyncMock(return_value=MagicMock(data={"flags": "x"}))
+        result = await connector.k8s_pod_info(
+            _make_operator(), _TARGET, {"pod_name": "app-x", "namespace": "default"}
+        )
+
+    assert core_v1.read_namespaced_secret.await_count == 0
+    assert core_v1.read_namespaced_config_map.await_count == 0
+    called = {name for name, _args, _kwargs in core_v1.method_calls}
+    assert called == {"list_namespaced_pod"}
+
+    env = result["containers"][0]["env"]
+    assert env == _EXPECTED_ENV
+    sourced = [e for e in env if "value_from" in e]
+    assert len(sourced) == 4
+    for entry in sourced:
+        assert entry["value"] is None
+        (ref,) = entry["value_from"].values()
+        assert set(ref) <= {"name", "key", "optional", "field_path", "container_name", "resource"}
+    assert "cG9zdGdyZXM6Ly9zZWNyZXQ=" not in repr(result)
 
 
 # ---------------------------------------------------------------------------

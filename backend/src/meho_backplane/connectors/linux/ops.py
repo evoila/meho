@@ -272,7 +272,7 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
 
     Composition: ``linux.about`` (identity canary) + the per-domain read
     tiers -- ``FILE_OPS`` (``file.read`` / ``log.tail``), ``HOST_OPS``
-    (``service.status`` / ``sysctl.read``), ``FIREWALL_OPS``
+    (``service.status`` / ``sysctl.read`` / ``dns.lookup``), ``FIREWALL_OPS``
     (``firewall.show``), ``STORAGE_OPS`` (``mount.list``) -- plus the T2
     governed ``WRITE_OPS`` (``file.write`` / ``service.control`` /
     ``script.run`` / ``sysctl.write`` / ``firewall.load``). Implemented as a
@@ -302,11 +302,12 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
 #: :meth:`LinuxSshConnector.register_operations`. Each entry covers a
 #: ``group_key`` declared in :data:`LINUX_OPS`; the registration walk fails
 #: closed with a :class:`ValueError` if a declared ``group_key`` lacks a
-#: curated entry (the bind9 / rke2 precedent). Seven groups: the six read
-#: verbs plus the ``exec`` group the T2 write verb ``script.run`` adds;
-#: ``system`` carries the identity canary + ``sysctl.read`` + ``sysctl.write``,
-#: and ``file`` / ``service`` / ``firewall`` each carry a read verb beside
-#: their governed write verb.
+#: curated entry (the bind9 / rke2 precedent). Eight groups: the read
+#: verbs' groups (``network`` carries ``dns.lookup`` alone) plus the ``exec``
+#: group the T2 write verb ``script.run`` adds; ``system`` carries the
+#: identity canary + ``sysctl.read`` + ``sysctl.write``, and ``file`` /
+#: ``service`` / ``firewall`` each carry a read verb beside their governed
+#: write verb.
 LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "system": (
         "Use for host identity and kernel-parameter reads plus the "
@@ -377,6 +378,15 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "(``df`` / ``lsblk``) is a separate op. Large tables spill to a "
         "result handle paged with ``result_query(handle_id, offset, "
         "limit)``. " + SSH_TRANSPORT_NOTE
+    ),
+    "network": (
+        "Use to check the host's own name lookup WITHOUT changing anything: "
+        "``linux.dns.lookup`` runs ``getent ahosts <name>`` on the host and "
+        "returns the addresses its resolver gives back, or ``found=false`` "
+        "when the name cannot be found. It shows what programs on that host "
+        "see, so it proves a resolver repair or explains why a pod cannot pull "
+        "an image. For a lookup from MEHO's own side use ``net.dns_lookup``. "
+        "Safe, so a sensor can run it on a schedule. " + SSH_TRANSPORT_NOTE
     ),
 }
 

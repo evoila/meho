@@ -388,6 +388,46 @@ def test_post_query_unknown_event_class_returns_422(client: TestClient) -> None:
     mock_query.assert_not_awaited()
 
 
+@pytest.mark.parametrize("has_trace", [True, False])
+def test_post_query_has_trace_reaches_the_substrate(client: TestClient, has_trace: bool) -> None:
+    """#4855: ``has_trace`` in the body becomes the substrate trace filter."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"has_trace": has_trace, "since": "30d"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    filters = mock_query.await_args.args[0]
+    assert filters.has_trace is has_trace
+
+
+def test_post_query_without_has_trace_applies_no_trace_filter(client: TestClient) -> None:
+    """#4855: a body without ``has_trace`` keeps rows with and without a trace."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"event_class": "operation_execution"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    assert mock_query.await_args.args[0].has_trace is None
+
+
 def test_post_query_bad_duration_returns_400(client: TestClient) -> None:
     """A garbage ``since`` value surfaces as 400, not 500."""
     key = make_rsa_keypair("kid-A")
@@ -533,7 +573,12 @@ def test_by_work_ref_builds_exact_work_ref_filter(client: TestClient) -> None:
 
 
 def test_my_recent_injects_principal_from_jwt(client: TestClient) -> None:
-    """AC5: ``principal`` filter is the operator's JWT subject — not from the URL."""
+    """AC5: the user id filter is the operator's JWT subject — not from the URL.
+
+    #4668: it is the exact ``principal_sub`` filter, not the partial
+    ``principal`` filter (which also matches names), so the route can
+    never return another person's rows.
+    """
     key = make_rsa_keypair("kid-A")
     token = _token(key, sub="op-42-jwt-sub")
     mock_query = AsyncMock(return_value=_empty_result())
@@ -548,7 +593,8 @@ def test_my_recent_injects_principal_from_jwt(client: TestClient) -> None:
         )
     assert resp.status_code == 200
     filters = mock_query.await_args.args[0]
-    assert filters.principal == "op-42-jwt-sub"
+    assert filters.principal_sub == "op-42-jwt-sub"
+    assert filters.principal is None
 
 
 def test_audit_query_row_includes_policy_decision(client: TestClient) -> None:
@@ -892,7 +938,63 @@ async def test_replay_unknown_session_returns_empty_not_404(client: TestClient) 
         # No MCP rows seeded in this tenant, so nothing was excluded for a
         # null session — the empty forest IS an empty history here (#2700).
         "excluded_null_session_count": 0,
+        # An empty forest has no node whose parent is missing (#4670).
+        "loose_row_count": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_replay_reports_loose_row_count(client: TestClient) -> None:
+    """#4670: nodes whose parent row does not exist surface as ``loose_row_count``.
+
+    A step row saved before MEHO stopped points at an operation id that
+    never got a row. It renders as a root, so the envelope counts it. A
+    root whose parent exists in another session is a real cross-session
+    link, not a loose row, and a NULL-parent root is a real chain start.
+    """
+    session_id = uuid.uuid4()
+    other_session = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        root = await _seed_audit_row(s, tenant_id=_TENANT_A, second=0, agent_session_id=session_id)
+        await _seed_audit_row(
+            s, tenant_id=_TENANT_A, second=1, agent_session_id=session_id, parent_audit_id=root
+        )
+        # The step row whose operation never saved its own row.
+        await _seed_audit_row(
+            s,
+            tenant_id=_TENANT_A,
+            second=2,
+            agent_session_id=session_id,
+            parent_audit_id=uuid.uuid4(),
+        )
+        # A root whose parent exists in another session: linked, not loose.
+        other_parent = await _seed_audit_row(
+            s, tenant_id=_TENANT_A, second=3, agent_session_id=other_session
+        )
+        await _seed_audit_row(
+            s,
+            tenant_id=_TENANT_A,
+            second=4,
+            agent_session_id=session_id,
+            parent_audit_id=other_parent,
+        )
+        await s.commit()
+
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{session_id}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["row_count"] == 4
+    assert len(body["root"]) == 3
+    assert body["loose_row_count"] == 1
 
 
 @pytest.mark.asyncio

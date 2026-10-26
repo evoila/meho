@@ -16,7 +16,7 @@ many minutes) should not hold one MCP request open for its whole run:
   or ``status="running"`` with ``extras.started_at``. When it is done the
   answer is the stored ``OperationResult`` of the call.
 
-No new MCP tool is added: the working surface stays the same 25 tools.
+No new MCP tool is added: the working surface does not change.
 """
 
 from __future__ import annotations

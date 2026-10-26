@@ -462,6 +462,14 @@ const (
 	PermissionVerdictNeedsApproval PermissionVerdict = "needs-approval"
 )
 
+// Defines values for PreviewOperationResponseStatus.
+const (
+	PreviewOperationResponseStatusError       PreviewOperationResponseStatus = "error"
+	PreviewOperationResponseStatusOk          PreviewOperationResponseStatus = "ok"
+	PreviewOperationResponseStatusRateLimited PreviewOperationResponseStatus = "rate_limited"
+	PreviewOperationResponseStatusUnavailable PreviewOperationResponseStatus = "unavailable"
+)
+
 // Defines values for PrincipalKind.
 const (
 	PrincipalKindAgent   PrincipalKind = "agent"
@@ -683,13 +691,17 @@ const (
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
 	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
 	TargetCreateProductRke2       TargetCreateProduct = "rke2"
+	TargetCreateProductSalt       TargetCreateProduct = "salt"
 	TargetCreateProductSddc       TargetCreateProduct = "sddc"
+	TargetCreateProductSrm        TargetCreateProduct = "srm"
 	TargetCreateProductTempo      TargetCreateProduct = "tempo"
 	TargetCreateProductVault      TargetCreateProduct = "vault"
 	TargetCreateProductVcd        TargetCreateProduct = "vcd"
 	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
 	TargetCreateProductVmware     TargetCreateProduct = "vmware"
+	TargetCreateProductVr         TargetCreateProduct = "vr"
 	TargetCreateProductVrli       TargetCreateProduct = "vrli"
+	TargetCreateProductVro        TargetCreateProduct = "vro"
 	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 	TargetCreateProductWindns     TargetCreateProduct = "windns"
 	TargetCreateProductWinsrv     TargetCreateProduct = "winsrv"
@@ -819,12 +831,14 @@ const (
 // Defines values for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer.
 const (
 	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferBuiltin EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "builtin"
+	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferLegacy  EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "legacy"
 	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferTenant  EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "tenant"
 )
 
 // Defines values for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer.
 const (
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferBuiltin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferLegacy  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "legacy"
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferTenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
 )
 
@@ -1250,7 +1264,7 @@ type AgentRunRequest struct {
 	// Async Return a run handle immediately instead of blocking for the result.
 	Async *bool `json:"async,omitempty"`
 
-	// Input The user prompt to run the agent on.
+	// Input The user prompt to run the agent on. At most 65536 characters.
 	Input string `json:"input"`
 }
 
@@ -1621,6 +1635,22 @@ type ApprovalResumeOutcomeView struct {
 	ResumedAt    *string             `json:"resumed_at"`
 }
 
+// ApprovalsStatus The approval settings in force (#4830).
+//
+// “custody“ is the state of the approval key: “configured“,
+// “missing“ or “malformed“. “effective_posture“ says whether a
+// second person must approve (“four_eyes_enforced“) or one operator
+// may approve their own request (“single_operator_break_glass“).
+// “delegated_decision_posture“ says whether a decision made on
+// someone else's instruction is allowed. The three values come from
+// :func:`meho_backplane.features.build_features_block`; they are state
+// words only, never a key value.
+type ApprovalsStatus struct {
+	Custody                  string `json:"custody"`
+	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
+	EffectivePosture         string `json:"effective_posture"`
+}
+
 // ApproveRequestBody POST body for “…/approve“.
 type ApproveRequestBody struct {
 	// Async Async governed dispatch (#3079). When true, the decision is still recorded synchronously, but the resumed op is dispatched on a background task and the route returns HTTP 202 + a durable run handle immediately instead of blocking for the resumed op's full duration. Poll / cancel via ``/api/v1/operations/runs/{handle}``. Default false — the response is byte-identical to the pre-#3079 inline resume.
@@ -1878,6 +1908,7 @@ type AuditQueryRequest struct {
 	//   with it on they write a decision or execution class, or no row
 	//   (#3757, :mod:`meho_backplane.audit_cutover`).
 	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
+	HasTrace      *bool               `json:"has_trace"`
 	Limit         *int                `json:"limit,omitempty"`
 	OpClass       *string             `json:"op_class"`
 	OpId          *string             `json:"op_id"`
@@ -1939,9 +1970,19 @@ type AuditQueryResult struct {
 // rows belong to no session), and mirrors the honest
 // “when_negotiated“ capture label the deploy's “/status“ reports.
 //
+// “loose_row_count“ (#4670) is the number of nodes in “root“ whose
+// “parent_audit_id“ names a row that does not exist in the tenant. A
+// multi-step operation saves its own row last, so such a node belongs
+// to an operation that is still running, or to one that stopped before
+// that save (“docs/decisions/composite-audit-when-a-step-waits.md“).
+// Such rows render as roots; this count tells them apart from real
+// chain starts. A root whose parent lives in another session is not
+// counted.
+//
 // Frozen like the substrate models it carries.
 type AuditReplayResult struct {
 	ExcludedNullSessionCount int                `json:"excluded_null_session_count"`
+	LooseRowCount            int                `json:"loose_row_count"`
 	Root                     []ReplayNode       `json:"root"`
 	RowCount                 int                `json:"row_count"`
 	SessionId                openapi_types.UUID `json:"session_id"`
@@ -3618,7 +3659,11 @@ type ConfirmVerifyResponseAnswer string
 // about what verb closes the workflow). It is a :class:`NextStep`
 // object on “state="registered"“ rows and “None“ on
 // “state="ingested"“ rows (no operator action remains for an
-// ingested connector). The hint is computed against the curated
+// ingested connector) — with one exception: a tenant row stored under
+// a former product name (“vcf-logs“ rows for “vrli-rest-9.0“,
+// #4889) can never be called, so it ships “dispatchable=False“ plus
+// a “next_step“ naming “meho connector delete <id>“ as the
+// clean-up. For registered rows the hint is computed against the curated
 // connector-spec catalog (#743): when the catalog carries an entry
 // for the registry's “(product, version)“ the verb points at
 // “meho connector ingest --catalog ...“; otherwise it points at
@@ -3647,7 +3692,9 @@ type ConfirmVerifyResponseAnswer string
 // “tenant_id“, but surfacing it directly lets a consumer key on it
 // without re-deriving. “shadowed_by_tenant_scope“ is the precedence
 // marker: within a single response, a “"builtin"“ row carries
-// “True“ when a “"tenant"“ row shares its “connector_id“ — i.e.
+// “True“ when a “"tenant"“ row shares its “connector_id“ **and**
+// “product“ (the rule dispatch uses; a tenant row under a former
+// product name, #4889, shares the id but shadows nothing) — i.e.
 // the built-in copy is *shadowed* by a tenant-scoped twin that
 // :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
 // first (tenant-wins dispatch precedence). The two fields exist because
@@ -3660,7 +3707,10 @@ type ConfirmVerifyResponseAnswer string
 // keep working; the listing sets “scope“ explicitly per row and
 // stamps “shadowed_by_tenant_scope“ in a post-pass over the full
 // response. Invariant: within one response no two rows share
-// “(connector_id, scope)“. See :data:`ConnectorScope`.
+// “(connector_id, scope)“, with one exception: a tenant row stored
+// under a former product name (#4889) sits next to the tenant's
+// current copy of the same id; “product“ tells the two apart. See
+// :data:`ConnectorScope`.
 type ConnectorListItem struct {
 	ConnectorId           string                 `json:"connector_id"`
 	DisabledGroupCount    int                    `json:"disabled_group_count"`
@@ -4501,8 +4551,23 @@ type DashboardReadState string
 // “bool | None“ for forward compatibility with response decoders
 // that were generated against the chassis-stage shape, but the
 // handler now always populates it from the probe.
+//
+// “revision“, “head“ and “detail“ (#4830) carry the probe's
+// values, so an operator can confirm an upgrade from “meho status“
+// without a shell into the pod: “revision“ is the revision stamped
+// in the database, “head“ the revision this build expects, and
+// “detail“ the same text “/ready“ shows for the “db“ check.
+// “revision“ is “None“ when the database has no revision or could
+// not be read; “head“ is “None“ when the migration scripts could
+// not be loaded. After a rollback “revision“ is newer than “head“
+// while “migrated“ stays “True“ (“docs/codebase/migrations.md“,
+// "Rollback contract"). The defaults keep older response decoders
+// working.
 type DbStatus struct {
-	Migrated *bool `json:"migrated"`
+	Detail   *string `json:"detail"`
+	Head     *string `json:"head"`
+	Migrated *bool   `json:"migrated"`
+	Revision *string `json:"revision"`
 }
 
 // DecideRequestBody POST body for “/decide“ — the operator-decision path.
@@ -5447,6 +5512,16 @@ type EventSourceUpdate struct {
 	Status *EventSourceStatus `json:"status,omitempty"`
 }
 
+// FeatureStatus One gated feature from “/ready“'s “features“ block (#4830).
+//
+// “configured“ is the feature's state; “missing_env“ lists the
+// names of the settings it still needs. Names only, never values.
+type FeatureStatus struct {
+	Configured bool      `json:"configured"`
+	MissingEnv *[]string `json:"missing_env,omitempty"`
+	Name       string    `json:"name"`
+}
+
 // FilterPredicate One “WHERE“ clause term: “field op value“.
 //
 // “value“ is omitted for “IS NULL“, a list for “IN“ (each element
@@ -5706,7 +5781,28 @@ type HTTPValidationError struct {
 // instance lets a standing grant made in the web console cover a delete
 // by a service principal. “meho status“ prints one line when it is on.
 // The default “"off"“ keeps older response decoders working.
+//
+// “readiness“, “approvals“ and “features“ (#4830) let an operator
+// confirm an upgrade through MEHO: the same checks “/ready“ returns
+// (:class:`ReadinessStatus`), the approval settings in force
+// (:class:`ApprovalsStatus`) and the gated features with the names of
+// the settings they still need (:class:`FeatureStatus`). The route is
+// OPERATOR-gated, so unlike “/ready“ no metrics token is needed.
+// “None“ / empty defaults keep older response decoders working; the
+// handler always fills them.
 type HealthResponse struct {
+	// Approvals The approval settings in force (#4830).
+	//
+	// ``custody`` is the state of the approval key: ``configured``,
+	// ``missing`` or ``malformed``. ``effective_posture`` says whether a
+	// second person must approve (``four_eyes_enforced``) or one operator
+	// may approve their own request (``single_operator_break_glass``).
+	// ``delegated_decision_posture`` says whether a decision made on
+	// someone else's instruction is allowed. The three values come from
+	// :func:`meho_backplane.features.build_features_block`; they are state
+	// words only, never a key value.
+	Approvals *ApprovalsStatus `json:"approvals,omitempty"`
+
 	// Db Database migration status.
 	//
 	// ``migrated`` is ``True`` when the DB-migration-state probe reports
@@ -5719,10 +5815,23 @@ type HealthResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
-	Db                  DbStatus  `json:"db"`
-	GrantedScopes       *[]string `json:"granted_scopes,omitempty"`
-	McpProtocolVersion  *string   `json:"mcp_protocol_version,omitempty"`
-	McpSessionIdCapture string    `json:"mcp_session_id_capture"`
+	//
+	// ``revision``, ``head`` and ``detail`` (#4830) carry the probe's
+	// values, so an operator can confirm an upgrade from ``meho status``
+	// without a shell into the pod: ``revision`` is the revision stamped
+	// in the database, ``head`` the revision this build expects, and
+	// ``detail`` the same text ``/ready`` shows for the ``db`` check.
+	// ``revision`` is ``None`` when the database has no revision or could
+	// not be read; ``head`` is ``None`` when the migration scripts could
+	// not be loaded. After a rollback ``revision`` is newer than ``head``
+	// while ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,
+	// "Rollback contract"). The defaults keep older response decoders
+	// working.
+	Db                  DbStatus         `json:"db"`
+	Features            *[]FeatureStatus `json:"features,omitempty"`
+	GrantedScopes       *[]string        `json:"granted_scopes,omitempty"`
+	McpProtocolVersion  *string          `json:"mcp_protocol_version,omitempty"`
+	McpSessionIdCapture string           `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -5740,8 +5849,17 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
-	Operator    OperatorIdentity `json:"operator"`
-	Pairings    *[]PairingHealth `json:"pairings,omitempty"`
+	Operator OperatorIdentity `json:"operator"`
+	Pairings *[]PairingHealth `json:"pairings,omitempty"`
+
+	// Readiness The ``/ready`` verdict and its checks (#4830).
+	//
+	// Built from :func:`meho_backplane.health.readiness_snapshot`, the
+	// helper the web console's dashboard already uses, so ``meho status``
+	// and ``meho_status`` show the same checks as ``/ready`` — which a
+	// deployment may block at its ingress, and which hides its
+	// ``features`` block from callers without the metrics token.
+	Readiness   *ReadinessStatus `json:"readiness,omitempty"`
 	SandboxMode *string          `json:"sandbox_mode,omitempty"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -6277,6 +6395,9 @@ type KindFilterValue string
 // and write an audit row per poll. The facet honours this handler's
 // constraints — an in-memory clock read; no connector, no credential,
 // no secret.
+//
+// “db“ shares :class:`DbStatus` with the deep check, so it carries
+// the migration revision too (#4830). It still never touches Vault.
 type LivenessResponse struct {
 	// Db Database migration status.
 	//
@@ -6290,6 +6411,18 @@ type LivenessResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
+	//
+	// ``revision``, ``head`` and ``detail`` (#4830) carry the probe's
+	// values, so an operator can confirm an upgrade from ``meho status``
+	// without a shell into the pod: ``revision`` is the revision stamped
+	// in the database, ``head`` the revision this build expects, and
+	// ``detail`` the same text ``/ready`` shows for the ``db`` check.
+	// ``revision`` is ``None`` when the database has no revision or could
+	// not be read; ``head`` is ``None`` when the migration scripts could
+	// not be loaded. After a rollback ``revision`` is newer than ``head``
+	// while ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,
+	// "Rollback contract"). The defaults keep older response decoders
+	// working.
 	Db DbStatus `json:"db"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
@@ -7068,6 +7201,85 @@ type PreviewOperationBody_Target struct {
 	union json.RawMessage
 }
 
+// PreviewOperationResponse Response envelope of “POST /api/v1/operations/preview“ (#4923).
+//
+// Types the envelope :func:`preview_operation` returns so the OpenAPI
+// document and the generated clients know its fields. The route serialises
+// only the keys the envelope carries (“response_model_exclude_unset“):
+// an “error“ envelope has no “method“, an ingested “ok“ preview has no
+// “plan_shown“, and so on. “extra="allow"“ keeps the keys a
+// target-resolution or rate-limit envelope adds (“duration_ms“,
+// “retry_after_seconds“, ...) on the wire unchanged.
+type PreviewOperationResponse struct {
+	// ConnectorId The connector the preview resolved against. May differ from the requested id when a sibling catalog serves the target.
+	ConnectorId *string `json:"connector_id"`
+
+	// Error Human-readable fault (status=error / unavailable / rate_limited).
+	Error *string `json:"error"`
+
+	// Extras Structured fault details, for example `error_code` or `validation_errors`.
+	Extras *map[string]interface{} `json:"extras"`
+
+	// Method Resolved HTTP verb (status=ok); `COMPOSITE` for a synthetic preview.
+	Method *string `json:"method"`
+
+	// OpId Echo of the requested op id.
+	OpId *string `json:"op_id"`
+
+	// PlanNote Plain reason the plan is not shown (when `plan_shown` is false).
+	PlanNote *string `json:"plan_note"`
+
+	// PlanShown Synthetic preview only: true when `proposed_effect` is present. False means the plan needs the target and is shown on the approval request.
+	PlanShown *bool `json:"plan_shown"`
+
+	// PolicyReason The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once).
+	PolicyReason *string `json:"policy_reason"`
+
+	// PolicyVerdict Three-state verdict returned by the permission resolver.
+	//
+	// :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+	// :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+	// decision; the approval queue (G11.2-T4) handles the resume path.
+	// :attr:`DENY` — the op is refused immediately with a structured,
+	// agent-reasonable error.
+	//
+	// The vocabulary is intentionally closed: a fourth verdict would
+	// require a code + migration change, which is the cheapest way to
+	// prevent drift between the DB layer and the policy engine.
+	PolicyVerdict *PermissionVerdict `json:"policy_verdict,omitempty"`
+
+	// PreviewHash Stable SHA-256 over the resolved request (status=ok). Present it as `preview_hash` on the governed call of a destructive-tier op.
+	PreviewHash *string `json:"preview_hash"`
+
+	// ProposedEffect The plan of what the op will change, the same block the approval request shows. Present only on a synthetic preview whose plan can be built without contacting the target.
+	ProposedEffect *map[string]interface{} `json:"proposed_effect"`
+
+	// Query Query-string params, or null when there are none (status=ok).
+	Query *map[string]interface{} `json:"query"`
+
+	// RedactedBody The would-be request body after the connector-boundary redaction pipeline; null when the op declares no body (status=ok).
+	RedactedBody interface{} `json:"redacted_body,omitempty"`
+
+	// RequiresApproval True when the op is marked as needing a human approval before it runs. Present whenever `safety_level` is.
+	RequiresApproval *bool `json:"requires_approval"`
+
+	// ResolvedPath Fully resolved request path, placeholders substituted and mount prefix applied (status=ok); the op id for a synthetic preview.
+	ResolvedPath *string `json:"resolved_path"`
+
+	// SafetyLevel The op's risk level: safe, caution, dangerous or destructive. Present on every preview whose op resolved (every status except unknown_op / unknown_connector).
+	SafetyLevel *string `json:"safety_level"`
+
+	// SourceKind `ingested`, `typed` or `composite`; absent when the op is unknown.
+	SourceKind *string `json:"source_kind"`
+
+	// Status ok: the would-be request (or the synthetic preview) resolved. error: a structured fault, see `error` and `extras.error_code`. unavailable: a typed/composite op outside the approval tiers has no request to preview. rate_limited: over the per-minute dispatch cap for this principal.
+	Status               PreviewOperationResponseStatus `json:"status"`
+	AdditionalProperties map[string]interface{}         `json:"-"`
+}
+
+// PreviewOperationResponseStatus ok: the would-be request (or the synthetic preview) resolved. error: a structured fault, see `error` and `extras.error_code`. unavailable: a typed/composite op outside the approval tiers has no request to preview. rate_limited: over the per-minute dispatch cap for this principal.
+type PreviewOperationResponseStatus string
+
 // PrincipalKind Discriminator that distinguishes what authenticated this request.
 //
 // G11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,
@@ -7199,6 +7411,25 @@ type ReadDocsRequest struct {
 
 // ReadDocsRequestMode defines model for ReadDocsRequest.Mode.
 type ReadDocsRequestMode string
+
+// ReadinessCheck One readiness check, as “/ready“ reports it (#4830).
+type ReadinessCheck struct {
+	Detail *string `json:"detail,omitempty"`
+	Name   string  `json:"name"`
+	Ok     bool    `json:"ok"`
+}
+
+// ReadinessStatus The “/ready“ verdict and its checks (#4830).
+//
+// Built from :func:`meho_backplane.health.readiness_snapshot`, the
+// helper the web console's dashboard already uses, so “meho status“
+// and “meho_status“ show the same checks as “/ready“ — which a
+// deployment may block at its ingress, and which hides its
+// “features“ block from callers without the metrics token.
+type ReadinessStatus struct {
+	Checks *[]ReadinessCheck `json:"checks,omitempty"`
+	Ready  bool              `json:"ready"`
+}
 
 // ReassignRunRequest Request body for “meho_runbook_reassign“ -- transfer ownership of a run.
 //
@@ -10631,7 +10862,7 @@ type EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams struct {
 
 // EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams defines parameters for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost.
 type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams struct {
-	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.
 	Prefer        *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
 	Authorization *string                                                                   `json:"authorization,omitempty"`
 }
@@ -10651,7 +10882,7 @@ type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams struct {
 
 // GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
 type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
-	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only); 'legacy' the tenant's old copy stored under a former product name (the copy a delete removes first). Omit for the default fail-loud 409 connector_scope_ambiguous response.
 	Prefer        *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
 	Authorization *string                                                           `json:"authorization,omitempty"`
 }
@@ -12310,6 +12541,325 @@ type VaultMoveUiVaultMovePostFormdataRequestBody = BodyVaultMoveUiVaultMovePost
 
 // VaultPutUiVaultPutPostFormdataRequestBody defines body for VaultPutUiVaultPutPost for application/x-www-form-urlencoded ContentType.
 type VaultPutUiVaultPutPostFormdataRequestBody = BodyVaultPutUiVaultPutPost
+
+// Getter for additional properties for PreviewOperationResponse. Returns the specified
+// element and whether it was found
+func (a PreviewOperationResponse) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for PreviewOperationResponse
+func (a *PreviewOperationResponse) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for PreviewOperationResponse to handle AdditionalProperties
+func (a *PreviewOperationResponse) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["connector_id"]; found {
+		err = json.Unmarshal(raw, &a.ConnectorId)
+		if err != nil {
+			return fmt.Errorf("error reading 'connector_id': %w", err)
+		}
+		delete(object, "connector_id")
+	}
+
+	if raw, found := object["error"]; found {
+		err = json.Unmarshal(raw, &a.Error)
+		if err != nil {
+			return fmt.Errorf("error reading 'error': %w", err)
+		}
+		delete(object, "error")
+	}
+
+	if raw, found := object["extras"]; found {
+		err = json.Unmarshal(raw, &a.Extras)
+		if err != nil {
+			return fmt.Errorf("error reading 'extras': %w", err)
+		}
+		delete(object, "extras")
+	}
+
+	if raw, found := object["method"]; found {
+		err = json.Unmarshal(raw, &a.Method)
+		if err != nil {
+			return fmt.Errorf("error reading 'method': %w", err)
+		}
+		delete(object, "method")
+	}
+
+	if raw, found := object["op_id"]; found {
+		err = json.Unmarshal(raw, &a.OpId)
+		if err != nil {
+			return fmt.Errorf("error reading 'op_id': %w", err)
+		}
+		delete(object, "op_id")
+	}
+
+	if raw, found := object["plan_note"]; found {
+		err = json.Unmarshal(raw, &a.PlanNote)
+		if err != nil {
+			return fmt.Errorf("error reading 'plan_note': %w", err)
+		}
+		delete(object, "plan_note")
+	}
+
+	if raw, found := object["plan_shown"]; found {
+		err = json.Unmarshal(raw, &a.PlanShown)
+		if err != nil {
+			return fmt.Errorf("error reading 'plan_shown': %w", err)
+		}
+		delete(object, "plan_shown")
+	}
+
+	if raw, found := object["policy_reason"]; found {
+		err = json.Unmarshal(raw, &a.PolicyReason)
+		if err != nil {
+			return fmt.Errorf("error reading 'policy_reason': %w", err)
+		}
+		delete(object, "policy_reason")
+	}
+
+	if raw, found := object["policy_verdict"]; found {
+		err = json.Unmarshal(raw, &a.PolicyVerdict)
+		if err != nil {
+			return fmt.Errorf("error reading 'policy_verdict': %w", err)
+		}
+		delete(object, "policy_verdict")
+	}
+
+	if raw, found := object["preview_hash"]; found {
+		err = json.Unmarshal(raw, &a.PreviewHash)
+		if err != nil {
+			return fmt.Errorf("error reading 'preview_hash': %w", err)
+		}
+		delete(object, "preview_hash")
+	}
+
+	if raw, found := object["proposed_effect"]; found {
+		err = json.Unmarshal(raw, &a.ProposedEffect)
+		if err != nil {
+			return fmt.Errorf("error reading 'proposed_effect': %w", err)
+		}
+		delete(object, "proposed_effect")
+	}
+
+	if raw, found := object["query"]; found {
+		err = json.Unmarshal(raw, &a.Query)
+		if err != nil {
+			return fmt.Errorf("error reading 'query': %w", err)
+		}
+		delete(object, "query")
+	}
+
+	if raw, found := object["redacted_body"]; found {
+		err = json.Unmarshal(raw, &a.RedactedBody)
+		if err != nil {
+			return fmt.Errorf("error reading 'redacted_body': %w", err)
+		}
+		delete(object, "redacted_body")
+	}
+
+	if raw, found := object["requires_approval"]; found {
+		err = json.Unmarshal(raw, &a.RequiresApproval)
+		if err != nil {
+			return fmt.Errorf("error reading 'requires_approval': %w", err)
+		}
+		delete(object, "requires_approval")
+	}
+
+	if raw, found := object["resolved_path"]; found {
+		err = json.Unmarshal(raw, &a.ResolvedPath)
+		if err != nil {
+			return fmt.Errorf("error reading 'resolved_path': %w", err)
+		}
+		delete(object, "resolved_path")
+	}
+
+	if raw, found := object["safety_level"]; found {
+		err = json.Unmarshal(raw, &a.SafetyLevel)
+		if err != nil {
+			return fmt.Errorf("error reading 'safety_level': %w", err)
+		}
+		delete(object, "safety_level")
+	}
+
+	if raw, found := object["source_kind"]; found {
+		err = json.Unmarshal(raw, &a.SourceKind)
+		if err != nil {
+			return fmt.Errorf("error reading 'source_kind': %w", err)
+		}
+		delete(object, "source_kind")
+	}
+
+	if raw, found := object["status"]; found {
+		err = json.Unmarshal(raw, &a.Status)
+		if err != nil {
+			return fmt.Errorf("error reading 'status': %w", err)
+		}
+		delete(object, "status")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for PreviewOperationResponse to handle AdditionalProperties
+func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ConnectorId != nil {
+		object["connector_id"], err = json.Marshal(a.ConnectorId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'connector_id': %w", err)
+		}
+	}
+
+	if a.Error != nil {
+		object["error"], err = json.Marshal(a.Error)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'error': %w", err)
+		}
+	}
+
+	if a.Extras != nil {
+		object["extras"], err = json.Marshal(a.Extras)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'extras': %w", err)
+		}
+	}
+
+	if a.Method != nil {
+		object["method"], err = json.Marshal(a.Method)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'method': %w", err)
+		}
+	}
+
+	if a.OpId != nil {
+		object["op_id"], err = json.Marshal(a.OpId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'op_id': %w", err)
+		}
+	}
+
+	if a.PlanNote != nil {
+		object["plan_note"], err = json.Marshal(a.PlanNote)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'plan_note': %w", err)
+		}
+	}
+
+	if a.PlanShown != nil {
+		object["plan_shown"], err = json.Marshal(a.PlanShown)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'plan_shown': %w", err)
+		}
+	}
+
+	if a.PolicyReason != nil {
+		object["policy_reason"], err = json.Marshal(a.PolicyReason)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'policy_reason': %w", err)
+		}
+	}
+
+	if a.PolicyVerdict != nil {
+		object["policy_verdict"], err = json.Marshal(a.PolicyVerdict)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'policy_verdict': %w", err)
+		}
+	}
+
+	if a.PreviewHash != nil {
+		object["preview_hash"], err = json.Marshal(a.PreviewHash)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'preview_hash': %w", err)
+		}
+	}
+
+	if a.ProposedEffect != nil {
+		object["proposed_effect"], err = json.Marshal(a.ProposedEffect)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'proposed_effect': %w", err)
+		}
+	}
+
+	if a.Query != nil {
+		object["query"], err = json.Marshal(a.Query)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'query': %w", err)
+		}
+	}
+
+	object["redacted_body"], err = json.Marshal(a.RedactedBody)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'redacted_body': %w", err)
+	}
+
+	if a.RequiresApproval != nil {
+		object["requires_approval"], err = json.Marshal(a.RequiresApproval)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'requires_approval': %w", err)
+		}
+	}
+
+	if a.ResolvedPath != nil {
+		object["resolved_path"], err = json.Marshal(a.ResolvedPath)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'resolved_path': %w", err)
+		}
+	}
+
+	if a.SafetyLevel != nil {
+		object["safety_level"], err = json.Marshal(a.SafetyLevel)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'safety_level': %w", err)
+		}
+	}
+
+	if a.SourceKind != nil {
+		object["source_kind"], err = json.Marshal(a.SourceKind)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'source_kind': %w", err)
+		}
+	}
+
+	object["status"], err = json.Marshal(a.Status)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'status': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -48683,7 +49233,7 @@ func (r GetGroupsApiV1OperationsGroupsGetResponse) StatusCode() int {
 type PostPreviewApiV1OperationsPreviewPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *map[string]interface{}
+	JSON200      *PreviewOperationResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -63567,7 +64117,7 @@ func ParsePostPreviewApiV1OperationsPreviewPostResponse(rsp *http.Response) (*Po
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest map[string]interface{}
+		var dest PreviewOperationResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -17,7 +17,7 @@ Mounts six routes. Five dispatch through the T1
   to ``work_ref=<path>`` (exact match); the "show every write
   authorised by change-ticket X" lookup (work_ref I1-T1 #1655).
 * ``GET /api/v1/audit/my-recent`` — pre-canned shortcut bound to
-  ``principal=<operator.sub>``.
+  ``principal_sub=<operator.sub>`` (exact match on the user id).
 * ``GET /api/v1/audit/show/{audit_id}`` — single-row fetch. 404 (not
   403) when the audit row is not in the operator's tenant, so the
   route never leaks the existence of an audit row across tenants.
@@ -136,6 +136,7 @@ from meho_backplane.audit_query import (
     InvalidCursorError,
     MyRecentPage,
     UnsupportedFilterError,
+    count_loose_rows_in_forest,
     parse_duration,
     query_audit,
     replay_session,
@@ -339,10 +340,10 @@ async def my_recent(
 ) -> MyRecentPage:
     """Audit rows the calling operator produced within the *since* window.
 
-    Principal is taken from ``operator.sub`` (the JWT subject); an
-    operator cannot see another operator's recent activity through
-    this route — for that, the full POST surface filters on
-    ``principal``.
+    The user id is taken from ``operator.sub`` (the JWT subject) and
+    matched exactly, so an operator cannot see another operator's
+    recent activity through this route — for that, the full POST
+    surface filters on ``principal`` (user id or name, partial match).
 
     Returns the unified ``{"items": [...], "next_cursor": ...}`` list
     envelope per ``docs/codebase/api-shape-conventions.md`` §2 (#2338
@@ -361,7 +362,7 @@ async def my_recent(
         since_dt = parse_duration(since, now=now)
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    filters = AuditQueryFilters(principal=operator.sub, since=since_dt, limit=limit)
+    filters = AuditQueryFilters(principal_sub=operator.sub, since=since_dt, limit=limit)
     result = await _dispatch(filters, tenant_id=operator.tenant_id)
     return MyRecentPage(items=result.rows, next_cursor=result.next_cursor)
 
@@ -540,6 +541,10 @@ async def replay(
     :func:`replay_session`, so a runaway session never materializes its
     tree just to be rejected — the recursive build is skipped entirely.
 
+    The 200 body also carries ``loose_row_count`` (#4670): the nodes in
+    the tree whose parent id names no row in the tenant — see
+    :func:`~meho_backplane.audit_query.count_loose_rows_in_forest`.
+
     The 200 body also carries ``excluded_null_session_count`` (#2700):
     the tenant-wide tally of ``method=MCP`` rows with a NULL
     ``agent_session_id`` (clients that never negotiated a session).
@@ -577,6 +582,11 @@ async def replay(
             tenant_id=operator.tenant_id,
             session=session,
         )
+        loose_row_count = await count_loose_rows_in_forest(
+            root,
+            tenant_id=operator.tenant_id,
+            session=session,
+        )
 
     structlog.contextvars.bind_contextvars(audit_row_count=row_count)
     return AuditReplayResult(
@@ -585,4 +595,5 @@ async def replay(
         tenant_id=operator.tenant_id,
         row_count=row_count,
         excluded_null_session_count=excluded_null_session_count,
+        loose_row_count=loose_row_count,
     )

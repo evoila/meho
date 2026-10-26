@@ -11,13 +11,14 @@ No DB, no session.
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.runner.work_item_signing import (
     TARGETLESS_SCOPE,
     SigningKeyUnavailableError,
@@ -76,12 +77,14 @@ def _verify(
     )
 
 
-def test_params_digest_matches_compute_params_hash() -> None:
-    # The edge-safe mirror must equal the DB-coupled canonical hash byte-for-byte,
-    # so the digest the centre signs and the runner recomputes always agree.
+def test_params_digest_is_the_plain_sha256_of_the_canonical_params() -> None:
+    # The runner computes this digest again over the params it executes and
+    # holds no server key, so it stays a plain SHA-256 of the canonical JSON:
+    # the digest the centre signs and the one the runner computes agree.
     params = {"z": 1, "a": [3, 2, 1], "id": uuid.uuid4(), "when": datetime(2026, 1, 1, tzinfo=UTC)}
-    assert params_digest(params) == compute_params_hash(params)
-    assert params_digest({}) == compute_params_hash({})
+    canonical = json.dumps(params, sort_keys=True, default=str, separators=(",", ":"))
+    assert params_digest(params) == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    assert params_digest({"b": 1, "a": 2}) == params_digest({"a": 2, "b": 1})
 
 
 def test_sign_then_verify_roundtrip() -> None:

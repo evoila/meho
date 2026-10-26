@@ -24,7 +24,7 @@ import (
 //
 //	meho audit query \
 //	  [--target T]                 # name or alias (server resolves)
-//	  [--principal P]              # operator sub or partial match
+//	  [--principal P]              # part of the user id or the name
 //	  [--op-id PATTERN]            # glob: vsphere.vm.*
 //	  [--op-class C]               # read | write | credential_read | audit_query | other
 //	  [--result-status S]          # ok | error | denied | pending
@@ -101,7 +101,7 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&target, "target", "",
 		"narrow to one target (name or alias; server-side resolution)")
 	cmd.Flags().StringVar(&principal, "principal", "",
-		"narrow to one operator (JWT subject; partial-match supported)")
+		"narrow to one operator (part of the user id or the name; case does not matter)")
 	cmd.Flags().StringVar(&opID, "op-id", "",
 		"narrow to one op-id (glob with * wildcards)")
 	cmd.Flags().StringVar(&opClass, "op-class", "",
@@ -318,16 +318,18 @@ func postQuery(
 }
 
 // printQueryTable renders the audit page as a compact, scannable
-// table. Columns: TIME, PRINCIPAL, TARGET, OP_ID, CLASS, STATUS per
-// the issue body's spec. When `next_cursor` is set, a final NEXT
+// table. Columns: AUDIT_ID, TIME, PRINCIPAL, TARGET, OP_ID, CLASS,
+// STATUS. The audit id comes first and is printed whole (#4858), so
+// an operator can paste it into `meho audit show` without re-running
+// the query with --json. When `next_cursor` is set, a final NEXT
 // line tells the operator how to paste-paginate.
 func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no audit rows matched the filter")
 		return
 	}
-	fmt.Fprintf(w, "%-22s %-32s %-18s %-26s %-16s %s\n",
-		"TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
+	fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
+		"AUDIT_ID", "TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
 	for _, row := range r.Rows {
 		principal := row.PrincipalSub
 		if name := strDeref(row.PrincipalName); name != "" {
@@ -337,7 +339,8 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		if target == "" {
 			target = "-"
 		}
-		fmt.Fprintf(w, "%-22s %-32s %-18s %-26s %-16s %s\n",
+		fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
+			row.Id.String(),
 			truncate(formatTS(row.Ts), 22),
 			principal,
 			truncate(target, 18),

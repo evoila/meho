@@ -706,6 +706,31 @@ class _FakeSysBackend:
 
 
 @dataclass
+class _FakeAdapter:
+    """In-process stand-in for hvac's ``client.adapter`` raw GET seam.
+
+    The Vault cluster-node reads (``vault.sys.ha_status`` /
+    ``vault.sys.raft.autopilot_state``) have no hvac helper, so the
+    handlers call ``client.adapter.get(<api path>)`` directly. ``payloads``
+    maps an API path (``"/v1/sys/ha-status"``) to the decoded body the
+    fake returns; ``raise_on_get`` maps a path to the exception to raise
+    instead (for example :class:`hvac.exceptions.Forbidden` for a 403).
+    ``get_calls`` records every path asked for.
+    """
+
+    payloads: dict[str, Any] = field(default_factory=dict)
+    raise_on_get: dict[str, Exception] = field(default_factory=dict)
+    get_calls: list[str] = field(default_factory=list)
+
+    def get(self, url: str, **_kwargs: Any) -> Any:
+        self.get_calls.append(url)
+        exc = self.raise_on_get.get(url)
+        if exc is not None:
+            raise exc
+        return self.payloads.get(url)
+
+
+@dataclass
 class _FakeClient:
     url: str
     timeout: float
@@ -714,6 +739,7 @@ class _FakeClient:
     auth: _FakeAuth
     sys: _FakeSysBackend
     secrets: _FakeSecrets
+    adapter: _FakeAdapter = field(default_factory=_FakeAdapter)
 
 
 def install_fake_vault(

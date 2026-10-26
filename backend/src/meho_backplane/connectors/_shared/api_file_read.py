@@ -494,7 +494,12 @@ def _record(
 
 
 def _checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> bytes:
-    """The body as the file check writes it back, or no body when it cannot be checked."""
+    """The body as the file check writes it back, or no body when it cannot be checked.
+
+    Whatever stops the check or the encoding of the checked copy (a refused
+    file, a number too long to parse, a lone surrogate the copy cannot
+    encode) gives no body. The ``401`` must still reach the dispatcher.
+    """
     try:
         checked = check_api_file(
             decode_text(response, path),
@@ -502,9 +507,9 @@ def _checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> b
             path=path,
             text_rule=text_rule,
         )
-    except (ApiFileNotTextError, ApiFileFormatError):
+        return checked.text.encode("utf-8")
+    except Exception:
         return b""
-    return checked.text.encode("utf-8")
 
 
 def _with_checked_body(response: httpx.Response, path: str, text_rule: TextRule) -> httpx.Response:
